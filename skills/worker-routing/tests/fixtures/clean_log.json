@@ -1,0 +1,23 @@
+{
+  "steps": [
+    {
+      "routing": "[ROUTING: Direct — reason: read-only file inspection]",
+      "tool_calls": [
+        {"tool": "view_file", "target_file": "README.md"}
+      ]
+    },
+    {
+      "routing": "[ROUTING: heavy_doer — complexity: Medium — reason: implement feature]",
+      "tool_calls": [
+        {"tool": "run_command", "command_line": "claude -p --dangerously-skip-permissions \"implement feature X\""},
+        {"tool": "replace_file_content", "target_file": "src/app.py"}
+      ]
+    },
+    {
+      "routing": "[ROUTING: Direct — reason: documentation update]",
+      "tool_calls": [
+        {"tool": "replace_file_content", "target_file": "docs/notes.md"}
+      ]
+    }
+  ]
+}

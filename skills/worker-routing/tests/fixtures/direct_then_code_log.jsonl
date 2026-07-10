@@ -1,0 +1,2 @@
+{"routing": "[ROUTING: Direct — reason: quick fix]", "tool_calls": [{"tool": "replace_file_content", "target_file": "src/utils.py"}]}
+{"routing": "[ROUTING: heavy_doer — complexity: Medium — reason: implement feature]", "tool_calls": [{"tool": "run_command", "command_line": "claude -p \"implement feature X\""}, {"tool": "replace_file_content", "target_file": "src/feature.py"}]}

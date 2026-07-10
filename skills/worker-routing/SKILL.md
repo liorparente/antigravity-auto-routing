@@ -35,13 +35,13 @@ For every non-trivial task, the Orchestrator must run the following sequential l
 ### Phase 1: Context Distillation
 Before planning begins, the Orchestrator invokes `agy` (Gemini 3.5 Flash) to gather relevant codebase parts.
 * **Goal:** Avoid polluting the Planner's context with raw files.
-* **Command:** `script -q /dev/null agy -p "Scan the codebase and locate all references to {TOPIC}. Output a distilled context summary."`
+* **Command:** `IN_WORKER_ROUTING=true script -q /dev/null agy -p "Scan the codebase and locate all references to {TOPIC}. Output a distilled context summary."`
 
 ### Phase 2: Planner-Critic Consensus Loop (System 2 Planning)
 For all Medium and Complex tasks, planning must undergo peer review before execution:
 1. **Drafting:** The **Planner** (Claude Fable 5 / Opus 4.8) writes a proposed implementation plan to `.claude/plan_draft.md`.
 2. **Review:** The **Critic** (Codex 5.6 Sol) reviews the draft plan.
-   * **Command:** `cat .claude/plan_draft.md | codex exec "Review this plan. Check for edge cases, performance bottlenecks, and architectural violations."`
+   * **Command:** `cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec "Review this plan. Check for edge cases, performance bottlenecks, and architectural violations."`
 3. **Refinement:** The Planner integrates the Critic's feedback, producing the final `implementation_plan.md` for user approval.
 
 ### Phase 3: Task Decomposition
@@ -56,7 +56,7 @@ The Orchestrator processes the `task.md` checklist, routing individual sub-tasks
 ### Phase 5: Verification & QA
 * The **Doer** runs local unit tests.
 * The Orchestrator invokes **Codex 5.6 Sol** for a final audit of the diff:
-  * **Command:** `codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"`
+  * **Command:** `IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"`
 
 ---
 
@@ -76,31 +76,34 @@ The Orchestrator processes the `task.md` checklist, routing individual sub-tasks
 
 ### 1. Antigravity CLI (agy) - Gemini 3.5 Flash
 *Always wrap with `script -q /dev/null` to allocate a PTY and prevent CLI hangs.*
+*Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Codebase scanning & context distillation
-script -q /dev/null agy -p "Summarize how authentication is handled across the repository" --output-format markdown
+IN_WORKER_ROUTING=true script -q /dev/null agy -p "Summarize how authentication is handled across the repository" --output-format markdown
 
 # Large file parsing (e.g., PDFs, large logs)
-script -q /dev/null agy -p "Extract API schemas from this spec document" -i /path/to/spec.pdf
+IN_WORKER_ROUTING=true script -q /dev/null agy -p "Extract API schemas from this spec document" -i /path/to/spec.pdf
 ```
 
 ### 2. Claude Code CLI
+*Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Complex implementation (Fable 5 / Sonnet 5)
-claude -p --dangerously-skip-permissions "Implement the user profile component following our design tokens"
+IN_WORKER_ROUTING=true claude -p --dangerously-skip-permissions "Implement the user profile component following our design tokens"
 
 # Opus-tier architectural research
-claude -p --model claude-opus-4-8 --dangerously-skip-permissions "Draft a migration plan for the database schema"
+IN_WORKER_ROUTING=true claude -p --model claude-opus-4-8 --dangerously-skip-permissions "Draft a migration plan for the database schema"
 ```
 
 ### 3. Codex CLI (v0.125+)
 *Always specify `-c model_reasoning_effort="low"` or `"medium"` to prevent ChatGPT timeouts.*
+*Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Plan critique (Consensus step)
-codex exec "Analyze this implementation plan: $(cat .claude/plan_draft.md)"
+IN_WORKER_ROUTING=true codex exec "Analyze this implementation plan: $(cat .claude/plan_draft.md)"
 
 # Code review (QA step)
-codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"
+IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"
 ```
 
 ### 4. Local Models (LM Studio API)

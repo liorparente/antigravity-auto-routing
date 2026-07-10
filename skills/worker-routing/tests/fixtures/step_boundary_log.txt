@@ -1,0 +1,3 @@
+Step 1: [ROUTING: Direct — reason: quick edit]
+Tool call: replace_file_content({"TargetFile": "src/leaky.py", "ReplacementChunks": [...]})
+Step 2: [ROUTING: light_doer — complexity: Simple — reason: run worker separately] Tool call: run_command({"CommandLine": "codex exec \"unrelated task\""})

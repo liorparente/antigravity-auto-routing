@@ -14,20 +14,25 @@ antigravity-worker-routing/
 ├── README.md
 ├── install.sh                        # idempotent installer
 ├── uninstall.sh                      # removes everything install.sh added
+├── .github/workflows/test.yml        # CI: unit tests + shellcheck
 └── skills/
     └── worker-routing/
-        ├── SKILL.md                  # full protocol specification
-        ├── routing-audit.sh          # post-session violation scanner
-        ├── routing_check.py          # helper: dynamic worker-pattern regex + [ROUTING: Direct] → code-edit violations
-        └── routing-config.json       # worker role → model name + CLI pattern mapping (user-customizable)
+        ├── protocol.md                # single source of truth for the enforced protocol text
+        ├── SKILL.md                   # full protocol specification (roles, lifecycle, CLI reference)
+        ├── routing-audit.sh           # thin wrapper: locates the log, delegates to routing_check.py
+        ├── routing_check.py           # audit engine: log parsing + all routing metrics + violations
+        ├── routing-config.json        # worker role → model name + CLI pattern mapping (user-customizable)
+        ├── test_routing.py            # unit + integration tests
+        └── tests/fixtures/            # sample logs (plain text, JSON, JSON Lines) used by the tests
 ```
 
+- **`skills/worker-routing/protocol.md`** — the single source of truth for the hard-enforced protocol (the gate, response template, complexity matrix, escalation triggers). `install.sh` copies it verbatim into `AGENTS.md` and `CLAUDE.md` at the target project root, and injects it into `~/.gemini/GEMINI.md`. Edit only this file — the generated copies are overwritten on every install.
 - **`skills/worker-routing/SKILL.md`** — the canonical protocol document. Defines the agent mesh (Orchestrator, Context Specialist, Planner, Critic, Heavy/Light Doers, Local/Sensitive Doer, QA/Auditor), the task lifecycle, the difficulty-aware routing matrix, and CLI command references for `agy`, `claude`, `codex`, and LM Studio.
-- **`skills/worker-routing/routing-audit.sh`** — scans Antigravity conversation logs (`~/.gemini/antigravity/brain/<conversation-id>/.system_generated/logs/overview.txt`) for protocol violations: source code edits with zero worker CLI calls, and `[ROUTING: Direct]` declarations that precede a source code edit.
-- **`skills/worker-routing/routing_check.py`** — Python helper invoked by the audit script. In `--regex` mode it builds a worker-detection regex from `routing-config.json`; in log-file mode it does the line-window pattern matching for the `[ROUTING: Direct] → code edit` check, using the same config to recognize worker CLI invocations.
+- **`skills/worker-routing/routing-audit.sh`** — locates a conversation's log (auto-detecting `overview.txt` or `transcript.jsonl` under `~/.gemini/antigravity/brain/<conversation-id>/.system_generated/logs/`) and hands it to `routing_check.py`, relaying its exit code directly.
+- **`skills/worker-routing/routing_check.py`** — the audit engine. Parses the log — plain text, JSON, or JSON Lines — into per-step tool calls, then computes every metric (total writes, code-file writes, `[ROUTING:]` declarations, worker CLI calls, and `[ROUTING: Direct] → code edit` violations) strictly within each step's own boundaries, so a worker mention in one step can never clear a violation in another. Worker-CLI detection only looks at the actual `CommandLine` of a `run_command` tool call — never at surrounding prose — and code-file detection matches file extensions exactly (via `Path(filename).suffix`), so `.html`/`package.json`/`.pyc` can't be mistaken for `.h`/`.js`/`.py`.
 - **`skills/worker-routing/routing-config.json`** — the source of truth for which models/CLIs count as "workers." See [Configuring workers](#configuring-workers) below.
-- **`install.sh`** — copies the skill files into every supported agent target directory and injects the enforced protocol block into `~/.gemini/GEMINI.md` (Antigravity's global instruction file), backing it up first.
-- **`uninstall.sh`** — removes the installed skill directories and strips the protocol block back out of `~/.gemini/GEMINI.md`, backing it up first.
+- **`install.sh [target_project_dir]`** — copies the skill files into every supported agent target directory, generates `AGENTS.md`/`CLAUDE.md` in the target project (defaulting to the current directory) from `protocol.md`, and injects the enforced protocol block into `~/.gemini/GEMINI.md` (Antigravity's global instruction file) — backing up any pre-existing file the first time it's touched.
+- **`uninstall.sh [target_project_dir]`** — removes the installed skill directories, restores/removes the generated `AGENTS.md`/`CLAUDE.md`, and strips the protocol block back out of `~/.gemini/GEMINI.md`.
 
 ---
 
@@ -99,8 +104,8 @@ Full command syntax for `agy`, `claude`, `codex`, and the LM Studio REST API is 
 ```
 
 `routing_check.py` reads this file at runtime — it is never hardcoded:
-- `routing_check.py --regex` flattens every role's `patterns` into one regex-escaped alternation (e.g. `(claude -p|codex|agy|...)`) and prints it to stdout. `routing-audit.sh` calls this to build `WORKER_REGEX` for its `grep -cE` worker-call count, falling back to a hardcoded pattern only if the script call fails.
-- `routing_check.py <log-file>` uses the same patterns to decide whether a `[ROUTING: Direct]` step that touches a code file actually invoked a recognized worker CLI, or is a genuine violation.
+- `routing_check.py --regex` flattens every role's `patterns` into one regex-escaped alternation (e.g. `(claude -p|codex|agy|...)`) and prints it to stdout. Kept for backwards compatibility with external tooling that shells out to it directly.
+- `routing_check.py <log-file>` is the full audit: it parses the log into steps, uses the same patterns to decide whether each step's `run_command` calls actually invoked a recognized worker CLI, and prints the complete metrics report. `routing-audit.sh` is a thin wrapper around this mode — it only locates the right log file and relays the exit code.
 
 ### Customizing for your own stack
 
@@ -127,22 +132,29 @@ bash install.sh
 
 Running `install.sh` again is safe — it does not duplicate the protocol block in `~/.gemini/GEMINI.md`, and file copies are simple overwrites.
 
+By default the installer targets the current directory as the project it installs into. Pass a different path to install into (or dogfood against) another project without `cd`-ing there first:
+
+```bash
+bash install.sh /path/to/some/other/project
+```
+
 ### What the installer does
 
-1. Creates each supported target directory if it doesn't already exist (`~/.gemini/config/skills/worker-routing/`, `~/.codex/skills/worker-routing/`, and local `.agents/`, `.agent/`, `.codex/` copies inside the repo).
+1. Creates each supported target directory if it doesn't already exist (`~/.gemini/config/skills/worker-routing/`, `~/.codex/skills/worker-routing/`, and local `.agents/`, `.agent/`, `.codex/` copies inside the target project).
 2. Copies `SKILL.md`, `routing-audit.sh`, and `routing_check.py` into each directory (always overwritten).
 3. Marks `routing-audit.sh` executable (`chmod +x`).
 4. Copies `routing-config.json` into each directory **only if it doesn't already exist**, so any customizations you've made to your installed copy (see [Configuring workers](#configuring-workers)) survive re-running the installer.
-5. Backs up `~/.gemini/GEMINI.md` to `~/.gemini/GEMINI.md.bak` before touching it.
-6. Injects the protocol block between two versionless sentinel markers (`# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ===` / `... END ===`) — the hard gate, mandatory response template, complexity matrix, and escalation triggers that Antigravity reads on every session start. If a block already exists between those markers, it's replaced in place. If a legacy v3.0 block (from older versions of this installer) is found instead, it's removed and replaced with the new versionless block automatically.
+5. Generates `AGENTS.md` and `CLAUDE.md` at the target project root from `skills/worker-routing/protocol.md` — the single source of truth for the enforced protocol text. Any pre-existing file is backed up to `<file>.bak` the first time it's touched, and that backup is never overwritten on subsequent runs.
+6. Backs up `~/.gemini/GEMINI.md` to `~/.gemini/GEMINI.md.bak` the first time it's touched.
+7. Injects the protocol block between two versionless sentinel markers (`# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ===` / `... END ===`) — the hard gate, mandatory response template, complexity matrix, and escalation triggers that Antigravity reads on every session start. If a block already exists between those markers, it's replaced in place. If a legacy v3.0 block (from older versions of this installer) is found instead, it's removed and replaced with the new versionless block automatically.
 
 ### Uninstalling
 
 ```bash
-bash uninstall.sh
+bash uninstall.sh [target_project_dir]
 ```
 
-This removes the installed skill directories and, after backing up `~/.gemini/GEMINI.md` to `~/.gemini/GEMINI.md.bak`, strips the protocol block back out (recognizing both the current versionless markers and the legacy v3.0 heading). Everything else in `GEMINI.md` is left untouched.
+This removes the installed skill directories, cleans up the generated `AGENTS.md`/`CLAUDE.md` (restoring the `.bak` backup if one exists, or simply deleting the file if it was purely generated), and, after backing up `~/.gemini/GEMINI.md` to `~/.gemini/GEMINI.md.bak`, strips the protocol block back out (recognizing both the current versionless markers and the legacy v3.0 heading). Everything else in `GEMINI.md` is left untouched.
 
 ---
 
@@ -164,15 +176,17 @@ Or target a specific conversation by ID:
 ~/.gemini/config/skills/worker-routing/routing-audit.sh <conversation-id>
 ```
 
+The audit log can be plain text (`overview.txt`, split on `Step N:` markers), a single JSON document (`steps` array), or JSON Lines (`transcript.jsonl`, one step per line) — `routing-audit.sh` auto-detects which one exists for the conversation. All metrics are computed strictly within each step's own boundaries, so a worker call in one step can never be mistaken for routing in another, and only an actual `run_command` tool call's `CommandLine` counts as a worker invocation — a conversational mention of a worker's name in prose never does.
+
 The script reports:
-- Total file-write tool calls and how many targeted source code (`.ts`, `.tsx`, `.js`, `.jsx`, `.css`)
+- Total file-write tool calls and how many targeted source code files (matched by exact extension against `code_extensions` in `routing-config.json`)
 - Number of `[ROUTING:]` declarations and worker CLI invocations found in the log
-- `[ROUTING: Direct] → code edit` violations (direct routing declared immediately before a source code write)
+- `[ROUTING: Direct] → code edit` violations (direct routing declared for a step that also wrote a source code file)
 - A 🔴 violation if source code was edited with zero worker calls
 - A 🟡 warning if code edits outnumber worker calls, or no routing declarations were found at all
 - A breakdown of which source files were touched, by edit count
 
-Exit and output are informational — the script does not block or modify anything; it's a post-hoc compliance check you run after a session (or wire into CI/a pre-commit hook if you want enforcement at that layer).
+Exit codes: `0` — audit ran, no violations. `1` — audit ran, violations found. `2` — the audit itself couldn't run (no conversation/log found, or the log/config failed to parse) — it fails closed rather than silently treating an unreadable log as clean. Wire it into CI or a pre-commit hook if you want enforcement at that layer.
 
 ---
 

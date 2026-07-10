@@ -1,0 +1,8 @@
+Step 1: [ROUTING: Direct — reason: edit landing page markup]
+Tool call: replace_file_content({"TargetFile": "index.html", "ReplacementChunks": [...]})
+
+Step 2: [ROUTING: Direct — reason: bump a dependency version]
+Tool call: replace_file_content({"TargetFile": "package.json", "ReplacementChunks": [...]})
+
+Step 3: [ROUTING: Direct — reason: clear stale bytecode cache]
+Tool call: replace_file_content({"TargetFile": "build/cache.pyc", "ReplacementChunks": [...]})

@@ -1,7 +1,12 @@
-# Worker Routing Protocol (HARD ENFORCED — v3.0)
+# Worker Routing Protocol (HARD ENFORCED — v3.1)
 
 Antigravity is a **pure orchestrator**. Its only job: assess complexity → pick worker → collect output.
 Self-execution of code/commands is a **protocol violation**, not a fallback option.
+
+This file is the single source of truth for the enforced protocol. `install.sh` copies it verbatim
+into `AGENTS.md` and `CLAUDE.md` at the target project root, and injects it into `~/.gemini/GEMINI.md`
+between the versionless sentinel markers. Edit only this file — the generated copies are overwritten
+on every install.
 
 ## ⛔ HARD GATE — Before ANY State-Modifying Action
 
@@ -50,11 +55,11 @@ This script detects source code edits made without worker routing. Violations ar
 |---|---|---|
 | **Trivial** | Single file, rename, format, quick Q&A | **Codex 5.6 Luna** or local **Gemma 4 E4B** |
 | **Simple** | 1-2 files, boilerplate, simple logic | **Codex 5.6 Terra** or local **Qwen3 Coder 30B** |
-| **Medium** | 3-4 files, new feature | **Claude Sonnet 5** (`claude -p --dangerously-skip-permissions`) |
+| **Medium** | 3-4 files, new feature | **Claude Sonnet 5** (`IN_WORKER_ROUTING=true claude -p --dangerously-skip-permissions`) |
 | **Complex** | 5+ files, architectural impact | **Planner:** Claude Fable 5 / Opus 4.8 <br> **Critic:** Codex 5.6 Sol <br> **Executor:** Claude Sonnet 5 |
 | **Sensitive** | PII, medical, credentials | **LM Studio** ALWAYS (local only) |
-| **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"`) |
-| **Context/Search** | Codebase scan, log parsing | **Antigravity CLI** (`agy`) with Gemini 3.5 Flash |
+| **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"`) |
+| **Context/Search** | Codebase scan, log parsing | **Antigravity CLI** (`IN_WORKER_ROUTING=true agy`) with Gemini 3.5 Flash |
 
 ## Routing Behavior
 1. **Silent availability check:** Before routing, verify the target worker is reachable (e.g., `curl -s http://127.0.0.1:1234/api/v0/models` for LM Studio). Do this silently.

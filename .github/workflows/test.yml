@@ -1,0 +1,22 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Run routing-check unit and integration tests
+        run: python3 skills/worker-routing/test_routing.py -v
+
+      - name: Shellcheck installer and audit scripts
+        run: shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh
