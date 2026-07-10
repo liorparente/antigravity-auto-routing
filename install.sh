@@ -30,6 +30,14 @@ cp "$SRC_DIR/routing_check.py" "$TARGET_DIR/routing_check.py"
 chmod +x "$TARGET_DIR/routing-audit.sh"
 echo "✅ Copied SKILL.md, routing-audit.sh, routing_check.py"
 
+# 3.5. Copy routing-config.json only if it doesn't already exist (preserve user customizations)
+if [ -f "$TARGET_DIR/routing-config.json" ]; then
+    echo "⏭️  routing-config.json already exists — skipping copy to preserve customizations."
+else
+    cp "$SRC_DIR/routing-config.json" "$TARGET_DIR/routing-config.json"
+    echo "✅ Copied routing-config.json"
+fi
+
 # 4. Append Worker Routing Protocol to GEMINI.md if not already present
 mkdir -p "$(dirname "$GEMINI_MD")"
 touch "$GEMINI_MD"

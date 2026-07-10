@@ -17,12 +17,14 @@ antigravity-auto-routing/
     └── auto-routing/
         ├── SKILL.md                  # full protocol specification
         ├── routing-audit.sh          # post-session violation scanner
-        └── routing_check.py          # helper: detects [ROUTING: Direct] → code-edit violations
+        ├── routing_check.py          # helper: dynamic worker-pattern regex + [ROUTING: Direct] → code-edit violations
+        └── routing-config.json       # worker role → model name + CLI pattern mapping (user-customizable)
 ```
 
 - **`skills/auto-routing/SKILL.md`** — the canonical protocol document. Defines the agent mesh (Orchestrator, Context Specialist, Planner, Critic, Heavy/Light Doers, Local/Sensitive Doer, QA/Auditor), the task lifecycle, the difficulty-aware routing matrix, and CLI command references for `agy`, `claude`, `codex`, and LM Studio.
 - **`skills/auto-routing/routing-audit.sh`** — scans Antigravity conversation logs (`~/.gemini/antigravity/brain/<conversation-id>/.system_generated/logs/overview.txt`) for protocol violations: source code edits with zero worker CLI calls, and `[ROUTING: Direct]` declarations that precede a source code edit.
-- **`skills/auto-routing/routing_check.py`** — Python helper invoked by the audit script to do the line-window pattern matching for the `[ROUTING: Direct] → code edit` check.
+- **`skills/auto-routing/routing_check.py`** — Python helper invoked by the audit script. In `--regex` mode it builds a worker-detection regex from `routing-config.json`; in log-file mode it does the line-window pattern matching for the `[ROUTING: Direct] → code edit` check, using the same config to recognize worker CLI invocations.
+- **`skills/auto-routing/routing-config.json`** — the source of truth for which models/CLIs count as "workers." See [Configuring workers](#configuring-workers) below.
 - **`install.sh`** — copies the skill files into `~/.gemini/config/skills/auto-routing/` and appends the enforced protocol block to `~/.gemini/GEMINI.md` (Antigravity's global instruction file), if not already present.
 
 ---
@@ -77,6 +79,42 @@ Full command syntax for `agy`, `claude`, `codex`, and the LM Studio REST API is 
 
 ---
 
+## Configuring workers
+
+`skills/auto-routing/routing-config.json` is the single source of truth for what counts as a "worker" during auditing. It maps each role in the agent mesh to a display `name` and a list of `patterns` — substrings that identify that worker's CLI invocation in a conversation log:
+
+```json
+{
+  "heavy_doer": {
+    "name": "Claude Sonnet 5",
+    "patterns": ["claude -p"]
+  },
+  "sensitive_doer": {
+    "name": "LM Studio (Local Model)",
+    "patterns": ["127.0.0.1:1234/v1/chat", "localhost:1234/v1/chat"]
+  }
+}
+```
+
+`routing_check.py` reads this file at runtime — it is never hardcoded:
+- `routing_check.py --regex` flattens every role's `patterns` into one regex-escaped alternation (e.g. `(claude -p|codex|agy|...)`) and prints it to stdout. `routing-audit.sh` calls this to build `WORKER_REGEX` for its `grep -cE` worker-call count, falling back to a hardcoded pattern only if the script call fails.
+- `routing_check.py <log-file>` uses the same patterns to decide whether a `[ROUTING: Direct]` step that touches a code file actually invoked a recognized worker CLI, or is a genuine violation.
+
+### Customizing for your own stack
+
+To swap in different models or tools, edit `routing-config.json` — no changes to the shell script or Python are needed:
+
+- **Different CLI for an existing role** — change `patterns`, e.g. point `heavy_doer` at a different command.
+- **Local models via Ollama** — add a pattern matching your invocation, e.g. `"patterns": ["ollama run"]`.
+- **A custom in-house script** — add its invocation string, e.g. `"patterns": ["./scripts/my-worker.sh"]`.
+- **New role** — add a new top-level key with `name` and `patterns`; it's picked up automatically by both `--regex` and log-file checks.
+
+Patterns are treated as literal substrings (regex-escaped internally), so no special quoting is needed — just list the exact text that appears in your logs when that worker is invoked.
+
+After editing the repo's copy, re-run `bash install.sh` — the installer only copies `routing-config.json` into `~/.gemini/config/skills/auto-routing/` if it isn't already there, so your installed customizations are preserved across upgrades. To force-refresh an installed config, delete the installed copy first, then re-run `install.sh`.
+
+---
+
 ## Setup
 
 ### Option 1: Clone and install
@@ -98,9 +136,10 @@ Both options are idempotent — running `install.sh` again will not duplicate th
 ### What the installer does
 
 1. Creates `~/.gemini/config/skills/auto-routing/` if it doesn't already exist.
-2. Copies `SKILL.md`, `routing-audit.sh`, and `routing_check.py` into that directory.
+2. Copies `SKILL.md`, `routing-audit.sh`, and `routing_check.py` into that directory (always overwritten).
 3. Marks `routing-audit.sh` executable (`chmod +x`).
-4. Checks `~/.gemini/GEMINI.md` for the marker `## Worker Routing Protocol (HARD ENFORCED — v3.0)`. If absent, appends the full enforced protocol block — the hard gate, mandatory response template, complexity matrix, and escalation triggers that Antigravity reads on every session start.
+4. Copies `routing-config.json` into that directory **only if it doesn't already exist**, so any customizations you've made to your installed copy (see [Configuring workers](#configuring-workers)) survive re-running the installer.
+5. Checks `~/.gemini/GEMINI.md` for the marker `## Worker Routing Protocol (HARD ENFORCED — v3.0)`. If absent, appends the full enforced protocol block — the hard gate, mandatory response template, complexity matrix, and escalation triggers that Antigravity reads on every session start.
 
 ---
 

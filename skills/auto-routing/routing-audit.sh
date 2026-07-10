@@ -41,7 +41,13 @@ ROUTING_DECLARATIONS=$(grep -c '\[ROUTING:' "$LOG_FILE" 2>/dev/null | head -1 | 
 ROUTING_DECLARATIONS=${ROUTING_DECLARATIONS:-0}
 
 # --- Metric 4: Worker CLI calls ---
-WORKER_CALLS=$(grep -cE 'claude -p|codex |gemini -p|agy |127\.0\.0\.1:1234/v1/chat' "$LOG_FILE" 2>/dev/null | head -1 | xargs)
+WORKER_REGEX=$(python3 "$SCRIPT_DIR/routing_check.py" --regex 2>/dev/null)
+if [ -z "$WORKER_REGEX" ]; then
+    echo "⚠️  Could not load dynamic worker regex from routing-config.json — using fallback."
+    WORKER_REGEX='claude -p|codex |gemini -p|agy |127\.0\.0\.1:1234/v1/chat'
+fi
+
+WORKER_CALLS=$(grep -cE "$WORKER_REGEX" "$LOG_FILE" 2>/dev/null | head -1 | xargs)
 WORKER_CALLS=${WORKER_CALLS:-0}
 
 # --- Metric 5: [ROUTING: Direct] followed by code edit (new check) ---
