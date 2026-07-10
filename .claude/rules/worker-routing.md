@@ -36,7 +36,7 @@ If the self-check answer is YES (a worker can do it) but you are about to self-e
 Then ask the user how to proceed.
 
 ## 📋 Post-Session Audit
-All sessions are auditable via: `~/.gemini/config/skills/auto-routing/routing-audit.sh [conversation-id]`
+All sessions are auditable via: `~/.gemini/config/skills/worker-routing/routing-audit.sh [conversation-id]`
 This script detects source code edits made without worker routing. Violations are flagged automatically.
 
 ## ✅ Allowed Direct Actions (No Worker, No Gate)
@@ -66,7 +66,7 @@ This script detects source code edits made without worker routing. Violations ar
 3. **Audit trail:** Every response that involves any action must start with `[ROUTING: {worker} — reason: {why}]` or `[ROUTING: Direct — reason: {allowed exception}]`.
 3.5. **Fallback Chain (on worker unavailability):** Local (LM Studio down) → escalate one tier up. API worker fails → try alternate API model. Full fallback order: Gemma E4B → Qwen Coder → Claude Code → agy Flash → agy Pro → manual. Log every fallback to ERRORS.md with reason.
 4. **Codex Sandbox Modes:** Always pick the right `-s` flag — wrong mode = blocked writes. `read-only`: pure analysis only. `workspace-write`: applying patches or fixes within the repo (default for Review/QA). `danger-full-access`: unrestricted system writes. Never use `read-only` when Codex needs to write files.
-5. **Full reference:** See `~/.gemini/config/skills/auto-routing/SKILL.md` for CLI syntax and edge cases.
+5. **Full reference:** See `~/.gemini/config/skills/worker-routing/SKILL.md` for CLI syntax and edge cases.
 
 ## Pushback Protocol (Bidirectional)
 Antigravity is authorized — and **required** — to refuse:

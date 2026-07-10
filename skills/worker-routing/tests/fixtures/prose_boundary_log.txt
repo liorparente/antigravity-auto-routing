@@ -1,0 +1,6 @@
+Step 1: [ROUTING: Direct — reason: discuss architecture]
+This is prose only: recodexing, codexes, geministic, and agynostic mention fake worker substrings like codex, gemini, and agy but are not real invocations.
+Tool call: replace_file_content({"TargetFile": "src/module.py", "ReplacementChunks": [...]})
+Step 2: [ROUTING: Direct — reason: apply patch after manual worker run]
+I manually ran `codex exec "fix bug"` earlier in this conversation and I'm now recording its output.
+Tool call: replace_file_content({"TargetFile": "src/patched.py", "ReplacementChunks": [...]})

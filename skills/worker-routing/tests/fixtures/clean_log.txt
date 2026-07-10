@@ -1,0 +1,9 @@
+Step 1: [ROUTING: Direct — reason: read-only file inspection]
+Tool call: view_file({"TargetFile": "README.md"})
+
+Step 2: [ROUTING: heavy_doer — complexity: Medium — reason: implement feature]
+Tool call: run_command({"CommandLine": "claude -p --dangerously-skip-permissions \"implement feature X\""})
+Tool call: replace_file_content({"TargetFile": "src/app.py", "ReplacementChunks": [...]})
+
+Step 3: [ROUTING: Direct — reason: documentation update]
+Tool call: replace_file_content({"TargetFile": "docs/notes.md", "ReplacementChunks": [...]})

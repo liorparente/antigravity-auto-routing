@@ -30,5 +30,6 @@
   "qa_auditor": {
     "name": "Codex 5.6 Sol",
     "patterns": ["codex review"]
-  }
+  },
+  "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"]
 }

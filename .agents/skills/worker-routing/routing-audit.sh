@@ -1,5 +1,5 @@
 #!/bin/bash
-# Routing Protocol Audit Script v2.1
+# Routing Protocol Audit Script v2.2
 # Scans conversation logs for routing protocol violations.
 #
 # Checks:
@@ -8,14 +8,27 @@
 #
 # Usage: ./routing-audit.sh [conversation-id]
 # If no ID given, scans the most recent conversation.
+#
+# Exit codes:
+#   0   Audit ran and found no violations.
+#   1   Violations detected, or the audit itself could not run (missing log,
+#       missing conversation, or routing_check.py failed to load its config —
+#       fails closed rather than silently treating the log as clean).
+
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRAIN_DIR="$HOME/.gemini/antigravity/brain"
+PY_CHECK="$SCRIPT_DIR/routing_check.py"
 
-if [ -n "$1" ]; then
-    CONV_ID="$1"
-else
-    CONV_ID=$(ls -t "$BRAIN_DIR" 2>/dev/null | head -1)
+CONV_ID="${1:-}"
+if [ -z "$CONV_ID" ]; then
+    CONV_ID=$(ls -t "$BRAIN_DIR" 2>/dev/null | head -1) || true
+fi
+
+if [ -z "$CONV_ID" ]; then
+    echo "❌ No conversations found under $BRAIN_DIR"
+    exit 1
 fi
 
 LOG_FILE="$BRAIN_DIR/$CONV_ID/.system_generated/logs/overview.txt"
@@ -28,32 +41,55 @@ fi
 echo "🔍 Auditing conversation: $CONV_ID"
 echo "---"
 
+# Runs routing_check.py with the given args, storing its stdout/stderr in
+# PY_OUT/PY_ERR. Fails closed: if routing_check.py exits non-zero (e.g. it
+# couldn't load routing-config.json), abort the whole audit instead of
+# silently falling back to a stale default.
+run_py() {
+    local err_file status
+    err_file=$(mktemp)
+    set +e
+    PY_OUT=$(python3 "$PY_CHECK" "$@" 2>"$err_file")
+    status=$?
+    set -e
+    PY_ERR=$(cat "$err_file")
+    rm -f "$err_file"
+    if [ "$status" -ne 0 ]; then
+        echo "❌ routing_check.py $* failed (exit $status) — failing closed." >&2
+        [ -n "$PY_ERR" ] && echo "$PY_ERR" >&2
+        exit 1
+    fi
+}
+
 # --- Metric 1: Total file-write tool calls ---
-DIRECT_WRITES=$(grep -o '"write_to_file"\|"replace_file_content"\|"multi_replace_file_content"' "$LOG_FILE" 2>/dev/null | wc -l | xargs)
+DIRECT_WRITES=$(grep -o '"write_to_file"\|"replace_file_content"\|"multi_replace_file_content"' "$LOG_FILE" 2>/dev/null | wc -l | xargs) || true
 DIRECT_WRITES=${DIRECT_WRITES:-0}
 
+# --- Dynamically load code extensions and worker CLI patterns ---
+run_py --extensions-regex
+EXT_REGEX="$PY_OUT"
+
+run_py --regex
+WORKER_REGEX="$PY_OUT"
+
+CODE_EXT_PATTERN="TargetFile[^,]*\\.${EXT_REGEX}"
+
 # --- Metric 2: Writes targeting source code files ---
-CODE_WRITES=$(grep -oE 'TargetFile[^,]*\.(ts|tsx|css|js|jsx)' "$LOG_FILE" 2>/dev/null | wc -l | xargs)
+CODE_WRITES=$(grep -oE "$CODE_EXT_PATTERN" "$LOG_FILE" 2>/dev/null | wc -l | xargs) || true
 CODE_WRITES=${CODE_WRITES:-0}
 
 # --- Metric 3: ROUTING declarations ---
-ROUTING_DECLARATIONS=$(grep -c '\[ROUTING:' "$LOG_FILE" 2>/dev/null | head -1 | xargs)
+ROUTING_DECLARATIONS=$(grep -o '\[ROUTING:' "$LOG_FILE" 2>/dev/null | wc -l | xargs) || true
 ROUTING_DECLARATIONS=${ROUTING_DECLARATIONS:-0}
 
 # --- Metric 4: Worker CLI calls ---
-WORKER_REGEX=$(python3 "$SCRIPT_DIR/routing_check.py" --regex 2>/dev/null)
-if [ -z "$WORKER_REGEX" ]; then
-    echo "⚠️  Could not load dynamic worker regex from routing-config.json — using fallback."
-    WORKER_REGEX='claude -p|codex |gemini -p|agy |127\.0\.0\.1:1234/v1/chat'
-fi
-
-WORKER_CALLS=$(grep -cE "$WORKER_REGEX" "$LOG_FILE" 2>/dev/null | head -1 | xargs)
+WORKER_CALLS=$(grep -oE "$WORKER_REGEX" "$LOG_FILE" 2>/dev/null | wc -l | xargs) || true
 WORKER_CALLS=${WORKER_CALLS:-0}
 
-# --- Metric 5: [ROUTING: Direct] followed by code edit (new check) ---
-DIRECT_THEN_CODE_DETAILS=$(python3 "$SCRIPT_DIR/routing_check.py" "$LOG_FILE" 2>&1 1>/dev/null)
-DIRECT_THEN_CODE=$(python3 "$SCRIPT_DIR/routing_check.py" "$LOG_FILE" 2>/dev/null)
-DIRECT_THEN_CODE=${DIRECT_THEN_CODE:-0}
+# --- Metric 5: [ROUTING: Direct] followed by code edit ---
+run_py "$LOG_FILE"
+DIRECT_THEN_CODE="${PY_OUT:-0}"
+DIRECT_THEN_CODE_DETAILS="$PY_ERR"
 
 # --- Summary ---
 echo "📊 Results:"
@@ -93,4 +129,10 @@ fi
 
 echo ""
 echo "--- Detailed source code edits ---"
-grep -oE 'TargetFile[^,]*\.(ts|tsx|css|js|jsx)' "$LOG_FILE" 2>/dev/null | sed 's/.*\///;s/\\"//' | sort | uniq -c | sort -rn
+grep -oE "$CODE_EXT_PATTERN" "$LOG_FILE" 2>/dev/null | sed 's/.*\///;s/\\"//' | sort | uniq -c | sort -rn || true
+
+if [ "$VIOLATION" = true ]; then
+    exit 1
+fi
+
+exit 0

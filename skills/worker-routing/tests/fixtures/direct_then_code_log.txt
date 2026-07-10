@@ -1,0 +1,6 @@
+Step 1: [ROUTING: Direct — reason: quick fix]
+Tool call: replace_file_content({"TargetFile": "src/utils.py", "ReplacementChunks": [...]})
+
+Step 2: [ROUTING: heavy_doer — complexity: Medium — reason: implement feature]
+Tool call: run_command({"CommandLine": "claude -p \"implement feature X\""})
+Tool call: replace_file_content({"TargetFile": "src/feature.py", "ReplacementChunks": [...]})

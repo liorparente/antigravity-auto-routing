@@ -1,4 +1,4 @@
-# antigravity-auto-routing
+# antigravity-worker-routing
 
 **Auto Routing & Collaboration Protocol v3.0** — a multi-model orchestration protocol, audit tooling, and installer for the Antigravity CLI ecosystem (Gemini `agy`, Claude Code, Codex).
 
@@ -9,23 +9,25 @@ The core idea: the orchestrator model (Antigravity) should never spend its own e
 ## What this repository contains
 
 ```
-antigravity-auto-routing/
+antigravity-worker-routing/
 ├── LICENSE
 ├── README.md
 ├── install.sh                        # idempotent installer
+├── uninstall.sh                      # removes everything install.sh added
 └── skills/
-    └── auto-routing/
+    └── worker-routing/
         ├── SKILL.md                  # full protocol specification
         ├── routing-audit.sh          # post-session violation scanner
         ├── routing_check.py          # helper: dynamic worker-pattern regex + [ROUTING: Direct] → code-edit violations
         └── routing-config.json       # worker role → model name + CLI pattern mapping (user-customizable)
 ```
 
-- **`skills/auto-routing/SKILL.md`** — the canonical protocol document. Defines the agent mesh (Orchestrator, Context Specialist, Planner, Critic, Heavy/Light Doers, Local/Sensitive Doer, QA/Auditor), the task lifecycle, the difficulty-aware routing matrix, and CLI command references for `agy`, `claude`, `codex`, and LM Studio.
-- **`skills/auto-routing/routing-audit.sh`** — scans Antigravity conversation logs (`~/.gemini/antigravity/brain/<conversation-id>/.system_generated/logs/overview.txt`) for protocol violations: source code edits with zero worker CLI calls, and `[ROUTING: Direct]` declarations that precede a source code edit.
-- **`skills/auto-routing/routing_check.py`** — Python helper invoked by the audit script. In `--regex` mode it builds a worker-detection regex from `routing-config.json`; in log-file mode it does the line-window pattern matching for the `[ROUTING: Direct] → code edit` check, using the same config to recognize worker CLI invocations.
-- **`skills/auto-routing/routing-config.json`** — the source of truth for which models/CLIs count as "workers." See [Configuring workers](#configuring-workers) below.
-- **`install.sh`** — copies the skill files into `~/.gemini/config/skills/auto-routing/` and appends the enforced protocol block to `~/.gemini/GEMINI.md` (Antigravity's global instruction file), if not already present.
+- **`skills/worker-routing/SKILL.md`** — the canonical protocol document. Defines the agent mesh (Orchestrator, Context Specialist, Planner, Critic, Heavy/Light Doers, Local/Sensitive Doer, QA/Auditor), the task lifecycle, the difficulty-aware routing matrix, and CLI command references for `agy`, `claude`, `codex`, and LM Studio.
+- **`skills/worker-routing/routing-audit.sh`** — scans Antigravity conversation logs (`~/.gemini/antigravity/brain/<conversation-id>/.system_generated/logs/overview.txt`) for protocol violations: source code edits with zero worker CLI calls, and `[ROUTING: Direct]` declarations that precede a source code edit.
+- **`skills/worker-routing/routing_check.py`** — Python helper invoked by the audit script. In `--regex` mode it builds a worker-detection regex from `routing-config.json`; in log-file mode it does the line-window pattern matching for the `[ROUTING: Direct] → code edit` check, using the same config to recognize worker CLI invocations.
+- **`skills/worker-routing/routing-config.json`** — the source of truth for which models/CLIs count as "workers." See [Configuring workers](#configuring-workers) below.
+- **`install.sh`** — copies the skill files into every supported agent target directory and injects the enforced protocol block into `~/.gemini/GEMINI.md` (Antigravity's global instruction file), backing it up first.
+- **`uninstall.sh`** — removes the installed skill directories and strips the protocol block back out of `~/.gemini/GEMINI.md`, backing it up first.
 
 ---
 
@@ -75,13 +77,13 @@ The goal is a 1,000–2,000 token distilled brief — not raw file dumps — so 
 | Complex | Architectural shifts, 5+ files | Planner: Fable 5/Opus 4.8, Critic: Codex Sol, Executor: Sonnet 5 | Consensus loop + Hi-CoT |
 | Sensitive | PII, credentials, secrets | LM Studio (local only) | Zero-leakage offline flow |
 
-Full command syntax for `agy`, `claude`, `codex`, and the LM Studio REST API is in [`skills/auto-routing/SKILL.md`](skills/auto-routing/SKILL.md).
+Full command syntax for `agy`, `claude`, `codex`, and the LM Studio REST API is in [`skills/worker-routing/SKILL.md`](skills/worker-routing/SKILL.md).
 
 ---
 
 ## Configuring workers
 
-`skills/auto-routing/routing-config.json` is the single source of truth for what counts as a "worker" during auditing. It maps each role in the agent mesh to a display `name` and a list of `patterns` — substrings that identify that worker's CLI invocation in a conversation log:
+`skills/worker-routing/routing-config.json` is the single source of truth for what counts as a "worker" during auditing. It maps each role in the agent mesh to a display `name` and a list of `patterns` — substrings that identify that worker's CLI invocation in a conversation log:
 
 ```json
 {
@@ -111,35 +113,36 @@ To swap in different models or tools, edit `routing-config.json` — no changes 
 
 Patterns are treated as literal substrings (regex-escaped internally), so no special quoting is needed — just list the exact text that appears in your logs when that worker is invoked.
 
-After editing the repo's copy, re-run `bash install.sh` — the installer only copies `routing-config.json` into `~/.gemini/config/skills/auto-routing/` if it isn't already there, so your installed customizations are preserved across upgrades. To force-refresh an installed config, delete the installed copy first, then re-run `install.sh`.
+After editing the repo's copy, re-run `bash install.sh` — the installer only copies `routing-config.json` into `~/.gemini/config/skills/worker-routing/` if it isn't already there, so your installed customizations are preserved across upgrades. To force-refresh an installed config, delete the installed copy first, then re-run `install.sh`.
 
 ---
 
 ## Setup
 
-### Option 1: Clone and install
-
 ```bash
-git clone https://github.com/liorparente/antigravity-auto-routing.git
-cd antigravity-auto-routing
+git clone https://github.com/liorparente/antigravity-worker-routing.git
+cd antigravity-worker-routing
 bash install.sh
 ```
 
-### Option 2: One-line remote install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/liorparente/antigravity-auto-routing/main/install.sh | bash
-```
-
-Both options are idempotent — running `install.sh` again will not duplicate the protocol block in `~/.gemini/GEMINI.md`, and file copies are simple overwrites.
+Running `install.sh` again is safe — it does not duplicate the protocol block in `~/.gemini/GEMINI.md`, and file copies are simple overwrites.
 
 ### What the installer does
 
-1. Creates `~/.gemini/config/skills/auto-routing/` if it doesn't already exist.
-2. Copies `SKILL.md`, `routing-audit.sh`, and `routing_check.py` into that directory (always overwritten).
+1. Creates each supported target directory if it doesn't already exist (`~/.gemini/config/skills/worker-routing/`, `~/.codex/skills/worker-routing/`, and local `.agents/`, `.agent/`, `.codex/` copies inside the repo).
+2. Copies `SKILL.md`, `routing-audit.sh`, and `routing_check.py` into each directory (always overwritten).
 3. Marks `routing-audit.sh` executable (`chmod +x`).
-4. Copies `routing-config.json` into that directory **only if it doesn't already exist**, so any customizations you've made to your installed copy (see [Configuring workers](#configuring-workers)) survive re-running the installer.
-5. Checks `~/.gemini/GEMINI.md` for the marker `## Worker Routing Protocol (HARD ENFORCED — v3.0)`. If absent, appends the full enforced protocol block — the hard gate, mandatory response template, complexity matrix, and escalation triggers that Antigravity reads on every session start.
+4. Copies `routing-config.json` into each directory **only if it doesn't already exist**, so any customizations you've made to your installed copy (see [Configuring workers](#configuring-workers)) survive re-running the installer.
+5. Backs up `~/.gemini/GEMINI.md` to `~/.gemini/GEMINI.md.bak` before touching it.
+6. Injects the protocol block between two versionless sentinel markers (`# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ===` / `... END ===`) — the hard gate, mandatory response template, complexity matrix, and escalation triggers that Antigravity reads on every session start. If a block already exists between those markers, it's replaced in place. If a legacy v3.0 block (from older versions of this installer) is found instead, it's removed and replaced with the new versionless block automatically.
+
+### Uninstalling
+
+```bash
+bash uninstall.sh
+```
+
+This removes the installed skill directories and, after backing up `~/.gemini/GEMINI.md` to `~/.gemini/GEMINI.md.bak`, strips the protocol block back out (recognizing both the current versionless markers and the legacy v3.0 heading). Everything else in `GEMINI.md` is left untouched.
 
 ---
 
@@ -152,13 +155,13 @@ Once installed, Antigravity's global instructions (`~/.gemini/GEMINI.md`) enforc
 Run the audit script against the most recent Antigravity conversation:
 
 ```bash
-~/.gemini/config/skills/auto-routing/routing-audit.sh
+~/.gemini/config/skills/worker-routing/routing-audit.sh
 ```
 
 Or target a specific conversation by ID:
 
 ```bash
-~/.gemini/config/skills/auto-routing/routing-audit.sh <conversation-id>
+~/.gemini/config/skills/worker-routing/routing-audit.sh <conversation-id>
 ```
 
 The script reports:
