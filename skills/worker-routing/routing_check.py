@@ -3,28 +3,34 @@
 routing_check.py — the routing audit engine.
 
 Modes:
-  --regex              Build a regex alternation from all worker patterns in
-                        routing-config.json and print it to stdout.
-  --extensions-regex    Print a regex alternation of the configured
-                        `code_extensions` to stdout.
-  <log_file>            Full audit: parses the log (plain text, JSON, or
-                        JSON Lines — detected from the file extension),
-                        computes every routing metric strictly within each
-                        conversation step's own boundaries, prints a
-                        human-readable report to stdout, and exits with the
-                        audit verdict. Per-violation detail lines go to
-                        stderr.
+  --strict               Treat warnings as failures too (exit 1 instead of
+                          0 when a 🟡 WARNING is emitted but no 🔴 VIOLATION
+                          is found).
+  <log_file>              Full audit: parses the log, computes every routing
+                          metric strictly within each conversation step's own
+                          boundaries, prints a human-readable report to
+                          stdout, and exits with the audit verdict.
+                          Per-violation detail lines go to stderr.
 
 Log formats:
-  *.txt / anything else   Plain text, split on `Step \\d+:` markers.
-  *.json                  A single JSON document: either a top-level array
-                           of step objects, or an object with a `steps` array.
+  *.txt / anything else   Plain text, split on `Step \\d+:` markers — unless
+                           the stripped content starts with `{`, in which
+                           case it's treated as JSON Lines regardless of
+                           extension (Antigravity's own `overview.txt` logs
+                           are written this way).
   *.jsonl                 JSON Lines: one step object per line.
 
-  Each step object looks like:
+  Each JSON Lines step object looks like:
     {"routing": "[ROUTING: Direct — reason: ...]",
      "tool_calls": [{"tool": "run_command", "command_line": "..."},
                     {"tool": "replace_file_content", "target_file": "..."}]}
+
+  Antigravity's own conversation logs use a slightly different shape: the
+  tool name is under `name` instead of `tool`, arguments are nested under
+  `args` as `TargetFile`/`CommandLine` (sometimes wrapped in literal double
+  quotes), and the `[ROUTING: ...]` declaration is embedded in a separate
+  step's free-form `content` rather than a dedicated `routing` key.
+  `_step_from_dict` accepts both shapes.
 
 Worker-CLI detection only ever looks at the `CommandLine`/`command_line`
 value of an actual `run_command` tool call — never at surrounding prose —
@@ -33,19 +39,29 @@ Code-file detection uses `Path(filename).suffix` for an exact extension
 match, so `.html` can't be mistaken for `.h`, `package.json` for `.js`, or
 `.pyc` for `.py`.
 
+A step that writes a source code file with zero worker CLI calls of its own
+is a violation — regardless of what (if anything) its `[ROUTING:]` label
+says. A `[ROUTING: heavy_doer ...]` label doesn't excuse an unrouted write
+any more than `[ROUTING: Direct ...]` does; only an actual worker `run_command`
+call in that same step does.
+
 Exit codes:
-  0   Audit ran, no violations.
-  1   Audit ran, violations found.
+  0   Audit ran, no violations (and, in --strict mode, no warnings either).
+  1   Audit ran, violations found (or, in --strict mode, warnings found).
   2   The audit itself could not run — missing/unreadable log file, a log
-      that failed to parse, or a routing-config.json that failed to load.
-      Fails closed rather than silently treating an unreadable log as clean.
+      that failed to parse or yielded no steps, or a routing-config.json
+      that failed to load. Fails closed rather than silently treating an
+      unreadable log as clean.
 """
+from __future__ import annotations
+
 import json
 import re
 import sys
 import traceback
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "routing-config.json"
@@ -56,11 +72,10 @@ WRITE_TOOLS = {"write_to_file", "replace_file_content", "multi_replace_file_cont
 
 STEP_HEADER_RE = re.compile(r"^Step\s+\d+\s*:", re.MULTILINE)
 ROUTING_RE = re.compile(r"\[ROUTING:[^\]\n]*\]")
-DIRECT_ROUTING_RE = re.compile(r"\[ROUTING:\s*Direct\b", re.IGNORECASE)
 TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 
 
-def _kv_pattern(key):
+def _kv_pattern(key: str) -> re.Pattern[str]:
     return re.compile(r'"' + key + r'"\s*:\s*"((?:[^"\\]|\\.)*)"')
 
 
@@ -68,13 +83,13 @@ TARGET_FILE_RE = _kv_pattern("TargetFile")
 COMMAND_LINE_RE = _kv_pattern("CommandLine")
 
 
-def load_config():
+def load_config() -> dict[str, Any]:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f)  # type: ignore[no-any-return]
 
 
-def load_patterns(config):
-    patterns = []
+def load_patterns(config: dict[str, Any]) -> list[str]:
+    patterns: list[str] = []
     for key, role in config.items():
         if key == "code_extensions" or not isinstance(role, dict):
             continue
@@ -82,20 +97,8 @@ def load_patterns(config):
     return patterns
 
 
-def load_code_extensions(config):
-    return config.get("code_extensions", DEFAULT_CODE_EXTENSIONS)
-
-
-def print_regex(config):
-    patterns = load_patterns(config)
-    escaped = [re.escape(p) for p in patterns]
-    print(f"\\b({'|'.join(escaped)})\\b")
-
-
-def print_extensions_regex(config):
-    extensions = load_code_extensions(config)
-    escaped = [re.escape(e) for e in extensions]
-    print(f"({'|'.join(escaped)})")
+def load_code_extensions(config: dict[str, Any]) -> list[str]:
+    return config.get("code_extensions", DEFAULT_CODE_EXTENSIONS)  # type: ignore[no-any-return]
 
 
 class Step:
@@ -106,22 +109,23 @@ class Step:
 
     __slots__ = ("index", "routing", "writes", "commands")
 
-    def __init__(self, index, routing=None):
+    index: int
+    routing: str | None
+    writes: list[str]
+    commands: list[str]
+
+    def __init__(self, index: int, routing: str | None = None) -> None:
         self.index = index
         self.routing = routing
         self.writes = []  # TargetFile strings from write-tool calls
         self.commands = []  # CommandLine strings from run_command calls
 
-    @property
-    def is_direct(self):
-        return bool(self.routing) and bool(DIRECT_ROUTING_RE.search(self.routing))
 
-
-def _parse_text_steps(text):
+def _parse_text_steps(text: str) -> list[Step]:
     """Plain-text logs: split on `Step \\d+:` markers. Each chunk is scanned
     only for its own [ROUTING:] declaration and its own tool calls."""
     headers = list(STEP_HEADER_RE.finditer(text))
-    steps = []
+    steps: list[Step] = []
 
     for i, header in enumerate(headers):
         start = header.start()
@@ -152,33 +156,45 @@ def _parse_text_steps(text):
     return steps
 
 
-def _step_from_dict(index, data):
-    step = Step(index, data.get("routing"))
+def _dig(data: dict[str, Any], *path: str) -> Any:
+    """Walk a chain of dict keys, returning None as soon as one is missing
+    or the value along the way isn't a dict."""
+    value: Any = data
+    for key in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def _strip_quotes(value: Any) -> Any:
+    return value.strip('"') if isinstance(value, str) else value
+
+
+def _step_from_dict(index: int, data: dict[str, Any]) -> Step:
+    routing = data.get("routing")
+    if "routing" not in data:
+        content = data.get("content")
+        if isinstance(content, str):
+            match = ROUTING_RE.search(content)
+            routing = match.group(0) if match else None
+
+    step = Step(index, routing)
     for call in data.get("tool_calls") or []:
-        tool_name = call.get("tool")
-        if tool_name in WRITE_TOOLS and call.get("target_file"):
-            step.writes.append(call["target_file"])
-        elif tool_name == "run_command" and call.get("command_line"):
-            step.commands.append(call["command_line"])
+        tool_name = call.get("tool") or call.get("name")
+        target_file = _strip_quotes(call.get("target_file") or _dig(call, "args", "TargetFile"))
+        command_line = _strip_quotes(call.get("command_line") or _dig(call, "args", "CommandLine"))
+
+        if tool_name in WRITE_TOOLS and target_file:
+            step.writes.append(target_file)
+        elif tool_name == "run_command" and command_line:
+            step.commands.append(command_line)
     return step
 
 
-def _parse_json_steps(text):
-    """JSON logs: a single document that is either a top-level array of step
-    objects, or an object with a `steps` array."""
-    data = json.loads(text) if text.strip() else {}
-    if isinstance(data, dict):
-        raw_steps = data.get("steps", [])
-    elif isinstance(data, list):
-        raw_steps = data
-    else:
-        raw_steps = []
-    return [_step_from_dict(i + 1, s) for i, s in enumerate(raw_steps)]
-
-
-def _parse_jsonl_steps(text):
+def _parse_jsonl_steps(text: str) -> list[Step]:
     """JSON Lines logs: one step object per line."""
-    steps = []
+    steps: list[Step] = []
     for line in text.splitlines():
         line = line.strip()
         if not line:
@@ -187,24 +203,25 @@ def _parse_jsonl_steps(text):
     return steps
 
 
-def parse_steps(log_file, text):
-    suffix = Path(log_file).suffix.lower()
-    if suffix == ".jsonl":
+def parse_steps(log_file: str, text: str) -> list[Step]:
+    if text.strip().startswith("{"):
         return _parse_jsonl_steps(text)
-    if suffix == ".json":
-        return _parse_json_steps(text)
+    if Path(log_file).suffix.lower() == ".jsonl":
+        return _parse_jsonl_steps(text)
     return _parse_text_steps(text)
 
 
-def compute_metrics(steps, code_extensions, worker_pattern):
+def compute_metrics(
+    steps: list[Step], code_extensions: list[str], worker_pattern: re.Pattern[str]
+) -> dict[str, Any]:
     code_ext_set = {e.lower().lstrip(".") for e in code_extensions}
 
     total_writes = 0
     code_writes = 0
     routing_declarations = 0
     worker_calls = 0
-    code_write_files = []
-    violations = []  # list of (step_index, [files])
+    code_write_files: list[str] = []
+    violations: list[tuple[int, list[str]]] = []  # (step_index, [files])
 
     for step in steps:
         if step.routing:
@@ -216,7 +233,7 @@ def compute_metrics(steps, code_extensions, worker_pattern):
             worker_calls += n
             step_worker_calls += n
 
-        step_code_writes = []
+        step_code_writes: list[str] = []
         for target_file in step.writes:
             total_writes += 1
             suffix = Path(target_file).suffix.lower().lstrip(".")
@@ -225,7 +242,7 @@ def compute_metrics(steps, code_extensions, worker_pattern):
                 code_write_files.append(target_file)
                 step_code_writes.append(target_file)
 
-        if step.is_direct and step_code_writes and step_worker_calls == 0:
+        if step_code_writes and step_worker_calls == 0:
             violations.append((step.index, step_code_writes))
 
     return {
@@ -238,7 +255,7 @@ def compute_metrics(steps, code_extensions, worker_pattern):
     }
 
 
-def run_audit(config, log_file):
+def run_audit(config: dict[str, Any], log_file: str, strict: bool = False) -> int:
     patterns = load_patterns(config)
     code_extensions = load_code_extensions(config)
     worker_pattern = re.compile(
@@ -259,15 +276,19 @@ def run_audit(config, log_file):
         print(f"❌ Failed to parse log: {log_file}")
         return 2
 
+    if text.strip() and not steps:
+        print(f"❌ No steps parsed from log: {log_file}")
+        return 2
+
     metrics = compute_metrics(steps, code_extensions, worker_pattern)
     violation_count = len(metrics["violations"])
 
     print("📊 Results:")
-    print(f"  Total file write tool calls:     {metrics['total_writes']}")
-    print(f"  Writes to source code files:     {metrics['code_writes']}")
-    print(f"  ROUTING declarations found:      {metrics['routing_declarations']}")
-    print(f"  Worker CLI calls found:          {metrics['worker_calls']}")
-    print(f"  [Direct] → code edit violations: {violation_count}")
+    print(f"  {'Total file write tool calls:':<33} {metrics['total_writes']}")
+    print(f"  {'Writes to source code files:':<33} {metrics['code_writes']}")
+    print(f"  {'ROUTING declarations found:':<33} {metrics['routing_declarations']}")
+    print(f"  {'Worker CLI calls found:':<33} {metrics['worker_calls']}")
+    print(f"  {'Unrouted code edit violations:':<33} {violation_count}")
     print("")
 
     violation = False
@@ -278,17 +299,21 @@ def run_audit(config, log_file):
         violation = True
 
     if violation_count > 0:
-        print(f"🔴 VIOLATION: [ROUTING: Direct] preceded a code edit {violation_count} time(s).")
-        print("   Direct routing is only allowed for .md edits, read-only ops, MCP calls, and QA.")
+        print(f"🔴 VIOLATION: Unrouted code edit detected in {violation_count} step(s).")
+        print("   Every step that writes a source code file must also contain a worker CLI call,")
+        print("   regardless of what its [ROUTING:] label says.")
         for step_index, files in metrics["violations"]:
-            print(f"  ⚠️  Step {step_index}: [ROUTING: Direct] → code edit detected ({files})", file=sys.stderr)
+            print(f"  ⚠️  Step {step_index}: unrouted code edit detected ({files})", file=sys.stderr)
         violation = True
 
+    warning = False
     if metrics["code_writes"] > metrics["worker_calls"] and not violation:
         print(f"🟡 WARNING: More code edits ({metrics['code_writes']}) than worker calls ({metrics['worker_calls']}).")
         print("   Some edits may not have been properly routed.")
+        warning = True
     elif metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0 and not violation:
         print(f"🟡 WARNING: No [ROUTING:] declarations found, but {metrics['total_writes']} file writes occurred.")
+        warning = True
     elif not violation:
         print("✅ No violations detected.")
 
@@ -298,10 +323,18 @@ def run_audit(config, log_file):
     for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"{count:>7} {name}")
 
-    return 1 if violation else 0
+    if violation:
+        return 1
+    if strict and warning:
+        return 1
+    return 0
 
 
-def main():
+def main() -> None:
+    strict = "--strict" in sys.argv
+    if strict:
+        sys.argv.remove("--strict")
+
     try:
         config = load_config()
     except Exception:
@@ -309,18 +342,10 @@ def main():
         sys.exit(2)
 
     if len(sys.argv) < 2:
-        print("Usage: routing_check.py [--regex | --extensions-regex | <log_file>]", file=sys.stderr)
+        print("Usage: routing_check.py [--strict] <log_file>", file=sys.stderr)
         sys.exit(2)
 
-    if sys.argv[1] == "--regex":
-        print_regex(config)
-        sys.exit(0)
-
-    if sys.argv[1] == "--extensions-regex":
-        print_extensions_regex(config)
-        sys.exit(0)
-
-    sys.exit(run_audit(config, sys.argv[1]))
+    sys.exit(run_audit(config, sys.argv[1], strict=strict))
 
 
 if __name__ == "__main__":

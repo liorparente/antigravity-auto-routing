@@ -23,7 +23,6 @@ TARGET_DIRS=(
     "$HOME/.gemini/config/skills/worker-routing"
     "$HOME/.codex/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
-    "$TARGET_PROJECT_DIR/.agent/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.codex/skills/worker-routing"
 )
 GEMINI_MD="$HOME/.gemini/GEMINI.md"
@@ -70,9 +69,9 @@ install_skill_files() {
     fi
 }
 
-# Remove any existing protocol block from a GEMINI.md-like file, whether it
-# was written with the new versionless markers or the legacy v3.0 heading.
-# Leaves the rest of the file untouched.
+# Remove any existing protocol block from a doc, whether it was written with
+# the new versionless markers or the legacy v3.0 heading. Leaves the rest of
+# the file untouched.
 strip_existing_block() {
     local file="$1"
 
@@ -94,7 +93,8 @@ strip_existing_block() {
 
 # Back up a file to "$file.bak" the first time we touch it. Once a backup
 # exists we never overwrite it, so it always holds the user's pre-install
-# original rather than a snapshot from a previous re-run.
+# original rather than a snapshot from a previous re-run. No-op for files
+# that don't exist yet — there's nothing to back up.
 backup_once() {
     local file="$1"
     if [ -f "$file" ] && [ ! -f "$file.bak" ]; then
@@ -103,12 +103,39 @@ backup_once() {
     fi
 }
 
-# Overwrite a project-root doc with the current protocol.md content,
-# backing up any pre-existing file first.
+# Inject/refresh the Worker Routing Protocol block between the sentinel
+# markers in a doc, preserving any other custom content already in the
+# file. Safe to re-run: a pre-existing block (versionless or legacy) is
+# replaced in place rather than duplicated.
 sync_protocol_doc() {
     local target_file="$1"
+
+    mkdir -p "$(dirname "$target_file")"
     backup_once "$target_file"
-    cp "$PROTOCOL_SRC" "$target_file"
+    touch "$target_file"
+
+    if grep -qF "$LEGACY_MARKER" "$target_file" 2>/dev/null; then
+        echo "🔄 Legacy v3.0 protocol block detected in $(basename "$target_file") — upgrading to versionless markers."
+    fi
+
+    strip_existing_block "$target_file"
+
+    # Trim trailing blank lines left over after stripping so re-running the
+    # installer doesn't accumulate blank lines before the re-injected block.
+    while [ -s "$target_file" ] && [ -z "$(tail -n 1 "$target_file")" ]; do
+        sed -i.tmp '$d' "$target_file"
+        rm -f "$target_file.tmp"
+    done
+
+    echo "📝 Writing Worker Routing Protocol to $target_file"
+    {
+        echo ""
+        echo "$PROTOCOL_START"
+        echo ""
+        cat "$PROTOCOL_SRC"
+        echo ""
+        echo "$PROTOCOL_END"
+    } >> "$target_file"
     echo "✅ Synced $(basename "$target_file") from protocol.md"
 }
 
@@ -117,40 +144,12 @@ for target_dir in "${TARGET_DIRS[@]}"; do
     install_skill_files "$target_dir"
 done
 
-# 2. Generate/refresh AGENTS.md and CLAUDE.md at the project root from the
-#    single source of truth, skills/worker-routing/protocol.md.
+# 2. Inject/refresh the Worker Routing Protocol block in AGENTS.md and
+#    CLAUDE.md at the project root, and in GEMINI.md (Antigravity's global
+#    instruction file) — preserving any other custom content already there.
 sync_protocol_doc "$AGENTS_MD"
 sync_protocol_doc "$CLAUDE_MD"
-
-# 3. Inject/refresh the Worker Routing Protocol block in GEMINI.md.
-mkdir -p "$(dirname "$GEMINI_MD")"
-touch "$GEMINI_MD"
-
-backup_once "$GEMINI_MD"
-
-if grep -qF "$LEGACY_MARKER" "$GEMINI_MD" 2>/dev/null; then
-    echo "🔄 Legacy v3.0 protocol block detected — upgrading to versionless markers."
-fi
-
-strip_existing_block "$GEMINI_MD"
-
-# Trim trailing blank lines left over after stripping so re-running the
-# installer doesn't accumulate blank lines before the re-injected block.
-while [ -s "$GEMINI_MD" ] && [ -z "$(tail -n 1 "$GEMINI_MD")" ]; do
-    sed -i.tmp '$d' "$GEMINI_MD"
-    rm -f "$GEMINI_MD.tmp"
-done
-
-echo "📝 Writing Worker Routing Protocol to $GEMINI_MD"
-{
-    echo ""
-    echo "$PROTOCOL_START"
-    echo ""
-    cat "$PROTOCOL_SRC"
-    echo ""
-    echo "$PROTOCOL_END"
-} >> "$GEMINI_MD"
-echo "✅ Worker Routing Protocol installed."
+sync_protocol_doc "$GEMINI_MD"
 
 echo "---"
 echo "🎉 Installation complete."

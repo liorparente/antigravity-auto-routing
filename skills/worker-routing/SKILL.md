@@ -3,9 +3,11 @@ name: Auto Routing Protocol
 description: "Antigravity = expensive orchestrator. Its ONLY job: assess task complexity and route to the cheapest capable worker. It never writes code or runs tasks itself. Every execution — including QA and review — is delegated to a worker model. Tokens saved = cost saved."
 ---
 
-# Auto Routing & Collaboration Protocol v3.0
+# Auto Routing & Collaboration Protocol v3.2
 
-This protocol defines the multi-model agent hierarchy, routing matrix, and collaborative workflows. Antigravity acts as a **pure orchestrator**, delegating all context gathering, planning, execution, and verification steps to specialized models to optimize performance, cost, and speed.
+This protocol defines the multi-model agent hierarchy and collaborative workflows. Antigravity acts as a **pure orchestrator**, delegating all context gathering, planning, execution, and verification steps to specialized models to optimize performance, cost, and speed.
+
+The hard-enforced gate, response template, and complexity/routing matrix live in [`protocol.md`](protocol.md) — the single source of truth also injected verbatim into `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`. This file covers everything protocol.md doesn't: the full agent mesh, the task lifecycle, and CLI command syntax for each worker.
 
 ---
 
@@ -62,13 +64,7 @@ The Orchestrator processes the `task.md` checklist, routing individual sub-tasks
 
 ## 📊 Difficulty-Aware Routing Matrix
 
-| Task Complexity | Signs | Assigned Worker | Execution Strategy |
-| :--- | :--- | :--- | :--- |
-| **Trivial** | Single-file edits, comments, formatting, quick Q&A. | **Codex 5.6 Luna** or local **Gemma 4 E4B** | **Direct Generation:** Skip planning/CoT to prevent overthinking and save tokens. |
-| **Simple** | Boilerplate creation, unit tests, simple logic (1-2 files). | **Codex 5.6 Terra** or local **Qwen3 Coder 30B** | **System 1 Few-Shot:** Generate directly with minimal instructions. |
-| **Medium** | New features, refactoring 3–4 files, API integration. | **Planner:** Claude Sonnet 5<br>**Executor:** Claude Sonnet 5 | **ICoT / Thinker-Executor:** Define specs and ideas first, then implement. |
-| **Complex** | Architectural shifts, refactoring 5+ files, core algorithm design. | **Planner:** Claude Fable 5 / Opus 4.8<br>**Critic:** Codex 5.6 Sol<br>**Executor:** Claude Sonnet 5 | **Consensus Loop + Hi-CoT:** Alternating plan-execution cycles to avoid drift. |
-| **Sensitive** | PII, credentials, database connection strings, security logic. | **LM Studio** (Local Models only) | **Local Inference Flow:** Enforce zero-leakage offline boundaries. |
+The authoritative Trivial → Sensitive routing matrix — which worker handles which complexity tier — lives in [`protocol.md`](protocol.md), the single source of truth that is also enforced live via `AGENTS.md`/`CLAUDE.md`/`GEMINI.md`. Edit it there; this file and `README.md` only reference it now, so the copies can't drift out of sync the way this table and `protocol.md`'s used to.
 
 ---
 
@@ -140,5 +136,5 @@ curl -s -X POST http://127.0.0.1:1234/api/v1/models/unload \
 5. **No Routing Overhead Exemptions:** If a task can be performed by a worker model, it must be routed.
 
 ---
-*Auto Routing & Collaboration Protocol v3.0 - 2026-07-10*
+*Auto Routing & Collaboration Protocol v3.2 - 2026-07-10*
 *Orchestrator = Dispatcher. Workers = Execution. Content = Distilled.*

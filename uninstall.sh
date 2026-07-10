@@ -1,8 +1,9 @@
 #!/bin/bash
 # uninstall.sh — removes the Auto Routing & Collaboration Protocol
 # Reverses everything install.sh does: deletes the installed skill
-# directories, restores/removes the generated AGENTS.md and CLAUDE.md, and
-# strips the protocol block back out of GEMINI.md.
+# directories, strips the protocol block back out of AGENTS.md, CLAUDE.md,
+# and GEMINI.md (preserving any other custom content in each), and deletes
+# AGENTS.md/CLAUDE.md entirely if nothing but the block was ever there.
 #
 # Usage: ./uninstall.sh [target_project_dir]
 #   target_project_dir   Project the local skill copies and generated
@@ -21,7 +22,6 @@ TARGET_DIRS=(
     "$HOME/.gemini/config/skills/worker-routing"
     "$HOME/.codex/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
-    "$TARGET_PROJECT_DIR/.agent/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.codex/skills/worker-routing"
 )
 GEMINI_MD="$HOME/.gemini/GEMINI.md"
@@ -51,52 +51,73 @@ for target_dir in "${TARGET_DIRS[@]}"; do
     fi
 done
 
-# 2. Clean up the generated AGENTS.md / CLAUDE.md at the project root. If a
-#    pre-install backup exists, restore it (undoing the sync in place);
-#    otherwise the file was purely generated, so just delete it.
+# Strip the protocol block out of a file in place (versionless or legacy
+# marker), leaving any other custom content untouched.
+strip_protocol_block() {
+    local target_file="$1"
+
+    if grep -qF "$PROTOCOL_START" "$target_file" 2>/dev/null; then
+        awk -v start="$PROTOCOL_START" -v end="$PROTOCOL_END" '
+            $0 == start { skip=1; next }
+            skip && $0 == end { skip=0; next }
+            !skip { print }
+        ' "$target_file" > "$target_file.tmp"
+        mv "$target_file.tmp" "$target_file"
+    elif grep -qF "$LEGACY_MARKER" "$target_file" 2>/dev/null; then
+        awk -v marker="$LEGACY_MARKER" '
+            $0 == marker { exit }
+            { print }
+        ' "$target_file" > "$target_file.tmp"
+        mv "$target_file.tmp" "$target_file"
+    fi
+
+    # Trim trailing blank lines left behind after stripping.
+    while [ -s "$target_file" ] && [ -z "$(tail -n 1 "$target_file")" ]; do
+        sed -i.tmp '$d' "$target_file"
+        rm -f "$target_file.tmp"
+    done
+}
+
+# 2. Strip the protocol block out of AGENTS.md / CLAUDE.md in place,
+#    preserving any other custom content. If nothing but the block (and
+#    surrounding blank lines) was ever there, the file was purely
+#    generated, so remove it entirely.
 remove_protocol_doc() {
     local target_file="$1"
-    if [ -f "$target_file.bak" ]; then
-        mv "$target_file.bak" "$target_file"
-        echo "✅ Restored $target_file from backup"
-    elif [ -f "$target_file" ]; then
-        rm -f "$target_file"
-        echo "✅ Removed $target_file"
-    else
+
+    if [ ! -f "$target_file" ]; then
         echo "⏭️  $target_file not found — skipping."
+        return
+    fi
+
+    if ! grep -qF -e "$PROTOCOL_START" -e "$LEGACY_MARKER" "$target_file" 2>/dev/null; then
+        echo "⏭️  No Worker Routing Protocol block found in $target_file — skipping."
+        return
+    fi
+
+    strip_protocol_block "$target_file"
+
+    if [ ! -s "$target_file" ]; then
+        rm -f "$target_file"
+        echo "✅ Removed $target_file (no custom content remained)"
+    else
+        echo "✅ Removed Worker Routing Protocol block from $target_file (custom content preserved)"
     fi
 }
 
 remove_protocol_doc "$AGENTS_MD"
 remove_protocol_doc "$CLAUDE_MD"
 
-# 3. Strip the protocol block out of GEMINI.md, if present.
+# 3. Strip the protocol block out of GEMINI.md, if present. GEMINI.md is
+#    Antigravity's global instruction file, so it is never deleted outright
+#    — only the block is removed, everything else is left untouched.
 if [ -f "$GEMINI_MD" ] && grep -qF -e "$PROTOCOL_START" -e "$LEGACY_MARKER" "$GEMINI_MD" 2>/dev/null; then
     if [ ! -f "$GEMINI_MD.bak" ]; then
         cp "$GEMINI_MD" "$GEMINI_MD.bak"
         echo "🗄️  Backed up $GEMINI_MD to $GEMINI_MD.bak"
     fi
 
-    if grep -qF "$PROTOCOL_START" "$GEMINI_MD" 2>/dev/null; then
-        awk -v start="$PROTOCOL_START" -v end="$PROTOCOL_END" '
-            $0 == start { skip=1; next }
-            skip && $0 == end { skip=0; next }
-            !skip { print }
-        ' "$GEMINI_MD" > "$GEMINI_MD.tmp"
-        mv "$GEMINI_MD.tmp" "$GEMINI_MD"
-    elif grep -qF "$LEGACY_MARKER" "$GEMINI_MD" 2>/dev/null; then
-        awk -v marker="$LEGACY_MARKER" '
-            $0 == marker { exit }
-            { print }
-        ' "$GEMINI_MD" > "$GEMINI_MD.tmp"
-        mv "$GEMINI_MD.tmp" "$GEMINI_MD"
-    fi
-
-    # Trim trailing blank lines left behind after stripping.
-    while [ -s "$GEMINI_MD" ] && [ -z "$(tail -n 1 "$GEMINI_MD")" ]; do
-        sed -i.tmp '$d' "$GEMINI_MD"
-        rm -f "$GEMINI_MD.tmp"
-    done
+    strip_protocol_block "$GEMINI_MD"
 
     echo "✅ Removed Worker Routing Protocol block from $GEMINI_MD"
 else

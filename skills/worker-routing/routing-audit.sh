@@ -1,14 +1,16 @@
 #!/bin/bash
-# Routing Protocol Audit Script v3.1
+# Routing Protocol Audit Script v3.2
 # Thin wrapper: locates the conversation log and delegates all parsing and
 # metric computation to routing_check.py, then relays its exit code as-is.
 #
-# Usage: ./routing-audit.sh [conversation-id]
+# Usage: ./routing-audit.sh [--strict] [conversation-id]
 # If no ID given, scans the most recent conversation.
+#   --strict   Relayed to routing_check.py: also fail (exit 1) on warnings,
+#              not just violations.
 #
 # Exit codes (relayed directly from routing_check.py):
-#   0   Audit ran, no violations.
-#   1   Audit ran, violations found.
+#   0   Audit ran, no violations (and, with --strict, no warnings).
+#   1   Audit ran, violations found (or, with --strict, warnings found).
 #   2   The audit itself could not run — no conversations found, no log
 #       file found for the conversation, or routing_check.py failed to
 #       load/parse its config or the log. Fails closed rather than
@@ -20,7 +22,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BRAIN_DIR="$HOME/.gemini/antigravity/brain"
 PY_CHECK="$SCRIPT_DIR/routing_check.py"
 
-CONV_ID="${1:-}"
+STRICT_FLAG=""
+CONV_ID=""
+for arg in "$@"; do
+    if [ "$arg" = "--strict" ]; then
+        STRICT_FLAG="--strict"
+    else
+        CONV_ID="$arg"
+    fi
+done
+
 if [ -z "$CONV_ID" ]; then
     # shellcheck disable=SC2012 # conversation IDs are simple directory names
     CONV_ID=$(ls -t "$BRAIN_DIR" 2>/dev/null | head -1) || true
@@ -51,7 +62,11 @@ echo "   Log file: $LOG_FILE"
 echo "---"
 
 set +e
-python3 "$PY_CHECK" "$LOG_FILE"
+if [ -n "$STRICT_FLAG" ]; then
+    python3 "$PY_CHECK" --strict "$LOG_FILE"
+else
+    python3 "$PY_CHECK" "$LOG_FILE"
+fi
 STATUS=$?
 set -e
 
