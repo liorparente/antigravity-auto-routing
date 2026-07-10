@@ -1,69 +1,9 @@
-#!/bin/bash
-# install.sh — installs the Auto Routing & Collaboration Protocol v3.0
-# Idempotent: safe to run multiple times.
-set -euo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$SCRIPT_DIR/skills/auto-routing"
-TARGET_DIRS=(
-    "$HOME/.gemini/config/skills/auto-routing"
-    "$HOME/.codex/skills/auto-routing"
-    "$SCRIPT_DIR/.agents/skills/auto-routing"
-    "$SCRIPT_DIR/.agent/skills/auto-routing"
-    "$SCRIPT_DIR/.codex/skills/auto-routing"
-)
-GEMINI_MD="$HOME/.gemini/GEMINI.md"
-MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
-
-echo "🚀 Installing Auto Routing & Collaboration Protocol v3.0"
-echo "---"
-
-install_skill_files() {
-    local target_dir="$1"
-
-    if [ ! -d "$target_dir" ]; then
-        echo "📁 Creating $target_dir"
-        mkdir -p "$target_dir"
-    else
-        echo "📁 Target directory already exists: $target_dir"
-    fi
-
-    echo "📄 Copying skill files to $target_dir..."
-    cp "$SRC_DIR/SKILL.md" "$target_dir/SKILL.md"
-    cp "$SRC_DIR/routing-audit.sh" "$target_dir/routing-audit.sh"
-    cp "$SRC_DIR/routing_check.py" "$target_dir/routing_check.py"
-    chmod +x "$target_dir/routing-audit.sh"
-    echo "✅ Copied SKILL.md, routing-audit.sh, routing_check.py"
-
-    if [ -f "$target_dir/routing-config.json" ]; then
-        echo "⏭️  routing-config.json already exists in $target_dir — skipping copy to preserve customizations."
-    else
-        cp "$SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
-        echo "✅ Copied routing-config.json"
-    fi
-}
-
-# 1. Copy skill files to all supported global and local agent targets.
-for target_dir in "${TARGET_DIRS[@]}"; do
-    install_skill_files "$target_dir"
-done
-
-# 2. Append Worker Routing Protocol to GEMINI.md if not already present
-mkdir -p "$(dirname "$GEMINI_MD")"
-touch "$GEMINI_MD"
-
-if grep -qF "$MARKER" "$GEMINI_MD" 2>/dev/null; then
-    echo "✅ Worker Routing Protocol already present in $GEMINI_MD — skipping."
-else
-    echo "📝 Appending Worker Routing Protocol to $GEMINI_MD"
-    cat >> "$GEMINI_MD" << 'PROTOCOL_EOF'
-
-## Worker Routing Protocol (HARD ENFORCED — v3.0)
+# Worker Routing Protocol (HARD ENFORCED — v3.0)
 
 Antigravity is a **pure orchestrator**. Its only job: assess complexity → pick worker → collect output.
 Self-execution of code/commands is a **protocol violation**, not a fallback option.
 
-### ⛔ HARD GATE — Before ANY State-Modifying Action
+## ⛔ HARD GATE — Before ANY State-Modifying Action
 
 Before using `write_to_file`, `replace_file_content`, `multi_replace_file_content`, or `run_command` (non-read-only), if the environment variable `IN_WORKER_ROUTING` is NOT set to `true`, execute this internal check:
 
@@ -78,7 +18,7 @@ Before using `write_to_file`, `replace_file_content`, `multi_replace_file_conten
    - **Context:** KI reference or conversation ID
 4. **Execute via worker CLI.** Never execute directly without explicit user approval.
 
-### 🔒 Mandatory Response Template (STRUCTURAL — Not Optional)
+## 🔒 Mandatory Response Template (STRUCTURAL — Not Optional)
 The **FIRST LINE** of every response MUST be exactly one of:
 ```
 [ROUTING: Direct — reason: {allowed exception from list below}]
@@ -91,21 +31,21 @@ If the self-check answer is YES (a worker can do it) but you are about to self-e
 ```
 Then ask the user how to proceed.
 
-### 📋 Post-Session Audit
+## 📋 Post-Session Audit
 All sessions are auditable via: `~/.gemini/config/skills/auto-routing/routing-audit.sh [conversation-id]`
 This script detects source code edits made without worker routing. Violations are flagged automatically.
 
-### ✅ Allowed Direct Actions (No Worker, No Gate)
+## ✅ Allowed Direct Actions (No Worker, No Gate)
 - Reading/analyzing files (`view_file`, `grep_search`, `list_dir`, `read_url_content`) — **EXCEPT Code Reviews (must route to Codex)**
 - Answering questions, planning, conversation
 - Creating/editing **documentation & visualization artifacts** (`.md` and `.html` files — not `.ts`, `.tsx`, `.css`, `.js`)
 - Read-only diagnostics (`git status`, `git log`, `curl` health checks)
 - MCP tool calls (NotebookLM, GA4, GSC, Stitch — these are tools, not code output)
 - `browser_subagent` for UI inspection/QA
-- `/handoff` output (temp .md file, not committed to repo) and `/prototype throwaway files (local only)`
+- `/handoff` output (temp .md file, not committed to repo) and `/prototype` throwaway files (local only)
 - Executing when the environment variable `IN_WORKER_ROUTING` is set to `true` (nested worker execution)
 
-### Complexity Matrix — Pick Worker Automatically
+## Complexity Matrix — Pick Worker Automatically
 | Complexity | Signs | Route To |
 |---|---|---|
 | **Trivial** | Single file, rename, format, quick Q&A | **Codex 5.6 Luna** or local **Gemma 4 E4B** |
@@ -116,7 +56,7 @@ This script detects source code edits made without worker routing. Violations ar
 | **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"`) |
 | **Context/Search** | Codebase scan, log parsing | **Antigravity CLI** (`agy`) with Gemini 3.5 Flash |
 
-### Routing Behavior
+## Routing Behavior
 1. **Silent availability check:** Before routing, verify the target worker is reachable (e.g., `curl -s http://127.0.0.1:1234/api/v0/models` for LM Studio). Do this silently.
 2. **If worker is unreachable:** HALT. Report which worker is down and the fix. Do NOT silently self-execute.
 3. **Audit trail:** Every response that involves any action must start with `[ROUTING: {worker} — reason: {why}]` or `[ROUTING: Direct — reason: {allowed exception}]`.
@@ -124,7 +64,7 @@ This script detects source code edits made without worker routing. Violations ar
 4. **Codex Sandbox Modes:** Always pick the right `-s` flag — wrong mode = blocked writes. `read-only`: pure analysis only. `workspace-write`: applying patches or fixes within the repo (default for Review/QA). `danger-full-access`: unrestricted system writes. Never use `read-only` when Codex needs to write files.
 5. **Full reference:** See `~/.gemini/config/skills/auto-routing/SKILL.md` for CLI syntax and edge cases.
 
-### Pushback Protocol (Bidirectional)
+## Pushback Protocol (Bidirectional)
 Antigravity is authorized — and **required** — to refuse:
 - Direct self-execution when a worker is available → "I must route this to {worker}."
 - Opus-tier model for trivial tasks → recommend Flash/local downgrade
@@ -139,15 +79,3 @@ When operating as a "tier 1/2" model (e.g. Flash or Sonnet) and encountering any
 4. **Security / Data Risks:** Any operations touching Auth, RLS, production secrets, or potentially destructive actions.
 
 Conversely, when operating as a "tier 3" model (e.g. Opus) and receiving a trivial task (such as drafting a `/note` or summarizing meetings) — **recommend downgrading to a cheaper model** to conserve resources.
-PROTOCOL_EOF
-    echo "✅ Worker Routing Protocol appended."
-fi
-
-echo "---"
-echo "🎉 Installation complete."
-echo "   Skill files installed to:"
-for target_dir in "${TARGET_DIRS[@]}"; do
-    echo "     - $target_dir"
-done
-echo "   Protocol doc:  $GEMINI_MD"
-echo "   Run audits with: ${TARGET_DIRS[0]}/routing-audit.sh [conversation-id]"
