@@ -34,7 +34,7 @@ For every non-trivial task, the Orchestrator must run the following sequential l
 
 ### Phase 1: Context Distillation
 Before planning begins, the Orchestrator invokes `agy` (Gemini 3.5 Flash) to gather relevant codebase parts.
-* **Goal:** Avoid polluting the Planner`s context with raw files.
+* **Goal:** Avoid polluting the Planner's context with raw files.
 * **Command:** `script -q /dev/null agy -p "Scan the codebase and locate all references to {TOPIC}. Output a distilled context summary."`
 
 ### Phase 2: Planner-Critic Consensus Loop (System 2 Planning)
@@ -42,7 +42,7 @@ For all Medium and Complex tasks, planning must undergo peer review before execu
 1. **Drafting:** The **Planner** (Claude Fable 5 / Opus 4.8) writes a proposed implementation plan to `.claude/plan_draft.md`.
 2. **Review:** The **Critic** (Codex 5.6 Sol) reviews the draft plan.
    * **Command:** `cat .claude/plan_draft.md | codex exec "Review this plan. Check for edge cases, performance bottlenecks, and architectural violations."`
-3. **Refinement:** The Planner integrates the Critic`s feedback, producing the final `implementation_plan.md` for user approval.
+3. **Refinement:** The Planner integrates the Critic's feedback, producing the final `implementation_plan.md` for user approval.
 
 ### Phase 3: Task Decomposition
 Upon user approval, the Orchestrator initializes `task.md` with structured sub-tasks.

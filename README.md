@@ -1,6 +1,6 @@
 # antigravity-auto-routing
 
-**Auto Routing & Collaboration Protocol v3.0** — a multi-model orchestration protocol, audit tooling, and installer for the [Antigravity](https://github.com/) CLI ecosystem (Gemini `agy`, Claude Code, Codex).
+**Auto Routing & Collaboration Protocol v3.0** — a multi-model orchestration protocol, audit tooling, and installer for the Antigravity CLI ecosystem (Gemini `agy`, Claude Code, Codex).
 
 The core idea: the orchestrator model (Antigravity) should never spend its own expensive tokens writing code or running commands. Instead, it assesses task complexity and **routes** every unit of work — context gathering, planning, implementation, and QA — to the cheapest model capable of doing it correctly. Tokens saved on the orchestrator are cost saved across the whole session.
 
