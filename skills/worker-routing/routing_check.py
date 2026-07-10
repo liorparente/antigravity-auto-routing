@@ -35,6 +35,19 @@ Log formats:
 Worker-CLI detection only ever looks at the `CommandLine`/`command_line`
 value of an actual `run_command` tool call — never at surrounding prose —
 so a conversational mention of a worker's name can't be mistaken for routing.
+`is_worker_invocation` strips leading environment variable assignments
+(e.g. `IN_WORKER_ROUTING=true`) and known wrappers (`script -q /dev/null`,
+`bash -c`) before checking whether the command *starts with* a configured
+worker pattern — a substring mention mid-command (e.g. `echo codex exec`)
+does not count.
+
+Commands that are not worker invocations are checked against
+`safe_commands` in routing-config.json via `is_command_safe`. A command
+that is neither a worker invocation nor a recognized safe command is an
+`unrouted_mutation` and flags its step as a violation even if it wrote no
+code files directly (e.g. a redirect, backtick, or `$()` substitution that
+could mutate state outside the tracked write tools).
+
 Code-file detection uses `Path(filename).suffix` for an exact extension
 match, so `.html` can't be mistaken for `.h`, `package.json` for `.js`, or
 `.pyc` for `.py`.
@@ -48,10 +61,12 @@ call in that same step does.
 Exit codes:
   0   Audit ran, no violations (and, in --strict mode, no warnings either).
   1   Audit ran, violations found (or, in --strict mode, warnings found).
-  2   The audit itself could not run — missing/unreadable log file, a log
-      that failed to parse or yielded no steps, or a routing-config.json
-      that failed to load. Fails closed rather than silently treating an
-      unreadable log as clean.
+  2   The audit itself could not run — missing/unreadable log file, an
+      empty log, a log that failed to parse or yielded no steps, a
+      routing-config.json that failed to load, or a raw-text cross-check
+      that suggests the parser is out of sync with the log format. Fails
+      closed rather than silently treating an unreadable/unparseable log
+      as clean.
 """
 from __future__ import annotations
 
@@ -74,6 +89,17 @@ STEP_HEADER_RE = re.compile(r"^Step\s+\d+\s*:", re.MULTILINE)
 ROUTING_RE = re.compile(r"\[ROUTING:[^\]\n]*\]")
 TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 
+# Non-role keys that may appear at the top level of routing-config.json
+# alongside the worker-role dicts.
+NON_ROLE_CONFIG_KEYS = {"code_extensions", "safe_commands", "orchestrator"}
+
+ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s+")
+SCRIPT_WRAPPER_RE = re.compile(r"^script\s+(?:-\S+\s+)*\S+\s+")
+BASH_C_WRAPPER_RE = re.compile(r"^bash\s+-c\s+")
+
+LOGICAL_SPLIT_RE = re.compile(r"\|\||&&|\||;")
+UNSAFE_SUBSTRINGS = (">", "`", "$(")
+
 
 def _kv_pattern(key: str) -> re.Pattern[str]:
     return re.compile(r'"' + key + r'"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -91,7 +117,7 @@ def load_config() -> dict[str, Any]:
 def load_patterns(config: dict[str, Any]) -> list[str]:
     patterns: list[str] = []
     for key, role in config.items():
-        if key == "code_extensions" or not isinstance(role, dict):
+        if key in NON_ROLE_CONFIG_KEYS or not isinstance(role, dict):
             continue
         patterns.extend(role.get("patterns", []))
     return patterns
@@ -99,6 +125,64 @@ def load_patterns(config: dict[str, Any]) -> list[str]:
 
 def load_code_extensions(config: dict[str, Any]) -> list[str]:
     return config.get("code_extensions", DEFAULT_CODE_EXTENSIONS)  # type: ignore[no-any-return]
+
+
+def load_safe_patterns(config: dict[str, Any]) -> list[re.Pattern[str]]:
+    return [re.compile(p) for p in config.get("safe_commands", [])]
+
+
+def _strip_command_wrappers(command: str) -> str:
+    """Strip leading environment variable assignments and known wrapper
+    commands (`script -q /dev/null ...`, `bash -c ...`) so the underlying
+    invocation is what gets matched against worker patterns."""
+    stripped = command.strip()
+    while True:
+        without_env = ENV_ASSIGNMENT_RE.sub("", stripped)
+        if without_env != stripped:
+            stripped = without_env
+            continue
+
+        script_match = SCRIPT_WRAPPER_RE.match(stripped)
+        if script_match:
+            stripped = stripped[script_match.end():]
+            continue
+
+        bash_c_match = BASH_C_WRAPPER_RE.match(stripped)
+        if bash_c_match:
+            stripped = stripped[bash_c_match.end():].strip()
+            if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in "\"'":
+                stripped = stripped[1:-1]
+            continue
+
+        break
+
+    return stripped.strip()
+
+
+def is_worker_invocation(command: str, worker_patterns: list[str]) -> bool:
+    """True if `command`, once stripped of leading env assignments and
+    known wrappers, actually starts with a configured worker pattern — a
+    substring mention elsewhere in the command (e.g. `echo codex exec`)
+    does not count as delegation."""
+    stripped = _strip_command_wrappers(command)
+    return any(stripped.startswith(pattern) for pattern in worker_patterns)
+
+
+def is_command_safe(command: str, safe_patterns: list[re.Pattern[str]]) -> bool:
+    """True if `command` contains no redirect/substitution shell metacharacters
+    and every `||`/`&&`/`|`/`;`-separated part matches a configured safe
+    pattern."""
+    if any(token in command for token in UNSAFE_SUBSTRINGS):
+        return False
+
+    parts = LOGICAL_SPLIT_RE.split(command)
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+        if not any(pattern.match(part) for pattern in safe_patterns):
+            return False
+    return True
 
 
 class Step:
@@ -212,7 +296,10 @@ def parse_steps(log_file: str, text: str) -> list[Step]:
 
 
 def compute_metrics(
-    steps: list[Step], code_extensions: list[str], worker_pattern: re.Pattern[str]
+    steps: list[Step],
+    code_extensions: list[str],
+    worker_patterns: list[str],
+    safe_patterns: list[re.Pattern[str]],
 ) -> dict[str, Any]:
     code_ext_set = {e.lower().lstrip(".") for e in code_extensions}
 
@@ -228,10 +315,13 @@ def compute_metrics(
             routing_declarations += 1
 
         step_worker_calls = 0
+        step_has_unrouted_mutation = False
         for command in step.commands:
-            n = len(worker_pattern.findall(command))
-            worker_calls += n
-            step_worker_calls += n
+            if is_worker_invocation(command, worker_patterns):
+                worker_calls += 1
+                step_worker_calls += 1
+            elif not is_command_safe(command, safe_patterns):
+                step_has_unrouted_mutation = True
 
         step_code_writes: list[str] = []
         for target_file in step.writes:
@@ -242,7 +332,7 @@ def compute_metrics(
                 code_write_files.append(target_file)
                 step_code_writes.append(target_file)
 
-        if step_code_writes and step_worker_calls == 0:
+        if step_has_unrouted_mutation or (step_code_writes and step_worker_calls == 0):
             violations.append((step.index, step_code_writes))
 
     return {
@@ -256,17 +346,19 @@ def compute_metrics(
 
 
 def run_audit(config: dict[str, Any], log_file: str, strict: bool = False) -> int:
-    patterns = load_patterns(config)
+    worker_patterns = load_patterns(config)
     code_extensions = load_code_extensions(config)
-    worker_pattern = re.compile(
-        r"\b(?:" + "|".join(re.escape(p) for p in patterns) + r")\b"
-    )
+    safe_patterns = load_safe_patterns(config)
 
     try:
         with open(log_file, "r", encoding="utf-8", errors="replace") as f:
             text = f.read()
     except OSError:
         print(f"❌ No log found: {log_file}")
+        return 2
+
+    if not text.strip():
+        print(f"❌ Empty log: {log_file}")
         return 2
 
     try:
@@ -276,11 +368,20 @@ def run_audit(config: dict[str, Any], log_file: str, strict: bool = False) -> in
         print(f"❌ Failed to parse log: {log_file}")
         return 2
 
-    if text.strip() and not steps:
+    if not steps:
         print(f"❌ No steps parsed from log: {log_file}")
         return 2
 
-    metrics = compute_metrics(steps, code_extensions, worker_pattern)
+    metrics = compute_metrics(steps, code_extensions, worker_patterns, safe_patterns)
+
+    raw_has_writes = any(t in text for t in WRITE_TOOLS)
+    raw_has_routing = "[ROUTING:" in text
+    if (raw_has_writes and metrics["total_writes"] == 0) or (
+        raw_has_routing and metrics["routing_declarations"] == 0
+    ):
+        print("❌ Parser out of sync with log format.")
+        return 2
+
     violation_count = len(metrics["violations"])
 
     print("📊 Results:")

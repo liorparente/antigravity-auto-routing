@@ -3,7 +3,7 @@ name: Auto Routing Protocol
 description: "Antigravity = expensive orchestrator. Its ONLY job: assess task complexity and route to the cheapest capable worker. It never writes code or runs tasks itself. Every execution — including QA and review — is delegated to a worker model. Tokens saved = cost saved."
 ---
 
-# Auto Routing & Collaboration Protocol v3.2
+# Auto Routing & Collaboration Protocol v3.3
 
 This protocol defines the multi-model agent hierarchy and collaborative workflows. Antigravity acts as a **pure orchestrator**, delegating all context gathering, planning, execution, and verification steps to specialized models to optimize performance, cost, and speed.
 
@@ -23,6 +23,8 @@ The hard-enforced gate, response template, and complexity/routing matrix live in
 | **Light Doer** | Codex 5.6 Terra / Luna | `codex exec` | Implements simple steps, boilerplate code, formats files, and writes unit tests. |
 | **Local / Sensitive Doer** | LM Studio (Qwen 30B / Gemma) | Local API (`127.0.0.1:1234`) | Executes tasks involving PII, credentials, or proprietary logic. Also acts as an offline fallback. |
 | **QA / Auditor** | Codex 5.6 Sol | `codex review` | Audits the final workspace state and uncommitted changes (`codex review --uncommitted`). |
+
+> **Sensitive-tier exception:** the fallback chain in [`protocol.md`](protocol.md) does not apply to Sensitive-tier tasks — if LM Studio (local) is unavailable, the task must fail closed immediately rather than escalating to any other worker.
 
 ---
 
@@ -136,5 +138,5 @@ curl -s -X POST http://127.0.0.1:1234/api/v1/models/unload \
 5. **No Routing Overhead Exemptions:** If a task can be performed by a worker model, it must be routed.
 
 ---
-*Auto Routing & Collaboration Protocol v3.2 - 2026-07-10*
+*Auto Routing & Collaboration Protocol v3.3 - 2026-07-10*
 *Orchestrator = Dispatcher. Workers = Execution. Content = Distilled.*

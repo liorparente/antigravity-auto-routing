@@ -58,8 +58,9 @@ install_skill_files() {
     cp "$SRC_DIR/SKILL.md" "$target_dir/SKILL.md"
     cp "$SRC_DIR/routing-audit.sh" "$target_dir/routing-audit.sh"
     cp "$SRC_DIR/routing_check.py" "$target_dir/routing_check.py"
+    cp "$SRC_DIR/protocol.md" "$target_dir/protocol.md"
     chmod +x "$target_dir/routing-audit.sh"
-    echo "✅ Copied SKILL.md, routing-audit.sh, routing_check.py"
+    echo "✅ Copied SKILL.md, routing-audit.sh, routing_check.py, protocol.md"
 
     if [ -f "$target_dir/routing-config.json" ]; then
         echo "⏭️  routing-config.json already exists in $target_dir — skipping copy to preserve customizations."
@@ -71,11 +72,17 @@ install_skill_files() {
 
 # Remove any existing protocol block from a doc, whether it was written with
 # the new versionless markers or the legacy v3.0 heading. Leaves the rest of
-# the file untouched.
+# the file untouched. Returns non-zero (and leaves the file completely
+# untouched) if PROTOCOL_START is present without a matching PROTOCOL_END —
+# stripping a half-written block would silently discard everything after it.
 strip_existing_block() {
     local file="$1"
 
     if grep -qF "$PROTOCOL_START" "$file" 2>/dev/null; then
+        if ! grep -qF "$PROTOCOL_END" "$file" 2>/dev/null; then
+            echo "⚠️  $file has $PROTOCOL_START but no matching $PROTOCOL_END — leaving it untouched." >&2
+            return 1
+        fi
         awk -v start="$PROTOCOL_START" -v end="$PROTOCOL_END" '
             $0 == start { skip=1; next }
             skip && $0 == end { skip=0; next }
@@ -118,7 +125,10 @@ sync_protocol_doc() {
         echo "🔄 Legacy v3.0 protocol block detected in $(basename "$target_file") — upgrading to versionless markers."
     fi
 
-    strip_existing_block "$target_file"
+    if ! strip_existing_block "$target_file"; then
+        echo "⏭️  Skipping $target_file — resolve the unbalanced markers, then re-run install.sh." >&2
+        return
+    fi
 
     # Trim trailing blank lines left over after stripping so re-running the
     # installer doesn't accumulate blank lines before the re-injected block.

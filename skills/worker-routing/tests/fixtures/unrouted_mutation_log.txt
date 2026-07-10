@@ -1,0 +1,5 @@
+Step 1: [ROUTING: Direct — reason: quick config tweak]
+Tool call: run_command({"CommandLine": "jq '.timeout = 60' config.json > /tmp/config.json && mv /tmp/config.json config.json"})
+
+Step 2: [ROUTING: Direct — reason: persist an env var]
+Tool call: run_command({"CommandLine": "echo 'export FOO=bar' >> ~/.bashrc"})

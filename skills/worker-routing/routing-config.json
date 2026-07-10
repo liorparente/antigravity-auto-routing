@@ -1,8 +1,4 @@
 {
-  "orchestrator": {
-    "name": "Claude Code / Codex",
-    "patterns": ["claude -p", "codex"]
-  },
   "context_specialist": {
     "name": "Gemini 3.5 Flash",
     "patterns": ["agy", "gemini -p"]
@@ -31,5 +27,19 @@
     "name": "Codex 5.6 Sol",
     "patterns": ["codex review"]
   },
-  "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"]
+  "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"],
+  "safe_commands": [
+    "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*cat(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*grep(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*rg(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*git\\s+(?:status|log|diff|show|branch)(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*curl\\s+-[a-zA-Z]+(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*jq\\s+[^>|&;]*$",
+    "^\\s*which\\s+[^>|&;]+\\s*$",
+    "^\\s*echo\\s+[^>|&;]*$",
+    "^\\s*pwd\\s*$",
+    "^\\s*find\\s+[^>|&;]*$",
+    "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^>|&;]+)?\\s*$"
+  ]
 }

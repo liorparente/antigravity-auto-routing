@@ -1,9 +1,10 @@
 #!/bin/bash
 # uninstall.sh — removes the Auto Routing & Collaboration Protocol
-# Reverses everything install.sh does: deletes the installed skill
-# directories, strips the protocol block back out of AGENTS.md, CLAUDE.md,
-# and GEMINI.md (preserving any other custom content in each), and deletes
-# AGENTS.md/CLAUDE.md entirely if nothing but the block was ever there.
+# Reverses everything install.sh does: deletes the installed skill files
+# (removing the containing directory only if that leaves it empty), strips
+# the protocol block back out of AGENTS.md, CLAUDE.md, and GEMINI.md
+# (preserving any other custom content in each), and deletes AGENTS.md/
+# CLAUDE.md entirely if nothing but the block was ever there.
 #
 # Usage: ./uninstall.sh [target_project_dir]
 #   target_project_dir   Project the local skill copies and generated
@@ -18,10 +19,13 @@ if [ ! -d "$TARGET_PROJECT_DIR" ]; then
 fi
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
 
+# Note: intentionally excludes "$TARGET_PROJECT_DIR/.agents/skills/worker-routing".
+# install.sh writes there too, but .agents/ is a shared convention directory
+# other tools may also populate — uninstall.sh leaves it alone so it never
+# has to guess whether it's safe to touch.
 TARGET_DIRS=(
     "$HOME/.gemini/config/skills/worker-routing"
     "$HOME/.codex/skills/worker-routing"
-    "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.codex/skills/worker-routing"
 )
 GEMINI_MD="$HOME/.gemini/GEMINI.md"
@@ -41,11 +45,18 @@ echo "🗑️  Uninstalling Auto Routing & Collaboration Protocol"
 echo "   Target project: $TARGET_PROJECT_DIR"
 echo "---"
 
-# 1. Remove installed skill directories.
+# 1. Remove only the specific files install.sh copied into each skill
+#    directory, then remove the directory itself if that leaves it empty.
+#    Any other content a user placed there is left untouched.
 for target_dir in "${TARGET_DIRS[@]}"; do
     if [ -d "$target_dir" ]; then
-        rm -rf "$target_dir"
-        echo "✅ Removed $target_dir"
+        rm -f "$target_dir/SKILL.md" "$target_dir/routing-audit.sh" "$target_dir/routing_check.py" "$target_dir/routing-config.json" "$target_dir/protocol.md"
+        rmdir "$target_dir" 2>/dev/null || true
+        if [ -d "$target_dir" ]; then
+            echo "✅ Removed skill files from $target_dir (other content preserved)"
+        else
+            echo "✅ Removed $target_dir"
+        fi
     else
         echo "⏭️  $target_dir not found — skipping."
     fi

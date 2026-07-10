@@ -1,6 +1,6 @@
 # antigravity-worker-routing
 
-**Auto Routing & Collaboration Protocol v3.2** — a multi-model orchestration protocol, audit tooling, and installer for the Antigravity CLI ecosystem (Gemini `agy`, Claude Code, Codex).
+**Auto Routing & Collaboration Protocol v3.3** — a multi-model orchestration protocol, audit tooling, and installer for the Antigravity CLI ecosystem (Gemini `agy`, Claude Code, Codex).
 
 The core idea: the orchestrator model (Antigravity) should never spend its own expensive tokens writing code or running commands. Instead, it assesses task complexity and **routes** every unit of work — context gathering, planning, implementation, and QA — to the cheapest model capable of doing it correctly. Tokens saved on the orchestrator are cost saved across the whole session.
 
@@ -108,8 +108,8 @@ After editing the repo's copy, re-run `bash install.sh` — the installer only c
 ## Setup
 
 ```bash
-git clone https://github.com/liorparente/antigravity-worker-routing.git
-cd antigravity-worker-routing
+git clone https://github.com/liorparente/auto-routing.git
+cd auto-routing
 bash install.sh
 ```
 

@@ -70,9 +70,15 @@ class RoutingCheckUnitTests(unittest.TestCase):
 
     def test_load_patterns_includes_known_workers(self) -> None:
         patterns = routing_check.load_patterns(self.config)
-        self.assertIn("codex", patterns)
+        self.assertIn("codex exec", patterns)
+        self.assertIn("codex review", patterns)
         self.assertIn("claude -p", patterns)
         self.assertNotIn("py", patterns)  # code_extensions must not leak in
+        self.assertNotIn("safe_commands", patterns)  # safe_commands must not leak in
+        # The "orchestrator" role (bare "claude -p" / "codex" patterns) was
+        # removed so those bare invocations no longer register as worker
+        # calls on their own.
+        self.assertNotIn("orchestrator", self.config)
 
     def test_load_code_extensions_matches_config(self) -> None:
         extensions = routing_check.load_code_extensions(self.config)
@@ -96,6 +102,34 @@ class RoutingCheckUnitTests(unittest.TestCase):
             result = run_check(str(missing))
             self.assertEqual(result.returncode, 2)
             self.assertIn("No log found", result.stdout)
+
+    def test_empty_log_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_log = Path(tmp) / "empty.txt"
+            empty_log.write_text("")
+            result = run_check(str(empty_log))
+            self.assertEqual(result.returncode, 2)
+
+            whitespace_only_log = Path(tmp) / "whitespace.txt"
+            whitespace_only_log.write_text("   \n\n\t\n")
+            result = run_check(str(whitespace_only_log))
+            self.assertEqual(result.returncode, 2)
+
+    def test_parser_out_of_sync_fails_closed(self) -> None:
+        # If the raw log text mentions a write tool or a [ROUTING:] label
+        # but the parser recovered zero of the corresponding metric, the
+        # parser is out of sync with the log format — fail closed instead
+        # of silently reporting a clean audit.
+        with tempfile.TemporaryDirectory() as tmp:
+            mismatched = Path(tmp) / "mismatched.txt"
+            mismatched.write_text(
+                "Step 1: [ROUTING: Direct — reason: mention only]\n"
+                "I intend to call write_to_file eventually but never issue "
+                "the actual tool call in the expected format.\n"
+            )
+            result = run_check(str(mismatched))
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("Parser out of sync", result.stdout)
 
     def test_no_args_fails_closed_with_usage(self) -> None:
         result = run_check()
@@ -122,9 +156,66 @@ class RoutingCheckUnitTests(unittest.TestCase):
             1, "[ROUTING: heavy_doer — complexity: Medium — reason: implement feature]"
         )
         step.writes.append("src/feature.py")
-        worker_pattern = re.compile(r"\b(?:claude -p)\b")
-        metrics = routing_check.compute_metrics([step], ["py"], worker_pattern)
+        safe_patterns = routing_check.load_safe_patterns(self.config)
+        metrics = routing_check.compute_metrics([step], ["py"], ["claude -p"], safe_patterns)
         self.assertEqual(metrics["violations"], [(1, ["src/feature.py"])])
+
+    def test_safe_commands_allowlist_matches_expected(self) -> None:
+        # Every safe_commands pattern in routing-config.json must actually
+        # allow the kind of read-only diagnostic command it was written for
+        # — none of these should ever surface as an unrouted_mutation.
+        safe_patterns = routing_check.load_safe_patterns(self.config)
+        step = routing_check.Step(1, "[ROUTING: Direct — reason: read-only diagnostics]")
+        step.commands = [
+            "ls -la",
+            "cat README.md",
+            "grep -rn TODO src/",
+            "rg TODO src/",
+            "git status",
+            "git log --oneline -5",
+            "curl -s http://127.0.0.1:1234/api/v0/models",
+            "jq '.version' package.json",
+            "which python3",
+            "echo hello",
+            "pwd",
+            "find . -name '*.py'",
+            "python3 -m unittest skills/worker-routing/test_routing.py -v",
+        ]
+        metrics = routing_check.compute_metrics([step], ["py"], [], safe_patterns)
+        self.assertEqual(metrics["violations"], [])
+
+    def test_unrouted_mutation_fails_strict_and_warns(self) -> None:
+        # A command that is neither a worker invocation nor a recognized
+        # safe command (e.g. a jq/echo shell redirect that mutates state
+        # directly) must be flagged as an unrouted mutation violation, in
+        # both plain and --strict modes — violations always fail, they are
+        # never downgraded to a mere warning.
+        result = run_check(str(FIXTURES_DIR / "unrouted_mutation_log.txt"))
+        self.assertEqual(result.returncode, 1)
+        assert_metrics(self, result.stdout, total_writes=0, code_writes=0,
+                       routing_declarations=2, worker_calls=0, violations=2)
+        self.assertIn("VIOLATION", result.stdout)
+        self.assertIn("Step 1: unrouted code edit detected", result.stderr)
+        self.assertIn("Step 2: unrouted code edit detected", result.stderr)
+
+        strict_result = run_check("--strict", str(FIXTURES_DIR / "unrouted_mutation_log.txt"))
+        self.assertEqual(strict_result.returncode, 1)
+        self.assertIn("VIOLATION", strict_result.stdout)
+
+    def test_substring_matching_does_not_count_as_delegation(self) -> None:
+        # is_worker_invocation must check that the command *starts with* a
+        # worker pattern after stripping env assignments/wrappers — a
+        # worker's name mentioned mid-command (e.g. inside an echo) is not
+        # an actual delegation.
+        patterns = routing_check.load_patterns(self.config)
+        self.assertFalse(routing_check.is_worker_invocation("echo codex exec", patterns))
+        self.assertFalse(routing_check.is_worker_invocation("echo claude -p", patterns))
+        self.assertTrue(routing_check.is_worker_invocation('codex exec "fix bug"', patterns))
+        self.assertTrue(
+            routing_check.is_worker_invocation(
+                'IN_WORKER_ROUTING=true script -q /dev/null codex exec "fix bug"', patterns
+            )
+        )
 
     def test_step_from_dict_reads_antigravity_shape(self) -> None:
         # Antigravity's own conversation logs nest tool name under `name`,
@@ -211,18 +302,20 @@ class RoutingCheckFixtureTests(unittest.TestCase):
                        routing_declarations=2, worker_calls=1, violations=1)
         self.assertIn("src/utils.py", result.stderr)
 
-    def test_real_overview_log_parses_with_no_violations(self) -> None:
+    def test_real_overview_log_flags_unrouted_shell_mutations(self) -> None:
         # Antigravity's actual overview.txt shape: JSON Lines wearing a
         # .txt extension, tool calls nested under `name`/`args`, and
         # [ROUTING:] declarations embedded in a separate step's `content`.
-        # None of its writes touch a code_extensions file, so it must parse
-        # cleanly with zero violations.
+        # None of its writes touch a code_extensions file, but two of its
+        # run_command calls mutate config files via shell redirection
+        # (`jq ... > tmp && mv tmp file`) without going through a worker —
+        # exactly what is_command_safe/unrouted_mutation detection exists
+        # to catch, so both must be flagged.
         result = run_check(str(FIXTURES_DIR / "real_overview_log.txt"))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         assert_metrics(self, result.stdout, total_writes=1, code_writes=0,
-                       routing_declarations=3, worker_calls=0, violations=0)
-        self.assertIn("No violations detected", result.stdout)
-        self.assertEqual(result.stderr.strip(), "")
+                       routing_declarations=3, worker_calls=0, violations=2)
+        self.assertIn("VIOLATION", result.stdout)
 
     def test_warning_only_log_warns_without_violation(self) -> None:
         result = run_check(str(FIXTURES_DIR / "warning_only_log.txt"))
@@ -331,6 +424,34 @@ class ProtocolSyncTests(unittest.TestCase):
                 self.assertIn(PROTOCOL_END, text)
                 self.assertIn(protocol_text, text)
 
+    def test_install_sh_copies_protocol_md_to_skill_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            protocol_text = PROTOCOL_MD.read_text()
+            for installed_dir in (
+                Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing",
+                Path(fake_home) / ".codex" / "skills" / "worker-routing",
+                Path(target_dir) / ".agents" / "skills" / "worker-routing",
+                Path(target_dir) / ".codex" / "skills" / "worker-routing",
+            ):
+                installed_protocol = installed_dir / "protocol.md"
+                self.assertTrue(installed_protocol.exists(), installed_protocol)
+                self.assertEqual(installed_protocol.read_text(), protocol_text)
+
+    def test_install_sh_leaves_unbalanced_markers_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            agents_md = Path(target_dir) / "AGENTS.md"
+            original = f"pre-existing\n{PROTOCOL_START}\nsome content but no end marker\n"
+            agents_md.write_text(original)
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(agents_md.read_text(), original)
+            self.assertIn(PROTOCOL_START, result.stderr)
+            self.assertIn("no matching", result.stderr)
+
     def test_install_sh_preserves_custom_content_in_agents_and_claude(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             agents_md = Path(target_dir) / "AGENTS.md"
@@ -374,7 +495,41 @@ class ProtocolSyncTests(unittest.TestCase):
 
             self.assertFalse((Path(target_dir) / "AGENTS.md").exists())
             self.assertFalse((Path(target_dir) / "CLAUDE.md").exists())
-            self.assertFalse((Path(target_dir) / ".agents" / "skills" / "worker-routing").exists())
+            self.assertFalse((Path(target_dir) / ".codex" / "skills" / "worker-routing").exists())
+            self.assertFalse((Path(fake_home) / ".codex" / "skills" / "worker-routing").exists())
+            self.assertFalse((Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing").exists())
+
+    def test_uninstall_sh_does_not_touch_local_agents_dir(self) -> None:
+        # uninstall.sh's TARGET_DIRS intentionally excludes the project-local
+        # .agents/ directory (unlike install.sh's) — see uninstall.sh for
+        # rationale. Its installed skill files are left in place.
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            self._run(INSTALL_SH, target_dir, home=fake_home)
+            agents_skill_dir = Path(target_dir) / ".agents" / "skills" / "worker-routing"
+            self.assertTrue((agents_skill_dir / "protocol.md").exists())
+
+            result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertTrue((agents_skill_dir / "protocol.md").exists())
+
+    def test_uninstall_sh_removes_protocol_md_but_preserves_other_content(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            self._run(INSTALL_SH, target_dir, home=fake_home)
+            codex_skill_dir = Path(target_dir) / ".codex" / "skills" / "worker-routing"
+            self.assertTrue((codex_skill_dir / "protocol.md").exists())
+
+            (codex_skill_dir / "my-custom-notes.txt").write_text("keep me\n")
+
+            result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertFalse((codex_skill_dir / "protocol.md").exists())
+            self.assertFalse((codex_skill_dir / "SKILL.md").exists())
+            # The directory itself survives because it still holds
+            # non-installer content — rmdir only succeeds on an empty dir.
+            self.assertTrue(codex_skill_dir.exists())
+            self.assertEqual((codex_skill_dir / "my-custom-notes.txt").read_text(), "keep me\n")
 
     def test_uninstall_sh_strips_block_but_preserves_custom_content(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:

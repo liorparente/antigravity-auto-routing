@@ -1,4 +1,4 @@
-# Worker Routing Protocol (HARD ENFORCED — v3.1)
+# Worker Routing Protocol (HARD ENFORCED — v3.3)
 
 Antigravity is a **pure orchestrator**. Its only job: assess complexity → pick worker → collect output.
 Self-execution of code/commands is a **protocol violation**, not a fallback option.
@@ -65,7 +65,7 @@ This script detects source code edits made without worker routing. Violations ar
 1. **Silent availability check:** Before routing, verify the target worker is reachable (e.g., `curl -s http://127.0.0.1:1234/api/v0/models` for LM Studio). Do this silently.
 2. **If worker is unreachable:** HALT. Report which worker is down and the fix. Do NOT silently self-execute.
 3. **Audit trail:** Every response that involves any action must start with `[ROUTING: {worker} — reason: {why}]` or `[ROUTING: Direct — reason: {allowed exception}]`.
-3.5. **Fallback Chain (on worker unavailability):** Local (LM Studio down) → escalate one tier up. API worker fails → try alternate API model. Full fallback order: Gemma E4B → Qwen Coder → Claude Code → agy Flash → agy Pro → manual. Log every fallback to ERRORS.md with reason.
+3.5. **Fallback Chain (on worker unavailability):** Local (LM Studio down) → escalate one tier up. API worker fails → try alternate API model. Full fallback order: Gemma E4B → Qwen Coder → Claude Code → agy Flash → agy Pro → manual. Log every fallback to ERRORS.md with reason. This fallback chain does not apply to Sensitive-tier tasks, which must fail closed immediately if local models are unavailable.
 4. **Codex Sandbox Modes:** Always pick the right `-s` flag — wrong mode = blocked writes. `read-only`: pure analysis only. `workspace-write`: applying patches or fixes within the repo (default for Review/QA). `danger-full-access`: unrestricted system writes. Never use `read-only` when Codex needs to write files.
 5. **Full reference:** See `~/.gemini/config/skills/worker-routing/SKILL.md` for CLI syntax and edge cases.
 
