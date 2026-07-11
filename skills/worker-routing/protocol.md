@@ -53,12 +53,12 @@ This script detects source code edits made without worker routing. Violations ar
 ## Complexity Matrix — Pick Worker Automatically
 | Complexity | Signs | Route To |
 |---|---|---|
-| **Trivial** | Single file, rename, format, quick Q&A | **Codex 5.6 Luna** or local **Gemma 4 E4B** |
-| **Simple** | 1-2 files, boilerplate, simple logic | **Codex 5.6 Terra** or local **Qwen3 Coder 30B** |
+| **Trivial** | Single file, rename, format, quick Q&A | **Codex 5.6 Luna** (`IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "..."`) or local **Gemma 4 E4B** |
+| **Simple** | 1-2 files, boilerplate, simple logic | **Codex 5.6 Terra** (`IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="low" -s workspace-write "..."`) or local **Qwen3 Coder 30B** |
 | **Medium** | 3-4 files, new feature | **Claude Sonnet 5** (`IN_WORKER_ROUTING=true claude -p --dangerously-skip-permissions`) |
 | **Complex** | 5+ files, architectural impact | **Planner:** Claude Fable 5 / Opus 4.8 <br> **Critic:** Codex 5.6 Sol <br> **Executor:** Claude Sonnet 5 |
 | **Sensitive** | PII, medical, credentials | **LM Studio** ALWAYS (local only) |
-| **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model_reasoning_effort="medium"`) |
+| **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write --model gpt-5.6-sol -c model_reasoning_effort="medium"`) |
 | **Context/Search** | Codebase scan, log parsing | **Antigravity CLI** (`IN_WORKER_ROUTING=true agy`) with Gemini 3.5 Flash |
 
 ## Routing Behavior
@@ -67,6 +67,7 @@ This script detects source code edits made without worker routing. Violations ar
 3. **Audit trail:** Every response that involves any action must start with `[ROUTING: {worker} — reason: {why}]` or `[ROUTING: Direct — reason: {allowed exception}]`.
 3.5. **Fallback Chain (on worker unavailability):** Local (LM Studio down) → escalate one tier up. API worker fails → try alternate API model. Full fallback order: Gemma E4B → Qwen Coder → Claude Code → agy Flash → agy Pro → manual. Log every fallback to ERRORS.md with reason. This fallback chain does not apply to Sensitive-tier tasks, which must fail closed immediately if local models are unavailable.
 4. **Codex Sandbox Modes:** Always pick the right `-s` flag — wrong mode = blocked writes. `read-only`: pure analysis only. `workspace-write`: applying patches or fixes within the repo (default for Review/QA). `danger-full-access`: unrestricted system writes. Never use `read-only` when Codex needs to write files.
+4.5. **Codex Model Selection & Effort (Critical):** Never omit the `--model` and `-c model_reasoning_effort` flags in `codex` CLI invocations. If omitted, Codex defaults to the global settings in `~/.codex/config.toml` (which uses the most expensive `gpt-5.6-sol` model with `ultra` effort). Always specify the tier-appropriate model (`gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol`) and reasoning effort (`low` or `medium`).
 5. **Full reference:** See `~/.gemini/config/skills/worker-routing/SKILL.md` for CLI syntax and edge cases.
 
 ## Pushback Protocol (Bidirectional)
