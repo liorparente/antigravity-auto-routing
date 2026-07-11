@@ -21,7 +21,7 @@ We establish a precision routing protocol, a structured fallback chain, and an a
 ### 2. Fallback Chain
 - **Sensitive**: Local models only (Gemma -> Qwen) -> fail closed.
 - **Context Scan**: agy Flash -> agy Pro -> codex read-only.
-- **Execution (Trivial/Simple)**: codex Luna/Terra -> codex Sol (low) -> Claude Sonnet -> Local models.
+- **Execution (Trivial/Simple)**: Local models (if already loaded) -> codex Luna/Terra -> codex Sol (low) -> Claude Sonnet -> Local models (load & execute).
 - **Complex/Planning**: Claude Fable/Opus -> codex Sol (medium/high) -> manual.
 
 ### 3. Autopilot Multi-Round Consensus

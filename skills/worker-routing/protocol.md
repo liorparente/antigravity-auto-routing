@@ -58,7 +58,7 @@ This script detects source code edits made without worker routing. Violations ar
 | **Medium** | 3-4 files, new feature | **Claude Sonnet 5** (`IN_WORKER_ROUTING=true claude -p --dangerously-skip-permissions`) |
 | **Complex** | 5+ files, architectural impact | **Planner:** Claude Fable 5 / Opus 4.8 <br> **Critic:** Codex 5.6 Sol <br> **Executor:** Claude Sonnet 5 |
 | **Sensitive** | PII, medical, credentials | **LM Studio** ALWAYS (local only) |
-| **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write --model gpt-5.6-sol -c model_reasoning_effort="medium"`) |
+| **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="medium"`) |
 | **Context/Search** | Codebase scan, log parsing | **Antigravity CLI** (`IN_WORKER_ROUTING=true agy`) with Gemini 3.5 Flash |
 
 ## Routing Behavior
@@ -68,7 +68,7 @@ This script detects source code edits made without worker routing. Violations ar
 3.5. **Fallback Chain (on worker unavailability):**
     - **Sensitive tasks**: Local models only (Gemma 4 E4B -> Qwen3 Coder 30B) -> fail closed immediately.
     - **Context/Search**: agy Flash -> agy Pro -> codex read-only.
-    - **Execution (Trivial/Simple)**: codex Luna/Terra -> codex Sol (low) -> Claude Sonnet -> Local models.
+    - **Execution (Trivial/Simple)**: Local models (if already loaded) -> codex Luna/Terra -> codex Sol (low) -> Claude Sonnet -> Local models (load & execute).
     - **Complex/Planning**: Claude Fable/Opus -> codex Sol (medium/high) -> manual.
     - *Log all fallback events to `ERRORS.md` with reasons.*
 4. **Codex Sandbox Modes:** Always pick the right `-s` flag — wrong mode = blocked writes. `read-only`: pure analysis only. `workspace-write`: applying patches or fixes within the repo (default for Review/QA). `danger-full-access`: unrestricted system writes. Never use `read-only` when Codex needs to write files.

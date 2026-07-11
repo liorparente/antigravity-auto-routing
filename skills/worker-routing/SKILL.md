@@ -94,14 +94,14 @@ IN_WORKER_ROUTING=true claude -p --model claude-opus-4-8 --dangerously-skip-perm
 ```
 
 ### 3. Codex CLI (v0.125+)
-*Always specify both `--model <model>` and `-c model_reasoning_effort="low"|"medium"` to prevent defaulting to the most expensive model/effort (e.g. Sol/Ultra) configured globally.*
+*Always specify both `--model <model>` (for `exec` commands) or `-c model="<model>"` (for `review` commands), and `-c model_reasoning_effort="low"|"medium"`, to prevent defaulting to the most expensive model/effort (e.g. Sol/Ultra) configured globally.*
 *Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Plan critique (Consensus step)
 IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="medium" "Analyze this implementation plan: $(cat .claude/plan_draft.md)"
 
 # Code review (QA step)
-IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write --model gpt-5.6-sol -c model_reasoning_effort="medium"
+IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="medium"
 
 # Trivial task (Luna - gpt-5.6-luna)
 IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "Rename variables in file.js"
