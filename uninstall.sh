@@ -119,6 +119,16 @@ remove_protocol_doc() {
 remove_protocol_doc "$AGENTS_MD"
 remove_protocol_doc "$CLAUDE_MD"
 
+# 2.5. Remove Claude Code rules file if present.
+CLAUDE_RULE_FILE="$TARGET_PROJECT_DIR/.claude/rules/worker-routing.md"
+if [ -f "$CLAUDE_RULE_FILE" ]; then
+    rm -f "$CLAUDE_RULE_FILE"
+    echo "✅ Removed $CLAUDE_RULE_FILE"
+    # Clean up empty parent directories
+    rmdir "$TARGET_PROJECT_DIR/.claude/rules" 2>/dev/null || true
+    rmdir "$TARGET_PROJECT_DIR/.claude" 2>/dev/null || true
+fi
+
 # 3. Strip the protocol block out of GEMINI.md, if present. GEMINI.md is
 #    Antigravity's global instruction file, so it is never deleted outright
 #    — only the block is removed, everything else is left untouched.

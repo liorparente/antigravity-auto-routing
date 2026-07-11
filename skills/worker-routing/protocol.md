@@ -55,7 +55,7 @@ This script detects source code edits made without worker routing. Violations ar
 |---|---|---|
 | **Trivial** | Single file, rename, format, quick Q&A | **Codex 5.6 Luna** (`IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "..."`) or local **Gemma 4 E4B** |
 | **Simple** | 1-2 files, boilerplate, simple logic | **Codex 5.6 Terra** (`IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="low" -s workspace-write "..."`) or local **Qwen3 Coder 30B** |
-| **Medium** | 3-4 files, new feature | **Claude Sonnet 5** (`IN_WORKER_ROUTING=true claude -p --dangerously-skip-permissions`) |
+| **Medium** | 3-4 files, new feature | **Claude Sonnet 5** (`IN_WORKER_ROUTING=true claude -p --allow-dangerously-skip-permissions`) |
 | **Complex** | 5+ files, architectural impact | **Planner:** Claude Fable 5 / Opus 4.8 <br> **Critic:** Codex 5.6 Sol <br> **Executor:** Claude Sonnet 5 |
 | **Sensitive** | PII, medical, credentials | **LM Studio** ALWAYS (local only) |
 | **Review/QA** | Post-feature audit | **Codex 5.6 Sol** (`IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="medium"`) |

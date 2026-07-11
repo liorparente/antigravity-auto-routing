@@ -23,10 +23,10 @@ IN_WORKER_ROUTING=true script -q /dev/null agy -p "Extract API schemas from this
 *Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Complex implementation (Fable 5 / Sonnet 5)
-IN_WORKER_ROUTING=true claude -p --dangerously-skip-permissions "Implement the user profile component following our design tokens"
+IN_WORKER_ROUTING=true claude -p --allow-dangerously-skip-permissions "Implement the user profile component following our design tokens"
 
 # Opus-tier architectural research
-IN_WORKER_ROUTING=true claude -p --model claude-opus-4-8 --dangerously-skip-permissions "Draft a migration plan for the database schema"
+IN_WORKER_ROUTING=true claude -p --model claude-opus-4-8 --allow-dangerously-skip-permissions "Draft a migration plan for the database schema"
 ```
 
 ---

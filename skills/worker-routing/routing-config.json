@@ -1,7 +1,7 @@
 {
   "context_specialist": {
     "name": "Gemini 3.5 Flash",
-    "patterns": ["agy", "gemini -p"]
+    "patterns": ["agy"]
   },
   "planner": {
     "name": "Claude Fable 5 / Opus 4.8",
@@ -40,6 +40,7 @@
     "^\\s*echo\\s+[^>|&;]*$",
     "^\\s*pwd\\s*$",
     "^\\s*find\\s+[^>|&;]*$",
-    "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^>|&;]+)?\\s*$"
+    "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*lsof(?:\\s+-[a-zA-Z0-9:]+)?(?:\\s+[^>|&;]+)?\\s*$"
   ]
 }

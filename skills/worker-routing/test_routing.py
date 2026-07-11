@@ -75,6 +75,7 @@ class RoutingCheckUnitTests(unittest.TestCase):
         self.assertIn("claude -p", patterns)
         self.assertNotIn("py", patterns)  # code_extensions must not leak in
         self.assertNotIn("safe_commands", patterns)  # safe_commands must not leak in
+        self.assertNotIn("gemini -p", patterns)  # gemini -p must be removed
         # The "orchestrator" role (bare "claude -p" / "codex" patterns) was
         # removed so those bare invocations no longer register as worker
         # calls on their own.
@@ -180,6 +181,8 @@ class RoutingCheckUnitTests(unittest.TestCase):
             "pwd",
             "find . -name '*.py'",
             "python3 -m unittest skills/worker-routing/test_routing.py -v",
+            "lsof -i :9222",
+            " lsof -i ",
         ]
         metrics = routing_check.compute_metrics([step], ["py"], [], safe_patterns)
         self.assertEqual(metrics["violations"], [])
@@ -434,11 +437,21 @@ class ProtocolSyncTests(unittest.TestCase):
                 Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing",
                 Path(fake_home) / ".codex" / "skills" / "worker-routing",
                 Path(target_dir) / ".agents" / "skills" / "worker-routing",
+                Path(target_dir) / ".agent" / "skills" / "worker-routing",
                 Path(target_dir) / ".codex" / "skills" / "worker-routing",
             ):
                 installed_protocol = installed_dir / "protocol.md"
                 self.assertTrue(installed_protocol.exists(), installed_protocol)
                 self.assertEqual(installed_protocol.read_text(), protocol_text)
+
+    def test_install_sh_copies_protocol_to_claude_rules(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            claude_rule = Path(target_dir) / ".claude" / "rules" / "worker-routing.md"
+            self.assertTrue(claude_rule.exists())
+            self.assertEqual(claude_rule.read_text(), PROTOCOL_MD.read_text())
 
     def test_install_sh_leaves_unbalanced_markers_untouched(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -498,6 +511,8 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertFalse((Path(target_dir) / ".codex" / "skills" / "worker-routing").exists())
             self.assertFalse((Path(fake_home) / ".codex" / "skills" / "worker-routing").exists())
             self.assertFalse((Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing").exists())
+            self.assertFalse((Path(target_dir) / ".claude" / "rules" / "worker-routing.md").exists())
+            self.assertFalse((Path(target_dir) / ".claude").exists())
 
     def test_uninstall_sh_does_not_touch_local_agents_dir(self) -> None:
         # uninstall.sh's TARGET_DIRS intentionally excludes the project-local
@@ -512,6 +527,19 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             self.assertTrue((agents_skill_dir / "protocol.md").exists())
+
+    def test_uninstall_sh_does_not_touch_local_agent_dir(self) -> None:
+        # uninstall.sh's TARGET_DIRS intentionally excludes the project-local
+        # .agent/ directory (unlike install.sh's). Its installed skill files are left in place.
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            self._run(INSTALL_SH, target_dir, home=fake_home)
+            agent_skill_dir = Path(target_dir) / ".agent" / "skills" / "worker-routing"
+            self.assertTrue((agent_skill_dir / "protocol.md").exists())
+
+            result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertTrue((agent_skill_dir / "protocol.md").exists())
 
     def test_uninstall_sh_removes_protocol_md_but_preserves_other_content(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:

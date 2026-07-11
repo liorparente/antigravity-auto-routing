@@ -23,6 +23,7 @@ TARGET_DIRS=(
     "$HOME/.gemini/config/skills/worker-routing"
     "$HOME/.codex/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
+    "$TARGET_PROJECT_DIR/.agent/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.codex/skills/worker-routing"
 )
 GEMINI_MD="$HOME/.gemini/GEMINI.md"
@@ -154,6 +155,13 @@ sync_protocol_doc() {
 for target_dir in "${TARGET_DIRS[@]}"; do
     install_skill_files "$target_dir"
 done
+
+# 1.5. Copy protocol.md to Claude Code rules directory.
+CLAUDE_RULES_DIR="$TARGET_PROJECT_DIR/.claude/rules"
+echo "📂 Syncing Claude Code rules..."
+mkdir -p "$CLAUDE_RULES_DIR"
+cp "$PROTOCOL_SRC" "$CLAUDE_RULES_DIR/worker-routing.md"
+echo "✅ Copied protocol.md to $CLAUDE_RULES_DIR/worker-routing.md"
 
 # 2. Inject/refresh the Worker Routing Protocol block in AGENTS.md and
 #    CLAUDE.md at the project root, and in GEMINI.md (Antigravity's global
