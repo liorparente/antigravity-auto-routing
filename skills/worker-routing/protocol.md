@@ -65,10 +65,16 @@ This script detects source code edits made without worker routing. Violations ar
 1. **Silent availability check:** Before routing, verify the target worker is reachable (e.g., `curl -s http://127.0.0.1:1234/api/v0/models` for LM Studio). Do this silently.
 2. **If worker is unreachable:** HALT. Report which worker is down and the fix. Do NOT silently self-execute.
 3. **Audit trail:** Every response that involves any action must start with `[ROUTING: {worker} — reason: {why}]` or `[ROUTING: Direct — reason: {allowed exception}]`.
-3.5. **Fallback Chain (on worker unavailability):** Local (LM Studio down) → escalate one tier up. API worker fails → try alternate API model. Full fallback order: Gemma E4B → Qwen Coder → Claude Code → agy Flash → agy Pro → manual. Log every fallback to ERRORS.md with reason. This fallback chain does not apply to Sensitive-tier tasks, which must fail closed immediately if local models are unavailable.
+3.5. **Fallback Chain (on worker unavailability):**
+    - **Sensitive tasks**: Local models only (Gemma 4 E4B -> Qwen3 Coder 30B) -> fail closed immediately.
+    - **Context/Search**: agy Flash -> agy Pro -> codex read-only.
+    - **Execution (Trivial/Simple)**: codex Luna/Terra -> codex Sol (low) -> Claude Sonnet -> Local models.
+    - **Complex/Planning**: Claude Fable/Opus -> codex Sol (medium/high) -> manual.
+    - *Log all fallback events to `ERRORS.md` with reasons.*
 4. **Codex Sandbox Modes:** Always pick the right `-s` flag — wrong mode = blocked writes. `read-only`: pure analysis only. `workspace-write`: applying patches or fixes within the repo (default for Review/QA). `danger-full-access`: unrestricted system writes. Never use `read-only` when Codex needs to write files.
 4.5. **Codex Model Selection & Effort (Critical):** Never omit the `--model` and `-c model_reasoning_effort` flags in `codex` CLI invocations. If omitted, Codex defaults to the global settings in `~/.codex/config.toml` (which uses the most expensive `gpt-5.6-sol` model with `ultra` effort). Always specify the tier-appropriate model (`gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol`) and reasoning effort (`low` or `medium`).
 5. **Full reference:** See `~/.gemini/config/skills/worker-routing/SKILL.md` for CLI syntax and edge cases.
+6. **Autopilot Consensus Loop (Planner-Critic):** For complex/planning tasks, run an autonomous multi-round consensus debate loop (up to 3 rounds) between the Planner (Claude) and the Critic (Codex Sol). The loop details are saved in `.scratch/planning_debate.md` for user visibility, while the final resolved implementation plan is written to `implementation_plan.md` for final approval.
 
 ## Pushback Protocol (Bidirectional)
 Antigravity is authorized — and **required** — to refuse:

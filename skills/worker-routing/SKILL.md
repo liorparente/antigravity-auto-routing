@@ -44,9 +44,9 @@ Before planning begins, the Orchestrator invokes `agy` (Gemini 3.5 Flash) to gat
 ### Phase 2: Planner-Critic Consensus Loop (System 2 Planning)
 For all Medium and Complex tasks, planning must undergo peer review before execution:
 1. **Drafting:** The **Planner** (Claude Fable 5 / Opus 4.8) writes a proposed implementation plan to `.claude/plan_draft.md`.
-2. **Review:** The **Critic** (Codex 5.6 Sol) reviews the draft plan.
-   * **Command:** `cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec "Review this plan. Check for edge cases, performance bottlenecks, and architectural violations."`
-3. **Refinement:** The Planner integrates the Critic's feedback, producing the final `implementation_plan.md` for user approval.
+2. **Autonomous Debate Loop:** The **Critic** (Codex 5.6 Sol) reviews the draft plan, and the **Planner** updates the plan to resolve objections. This loop runs autonomously for up to 3 rounds, logging the entire discussion to `.scratch/planning_debate.md`.
+   * **Command (Critic Review):** `cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="medium" "Review this plan. Check for edge cases, performance bottlenecks, and architectural violations."`
+3. **Final Plan Delivery:** Once the Critic approves (or 3 rounds are reached), the final resolved plan is saved to `implementation_plan.md` and presented to the user.
 
 ### Phase 3: Task Decomposition
 Upon user approval, the Orchestrator initializes `task.md` with structured sub-tasks.
