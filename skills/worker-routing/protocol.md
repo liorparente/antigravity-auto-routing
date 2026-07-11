@@ -63,6 +63,7 @@ This script detects source code edits made without worker routing. Violations ar
 
 ## Routing Behavior
 1. **Silent availability check:** Before routing, verify the target worker is reachable (e.g., `curl -s http://127.0.0.1:1234/api/v0/models` for LM Studio). Do this silently.
+1.5. **Local model verification:** To check if a local model is already active/loaded in LM Studio, query: `curl -s http://127.0.0.1:1234/v1/models | jq '.data[0].id'`. If active, prioritize routing simple tasks to it.
 2. **If worker is unreachable:** HALT. Report which worker is down and the fix. Do NOT silently self-execute.
 3. **Audit trail:** Every response that involves any action must start with `[ROUTING: {worker} — reason: {why}]` or `[ROUTING: Direct — reason: {allowed exception}]`.
 3.5. **Fallback Chain (on worker unavailability):**

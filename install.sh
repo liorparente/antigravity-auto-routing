@@ -56,11 +56,12 @@ install_skill_files() {
 
     echo "📄 Copying skill files to $target_dir..."
     cp "$SRC_DIR/SKILL.md" "$target_dir/SKILL.md"
+    cp "$SRC_DIR/REFERENCE.md" "$target_dir/REFERENCE.md"
     cp "$SRC_DIR/routing-audit.sh" "$target_dir/routing-audit.sh"
     cp "$SRC_DIR/routing_check.py" "$target_dir/routing_check.py"
     cp "$SRC_DIR/protocol.md" "$target_dir/protocol.md"
     chmod +x "$target_dir/routing-audit.sh"
-    echo "✅ Copied SKILL.md, routing-audit.sh, routing_check.py, protocol.md"
+    echo "✅ Copied SKILL.md, REFERENCE.md, routing-audit.sh, routing_check.py, protocol.md"
 
     if [ -f "$target_dir/routing-config.json" ]; then
         echo "⏭️  routing-config.json already exists in $target_dir — skipping copy to preserve customizations."

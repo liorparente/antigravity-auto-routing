@@ -50,7 +50,7 @@ echo "---"
 #    Any other content a user placed there is left untouched.
 for target_dir in "${TARGET_DIRS[@]}"; do
     if [ -d "$target_dir" ]; then
-        rm -f "$target_dir/SKILL.md" "$target_dir/routing-audit.sh" "$target_dir/routing_check.py" "$target_dir/routing-config.json" "$target_dir/protocol.md"
+        rm -f "$target_dir/SKILL.md" "$target_dir/REFERENCE.md" "$target_dir/routing-audit.sh" "$target_dir/routing_check.py" "$target_dir/routing-config.json" "$target_dir/protocol.md"
         rmdir "$target_dir" 2>/dev/null || true
         if [ -d "$target_dir" ]; then
             echo "✅ Removed skill files from $target_dir (other content preserved)"
