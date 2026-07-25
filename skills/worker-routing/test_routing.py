@@ -9,9 +9,9 @@ or, from this directory:
 """
 from __future__ import annotations
 
-import importlib.util
 import hashlib
 import hmac
+import importlib.util
 import json
 import os
 import re
@@ -53,6 +53,7 @@ def run_check(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(ROUTING_CHECK), *args],
         capture_output=True,
+        check=False,
         text=True,
     )
 
@@ -155,6 +156,7 @@ class RoutingCheckUnitTests(unittest.TestCase):
             result = subprocess.run(
                 [sys.executable, str(script_copy), str(FIXTURES_DIR / "clean_log.txt")],
                 capture_output=True,
+                check=False,
                 text=True,
             )
             self.assertEqual(result.returncode, 2)
@@ -369,6 +371,7 @@ class RoutingAuditIntegrationTests(unittest.TestCase):
         return subprocess.run(
             ["bash", str(ROUTING_AUDIT), *args, self.conv_id],
             capture_output=True,
+            check=False,
             text=True,
             env=env,
         )
@@ -425,6 +428,7 @@ class ProtocolSyncTests(unittest.TestCase):
         return subprocess.run(
             ["bash", str(script), *args],
             capture_output=True,
+            check=False,
             text=True,
             env=env,
         )
@@ -701,7 +705,13 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             env["HOME"] = fake_home
             env["AUTO_ROUTING_FAIL_AFTER_WRITES"] = "3"
 
-            res = subprocess.run([str(INSTALL_SH), target_dir], capture_output=True, text=True, env=env)
+            res = subprocess.run(
+                [str(INSTALL_SH), target_dir],
+                capture_output=True,
+                check=False,
+                text=True,
+                env=env,
+            )
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("AUTO_ROUTING_FAIL_AFTER_WRITES", res.stderr)
             self.assertEqual(agents_md.read_text(), "# Original AGENTS.md content\n")
@@ -770,7 +780,10 @@ class CalibrationSignatureTests(unittest.TestCase):
             os.environ, {"AGY_CALIBRATION_SECRET": secret.decode()}, clear=True
         ):
             metrics = self._metrics(step)
-        details = metrics["violation_details"][0][1]
+        violation_details = metrics["violation_details"]
+        assert isinstance(violation_details, list)
+        details = violation_details[0][1]
+        assert isinstance(details, list)
         self.assertEqual(details.count(routing_check.CALIBRATION_VIOLATION), 1)
 
     def test_header_without_secret_or_evidence_fails_without_creating_key(self) -> None:
@@ -780,9 +793,13 @@ class CalibrationSignatureTests(unittest.TestCase):
             step.calibration_headers.append("a" * 64)
             with mock.patch.dict(os.environ, {}, clear=True):
                 metrics = self._metrics(step, root)
+            violation_details = metrics["violation_details"]
+            assert isinstance(violation_details, list)
+            details = violation_details[0][1]
+            assert isinstance(details, list)
             self.assertIn(
                 routing_check.CALIBRATION_VIOLATION,
-                metrics["violation_details"][0][1],
+                details,
             )
             self.assertFalse(
                 (root / ".ralph" / "cache" / "calibration.key").exists()
@@ -885,7 +902,9 @@ class TransactionalWorkerCallTests(unittest.TestCase):
             "-c model_reasoning_effort=low && touch x.py"
         )
         self.assertEqual(metrics["worker_calls"], 0)
-        self.assertEqual(len(metrics["violations"]), 1)
+        violations = metrics["violations"]
+        assert isinstance(violations, list)
+        self.assertEqual(len(violations), 1)
 
     def test_nested_shell_worker_with_unsafe_tail_is_not_counted(self) -> None:
         metrics = self._metrics(
@@ -893,7 +912,9 @@ class TransactionalWorkerCallTests(unittest.TestCase):
             "-c model_reasoning_effort=low && touch x.py'"
         )
         self.assertEqual(metrics["worker_calls"], 0)
-        self.assertEqual(len(metrics["violations"]), 1)
+        violations = metrics["violations"]
+        assert isinstance(violations, list)
+        self.assertEqual(len(violations), 1)
 
     def test_newline_or_background_tail_is_not_counted(self) -> None:
         worker = (
@@ -904,7 +925,9 @@ class TransactionalWorkerCallTests(unittest.TestCase):
             with self.subTest(separator=repr(separator)):
                 metrics = self._metrics(f"{worker}{separator}touch x.py")
                 self.assertEqual(metrics["worker_calls"], 0)
-                self.assertEqual(len(metrics["violations"]), 1)
+                violations = metrics["violations"]
+                assert isinstance(violations, list)
+                self.assertEqual(len(violations), 1)
 
     def test_suppression_is_per_original_command(self) -> None:
         metrics = self._metrics(
@@ -914,7 +937,9 @@ class TransactionalWorkerCallTests(unittest.TestCase):
             "-c model_reasoning_effort=low && git status",
         )
         self.assertEqual(metrics["worker_calls"], 1)
-        self.assertEqual(len(metrics["violations"]), 1)
+        violations = metrics["violations"]
+        assert isinstance(violations, list)
+        self.assertEqual(len(violations), 1)
 
 
 class AgentCouncilDebateTests(unittest.TestCase):

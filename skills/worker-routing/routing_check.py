@@ -186,7 +186,7 @@ def is_worker_invocation(command: str, worker_patterns: list[str]) -> bool:
     does not count as delegation."""
     stripped = _strip_command_wrappers(command)
     for pattern in worker_patterns:
-        if stripped == pattern or stripped.startswith(pattern + " ") or stripped.startswith(pattern + "\t"):
+        if stripped == pattern or stripped.startswith((pattern + " ", pattern + "\t")):
             return True
     return False
 
@@ -338,13 +338,13 @@ class Step:
     """One logical unit of a conversation log."""
 
     __slots__ = (
-        "index",
-        "routing",
-        "writes",
-        "commands",
-        "unknown_write_tools",
         "calibration_headers",
         "calibration_manifests",
+        "commands",
+        "index",
+        "routing",
+        "unknown_write_tools",
+        "writes",
     )
 
     index: int
@@ -682,7 +682,7 @@ def run_audit(
 
     try:
         steps = parse_steps(log_file, text)
-    except Exception:
+    except Exception:  # noqa: BLE001 - the audit must fail closed on malformed logs.
         traceback.print_exc(file=sys.stderr)
         print(f"❌ Failed to parse log: {log_file}")
         return 2
@@ -716,7 +716,7 @@ def run_audit(
     print(f"  {'ROUTING declarations found:':<33} {metrics['routing_declarations']}")
     print(f"  {'Worker CLI calls found:':<33} {metrics['worker_calls']}")
     print(f"  {'Unrouted code edit violations:':<33} {violation_count}")
-    print("")
+    print()
 
     violation = False
 
@@ -744,7 +744,7 @@ def run_audit(
     elif not violation:
         print("✅ No violations detected.")
 
-    print("")
+    print()
     print("--- Detailed source code edits ---")
     counts = Counter(Path(f).name for f in metrics["code_write_files"])
     for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
@@ -764,7 +764,7 @@ def main() -> None:
 
     try:
         config = load_config()
-    except Exception:
+    except Exception:  # noqa: BLE001 - configuration failures must exit closed.
         traceback.print_exc(file=sys.stderr)
         sys.exit(2)
 

@@ -185,7 +185,7 @@ class AgentCouncil:
             if not TASK_ID_RE.fullmatch(task_id):
                 raise ValueError("task_id must contain only letters, digits, '.', '_' or '-'")
             return task_id
-        digest = hashlib.sha256(f"{task}\0{complexity}\0{effort}".encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(f"{task}\0{complexity}\0{effort}".encode()).hexdigest()
         return f"task-{digest[:16]}"
 
     def _load_cache(self) -> dict[str, dict[str, Any]]:
@@ -200,7 +200,13 @@ class AgentCouncil:
         ):
             return {}
         entries = loaded.get("entries")
-        return entries if isinstance(entries, dict) else {}
+        if not isinstance(entries, dict):
+            return {}
+        return {
+            key: entry
+            for key, entry in entries.items()
+            if isinstance(key, str) and isinstance(entry, dict)
+        }
 
     @staticmethod
     def _constraints_satisfied(task: str, complexity: str, effort: str) -> bool:
@@ -405,27 +411,40 @@ class AgentCouncil:
             candidate = entry.get("manifest")
             if not isinstance(candidate, dict):
                 continue
-            identity = {
-                field: candidate.get(field)
-                for field in ("task_id", "task", "complexity", "effort")
-            }
-            if not all(isinstance(value, str) for value in identity.values()):
+            candidate_task_id = candidate.get("task_id")
+            candidate_task = candidate.get("task")
+            candidate_complexity = candidate.get("complexity")
+            candidate_effort = candidate.get("effort")
+            if not (
+                isinstance(candidate_task_id, str)
+                and isinstance(candidate_task, str)
+                and isinstance(candidate_complexity, str)
+                and isinstance(candidate_effort, str)
+            ):
                 continue
+            identity = {
+                "task_id": candidate_task_id,
+                "task": candidate_task,
+                "complexity": candidate_complexity,
+                "effort": candidate_effort,
+            }
             expected_key = hashlib.sha256(_canonical_json(identity)).hexdigest()
             if key != expected_key or not self._valid_cached_manifest(
                 candidate,
-                task_id=identity["task_id"],
-                task=identity["task"],
-                complexity=identity["complexity"],
-                effort=identity["effort"],
-                safe=lexical_safety_scan(identity["task"]),
+                task_id=candidate_task_id,
+                task=candidate_task,
+                complexity=candidate_complexity,
+                effort=candidate_effort,
+                safe=lexical_safety_scan(candidate_task),
                 secret=secret,
             ):
                 continue
             valid_cache[key] = entry
         cache = valid_cache
-        cached = cache.get(cache_key, {}).get("manifest")
-        if self._valid_cached_manifest(
+        cached_entry = cache.get(cache_key)
+        cached = cached_entry.get("manifest") if cached_entry is not None else None
+        manifest: dict[str, Any]
+        if isinstance(cached, dict) and self._valid_cached_manifest(
             cached,
             task_id=normalized_task_id,
             task=task,

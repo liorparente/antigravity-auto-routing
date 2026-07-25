@@ -27,3 +27,9 @@
 - Failure: Claude Sonnet 4.6 could not reach its API endpoint (`ENOTFOUND`) and exited without yielding implementation output.
 - Fallback: use a built-in implementation worker with the same three-file scope, followed by an independent QA worker.
 - Scope impact: the Claude CLI produced no file changes or partial result.
+
+## 2026-07-25 — CLI research fallback unavailable for lint/type repair
+
+- Mission: inspect the three worker-routing Python files before Ruff and mypy repair.
+- Failure: `agy` failed before inspection due sandbox log/bind permissions; the Codex CLI fallback then failed before inspection due in-process app-server permissions.
+- Fallback: use a delegated built-in research and execution worker.
