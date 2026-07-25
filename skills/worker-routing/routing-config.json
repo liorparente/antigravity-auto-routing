@@ -1,32 +1,45 @@
 {
   "context_specialist": {
-    "name": "Gemini 3.5 Flash",
-    "patterns": ["agy"]
+    "name": "Gemini 3.6 Flash (High/Medium/Low) / Gemini 3.1 Pro (High/Low)",
+    "patterns": ["agy", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro"]
   },
   "planner": {
-    "name": "Claude Fable 5 / Opus 4.8",
-    "patterns": ["claude -p --model", "claude -p"]
+    "name": "Claude Opus 4.6 (Thinking) / Claude Fable 5 / Opus 4.8",
+    "patterns": ["claude-opus-4.6", "claude-fable-5", "claude -p --model"]
   },
   "critic": {
-    "name": "Codex 5.6 Sol",
-    "patterns": ["codex exec"]
+    "name": "Codex 5.6 Sol / GPT-OSS 120B (Medium)",
+    "patterns": ["codex exec", "gpt-oss-120b", "codex-sol"]
   },
   "heavy_doer": {
-    "name": "Claude Sonnet 5",
-    "patterns": ["claude -p"]
+    "name": "Claude Sonnet 4.6 (Thinking) / Claude Sonnet 5",
+    "patterns": ["claude-sonnet-4.6", "claude-sonnet-5", "claude -p"]
   },
   "light_doer": {
-    "name": "Codex 5.6 Terra / Luna",
-    "patterns": ["codex exec"]
+    "name": "Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)",
+    "patterns": ["codex exec", "gemini-3.6-flash-low", "codex-terra", "codex-luna"]
   },
   "sensitive_doer": {
     "name": "LM Studio (Local Model)",
     "patterns": ["127.0.0.1:1234/v1/chat", "localhost:1234/v1/chat"]
   },
   "qa_auditor": {
-    "name": "Codex 5.6 Sol",
-    "patterns": ["codex review"]
+    "name": "Codex 5.6 Sol / Claude Opus 4.6 (Thinking)",
+    "patterns": ["codex review", "claude-opus-4.6"]
   },
+  "supported_models": [
+    "Gemini 3.6 Flash (High)",
+    "Gemini 3.6 Flash (Medium)",
+    "Gemini 3.6 Flash (Low)",
+    "Gemini 3.5 Flash (High)",
+    "Gemini 3.5 Flash (Medium)",
+    "Gemini 3.5 Flash (Low)",
+    "Gemini 3.1 Pro (High)",
+    "Gemini 3.1 Pro (Low)",
+    "Claude Sonnet 4.6 (Thinking)",
+    "Claude Opus 4.6 (Thinking)",
+    "GPT-OSS 120B (Medium)"
+  ],
   "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"],
   "safe_commands": [
     "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",

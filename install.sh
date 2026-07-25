@@ -1,20 +1,15 @@
 #!/bin/bash
-# install.sh — installs the Auto Routing & Collaboration Protocol
-# Idempotent: safe to run multiple times.
-#
+# install.sh — atomically installs the Auto Routing & Collaboration Protocol.
 # Usage: ./install.sh [target_project_dir]
-#   target_project_dir   Project to install the local skill copies and the
-#                         generated AGENTS.md/CLAUDE.md into. Defaults to the
-#                         current directory.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
 PROTOCOL_SRC="$SRC_DIR/protocol.md"
-
 TARGET_PROJECT_DIR="${1:-.}"
-if [ ! -d "$TARGET_PROJECT_DIR" ]; then
-    echo "❌ Target project directory does not exist: $TARGET_PROJECT_DIR"
+
+if [ ! -d "$TARGET_PROJECT_DIR" ] || [ ! -r "$PROTOCOL_SRC" ]; then
+    echo "❌ Target project or protocol source is unavailable." >&2
     exit 1
 fi
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
@@ -26,120 +21,110 @@ TARGET_DIRS=(
     "$TARGET_PROJECT_DIR/.agent/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.codex/skills/worker-routing"
 )
-GEMINI_MD="$HOME/.gemini/GEMINI.md"
 AGENTS_MD="$TARGET_PROJECT_DIR/AGENTS.md"
 CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
-
-# Versionless sentinel markers — the protocol content between them can change
-# across releases without ever needing a new marker string, so re-running the
-# installer is always a clean "replace everything between these two lines".
+GEMINI_MD="$HOME/.gemini/GEMINI.md"
+CLAUDE_RULE="$TARGET_PROJECT_DIR/.claude/rules/worker-routing.md"
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END="# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
-
-# Legacy marker used before versionless markers existed (v3.0). That block was
-# always appended as the final section of GEMINI.md with nothing after it, so
-# "from this heading to end of file" reliably captures the whole thing.
 LEGACY_MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
+MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py protocol.md)
 
-echo "🚀 Installing Auto Routing & Collaboration Protocol"
-echo "   Target project: $TARGET_PROJECT_DIR"
-echo "---"
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
+TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-rollback.XXXXXX")"
+touch "$TRANSACTION_DIR/entries"
+COMMITTED=0
 
-install_skill_files() {
-    local target_dir="$1"
-
-    if [ ! -d "$target_dir" ]; then
-        echo "📁 Creating $target_dir"
-        mkdir -p "$target_dir"
-    else
-        echo "📁 Target directory already exists: $target_dir"
-    fi
-
-    echo "📄 Copying skill files to $target_dir..."
-    cp "$SRC_DIR/SKILL.md" "$target_dir/SKILL.md"
-    cp "$SRC_DIR/REFERENCE.md" "$target_dir/REFERENCE.md"
-    cp "$SRC_DIR/routing-audit.sh" "$target_dir/routing-audit.sh"
-    cp "$SRC_DIR/routing_check.py" "$target_dir/routing_check.py"
-    cp "$SRC_DIR/protocol.md" "$target_dir/protocol.md"
-    chmod +x "$target_dir/routing-audit.sh"
-    echo "✅ Copied SKILL.md, REFERENCE.md, routing-audit.sh, routing_check.py, protocol.md"
-
-    if [ -f "$target_dir/routing-config.json" ]; then
-        echo "⏭️  routing-config.json already exists in $target_dir — skipping copy to preserve customizations."
-    else
-        cp "$SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
-        echo "✅ Copied routing-config.json"
-    fi
-}
-
-# Remove any existing protocol block from a doc, whether it was written with
-# the new versionless markers or the legacy v3.0 heading. Leaves the rest of
-# the file untouched. Returns non-zero (and leaves the file completely
-# untouched) if PROTOCOL_START is present without a matching PROTOCOL_END —
-# stripping a half-written block would silently discard everything after it.
-strip_existing_block() {
-    local file="$1"
-
-    if grep -qF "$PROTOCOL_START" "$file" 2>/dev/null; then
-        if ! grep -qF "$PROTOCOL_END" "$file" 2>/dev/null; then
-            echo "⚠️  $file has $PROTOCOL_START but no matching $PROTOCOL_END — leaving it untouched." >&2
-            return 1
+rollback() {
+    [ -s "$TRANSACTION_DIR/entries" ] || return 0
+    echo "↩️  Rolling back incomplete installation..." >&2
+    while IFS='|' read -r number state target; do
+        [ -n "$target" ] || continue
+        if [ "$state" = "present" ]; then
+            mkdir -p "$(dirname "$target")"
+            cp -p "$TRANSACTION_DIR/$number" "$target"
+        else
+            rm -f "$target"
         fi
-        awk -v start="$PROTOCOL_START" -v end="$PROTOCOL_END" '
-            $0 == start { skip=1; next }
-            skip && $0 == end { skip=0; next }
-            !skip { print }
-        ' "$file" > "$file.tmp"
-        mv "$file.tmp" "$file"
-    elif grep -qF "$LEGACY_MARKER" "$file" 2>/dev/null; then
-        awk -v marker="$LEGACY_MARKER" '
-            $0 == marker { exit }
-            { print }
-        ' "$file" > "$file.tmp"
-        mv "$file.tmp" "$file"
-    fi
+    done < "$TRANSACTION_DIR/entries"
 }
 
-# Back up a file to "$file.bak" the first time we touch it. Once a backup
-# exists we never overwrite it, so it always holds the user's pre-install
-# original rather than a snapshot from a previous re-run. No-op for files
-# that don't exist yet — there's nothing to back up.
-backup_once() {
-    local file="$1"
-    if [ -f "$file" ] && [ ! -f "$file.bak" ]; then
-        cp "$file" "$file.bak"
-        echo "🗄️  Backed up $file to $file.bak"
+cleanup() {
+    status=$?
+    if [ "$status" -ne 0 ] && [ "$COMMITTED" -ne 1 ]; then
+        rollback || true
+        echo "❌ Installation failed; original files were restored." >&2
     fi
+    rm -rf "$STAGING_DIR" "$TRANSACTION_DIR"
 }
+trap cleanup EXIT
 
-# Inject/refresh the Worker Routing Protocol block between the sentinel
-# markers in a doc, preserving any other custom content already in the
-# file. Safe to re-run: a pre-existing block (versionless or legacy) is
-# replaced in place rather than duplicated.
-sync_protocol_doc() {
-    local target_file="$1"
-
-    mkdir -p "$(dirname "$target_file")"
-    backup_once "$target_file"
-    touch "$target_file"
-
-    if grep -qF "$LEGACY_MARKER" "$target_file" 2>/dev/null; then
-        echo "🔄 Legacy v3.0 protocol block detected in $(basename "$target_file") — upgrading to versionless markers."
-    fi
-
-    if ! strip_existing_block "$target_file"; then
-        echo "⏭️  Skipping $target_file — resolve the unbalanced markers, then re-run install.sh." >&2
+snapshot_file() {
+    local target="$1" number
+    if grep -Fqx "$target" "$TRANSACTION_DIR/paths" 2>/dev/null; then
         return
     fi
+    touch "$TRANSACTION_DIR/paths"
+    number="$(wc -l < "$TRANSACTION_DIR/entries" | tr -d ' ')"
+    if [ -e "$target" ]; then
+        cp -p "$target" "$TRANSACTION_DIR/$number"
+        echo "$number|present|$target" >> "$TRANSACTION_DIR/entries"
+    else
+        echo "$number|absent|$target" >> "$TRANSACTION_DIR/entries"
+    fi
+    echo "$target" >> "$TRANSACTION_DIR/paths"
+}
 
-    # Trim trailing blank lines left over after stripping so re-running the
-    # installer doesn't accumulate blank lines before the re-injected block.
-    while [ -s "$target_file" ] && [ -z "$(tail -n 1 "$target_file")" ]; do
-        sed -i.tmp '$d' "$target_file"
-        rm -f "$target_file.tmp"
+atomic_copy() {
+    local source="$1" target="$2" temporary
+    snapshot_file "$target"
+    mkdir -p "$(dirname "$target")"
+    temporary="${target}.auto-routing-tmp.$$"
+    cp "$source" "$temporary"
+    mv -f "$temporary" "$target"
+}
+
+backup_once() {
+    local target="$1"
+    if [ -f "$target" ] && [ ! -f "$target.bak" ]; then
+        atomic_copy "$target" "$target.bak"
+        echo "🗄️  Backed up $target to $target.bak"
+    fi
+}
+
+# Render a protocol document in staging.  It never mutates the source file,
+# which makes marker validation a true preflight operation.
+stage_protocol_doc() {
+    local source="$1" output="$2"
+    mkdir -p "$(dirname "$output")"
+    if [ -f "$source" ]; then
+        if grep -qF "$PROTOCOL_START" "$source" && ! grep -qF "$PROTOCOL_END" "$source"; then
+            echo "⚠️  $source has $PROTOCOL_START but no matching $PROTOCOL_END — leaving it untouched." >&2
+            return 2
+        fi
+        if grep -qF "$PROTOCOL_END" "$source" && ! grep -qF "$PROTOCOL_START" "$source"; then
+            echo "❌ $source has an unmatched $PROTOCOL_END." >&2
+            return 1
+        fi
+        if grep -qF "$PROTOCOL_START" "$source"; then
+            awk -v start="$PROTOCOL_START" -v end="$PROTOCOL_END" '
+                $0 == start { skip=1; next }
+                skip && $0 == end { skip=0; next }
+                !skip { print }
+            ' "$source" > "$output"
+        elif grep -qF "$LEGACY_MARKER" "$source"; then
+            awk -v marker="$LEGACY_MARKER" '$0 == marker { exit } { print }' "$source" > "$output"
+        else
+            cp "$source" "$output"
+        fi
+    else
+        : > "$output"
+    fi
+    # Do not accumulate blank separators on repeated installs.
+    while [ -s "$output" ] && [ -z "$(tail -n 1 "$output")" ]; do
+        sed -i.tmp '$d' "$output"
+        rm -f "$output.tmp"
     done
-
-    echo "📝 Writing Worker Routing Protocol to $target_file"
     {
         echo ""
         echo "$PROTOCOL_START"
@@ -147,35 +132,65 @@ sync_protocol_doc() {
         cat "$PROTOCOL_SRC"
         echo ""
         echo "$PROTOCOL_END"
-    } >> "$target_file"
-    echo "✅ Synced $(basename "$target_file") from protocol.md"
+    } >> "$output"
 }
 
-# 1. Copy skill files to all supported global and local agent targets.
-for target_dir in "${TARGET_DIRS[@]}"; do
-    install_skill_files "$target_dir"
+echo "🚀 Installing Auto Routing & Collaboration Protocol"
+echo "   Target project: $TARGET_PROJECT_DIR"
+echo "📦 Preflighting and staging installation..."
+
+# Stage all source-controlled artifacts before touching an installation target.
+mkdir -p "$STAGING_DIR/files"
+for file in "${MANAGED_FILES[@]}"; do
+    [ -r "$SRC_DIR/$file" ] || { echo "❌ Missing required source: $file" >&2; exit 1; }
+    cp "$SRC_DIR/$file" "$STAGING_DIR/files/$file"
 done
 
-# 1.5. Copy protocol.md to Claude Code rules directory.
-CLAUDE_RULES_DIR="$TARGET_PROJECT_DIR/.claude/rules"
-echo "📂 Syncing Claude Code rules..."
-mkdir -p "$CLAUDE_RULES_DIR"
-cp "$PROTOCOL_SRC" "$CLAUDE_RULES_DIR/worker-routing.md"
-echo "✅ Copied protocol.md to $CLAUDE_RULES_DIR/worker-routing.md"
+DOCS=("$AGENTS_MD" "$CLAUDE_MD" "$GEMINI_MD")
+STAGED_DOCS=()
+for index in "${!DOCS[@]}"; do
+    staged="$STAGING_DIR/docs/$index"
+    stage_status=0
+    stage_protocol_doc "${DOCS[$index]}" "$staged" || stage_status=$?
+    if [ "$stage_status" -ne 0 ]; then
+        # A malformed sentinel block makes single-source synchronization
+        # ambiguous.  Abort before the first target mutation.
+        exit "$stage_status"
+    fi
+    STAGED_DOCS[$index]="$staged"
+done
+cp "$PROTOCOL_SRC" "$STAGING_DIR/claude-rule.md"
 
-# 2. Inject/refresh the Worker Routing Protocol block in AGENTS.md and
-#    CLAUDE.md at the project root, and in GEMINI.md (Antigravity's global
-#    instruction file) — preserving any other custom content already there.
-sync_protocol_doc "$AGENTS_MD"
-sync_protocol_doc "$CLAUDE_MD"
-sync_protocol_doc "$GEMINI_MD"
+# Test-only fault injection verifies that preflight has no side effects.
+if [ "${AUTO_ROUTING_FAIL_AFTER_STAGE:-0}" = "1" ]; then
+    echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_STAGE=1 triggered — aborting install before target mutation." >&2
+    exit 1
+fi
 
-echo "---"
+write_count=0
+for target_dir in "${TARGET_DIRS[@]}"; do
+    for file in "${MANAGED_FILES[@]}"; do
+        atomic_copy "$STAGING_DIR/files/$file" "$target_dir/$file"
+        write_count=$((write_count + 1))
+        if [ "${AUTO_ROUTING_FAIL_AFTER_WRITES:-0}" = "$write_count" ]; then
+            echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_WRITES triggered." >&2
+            exit 1
+        fi
+    done
+    # Preserve customized routing configuration; install only the default.
+    if [ ! -f "$target_dir/routing-config.json" ]; then
+        atomic_copy "$SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
+    fi
+    chmod +x "$target_dir/routing-audit.sh" "$target_dir/agent_council.py"
+done
+
+atomic_copy "$STAGING_DIR/claude-rule.md" "$CLAUDE_RULE"
+for index in "${!DOCS[@]}"; do
+    [ -n "${STAGED_DOCS[$index]}" ] || continue
+    backup_once "${DOCS[$index]}"
+    atomic_copy "${STAGED_DOCS[$index]}" "${DOCS[$index]}"
+done
+
+COMMITTED=1
 echo "🎉 Installation complete."
-echo "   Skill files installed to:"
-for target_dir in "${TARGET_DIRS[@]}"; do
-    echo "     - $target_dir"
-done
-echo "   Project docs:  $AGENTS_MD, $CLAUDE_MD"
-echo "   Protocol doc:  $GEMINI_MD (backup: $GEMINI_MD.bak)"
-echo "   Run audits with: ${TARGET_DIRS[0]}/routing-audit.sh [conversation-id]"
+echo "   Synchronized protocol source: $AGENTS_MD, $CLAUDE_MD, $GEMINI_MD"

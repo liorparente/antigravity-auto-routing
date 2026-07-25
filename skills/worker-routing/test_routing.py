@@ -10,6 +10,9 @@ or, from this directory:
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import hmac
+import json
 import os
 import re
 import shutil
@@ -18,6 +21,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent
@@ -36,6 +40,13 @@ spec = importlib.util.spec_from_file_location("routing_check", ROUTING_CHECK)
 assert spec is not None and spec.loader is not None
 routing_check = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(routing_check)
+
+agent_council_spec = importlib.util.spec_from_file_location(
+    "agent_council", SKILL_DIR / "agent_council.py"
+)
+assert agent_council_spec is not None and agent_council_spec.loader is not None
+agent_council = importlib.util.module_from_spec(agent_council_spec)
+agent_council_spec.loader.exec_module(agent_council)
 
 
 def run_check(*args: str) -> subprocess.CompletedProcess[str]:
@@ -341,20 +352,25 @@ class RoutingAuditIntegrationTests(unittest.TestCase):
     """Exercises routing-audit.sh end to end against a throwaway brain/ conversation dir."""
 
     def setUp(self) -> None:
-        self.brain_dir = Path.home() / ".gemini" / "antigravity" / "brain"
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.home_dir = Path(self.tmp_dir.name)
+        self.brain_dir = self.home_dir / ".gemini" / "antigravity" / "brain"
         self.conv_id = f"routing-audit-test-{os.getpid()}"
         self.conv_dir = self.brain_dir / self.conv_id
         self.log_dir = self.conv_dir / ".system_generated" / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self) -> None:
-        shutil.rmtree(self.conv_dir, ignore_errors=True)
+        self.tmp_dir.cleanup()
 
     def _run_audit(self, *args: str) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env["HOME"] = str(self.home_dir)
         return subprocess.run(
             ["bash", str(ROUTING_AUDIT), *args, self.conv_id],
             capture_output=True,
             text=True,
+            env=env,
         )
 
     def test_clean_log_exits_zero(self) -> None:
@@ -453,17 +469,20 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertTrue(claude_rule.exists())
             self.assertEqual(claude_rule.read_text(), PROTOCOL_MD.read_text())
 
-    def test_install_sh_leaves_unbalanced_markers_untouched(self) -> None:
+    def test_install_sh_aborts_on_unbalanced_markers_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             agents_md = Path(target_dir) / "AGENTS.md"
             original = f"pre-existing\n{PROTOCOL_START}\nsome content but no end marker\n"
             agents_md.write_text(original)
 
             result = self._run(INSTALL_SH, target_dir, home=fake_home)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(agents_md.read_text(), original)
             self.assertIn(PROTOCOL_START, result.stderr)
             self.assertIn("no matching", result.stderr)
+            self.assertFalse(
+                (Path(target_dir) / ".agents" / "skills" / "worker-routing" / "protocol.md").exists()
+            )
 
     def test_install_sh_preserves_custom_content_in_agents_and_claude(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -581,6 +600,419 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertIn("Keep me too.", claude_text)
             self.assertNotIn(PROTOCOL_START, agents_text)
             self.assertNotIn(PROTOCOL_START, claude_text)
+
+
+
+class GoldStandardV6NegativeTests(unittest.TestCase):
+    """Matrix tests for Gold Standard v6 (CMD-01..CMD-05, DEC-01..DEC-04, LOG-01, INS-01)."""
+
+    def setUp(self) -> None:
+        self.config = routing_check.load_config()
+        self.worker_patterns = routing_check.load_patterns(self.config)
+        self.safe_patterns = routing_check.load_safe_patterns(self.config)
+        self.code_extensions = routing_check.load_code_extensions(self.config)
+
+    def test_cmd01_chained_command_with_unsafe_tail_flagged(self) -> None:
+        step = routing_check.Step(1, "[ROUTING: codex — complexity: simple — effort: low — reason: test]")
+        step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\" && touch x.py")
+        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        self.assertEqual(len(metrics["violations"]), 1)
+
+    def test_cmd02_subshell_substitution_rejected(self) -> None:
+        safe = routing_check.is_command_safe("echo $(id)", self.safe_patterns)
+        self.assertFalse(safe)
+
+    def test_cmd03_exact_token_boundary_enforced(self) -> None:
+        is_worker = routing_check.is_worker_invocation("codex execfoo --test", self.worker_patterns)
+        self.assertFalse(is_worker)
+
+    def test_cmd04_nested_bash_c_unsafe_tail_flagged(self) -> None:
+        step = routing_check.Step(1, "[ROUTING: codex — complexity: simple — effort: low — reason: test]")
+        step.commands.append(
+            "bash -c 'codex exec --model gpt-5.6-luna -c model_reasoning_effort=low && touch x.py'"
+        )
+        metrics = routing_check.compute_metrics(
+            [step], self.code_extensions, self.worker_patterns, self.safe_patterns
+        )
+        self.assertEqual(len(metrics["violations"]), 1)
+
+    def test_dec01_model_declaration_drift_detected(self) -> None:
+        step = routing_check.Step(1, "[ROUTING: Codex Sol — complexity: complex — effort: high — reason: test]")
+        step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\"")
+        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        self.assertEqual(len(metrics["violations"]), 1)
+
+    def test_dec02_effort_declaration_drift_detected(self) -> None:
+        step = routing_check.Step(1, "[ROUTING: codex — complexity: complex — effort: high — reason: test]")
+        step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort=\"low\"")
+        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        self.assertEqual(len(metrics["violations"]), 1)
+
+    def test_dec03_approved_agy_codex_review_and_calibrated_claude_are_valid(self) -> None:
+        agy = routing_check.Step(
+            1, "[ROUTING: Gemini 3.6 Flash — complexity: medium — effort: high — reason: research]"
+        )
+        agy.commands.append('agy -p "scan repository"')
+        review = routing_check.Step(
+            2, "[ROUTING: Codex Sol — complexity: complex — effort: high — reason: audit]"
+        )
+        review.commands.append("codex review --uncommitted")
+        claude = routing_check.Step(
+            3, "[ROUTING: Claude Sonnet 4.6 — complexity: medium — effort: high — reason: implement]"
+        )
+        claude.commands.append(
+            'claude -p --model claude-sonnet-4.6 -c model_reasoning_effort="high" '
+            '--allow-dangerously-skip-permissions "implement feature" < /dev/null'
+        )
+        metrics = routing_check.compute_metrics(
+            [agy, review, claude], self.code_extensions, self.worker_patterns, self.safe_patterns
+        )
+        self.assertEqual(metrics["violations"], [])
+
+    def test_agent_council_manifest_generation(self) -> None:
+        agent_council_path = SKILL_DIR / "agent_council.py"
+        spec = importlib.util.spec_from_file_location("agent_council", agent_council_path)
+        assert spec is not None and spec.loader is not None
+        agent_council_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agent_council_mod)
+        AgentCouncil = agent_council_mod.AgentCouncil
+
+        with tempfile.TemporaryDirectory() as tmp:
+            council = AgentCouncil(root_dir=Path(tmp))
+            manifest = council.run(task="Refactor auth system", complexity="complex", effort="high", task_id="test-task-1")
+            self.assertEqual(manifest["task_id"], "test-task-1")
+            self.assertEqual(manifest["complexity"], "complex")
+            self.assertEqual(manifest["effort"], "high")
+            self.assertEqual(manifest.get("decision") or manifest.get("status"), "APPROVED")
+            self.assertTrue(len(manifest["signature"]) > 0)
+    def test_log01_unknown_write_tool_fails_closed(self) -> None:
+        step = routing_check.Step(1, "[ROUTING: Direct — reason: test]")
+        step.unknown_write_tools.append("apply_unreviewed_patch")
+        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        self.assertEqual(len(metrics["violations"]), 1)
+        self.assertIn("LOG-01", metrics["violation_details"][0][1][0])
+
+    def test_ins01_atomic_install_with_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            agents_md = Path(target_dir) / "AGENTS.md"
+            agents_md.write_text("# Original AGENTS.md content\n")
+
+            env = dict(os.environ)
+            env["HOME"] = fake_home
+            env["AUTO_ROUTING_FAIL_AFTER_WRITES"] = "3"
+
+            res = subprocess.run([str(INSTALL_SH), target_dir], capture_output=True, text=True, env=env)
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("AUTO_ROUTING_FAIL_AFTER_WRITES", res.stderr)
+            self.assertEqual(agents_md.read_text(), "# Original AGENTS.md content\n")
+            self.assertFalse(
+                (Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing" / "SKILL.md").exists()
+            )
+
+
+class CalibrationSignatureTests(unittest.TestCase):
+    """DEC-05 verification uses same-step evidence and never creates secrets."""
+
+    def setUp(self) -> None:
+        self.config = routing_check.load_config()
+        self.worker_patterns = routing_check.load_patterns(self.config)
+        self.safe_patterns = routing_check.load_safe_patterns(self.config)
+        self.code_extensions = routing_check.load_code_extensions(self.config)
+
+    @staticmethod
+    def _manifest(secret: bytes, **overrides: str) -> dict[str, str]:
+        manifest = {
+            "task_id": "task-1",
+            "task": "Refactor routing checks",
+            "complexity": "medium",
+            "effort": "high",
+            "decision": "APPROVED",
+            "nonce": "0123456789abcdef0123456789abcdef",
+        }
+        manifest.update(overrides)
+        payload = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        manifest["signature"] = hmac.new(secret, payload, hashlib.sha256).hexdigest()
+        return manifest
+
+    def _metrics(
+        self, step: object, root_dir: Path | None = None
+    ) -> dict[str, object]:
+        return routing_check.compute_metrics(
+            [step],
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+            root_dir=root_dir,
+        )
+
+    def test_valid_header_and_six_field_manifest_pass(self) -> None:
+        secret = b"isolated-test-secret"
+        manifest = self._manifest(secret)
+        step = routing_check.Step(1)
+        step.calibration_headers.append(manifest["signature"])
+        step.calibration_manifests.append(manifest)
+        with mock.patch.dict(
+            os.environ, {"AGY_CALIBRATION_SECRET": secret.decode()}, clear=True
+        ):
+            metrics = self._metrics(step)
+        self.assertEqual(metrics["violations"], [])
+
+    def test_tampered_manifest_records_exactly_one_dec05(self) -> None:
+        secret = b"isolated-test-secret"
+        manifest = self._manifest(secret)
+        manifest["task"] = "Tampered task"
+        step = routing_check.Step(1)
+        step.calibration_headers.extend([manifest["signature"], "not-an-hmac"])
+        step.calibration_manifests.append(manifest)
+        with mock.patch.dict(
+            os.environ, {"AGY_CALIBRATION_SECRET": secret.decode()}, clear=True
+        ):
+            metrics = self._metrics(step)
+        details = metrics["violation_details"][0][1]
+        self.assertEqual(details.count(routing_check.CALIBRATION_VIOLATION), 1)
+
+    def test_header_without_secret_or_evidence_fails_without_creating_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            step = routing_check.Step(1)
+            step.calibration_headers.append("a" * 64)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                metrics = self._metrics(step, root)
+            self.assertIn(
+                routing_check.CALIBRATION_VIOLATION,
+                metrics["violation_details"][0][1],
+            )
+            self.assertFalse(
+                (root / ".ralph" / "cache" / "calibration.key").exists()
+            )
+
+    def test_signature_only_manifest_cannot_bypass_six_field_verification(self) -> None:
+        steps = routing_check.parse_steps(
+            "overview.txt", json.dumps({"signature": "a" * 64}) + "\n"
+        )
+        with mock.patch.dict(
+            os.environ, {"AGY_CALIBRATION_SECRET": "isolated-test-secret"}, clear=True
+        ):
+            metrics = routing_check.compute_metrics(
+                steps,
+                self.code_extensions,
+                self.worker_patterns,
+                self.safe_patterns,
+            )
+        self.assertEqual(metrics["calibration_markers"], 1)
+        self.assertEqual(
+            metrics["violation_details"][0][1],
+            [routing_check.CALIBRATION_VIOLATION],
+        )
+
+    def test_project_key_is_used_when_environment_secret_is_absent(self) -> None:
+        secret = b"project-local-secret"
+        manifest = self._manifest(secret)
+        step = routing_check.Step(1)
+        step.calibration_manifests.append(manifest)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            key_file = root / ".ralph" / "cache" / "calibration.key"
+            key_file.parent.mkdir(parents=True)
+            key_file.write_bytes(secret)
+            with mock.patch.dict(os.environ, {}, clear=True):
+                metrics = self._metrics(step, root)
+        self.assertEqual(metrics["violations"], [])
+
+    def test_jsonl_parser_pairs_header_with_embedded_manifest(self) -> None:
+        secret = b"parser-test-secret"
+        manifest = self._manifest(secret)
+        content = (
+            f"[CALIBRATION: {manifest['signature']}]\n"
+            + json.dumps(manifest, sort_keys=True)
+        )
+        steps = routing_check.parse_steps(
+            "overview.txt", json.dumps({"content": content}) + "\n"
+        )
+        with mock.patch.dict(
+            os.environ, {"AGY_CALIBRATION_SECRET": secret.decode()}, clear=True
+        ):
+            metrics = routing_check.compute_metrics(
+                steps,
+                self.code_extensions,
+                self.worker_patterns,
+                self.safe_patterns,
+            )
+        self.assertEqual(metrics["violations"], [])
+        self.assertEqual(len(steps[0].calibration_headers), 1)
+        self.assertGreaterEqual(len(steps[0].calibration_manifests), 1)
+
+    def test_agent_council_signature_matches_routing_check_contract(self) -> None:
+        secret = "cross-module-secret"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"AGY_CALIBRATION_SECRET": secret}, clear=True
+        ):
+            manifest = agent_council.AgentCouncil(Path(tmp)).run(
+                "Refactor routing checks", "medium", "high", "contract-task"
+            )
+            step = routing_check.Step(1)
+            step.calibration_headers.append(manifest["signature"])
+            step.calibration_manifests.append(manifest)
+            metrics = self._metrics(step, Path(tmp))
+        self.assertEqual(metrics["violations"], [])
+
+
+class TransactionalWorkerCallTests(unittest.TestCase):
+    def setUp(self) -> None:
+        config = routing_check.load_config()
+        self.worker_patterns = routing_check.load_patterns(config)
+        self.safe_patterns = routing_check.load_safe_patterns(config)
+        self.code_extensions = routing_check.load_code_extensions(config)
+
+    def _metrics(self, *commands: str) -> dict[str, object]:
+        step = routing_check.Step(
+            1,
+            "[ROUTING: codex — complexity: simple — effort: low — reason: test]",
+        )
+        step.commands.extend(commands)
+        return routing_check.compute_metrics(
+            [step],
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+        )
+
+    def test_worker_segment_in_command_with_unsafe_tail_is_not_counted(self) -> None:
+        metrics = self._metrics(
+            "IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna "
+            "-c model_reasoning_effort=low && touch x.py"
+        )
+        self.assertEqual(metrics["worker_calls"], 0)
+        self.assertEqual(len(metrics["violations"]), 1)
+
+    def test_nested_shell_worker_with_unsafe_tail_is_not_counted(self) -> None:
+        metrics = self._metrics(
+            "bash -c 'codex exec --model gpt-5.6-luna "
+            "-c model_reasoning_effort=low && touch x.py'"
+        )
+        self.assertEqual(metrics["worker_calls"], 0)
+        self.assertEqual(len(metrics["violations"]), 1)
+
+    def test_newline_or_background_tail_is_not_counted(self) -> None:
+        worker = (
+            "codex exec --model gpt-5.6-luna "
+            "-c model_reasoning_effort=low"
+        )
+        for separator in ("\n", " & "):
+            with self.subTest(separator=repr(separator)):
+                metrics = self._metrics(f"{worker}{separator}touch x.py")
+                self.assertEqual(metrics["worker_calls"], 0)
+                self.assertEqual(len(metrics["violations"]), 1)
+
+    def test_suppression_is_per_original_command(self) -> None:
+        metrics = self._metrics(
+            "codex exec --model gpt-5.6-luna "
+            "-c model_reasoning_effort=low && touch x.py",
+            "codex exec --model gpt-5.6-luna "
+            "-c model_reasoning_effort=low && git status",
+        )
+        self.assertEqual(metrics["worker_calls"], 1)
+        self.assertEqual(len(metrics["violations"]), 1)
+
+
+class AgentCouncilDebateTests(unittest.TestCase):
+    def test_safe_task_reaches_consensus_after_two_distinct_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            manifest = agent_council.AgentCouncil(Path(tmp)).run(
+                "Refactor routing checks", "complex", "high", "safe-task"
+            )
+        self.assertEqual(manifest["decision"], "APPROVED")
+        self.assertEqual(
+            [item["focus"] for item in manifest["debate_rounds"]],
+            ["safety", "constraints"],
+        )
+        self.assertEqual(manifest["consensus_status"], "CONSENSUS_REACHED")
+        self.assertEqual(manifest["consensus_round"], 2)
+
+    def test_safety_constraint_disagreement_uses_third_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            manifest = agent_council.AgentCouncil(Path(tmp)).run(
+                "Refactor; touch x.py", "medium", "high", "unsafe-task"
+            )
+        self.assertEqual(manifest["decision"], "REJECTED_LEXICAL")
+        self.assertEqual(len(manifest["debate_rounds"]), 3)
+        self.assertEqual(manifest["debate_rounds"][-1]["focus"], "adjudication")
+        self.assertEqual(manifest["consensus_round"], 3)
+        self.assertLessEqual(
+            len(manifest["debate_rounds"]), agent_council.MAX_DEBATE_ROUNDS
+        )
+
+    def test_v1_or_tampered_cache_is_regenerated_as_strict_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            council = agent_council.AgentCouncil(root)
+            council.cache_file.parent.mkdir(parents=True)
+            council.cache_file.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "entries": {
+                            "untrusted": {
+                                "created_at": 1,
+                                "manifest": {"signature": "0" * 64},
+                            }
+                        },
+                    }
+                )
+            )
+            first = council.run(
+                "Refactor routing checks", "medium", "high", "cache-task"
+            )
+            cache = json.loads(council.cache_file.read_text())
+            self.assertEqual(cache["version"], 2)
+
+            entry = next(iter(cache["entries"].values()))
+            entry["manifest"]["signature"] = "0" * 64
+            council.cache_file.write_text(json.dumps(cache))
+            second = council.run(
+                "Refactor routing checks", "medium", "high", "cache-task"
+            )
+            rewritten = json.loads(council.cache_file.read_text())
+            rewritten_entry = next(iter(rewritten["entries"].values()))
+            rewritten_entry["manifest"]["debate_rounds"][0]["vote"] = "REJECT"
+            council.cache_file.write_text(json.dumps(rewritten))
+            third = council.run(
+                "Refactor routing checks", "medium", "high", "cache-task"
+            )
+            debate_rewritten = json.loads(council.cache_file.read_text())
+        self.assertEqual(first, second)
+        self.assertEqual(first, third)
+        self.assertNotEqual(
+            next(iter(rewritten["entries"].values()))["manifest"]["signature"],
+            "0" * 64,
+        )
+        self.assertEqual(
+            next(iter(debate_rewritten["entries"].values()))["manifest"][
+                "debate_rounds"
+            ][0]["vote"],
+            "APPROVE",
+        )
+
+    def test_environment_secret_precedes_workspace_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            key = root / ".ralph" / "cache" / "calibration.key"
+            key.parent.mkdir(parents=True)
+            key.write_bytes(b"workspace")
+            with mock.patch.dict(
+                os.environ, {"AGY_CALIBRATION_SECRET": "environment"}, clear=True
+            ):
+                self.assertEqual(
+                    agent_council.get_calibration_secret(root), b"environment"
+                )
 
 
 if __name__ == "__main__":

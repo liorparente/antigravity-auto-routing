@@ -70,7 +70,10 @@ Exit codes:
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
 import re
 import sys
 import traceback
@@ -87,6 +90,13 @@ WRITE_TOOLS = {"write_to_file", "replace_file_content", "multi_replace_file_cont
 
 STEP_HEADER_RE = re.compile(r"^Step\s+\d+\s*:", re.MULTILINE)
 ROUTING_RE = re.compile(r"\[ROUTING:[^\]\n]*\]")
+CALIBRATION_RE = re.compile(r"\[CALIBRATION:\s*([^\]\n]+)\]", re.IGNORECASE)
+ROUTING_LABEL_RE = re.compile(
+    r"\[ROUTING:\s*(?P<worker>.+?)\s+—\s*complexity:\s*"
+    r"(?P<complexity>trivial|simple|medium|complex)\s+—\s*effort:\s*"
+    r"(?P<effort>low|medium|high|ultra)\s+—\s*reason:\s*(?P<reason>[^\]\n]+)\]",
+    re.IGNORECASE,
+)
 TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 
 # Non-role keys that may appear at the top level of routing-config.json
@@ -97,8 +107,18 @@ ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s+")
 SCRIPT_WRAPPER_RE = re.compile(r"^script\s+(?:-\S+\s+)*\S+\s+")
 BASH_C_WRAPPER_RE = re.compile(r"^bash\s+-c\s+")
 
-LOGICAL_SPLIT_RE = re.compile(r"\|\||&&|\||;")
 UNSAFE_SUBSTRINGS = (">", "`", "$(")
+MODEL_RE = re.compile(
+    r"(?:^|\s)(?:--model(?:=|\s+)|-c\s+model\s*=\s*)[\"']?(?P<model>[^\s'\"]+)",
+    re.IGNORECASE,
+)
+EFFORT_RE = re.compile(
+    r"model_reasoning_effort\s*=\s*[\"']?(?P<effort>low|medium|high|ultra)[\"']?",
+    re.IGNORECASE,
+)
+CALIBRATION_FIELDS = ("task_id", "task", "complexity", "effort", "decision", "nonce")
+CALIBRATION_VIOLATION = "DEC-05 HMAC calibration signature mismatch"
+HMAC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 
 
 def _kv_pattern(key: str) -> re.Pattern[str]:
@@ -165,7 +185,77 @@ def is_worker_invocation(command: str, worker_patterns: list[str]) -> bool:
     substring mention elsewhere in the command (e.g. `echo codex exec`)
     does not count as delegation."""
     stripped = _strip_command_wrappers(command)
-    return any(stripped.startswith(pattern) for pattern in worker_patterns)
+    for pattern in worker_patterns:
+        if stripped == pattern or stripped.startswith(pattern + " ") or stripped.startswith(pattern + "\t"):
+            return True
+    return False
+
+
+def split_command_segments(command: str) -> list[str]:
+    """Split `&&`, `||`, `|`, and `;` only outside quoted text (CMD-01)."""
+    parts: list[str] = []
+    start = index = 0
+    quote: str | None = None
+    escaped = False
+    while index < len(command):
+        char = command[index]
+        if escaped:
+            escaped = False
+        elif char == "\\" and quote != "'":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in "'\"":
+            quote = char
+        elif char in ";&|\r\n":
+            parts.append(command[start:index].strip())
+            index += 2 if command[index:index + 2] in {"&&", "||"} else 1
+            start = index
+            continue
+        index += 1
+    parts.append(command[start:].strip())
+    return parts
+
+
+def _bash_c_payload(command: str) -> str | None:
+    """Return an explicitly quoted ``bash -c`` payload, if this is one.
+
+    ``bash -c 'worker && unsafe'`` is a nested shell program; treating it as
+    one opaque worker segment would let its unsafe tail evade CMD-01.
+    """
+    stripped = command.strip()
+    while True:
+        without_env = ENV_ASSIGNMENT_RE.sub("", stripped)
+        if without_env != stripped:
+            stripped = without_env
+            continue
+        script_match = SCRIPT_WRAPPER_RE.match(stripped)
+        if script_match:
+            stripped = stripped[script_match.end():]
+            continue
+        break
+    match = BASH_C_WRAPPER_RE.match(stripped)
+    if not match:
+        return None
+    payload = stripped[match.end():].strip()
+    if len(payload) >= 2 and payload[0] == payload[-1] and payload[0] in "'\"":
+        return payload[1:-1]
+    return payload
+
+
+def command_segments(command: str, depth: int = 0) -> list[str]:
+    """Return logical segments, recursively unpacking quoted ``bash -c``."""
+    if depth > 8:  # Fail closed on wrapper recursion rather than guessing.
+        return [command]
+    segments: list[str] = []
+    for segment in split_command_segments(command):
+        payload = _bash_c_payload(segment)
+        if payload is None:
+            segments.append(segment)
+        else:
+            segments.extend(command_segments(payload, depth + 1))
+    return segments
 
 
 def is_command_safe(command: str, safe_patterns: list[re.Pattern[str]]) -> bool:
@@ -175,7 +265,7 @@ def is_command_safe(command: str, safe_patterns: list[re.Pattern[str]]) -> bool:
     if any(token in command for token in UNSAFE_SUBSTRINGS):
         return False
 
-    parts = LOGICAL_SPLIT_RE.split(command)
+    parts = command_segments(command)
     for part in parts:
         part = part.strip()
         if not part:
@@ -185,29 +275,212 @@ def is_command_safe(command: str, safe_patterns: list[re.Pattern[str]]) -> bool:
     return True
 
 
-class Step:
-    """One logical unit of a conversation log: an optional [ROUTING: ...]
-    declaration plus the tool calls made while that declaration was active.
-    Metrics are computed strictly within a single Step — content from a
-    neighboring step never bleeds in."""
+def structural_binding_issues(
+    routing_str: str | None, commands: list[str], worker_patterns: list[str]
+) -> list[str]:
+    """Bind a complete declaration to each actual worker segment (DEC-01..04)."""
+    if not routing_str:
+        return []
+    declaration = ROUTING_LABEL_RE.search(routing_str)
+    if not declaration:
+        return []
+    declared_worker = declaration.group("worker").strip().lower()
+    declared_effort = declaration.group("effort").lower()
+    issues: list[str] = []
+    for command in commands:
+        # CMD-02/CMD-04 own unsafe shell syntax; do not let it participate in
+        # structural validation as if it were an unmodified worker call.
+        if any(marker in command for marker in UNSAFE_SUBSTRINGS):
+            continue
+        for segment in command_segments(command):
+            if not segment or not is_worker_invocation(segment, worker_patterns):
+                continue
+            model_match = MODEL_RE.search(segment)
+            effort_match = EFFORT_RE.search(segment)
+            executable = _strip_command_wrappers(segment).split(maxsplit=1)[0].lower()
+            # agy and codex review are valid protocol calls without the
+            # execution calibration flags.  Codex exec/Claude execution must
+            # bind both flags whenever a full declaration is present.
+            requires_flags = (
+                (executable == "codex" and _strip_command_wrappers(segment).startswith("codex exec"))
+                or executable == "claude"
+            )
+            if requires_flags and (not model_match or not effort_match):
+                issues.append("DEC-04 missing --model or model_reasoning_effort")
+                continue
+            if not requires_flags and not model_match and not effort_match:
+                continue
+            model = model_match.group("model").lower() if model_match else ""
+            actual_effort = effort_match.group("effort").lower() if effort_match else None
+            expected_tier = next((tier for tier in ("sol", "terra", "luna") if tier in declared_worker), None)
+            if "codex" in declared_worker or expected_tier:
+                worker_matches = executable == "codex" and (expected_tier is None or expected_tier in model)
+            elif any(name in declared_worker for name in ("claude", "sonnet", "opus", "fable", "heavy_doer", "planner")):
+                family = next((name for name in ("sonnet", "opus", "fable") if name in declared_worker), None)
+                worker_matches = executable == "claude" and (family is None or family in model)
+            elif any(name in declared_worker for name in ("agy", "gemini", "context_specialist")):
+                worker_matches = executable == "agy"
+            else:
+                worker_matches = False
+            if not worker_matches:
+                issues.append("DEC-01 declaration worker/model drift")
+            if actual_effort is not None and actual_effort != declared_effort:
+                issues.append("DEC-02 declaration effort drift")
+    return issues
 
-    __slots__ = ("index", "routing", "writes", "commands")
+
+def check_structural_binding(routing_str: str | None, command: str, worker_patterns: list[str]) -> bool:
+    """Compatibility wrapper retained for existing callers/tests."""
+    return not structural_binding_issues(routing_str, [command], worker_patterns)
+
+
+class Step:
+    """One logical unit of a conversation log."""
+
+    __slots__ = (
+        "index",
+        "routing",
+        "writes",
+        "commands",
+        "unknown_write_tools",
+        "calibration_headers",
+        "calibration_manifests",
+    )
 
     index: int
     routing: str | None
     writes: list[str]
     commands: list[str]
+    unknown_write_tools: list[str]
+    calibration_headers: list[str]
+    calibration_manifests: list[dict[str, Any]]
 
     def __init__(self, index: int, routing: str | None = None) -> None:
         self.index = index
         self.routing = routing
         self.writes = []  # TargetFile strings from write-tool calls
         self.commands = []  # CommandLine strings from run_command calls
+        self.unknown_write_tools = []  # unapproved mutating tool names (LOG-01)
+        self.calibration_headers = []
+        self.calibration_manifests = []
+
+
+def _collect_calibration_manifests(value: Any) -> list[dict[str, Any]]:
+    """Collect every signature-bearing object without trusting its shape."""
+    found: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if "signature" in value:
+            found.append(value)
+        for nested in value.values():
+            found.extend(_collect_calibration_manifests(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            found.extend(_collect_calibration_manifests(nested))
+    return found
+
+
+def _embedded_json_values(text: str) -> list[Any]:
+    """Decode JSON values embedded in ordinary transcript content."""
+    decoder = json.JSONDecoder()
+    values: list[Any] = []
+    index = 0
+    while True:
+        start = text.find("{", index)
+        if start < 0:
+            break
+        try:
+            value, consumed = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+        values.append(value)
+        index = start + consumed
+    return values
+
+
+def _add_calibration_text(step: Step, text: str) -> None:
+    step.calibration_headers.extend(
+        match.group(1).strip() for match in CALIBRATION_RE.finditer(text)
+    )
+    for value in _embedded_json_values(text):
+        step.calibration_manifests.extend(_collect_calibration_manifests(value))
+
+
+def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
+    """Read the verifier secret without creating or modifying project state."""
+    configured = os.environ.get("AGY_CALIBRATION_SECRET")
+    if configured:
+        return configured.encode("utf-8")
+    project_root = Path(root_dir).resolve() if root_dir is not None else Path.cwd()
+    try:
+        secret = (
+            project_root / ".ralph" / "cache" / "calibration.key"
+        ).read_bytes()
+    except OSError:
+        return None
+    return secret or None
+
+
+def _canonical_calibration_payload(manifest: dict[str, Any]) -> bytes | None:
+    payload: dict[str, str] = {}
+    for field in CALIBRATION_FIELDS:
+        value = manifest.get(field)
+        if not isinstance(value, str):
+            return None
+        payload[field] = value
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def calibration_signature_issue(
+    step: Step, root_dir: str | Path | None = None
+) -> str | None:
+    """Verify all same-step headers/evidence and return DEC-05 at most once."""
+    if not step.calibration_headers and not step.calibration_manifests:
+        return None
+    secret = get_calibration_secret(root_dir)
+    if secret is None:
+        return CALIBRATION_VIOLATION
+
+    validation_by_signature: dict[str, bool] = {}
+    invalid = False
+    for manifest in step.calibration_manifests:
+        signature = manifest.get("signature")
+        payload = _canonical_calibration_payload(manifest)
+        valid = (
+            isinstance(signature, str)
+            and HMAC_SHA256_RE.fullmatch(signature) is not None
+            and payload is not None
+            and hmac.compare_digest(
+                signature.lower(),
+                hmac.new(secret, payload, hashlib.sha256).hexdigest(),
+            )
+        )
+        if isinstance(signature, str):
+            previous = validation_by_signature.get(signature.lower(), True)
+            validation_by_signature[signature.lower()] = previous and valid
+        if not valid:
+            invalid = True
+
+    for header in step.calibration_headers:
+        normalized = header.lower()
+        if (
+            HMAC_SHA256_RE.fullmatch(header) is None
+            or not validation_by_signature.get(normalized, False)
+        ):
+            invalid = True
+    return CALIBRATION_VIOLATION if invalid else None
+
+
+def is_unknown_write_tool(tool_name: Any) -> bool:
+    """Fail closed for unapproved tools whose name represents a file mutation."""
+    if not isinstance(tool_name, str) or tool_name in WRITE_TOOLS:
+        return False
+    lowered = tool_name.lower()
+    mutation_terms = ("write", "edit", "replace", "patch", "apply")
+    return any(term in lowered for term in mutation_terms)
 
 
 def _parse_text_steps(text: str) -> list[Step]:
-    """Plain-text logs: split on `Step \\d+:` markers. Each chunk is scanned
-    only for its own [ROUTING:] declaration and its own tool calls."""
     headers = list(STEP_HEADER_RE.finditer(text))
     steps: list[Step] = []
 
@@ -218,6 +491,7 @@ def _parse_text_steps(text: str) -> list[Step]:
 
         routing_match = ROUTING_RE.search(chunk)
         step = Step(i + 1, routing_match.group(0) if routing_match else None)
+        _add_calibration_text(step, chunk)
 
         calls = list(TOOL_CALL_RE.finditer(chunk))
         for j, call in enumerate(calls):
@@ -234,6 +508,8 @@ def _parse_text_steps(text: str) -> list[Step]:
                 m = COMMAND_LINE_RE.search(segment)
                 if m:
                     step.commands.append(m.group(1))
+            elif is_unknown_write_tool(tool_name):
+                step.unknown_write_tools.append(tool_name)
 
         steps.append(step)
 
@@ -241,8 +517,6 @@ def _parse_text_steps(text: str) -> list[Step]:
 
 
 def _dig(data: dict[str, Any], *path: str) -> Any:
-    """Walk a chain of dict keys, returning None as soon as one is missing
-    or the value along the way isn't a dict."""
     value: Any = data
     for key in path:
         if not isinstance(value, dict):
@@ -264,6 +538,10 @@ def _step_from_dict(index: int, data: dict[str, Any]) -> Step:
             routing = match.group(0) if match else None
 
     step = Step(index, routing)
+    step.calibration_manifests.extend(_collect_calibration_manifests(data))
+    for value in data.values():
+        if isinstance(value, str):
+            _add_calibration_text(step, value)
     for call in data.get("tool_calls") or []:
         tool_name = call.get("tool") or call.get("name")
         target_file = _strip_quotes(call.get("target_file") or _dig(call, "args", "TargetFile"))
@@ -273,11 +551,12 @@ def _step_from_dict(index: int, data: dict[str, Any]) -> Step:
             step.writes.append(target_file)
         elif tool_name == "run_command" and command_line:
             step.commands.append(command_line)
+        elif is_unknown_write_tool(tool_name):
+            step.unknown_write_tools.append(str(tool_name))
     return step
 
 
 def _parse_jsonl_steps(text: str) -> list[Step]:
-    """JSON Lines logs: one step object per line."""
     steps: list[Step] = []
     for line in text.splitlines():
         line = line.strip()
@@ -300,6 +579,7 @@ def compute_metrics(
     code_extensions: list[str],
     worker_patterns: list[str],
     safe_patterns: list[re.Pattern[str]],
+    root_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     code_ext_set = {e.lower().lstrip(".") for e in code_extensions}
 
@@ -308,7 +588,10 @@ def compute_metrics(
     routing_declarations = 0
     worker_calls = 0
     code_write_files: list[str] = []
-    violations: list[tuple[int, list[str]]] = []  # (step_index, [files])
+    violations: list[tuple[int, list[str]]] = []
+    violation_details: list[tuple[int, list[str]]] = []
+    declaration_drift: list[tuple[int, list[str]]] = []
+    calibration_markers = 0
 
     for step in steps:
         if step.routing:
@@ -316,12 +599,37 @@ def compute_metrics(
 
         step_worker_calls = 0
         step_has_unrouted_mutation = False
+        step_issues: list[str] = []
+
         for command in step.commands:
-            if is_worker_invocation(command, worker_patterns):
-                worker_calls += 1
-                step_worker_calls += 1
-            elif not is_command_safe(command, safe_patterns):
+            command_worker_calls = 0
+            command_has_unrouted_mutation = any(
+                marker in command for marker in UNSAFE_SUBSTRINGS
+            )
+            # Reject shell injection/redirect syntax before classifying any
+            # segment as a valid worker invocation (CMD-02/CMD-04).
+            for part in command_segments(command):
+                if not part:
+                    continue
+                if is_worker_invocation(part, worker_patterns):
+                    command_worker_calls += 1
+                elif not is_command_safe(part, safe_patterns):
+                    command_has_unrouted_mutation = True
+            if command_has_unrouted_mutation:
                 step_has_unrouted_mutation = True
+            else:
+                worker_calls += command_worker_calls
+                step_worker_calls += command_worker_calls
+
+        step_issues.extend(structural_binding_issues(step.routing, step.commands, worker_patterns))
+        calibration_markers += len(step.calibration_headers) + len(
+            step.calibration_manifests
+        )
+        calibration_issue = calibration_signature_issue(step, root_dir)
+        if calibration_issue:
+            step_issues.append(calibration_issue)
+        if step.unknown_write_tools:
+            step_issues.append("LOG-01 unknown write tool: " + ", ".join(step.unknown_write_tools))
 
         step_code_writes: list[str] = []
         for target_file in step.writes:
@@ -332,8 +640,11 @@ def compute_metrics(
                 code_write_files.append(target_file)
                 step_code_writes.append(target_file)
 
-        if step_has_unrouted_mutation or (step_code_writes and step_worker_calls == 0):
+        if step_issues:
+            declaration_drift.append((step.index, step_issues))
+        if step_has_unrouted_mutation or step_issues or (step_code_writes and step_worker_calls == 0):
             violations.append((step.index, step_code_writes))
+            violation_details.append((step.index, step_issues))
 
     return {
         "total_writes": total_writes,
@@ -342,10 +653,18 @@ def compute_metrics(
         "worker_calls": worker_calls,
         "code_write_files": code_write_files,
         "violations": violations,
+        "declaration_drift": declaration_drift,
+        "violation_details": violation_details,
+        "calibration_markers": calibration_markers,
     }
 
 
-def run_audit(config: dict[str, Any], log_file: str, strict: bool = False) -> int:
+def run_audit(
+    config: dict[str, Any],
+    log_file: str,
+    strict: bool = False,
+    root_dir: str | Path | None = None,
+) -> int:
     worker_patterns = load_patterns(config)
     code_extensions = load_code_extensions(config)
     safe_patterns = load_safe_patterns(config)
@@ -372,12 +691,19 @@ def run_audit(config: dict[str, Any], log_file: str, strict: bool = False) -> in
         print(f"❌ No steps parsed from log: {log_file}")
         return 2
 
-    metrics = compute_metrics(steps, code_extensions, worker_patterns, safe_patterns)
+    metrics = compute_metrics(
+        steps, code_extensions, worker_patterns, safe_patterns, root_dir=root_dir
+    )
 
     raw_has_writes = any(t in text for t in WRITE_TOOLS)
     raw_has_routing = "[ROUTING:" in text
+    raw_has_calibration = (
+        CALIBRATION_RE.search(text) is not None or '"signature"' in text
+    )
     if (raw_has_writes and metrics["total_writes"] == 0) or (
         raw_has_routing and metrics["routing_declarations"] == 0
+    ) or (
+        raw_has_calibration and metrics["calibration_markers"] == 0
     ):
         print("❌ Parser out of sync with log format.")
         return 2
