@@ -22,10 +22,10 @@ jobs:
         run: python3 skills/worker-routing/test_routing.py -v
 
       - name: Lint with ruff
-        run: ruff check skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py
+        run: ruff check skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py
 
       - name: Type-check with mypy
-        run: mypy skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py
+        run: mypy skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py
 
       - name: Shellcheck installer and audit scripts
         run: shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh

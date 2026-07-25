@@ -157,7 +157,7 @@ for index in "${!DOCS[@]}"; do
         # ambiguous.  Abort before the first target mutation.
         exit "$stage_status"
     fi
-    STAGED_DOCS[$index]="$staged"
+    STAGED_DOCS[index]="$staged"
 done
 cp "$PROTOCOL_SRC" "$STAGING_DIR/claude-rule.md"
 
