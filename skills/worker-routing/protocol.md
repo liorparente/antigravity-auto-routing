@@ -15,7 +15,7 @@ commit fails. Edit only this file — the generated copies are overwritten on ev
 ## 🎯 Core Philosophy: Quality-First & Deep Research
 - **Quality Over Token Frugality:** The goal is 100% functional correctness, edge-case coverage, and structural elegance. Token efficiency is secondary to solution quality.
 - **Deep Research Mandate:** Every non-trivial mission begins with thorough codebase scanning, dependency mapping, and context gathering using `agy` (Gemini 3.6 Flash / 3.5 Flash / 3.1 Pro) before any code is touched.
-- **Deep Thinking Mandate:** Architectural decisions and multi-file changes require explicit System 2 planning (Claude Opus 4.6 Thinking / Claude Sonnet 4.6 Thinking / Fable 5 with Codex Sol Critic).
+- **Deep Thinking Mandate:** Architectural decisions and multi-file changes require explicit System 2 planning (Claude Opus 5 Thinking / Claude Sonnet 5 Thinking / Fable 5 with Codex Sol Critic).
 
 ## ⛔ HARD GATE — Before ANY State-Modifying Action
 
@@ -66,19 +66,21 @@ Supported Active IDE Models:
 - **Gemini 3.6 Flash** (`High` / `Medium` / `Low`)
 - **Gemini 3.5 Flash** (`High` / `Medium` / `Low`)
 - **Gemini 3.1 Pro** (`High` / `Low`)
-- **Claude Sonnet 4.6** (`Thinking`) / **Claude Sonnet 5**
-- **Claude Opus 4.6** (`Thinking`) / **Claude Fable 5 / Opus 4.8**
+- **Claude Sonnet 5** (`Thinking`)
+- **Claude Opus 5** (`Thinking`) / **Claude Fable 5 / Opus 4.8**
 - **GPT-OSS 120B** (`Medium`)
 - **Codex 5.6** (`Luna` / `Terra` / `Sol`)
+
+**Execution requirement for every external CLI example below:** invoke it through `run_command` with `BypassSandbox: true` (see Rule 4.7). `BypassSandbox` is a `run_command` tool-call field, not a worker CLI flag.
 
 | Complexity | Signs & Requirements | Route To Model | Calibrated Effort & Command |
 |---|---|---|---|
 | **Trivial** | Single file, rename, formatting, quick Q&A | **Gemini 3.6 Flash (Low)** / **Codex 5.6 Luna** / **Gemma 4 E4B** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "..." < /dev/null` |
 | **Simple** | 1-2 files, boilerplate, input validation | **Gemini 3.6 Flash (Medium)** / **Codex 5.6 Terra** / **GPT-OSS 120B (Medium)** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "..." < /dev/null` |
-| **Medium** | 3-4 files, new feature, refactoring | **Claude Sonnet 4.6 (Thinking)** / **Gemini 3.6 Flash (High)** (+ Codex Sol Critic) | `IN_WORKER_ROUTING=true claude -p --model claude-sonnet-4.6 -c model_reasoning_effort="high" --allow-dangerously-skip-permissions "..." < /dev/null` <br> Critic effort: `medium` / `high` |
-| **Complex** | 5+ files, architectural changes, DB schema, security | **Planner:** Claude Opus 4.6 (Thinking) / Fable 5 <br> **Critic:** Codex 5.6 Sol / GPT-OSS 120B <br> **Executor:** Claude Sonnet 4.6 (Thinking) | Deep Research (`agy` with **Gemini 3.1 Pro High / Gemini 3.6 Flash High**) + System 2 Debate (up to 3 rounds). Critic effort: `high` / `ultra`. |
+| **Medium** | 3-4 files, new feature, refactoring | **Claude Sonnet 5 (Thinking)** / **Gemini 3.6 Flash (High)** (+ Codex Sol Critic) | `IN_WORKER_ROUTING=true claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" --allow-dangerously-skip-permissions "..." < /dev/null` <br> Critic effort: `medium` / `high` |
+| **Complex** | 5+ files, architectural changes, DB schema, security | **Planner:** Claude Opus 5 (Thinking) / Fable 5 <br> **Critic:** Codex 5.6 Sol / GPT-OSS 120B <br> **Executor:** Claude Sonnet 5 (Thinking) | Deep Research (`agy` with **Gemini 3.1 Pro High / Gemini 3.6 Flash High**) + System 2 Debate (up to 3 rounds). Critic effort: `high` / `ultra`. |
 | **Sensitive** | PII, medical, credentials | **LM Studio** ALWAYS (local model) | Deep local validation. Fail closed if offline. |
-| **Review/QA** | Post-feature audit & regression check | **Codex 5.6 Sol** / **Claude Opus 4.6 (Thinking)** | `IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null` |
+| **Review/QA** | Post-feature audit & regression check | **Codex 5.6 Sol** / **Claude Opus 5 (Thinking)** | `IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null` |
 | **Context/Search** | Deep codebase scan, dependency tree, log parsing | **Antigravity CLI** (`agy`) with **Gemini 3.6 Flash (High)** or **Gemini 3.1 Pro (High)** | `IN_WORKER_ROUTING=true agy -p "..." < /dev/null` for comprehensive research. |
 
 ## Routing Behavior
@@ -90,14 +92,15 @@ Supported Active IDE Models:
     - **Sensitive tasks**: Local models only (Gemma 4 E4B -> Qwen3 Coder 30B) -> fail closed immediately.
     - **Context/Search**: Gemini 3.6 Flash (High) -> Gemini 3.1 Pro (High) -> agy -> codex read-only.
     - **Execution (Trivial/Simple)**: Gemini 3.6 Flash (Medium) -> codex Luna/Terra -> GPT-OSS 120B -> Claude Sonnet -> Local models.
-    - **Complex/Planning**: Claude Opus 4.6 (Thinking) -> Claude Fable/Opus 4.8 -> codex Sol (high/ultra) -> manual.
+    - **Complex/Planning**: Claude Opus 5 (Thinking) -> Claude Fable/Opus 4.8 -> codex Sol (high/ultra) -> manual.
     - *Log all fallback events to `ERRORS.md` with reasons.*
 4. **Codex Sandbox Modes:** Always pick the right `-s` flag — wrong mode = blocked writes. `read-only`: pure analysis only. `workspace-write`: applying patches or fixes within the repo (default for Review/QA). `danger-full-access`: unrestricted system writes. Never use `read-only` when Codex needs to write files.
 4.5. **Codex Model Selection & Effort (Critical):** Never omit the `--model` and `-c model_reasoning_effort` flags in `codex` CLI invocations. Always specify the tier-appropriate model (`gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol`) and calibrated reasoning effort (`low`, `medium`, `high`, or `ultra`).
 4.6. **Non-Interactive Stdin Guard (Critical):** Every CLI worker invocation (`codex exec`, `claude -p`, `agy -p`) MUST be non-interactive. Always pipe input explicitly (e.g. `echo "$PROMPT" | codex exec ... -`) or append `< /dev/null` (e.g. `codex exec ... "prompt" < /dev/null`). Never leave stdin unhandled without EOF, as CLI tools will block indefinitely waiting for terminal input.
 4.7. **CLI Worker Sandbox Bypass (Critical):** When executing external CLI workers (`codex exec`, `codex review`, `claude -p`, `agy -p`) via `run_command`, the tool call MUST set `BypassSandbox: true`. Standard IDE sandbox mode restricts local loopback socket binding (`127.0.0.1:0`) and IPC pipes, triggering `Operation not permitted (os error 1) - failed to initialize in-process app-server client`. macOS "Full Disk Access" permissions do NOT fix sandbox socket isolation.
 5. **Full reference:** See `~/.gemini/config/skills/worker-routing/SKILL.md` for CLI syntax and edge cases.
-6. **Autopilot Consensus Loop (Planner-Critic):** For complex/planning tasks, run an autonomous multi-round consensus debate loop (up to 3 rounds) between the Planner (Claude Opus 4.6 Thinking / Fable 5) and the Critic (Codex Sol). The loop details are saved in `.scratch/planning_debate.md` for user visibility, while the final resolved implementation plan is written to `implementation_plan.md` for final approval.
+6. **Autopilot Consensus Loop (Planner-Critic):** For complex/planning tasks, run an autonomous multi-round consensus debate loop (up to 3 rounds) between the Planner (Claude Opus 5 Thinking / Fable 5) and the Critic (Codex Sol). The loop details are saved in `.scratch/planning_debate.md` for user visibility, while the final resolved implementation plan is written to `implementation_plan.md` for final approval.
+7. **Codebase Design Mandate:** Whenever generating an `implementation_plan.md` for any code-related task, Planner and Critic MUST read and apply the deep module design principles from `/codebase-design` (`/Users/liorparente/.gemini/config/skills/codebase-design/SKILL.md`). Include an explicit Codebase Design & Deep Module section in the plan analyzing public interfaces, module depth, leverage, locality, and test seams before implementation.
 
 ## Pushback Protocol (Bidirectional)
 Antigravity is authorized — and **required** — to refuse:

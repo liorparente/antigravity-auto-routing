@@ -78,8 +78,32 @@ import re
 import sys
 import traceback
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+@dataclass(frozen=True)
+class AuditIssue:
+    code: str
+    severity: str
+    message: str
+    step_index: int
+    target_files: list[str]
+
+
+@dataclass(frozen=True)
+class AuditReport:
+    total_writes: int
+    code_writes: int
+    routing_declarations: int
+    worker_calls: int
+    violations: list[tuple[int, list[str]]]
+    declaration_drift: list[tuple[int, list[str]]]
+    violation_details: list[tuple[int, list[str]]]
+    calibration_markers: int
+    code_write_files: list[str]
+    exit_code: int
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "routing-config.json"
@@ -317,7 +341,13 @@ def structural_binding_issues(
                 worker_matches = executable == "codex" and (expected_tier is None or expected_tier in model)
             elif any(name in declared_worker for name in ("claude", "sonnet", "opus", "fable", "heavy_doer", "planner")):
                 family = next((name for name in ("sonnet", "opus", "fable") if name in declared_worker), None)
-                worker_matches = executable == "claude" and (family is None or family in model)
+                ver_match = re.search(r"\b\d+(?:\.\d+)?\b", declared_worker)
+                expected_ver = ver_match.group(0) if ver_match else None
+                worker_matches = (
+                    executable == "claude"
+                    and (family is None or family in model)
+                    and (expected_ver is None or expected_ver in model)
+                )
             elif any(name in declared_worker for name in ("agy", "gemini", "context_specialist")):
                 worker_matches = executable == "agy"
             else:
@@ -408,17 +438,12 @@ def _add_calibration_text(step: Step, text: str) -> None:
 
 def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
     """Read the verifier secret without creating or modifying project state."""
-    configured = os.environ.get("AGY_CALIBRATION_SECRET")
-    if configured:
-        return configured.encode("utf-8")
-    project_root = Path(root_dir).resolve() if root_dir is not None else Path.cwd()
+    from agent_council import AgentCouncil
+
     try:
-        secret = (
-            project_root / ".ralph" / "cache" / "calibration.key"
-        ).read_bytes()
-    except OSError:
+        return AgentCouncil.load_secret(root_dir=root_dir, read_only=True)
+    except (OSError, ValueError):
         return None
-    return secret or None
 
 
 def _canonical_calibration_payload(manifest: dict[str, Any]) -> bytes | None:
@@ -445,15 +470,8 @@ def calibration_signature_issue(
     invalid = False
     for manifest in step.calibration_manifests:
         signature = manifest.get("signature")
-        payload = _canonical_calibration_payload(manifest)
-        valid = (
-            isinstance(signature, str)
-            and HMAC_SHA256_RE.fullmatch(signature) is not None
-            and payload is not None
-            and hmac.compare_digest(
-                signature.lower(),
-                hmac.new(secret, payload, hashlib.sha256).hexdigest(),
-            )
+        valid = HMACValidator.verify_manifest(
+            manifest, secret=secret, root_dir=root_dir
         )
         if isinstance(signature, str):
             previous = validation_by_signature.get(signature.lower(), True)
@@ -625,7 +643,7 @@ def compute_metrics(
         calibration_markers += len(step.calibration_headers) + len(
             step.calibration_manifests
         )
-        calibration_issue = calibration_signature_issue(step, root_dir)
+        calibration_issue = HMACValidator.validate(step, root_dir)
         if calibration_issue:
             step_issues.append(calibration_issue)
         if step.unknown_write_tools:
@@ -657,6 +675,125 @@ def compute_metrics(
         "violation_details": violation_details,
         "calibration_markers": calibration_markers,
     }
+
+
+class LogParserAdapter:
+    """Base interface for parsing conversation log steps."""
+
+    def parse(self, log_file: str, text: str) -> list[Step]:
+        raise NotImplementedError
+
+
+class TextLogParser(LogParserAdapter):
+    """Parses plain text conversation logs split on Step headers."""
+
+    def parse(self, log_file: str, text: str) -> list[Step]:
+        return _parse_text_steps(text)
+
+
+class JsonLinesLogParser(LogParserAdapter):
+    """Parses JSON Lines log format."""
+
+    def parse(self, log_file: str, text: str) -> list[Step]:
+        return _parse_jsonl_steps(text)
+
+
+class PolicyEvaluator:
+    """Evaluates steps against routing policy configuration."""
+
+    def __init__(self, config: dict[str, Any], root_dir: str | Path | None = None) -> None:
+        self.config = config
+        self.root_dir = root_dir
+        self.worker_patterns = load_patterns(config)
+        self.code_extensions = load_code_extensions(config)
+        self.safe_patterns = load_safe_patterns(config)
+
+    def evaluate(self, steps: list[Step]) -> dict[str, Any]:
+        return compute_metrics(
+            steps,
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+            root_dir=self.root_dir,
+        )
+
+
+class HMACValidator:
+    """Delegates HMAC calibration signature validation to central helpers."""
+
+    @staticmethod
+    def verify_manifest(
+        manifest: dict[str, Any],
+        secret: bytes,
+        root_dir: str | Path | None = None,
+    ) -> bool:
+        """Use AgentCouncil's shared calibration-v1 verification contract."""
+        from agent_council import AgentCouncil
+
+        return AgentCouncil.verify_signature(
+            manifest, secret=secret, root_dir=root_dir
+        )
+
+    @staticmethod
+    def validate(step: Step, root_dir: str | Path | None = None) -> str | None:
+        return calibration_signature_issue(step, root_dir)
+
+
+class RoutingAuditEngine:
+    """Deep engine orchestrating log parsing, policy evaluation, and reporting."""
+
+    def __init__(
+        self, config_path: str | Path | None = None, root_dir: str | Path | None = None
+    ) -> None:
+        self.config_path = Path(config_path) if config_path else CONFIG_PATH
+        self.root_dir = root_dir
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            self.config = json.load(f)
+
+    def get_parser(self, log_file: str, text: str) -> LogParserAdapter:
+        if text.strip().startswith("{") or Path(log_file).suffix.lower() == ".jsonl":
+            return JsonLinesLogParser()
+        return TextLogParser()
+
+    def audit_log(self, log_file: str | Path, strict: bool = False) -> AuditReport:
+        log_path = str(log_file)
+        with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+
+        if not text.strip():
+            raise ValueError(f"Empty log: {log_path}")
+
+        parser = self.get_parser(log_path, text)
+        steps = parser.parse(log_path, text)
+        if not steps:
+            raise ValueError(f"No steps parsed from log: {log_path}")
+
+        evaluator = PolicyEvaluator(self.config, root_dir=self.root_dir)
+        metrics = evaluator.evaluate(steps)
+
+        violation_count = len(metrics["violations"])
+        violation = (metrics["code_writes"] > 0 and metrics["worker_calls"] == 0) or violation_count > 0
+        warning = (
+            metrics["code_writes"] > metrics["worker_calls"] and not violation
+        ) or (
+            metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0 and not violation
+        )
+
+        exit_code = 1 if violation or (strict and warning) else 0
+
+        return AuditReport(
+            total_writes=metrics["total_writes"],
+            code_writes=metrics["code_writes"],
+            routing_declarations=metrics["routing_declarations"],
+            worker_calls=metrics["worker_calls"],
+            violations=metrics["violations"],
+            declaration_drift=metrics["declaration_drift"],
+            violation_details=metrics["violation_details"],
+            calibration_markers=metrics["calibration_markers"],
+            code_write_files=metrics["code_write_files"],
+            exit_code=exit_code,
+        )
+
 
 
 def run_audit(

@@ -28,6 +28,7 @@ REPO_ROOT = SKILL_DIR.parent.parent
 FIXTURES_DIR = SKILL_DIR / "tests" / "fixtures"
 ROUTING_CHECK = SKILL_DIR / "routing_check.py"
 ROUTING_AUDIT = SKILL_DIR / "routing-audit.sh"
+SKILL_MD = SKILL_DIR / "SKILL.md"
 PROTOCOL_MD = SKILL_DIR / "protocol.md"
 INSTALL_SH = REPO_ROOT / "install.sh"
 UNINSTALL_SH = REPO_ROOT / "uninstall.sh"
@@ -39,6 +40,7 @@ PROTOCOL_END = "# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
 spec = importlib.util.spec_from_file_location("routing_check", ROUTING_CHECK)
 assert spec is not None and spec.loader is not None
 routing_check = importlib.util.module_from_spec(spec)
+sys.modules["routing_check"] = routing_check
 spec.loader.exec_module(routing_check)
 
 agent_council_spec = importlib.util.spec_from_file_location(
@@ -46,6 +48,7 @@ agent_council_spec = importlib.util.spec_from_file_location(
 )
 assert agent_council_spec is not None and agent_council_spec.loader is not None
 agent_council = importlib.util.module_from_spec(agent_council_spec)
+sys.modules["agent_council"] = agent_council
 agent_council_spec.loader.exec_module(agent_council)
 
 
@@ -415,8 +418,71 @@ class RoutingAuditIntegrationTests(unittest.TestCase):
         self.assertIn("WARNING", result.stdout)
 
 
+class ProtocolDocumentationTests(unittest.TestCase):
+    """Locks the centralized Rule 4.7 guidance and its CLI examples."""
+
+    def test_skill_centralizes_phase_bypass_guidance(self) -> None:
+        skill_text = SKILL_MD.read_text()
+        lifecycle_section = skill_text.split(
+            "## 🔄 Task Lifecycle & Collaboration Pipeline", 1
+        )[1].split("## 📊 Calibrated Effort Matrix", 1)[0]
+        lifecycle_preamble, phase_bodies = lifecycle_section.split("### Phase 0:", 1)
+
+        self.assertEqual(lifecycle_preamble.count("Rule 4.7"), 1)
+        self.assertIn(
+            "[Rule 4.7 in `protocol.md`](protocol.md#routing-behavior)",
+            lifecycle_preamble,
+        )
+        self.assertNotIn("Rule 4.7", phase_bodies)
+        self.assertNotIn("BypassSandbox", phase_bodies)
+
+    def test_protocol_matrix_scopes_bypass_to_run_command(self) -> None:
+        protocol_text = PROTOCOL_MD.read_text()
+        matrix_section = protocol_text.split(
+            "## 📊 Calibrated Complexity & Supported Model Matrix", 1
+        )[1].split("## Routing Behavior", 1)[0]
+        matrix_intro, matrix_table = matrix_section.split("| Complexity |", 1)
+        matrix_table = "| Complexity |" + matrix_table
+        command_markers = ("codex exec", "codex review", "claude -p", "agy -p")
+        command_examples = [
+            code_span
+            for code_span in re.findall(r"`([^`\n]+)`", matrix_table)
+            if any(marker in code_span for marker in command_markers)
+        ]
+        expected_commands = [
+            'IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna '
+            '-c model_reasoning_effort="low" -s workspace-write "..." < /dev/null',
+            'IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra '
+            '-c model_reasoning_effort="medium" -s workspace-write "..." < /dev/null',
+            'IN_WORKER_ROUTING=true claude -p --model claude-sonnet-5 '
+            '-c model_reasoning_effort="high" --allow-dangerously-skip-permissions '
+            '"..." < /dev/null',
+            "IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write "
+            '-c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null',
+            'IN_WORKER_ROUTING=true agy -p "..." < /dev/null',
+        ]
+
+        self.assertIn("**Execution requirement", matrix_intro)
+        for requirement in (
+            "run_command",
+            "BypassSandbox: true",
+            "Rule 4.7",
+            "tool-call field",
+            "not a worker CLI flag",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, matrix_intro)
+
+        self.assertEqual(command_examples, expected_commands)
+        for command in command_examples:
+            with self.subTest(command=command):
+                self.assertNotIn("BypassSandbox", command)
+                self.assertNotRegex(command, r"(?i)--\S*bypass\S*sandbox")
+
+
 class ProtocolSyncTests(unittest.TestCase):
-    """Ensures install.sh/uninstall.sh single-source AGENTS.md and CLAUDE.md
+    """Ensures install.sh/uninstall.sh single-source AGENTS.md, CLAUDE.md,
+    and GEMINI.md
     from skills/worker-routing/protocol.md by injecting it between sentinel
     markers, preserving any other custom content already in those files.
     Sandboxed under a fake $HOME so the tests never touch the real
@@ -433,19 +499,26 @@ class ProtocolSyncTests(unittest.TestCase):
             env=env,
         )
 
-    def test_install_sh_injects_protocol_block_into_agents_and_claude(self) -> None:
+    def test_install_sh_injects_exact_protocol_block_into_all_docs(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             result = self._run(INSTALL_SH, target_dir, home=fake_home)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             protocol_text = PROTOCOL_MD.read_text()
-            for name in ("AGENTS.md", "CLAUDE.md"):
-                doc = Path(target_dir) / name
-                self.assertTrue(doc.exists())
-                text = doc.read_text()
-                self.assertIn(PROTOCOL_START, text)
-                self.assertIn(PROTOCOL_END, text)
-                self.assertIn(protocol_text, text)
+            expected_block = f"\n\n{protocol_text}\n"
+            docs = (
+                Path(target_dir) / "AGENTS.md",
+                Path(target_dir) / "CLAUDE.md",
+                Path(fake_home) / ".gemini" / "GEMINI.md",
+            )
+            for doc in docs:
+                with self.subTest(doc=doc):
+                    self.assertTrue(doc.exists())
+                    text = doc.read_text()
+                    self.assertEqual(text.count(PROTOCOL_START), 1)
+                    self.assertEqual(text.count(PROTOCOL_END), 1)
+                    block = text.split(PROTOCOL_START, 1)[1].split(PROTOCOL_END, 1)[0]
+                    self.assertEqual(block, expected_block)
 
     def test_install_sh_copies_protocol_md_to_skill_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -662,16 +735,46 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
         )
         review.commands.append("codex review --uncommitted")
         claude = routing_check.Step(
-            3, "[ROUTING: Claude Sonnet 4.6 — complexity: medium — effort: high — reason: implement]"
+            3, "[ROUTING: Claude Sonnet 5 — complexity: medium — effort: high — reason: implement]"
         )
         claude.commands.append(
-            'claude -p --model claude-sonnet-4.6 -c model_reasoning_effort="high" '
+            'claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" '
             '--allow-dangerously-skip-permissions "implement feature" < /dev/null'
         )
         metrics = routing_check.compute_metrics(
             [agy, review, claude], self.code_extensions, self.worker_patterns, self.safe_patterns
         )
         self.assertEqual(metrics["violations"], [])
+
+    def test_dec04_claude_v5_opus_and_sonnet_routing_steps_valid(self) -> None:
+        opus_step = routing_check.Step(
+            1, "[ROUTING: Claude Opus 5 — complexity: complex — effort: high — reason: plan architectural changes]"
+        )
+        opus_step.commands.append(
+            'claude -p --model claude-opus-5 -c model_reasoning_effort="high" "plan feature" < /dev/null'
+        )
+        sonnet_step = routing_check.Step(
+            2, "[ROUTING: Claude Sonnet 5 — complexity: medium — effort: high — reason: execute implementation]"
+        )
+        sonnet_step.commands.append(
+            'claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
+        )
+        metrics = routing_check.compute_metrics(
+            [opus_step, sonnet_step], self.code_extensions, self.worker_patterns, self.safe_patterns
+        )
+        self.assertEqual(metrics["violations"], [])
+
+    def test_dec05_retired_claude_v4_6_model_declarations_rejected(self) -> None:
+        step = routing_check.Step(
+            1, "[ROUTING: Claude Sonnet 4.6 — complexity: medium — effort: high — reason: legacy model test]"
+        )
+        step.commands.append(
+            'claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
+        )
+        metrics = routing_check.compute_metrics(
+            [step], self.code_extensions, self.worker_patterns, self.safe_patterns
+        )
+        self.assertEqual(len(metrics["violations"]), 1)
 
     def test_agent_council_manifest_generation(self) -> None:
         agent_council_path = SKILL_DIR / "agent_council.py"
@@ -1038,6 +1141,106 @@ class AgentCouncilDebateTests(unittest.TestCase):
                 self.assertEqual(
                     agent_council.get_calibration_secret(root), b"environment"
                 )
+
+
+class AgentCouncilSignatureApiTests(unittest.TestCase):
+    """Public key-loading and signature APIs fail closed for auditors."""
+
+    @staticmethod
+    def _unsigned_manifest() -> dict[str, str]:
+        return {
+            "task_id": "signature-api-task",
+            "task": "Verify shared calibration API",
+            "complexity": "medium",
+            "effort": "high",
+            "decision": "APPROVED",
+            "nonce": "0123456789abcdef0123456789abcdef",
+        }
+
+    def test_load_secret_is_read_only_by_default_and_can_create_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            key_file = root / ".ralph" / "cache" / "calibration.key"
+            with self.assertRaises(FileNotFoundError):
+                agent_council.AgentCouncil.load_secret(root)
+            self.assertFalse(key_file.exists())
+
+            generated = agent_council.AgentCouncil.load_secret(root, read_only=False)
+            self.assertEqual(key_file.read_bytes(), generated)
+            self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(agent_council.AgentCouncil.load_secret(root), generated)
+
+    def test_load_secret_rejects_symlinked_workspace_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            key_file = root / ".ralph" / "cache" / "calibration.key"
+            key_file.parent.mkdir(parents=True)
+            target = root / "secret-target"
+            target.write_bytes(b"target-secret")
+            key_file.symlink_to(target)
+
+            with self.assertRaises(ValueError):
+                agent_council.AgentCouncil.load_secret(root)
+
+    def test_load_secret_rejects_oversized_workspace_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            key_file = root / ".ralph" / "cache" / "calibration.key"
+            key_file.parent.mkdir(parents=True)
+            key_file.write_bytes(b"x" * 4097)
+
+            with self.assertRaises(ValueError):
+                agent_council.AgentCouncil.load_secret(root)
+
+    def test_verify_signature_and_validate_manifest_structure(self) -> None:
+        secret = b"signature-api-secret"
+        manifest = self._unsigned_manifest()
+        manifest["signature"] = agent_council.AgentCouncil.generate_signature(
+            manifest, secret
+        )
+
+        self.assertTrue(agent_council.AgentCouncil.validate_manifest_structure(manifest))
+        self.assertTrue(agent_council.AgentCouncil.verify_signature(manifest, secret=secret))
+
+        manifest["task"] = "Tampered task"
+        self.assertTrue(agent_council.AgentCouncil.validate_manifest_structure(manifest))
+        self.assertFalse(agent_council.AgentCouncil.verify_signature(manifest, secret=secret))
+
+        malformed = dict(manifest)
+        malformed.pop("nonce")
+        self.assertFalse(agent_council.AgentCouncil.validate_manifest_structure(malformed))
+
+
+class RoutingAuditEngineTests(unittest.TestCase):
+    """Unit tests for the RoutingAuditEngine, LogParserAdapters, and PolicyEvaluator."""
+
+    def test_engine_audit_clean_log_returns_report(self) -> None:
+        engine = routing_check.RoutingAuditEngine()
+        clean_log = SKILL_DIR / "tests" / "fixtures" / "clean_log.txt"
+        report = engine.audit_log(clean_log)
+        self.assertIsInstance(report, routing_check.AuditReport)
+        self.assertEqual(report.exit_code, 0)
+        self.assertEqual(len(report.violations), 0)
+
+    def test_engine_audit_violation_log_returns_error_report(self) -> None:
+        engine = routing_check.RoutingAuditEngine()
+        violation_log = SKILL_DIR / "tests" / "fixtures" / "unrouted_mutation_log.txt"
+        report = engine.audit_log(violation_log, strict=True)
+        self.assertIsInstance(report, routing_check.AuditReport)
+        self.assertEqual(report.exit_code, 1)
+
+    def test_parser_adapter_selection(self) -> None:
+        engine = routing_check.RoutingAuditEngine()
+        text_parser = engine.get_parser("log.txt", "Step 1: text log")
+        jsonl_parser = engine.get_parser("log.jsonl", '{"routing": "direct"}')
+        self.assertIsInstance(text_parser, routing_check.TextLogParser)
+        self.assertIsInstance(jsonl_parser, routing_check.JsonLinesLogParser)
 
 
 if __name__ == "__main__":

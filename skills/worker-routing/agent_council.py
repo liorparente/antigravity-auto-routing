@@ -37,6 +37,8 @@ DEFAULT_EFFORTS = {
 }
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 UNSAFE_LEXEMES = ("$(", "`", ";", "&&", "||", "|", ">", "<")
+CALIBRATION_FIELDS = ("task_id", "task", "complexity", "effort", "decision", "nonce")
+HMAC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 
 
 def lexical_safety_scan(task: str) -> bool:
@@ -92,10 +94,10 @@ def generate_calibration_signature(
     nonce: str,
     secret: bytes | None = None,
 ) -> str:
-    """Generate an HMAC-SHA256 signature over all decision-bearing fields."""
+    """Compatibility facade for :meth:`AgentCouncil.generate_signature`."""
     if secret is None:
         secret = get_calibration_secret(None, create=False)
-    payload = _canonical_json(
+    return AgentCouncil.generate_signature(
         {
             "task_id": task_id,
             "task": task,
@@ -103,51 +105,23 @@ def generate_calibration_signature(
             "effort": effort,
             "decision": decision,
             "nonce": nonce,
-        }
+        },
+        secret,
     )
-    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
 def get_calibration_secret(root_dir: Path | None, *, create: bool = True) -> bytes:
-    """Return the environment secret or the workspace's private local key.
+    """Compatibility facade for the central secret provider.
 
-    The environment always takes precedence.  When ``create`` is false this
-    helper is read-only and therefore suitable for callers that only verify
-    signatures.
+    ``create`` retains its historical meaning: council generation may create a
+    workspace key, whereas signature verification must remain read-only.
     """
-    configured_secret = os.environ.get("AGY_CALIBRATION_SECRET")
-    if configured_secret:
-        return configured_secret.encode("utf-8")
-    if root_dir is None:
-        raise RuntimeError(
-            "AGY_CALIBRATION_SECRET is required outside an AgentCouncil workspace"
-        )
+    return AgentCouncil.load_secret(root_dir, read_only=not create)
 
-    secret_file = Path(root_dir).resolve() / ".ralph" / "cache" / "calibration.key"
-    try:
-        secret = secret_file.read_bytes()
-    except FileNotFoundError:
-        if not create:
-            raise RuntimeError(f"calibration secret not found: {secret_file}")
-    else:
-        if not secret:
-            raise RuntimeError(f"calibration secret is empty: {secret_file}")
-        return secret
 
-    secret_file.parent.mkdir(parents=True, exist_ok=True)
-    generated = secrets.token_bytes(32)
-    try:
-        descriptor = os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        secret = secret_file.read_bytes()
-        if not secret:
-            raise RuntimeError(f"calibration secret is empty: {secret_file}")
-        return secret
-    with os.fdopen(descriptor, "wb") as stream:
-        stream.write(generated)
-        stream.flush()
-        os.fsync(stream.fileno())
-    return generated
+def verify_calibration_signature(manifest: dict[str, Any], secret: bytes) -> bool:
+    """Pure module function to verify a calibration-v1 signature."""
+    return AgentCouncil.verify_signature(manifest, secret=secret)
 
 
 def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
@@ -177,7 +151,115 @@ class AgentCouncil:
 
     def _calibration_secret(self) -> bytes:
         """Compatibility wrapper around the central secret provider."""
-        return get_calibration_secret(self.root_dir)
+        return self.load_secret(self.root_dir, read_only=False)
+
+    @staticmethod
+    def load_secret(
+        root_dir: str | Path | None = None, read_only: bool = True
+    ) -> bytes:
+        """Load the calibration secret without trusting unsafe local key files.
+
+        An explicit environment secret has priority.  Workspace keys are only
+        accepted when they are ordinary, non-symlink files no larger than 4 KiB.
+        Verification callers use the default read-only mode, so a missing key
+        cannot create authentication material as a side effect.
+        """
+        configured_secret = os.environ.get("AGY_CALIBRATION_SECRET")
+        if configured_secret:
+            return configured_secret.encode("utf-8")
+
+        secret_file = (
+            Path(root_dir or ".").resolve()
+            / ".ralph"
+            / "cache"
+            / "calibration.key"
+        )
+
+        if secret_file.is_symlink():
+            raise ValueError(f"calibration secret must be a regular file: {secret_file}")
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+
+        try:
+            descriptor = os.open(secret_file, flags)
+        except OSError:
+            if secret_file.is_symlink():
+                raise ValueError(f"calibration secret must be a regular file: {secret_file}")
+            if read_only:
+                raise FileNotFoundError(secret_file)
+            secret_file.parent.mkdir(parents=True, exist_ok=True)
+            generated = secrets.token_bytes(32)
+            try:
+                descriptor = os.open(
+                    secret_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+            except FileExistsError:
+                return AgentCouncil.load_secret(root_dir, read_only=True)
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(generated)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(secret_file, 0o600)
+            return generated
+
+        try:
+            stat_result = os.fstat(descriptor)
+            if not os.path.isabs(str(secret_file)) or secret_file.is_symlink():
+                raise ValueError(f"calibration secret must be a regular file: {secret_file}")
+            if stat_result.st_size > 4096:
+                raise ValueError(f"calibration secret exceeds 4096 bytes: {secret_file}")
+            with os.fdopen(descriptor, "rb", closefd=True) as stream:
+                secret = stream.read()
+                descriptor = -1
+            if not secret:
+                raise ValueError(f"calibration secret is empty: {secret_file}")
+            return secret
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    @staticmethod
+    def generate_signature(manifest: dict[str, Any], secret: bytes) -> str:
+        """Return the calibration-v1 HMAC for the decision-bearing fields."""
+        payload: dict[str, str] = {}
+        for field in CALIBRATION_FIELDS:
+            value = manifest.get(field)
+            if not isinstance(value, str):
+                raise ValueError(f"calibration manifest field {field!r} must be a string")
+            payload[field] = value
+        return hmac.new(secret, _canonical_json(payload), hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def validate_manifest_structure(manifest: dict[str, Any]) -> bool:
+        """Return whether a manifest contains a syntactically valid v1 signature."""
+        return (
+            isinstance(manifest, dict)
+            and all(isinstance(manifest.get(field), str) for field in CALIBRATION_FIELDS)
+            and isinstance(manifest.get("signature"), str)
+            and HMAC_SHA256_RE.fullmatch(manifest["signature"]) is not None
+        )
+
+    @staticmethod
+    def verify_signature(
+        manifest: dict[str, Any],
+        secret: bytes | None = None,
+        root_dir: str | Path | None = None,
+    ) -> bool:
+        """Fail closed unless ``manifest`` has a valid calibration-v1 HMAC."""
+        if not AgentCouncil.validate_manifest_structure(manifest):
+            return False
+        try:
+            verification_secret = (
+                secret
+                if secret is not None
+                else AgentCouncil.load_secret(root_dir, read_only=True)
+            )
+            expected = AgentCouncil.generate_signature(manifest, verification_secret)
+        except (OSError, ValueError):
+            return False
+        return hmac.compare_digest(manifest["signature"].lower(), expected)
 
     @staticmethod
     def _task_id(task: str, complexity: str, effort: str, task_id: str | None) -> str:
