@@ -59,3 +59,8 @@
 - Resolution: Standardized `protocol.md`, `routing-config.json`, `SKILL.md`, and `test_routing.py` on active v5 models (`claude-sonnet-5`, `claude-opus-5`). Enhanced `routing_check.py` with numeric version matching (`re.search(r'\b\d+(?:\.\d+)?\b', declared_worker)`) to strictly detect version drift against declared routing headers.
 - Verification: Ran `./install.sh` to update system-wide targets and verified all 76 unit tests pass (`OK`).
 
+## 2026-08-04 — Claude CLI Positional Argument & Context Leak
+
+- Issue: The Claude CLI (`claude -p -c ... "Prompt" < /dev/null`) ignored the positional prompt argument due to the flag chain and `/dev/null` redirection.
+- Consequence: Treating the prompt as empty, the CLI defaulted to loading its stateful project history (e.g., from a `.claude` directory) and answered based on an old conversation context (e.g., Phase 3 Auth) instead of the intended prompt.
+- Resolution: Pipe the prompt strictly through `stdin` using `echo "..." | claude -p -`. This forces the CLI to read the exact input and prevents it from falling back to cached stateful history.
