@@ -19,7 +19,12 @@ commit fails. Edit only this file — the generated copies are overwritten on ev
 
 ## ⛔ HARD GATE — Before ANY State-Modifying Action
 
-Before using `write_to_file`, `replace_file_content`, `multi_replace_file_content`, or `run_command` (non-read-only), if the environment variable `IN_WORKER_ROUTING` is NOT set to `true`, execute this internal check:
+⛔ **NESTED WORKER SHORT-CIRCUIT:**
+If the environment variable `ROUTING_DEPTH` is set to `1` or greater, YOU ARE THE DESIGNATED WORKER. 
+Do NOT route the task. Do NOT check the complexity matrix. Do NOT invoke `codex exec`, `claude -p`, `codex review`, `agy`, council tooling, or any subagent mechanisms. 
+Perform the assigned task directly; modify files only when requested.
+
+Before using `write_to_file`, `replace_file_content`, `multi_replace_file_content`, or `run_command` (non-read-only), if the environment variable `ROUTING_DEPTH` is NOT set to `1`, execute this internal check:
 
 1. **Self-Check:** Ask internally — *"Can a worker do this?"*
    - YES → route to worker. Do not proceed with direct execution.
@@ -58,7 +63,7 @@ This script detects source code edits made without worker routing. Violations ar
 - MCP tool calls (NotebookLM, GA4, GSC, Stitch — these are tools, not code output)
 - `browser_subagent` for UI inspection/QA
 - `/handoff` output (temp .md file, not committed to repo) and `/prototype` throwaway files (local only)
-- Executing when the environment variable `IN_WORKER_ROUTING` is set to `true` (nested worker execution)
+- Executing when the environment variable `ROUTING_DEPTH` is set to `1` (nested worker execution)
 
 ## 📊 Calibrated Complexity & Supported Model Matrix — Perfect Score Standard
 
@@ -75,13 +80,13 @@ Supported Active IDE Models:
 
 | Complexity | Signs & Requirements | Route To Model | Calibrated Effort & Command |
 |---|---|---|---|
-| **Trivial** | Single file, rename, formatting, quick Q&A | **Gemini 3.6 Flash (Low)** / **Codex 5.6 Luna** / **Gemma 4 E4B** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "..." < /dev/null` |
-| **Simple** | 1-2 files, boilerplate, input validation | **Gemini 3.6 Flash (Medium)** / **Codex 5.6 Terra** / **GPT-OSS 120B (Medium)** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "..." < /dev/null` |
-| **Medium** | 3-4 files, new feature, refactoring | **Claude Sonnet 5 (Thinking)** / **Gemini 3.6 Flash (High)** (+ Codex Sol Critic) | `IN_WORKER_ROUTING=true claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" --allow-dangerously-skip-permissions "..." < /dev/null` <br> Critic effort: `medium` / `high` |
+| **Trivial** | Single file, rename, formatting, quick Q&A | **Gemini 3.6 Flash (Low)** / **Codex 5.6 Luna** / **Gemma 4 E4B** | `ROUTING_DEPTH=1 codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "..." < /dev/null` |
+| **Simple** | 1-2 files, boilerplate, input validation | **Gemini 3.6 Flash (Medium)** / **Codex 5.6 Terra** / **GPT-OSS 120B (Medium)** | `ROUTING_DEPTH=1 codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "..." < /dev/null` |
+| **Medium** | 3-4 files, new feature, refactoring | **Claude Sonnet 5 (Thinking)** / **Gemini 3.6 Flash (High)** (+ Codex Sol Critic) | `ROUTING_DEPTH=1 claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" --allow-dangerously-skip-permissions "..." < /dev/null` <br> Critic effort: `medium` / `high` |
 | **Complex** | 5+ files, architectural changes, DB schema, security | **Planner:** Claude Opus 5 (Thinking) / Fable 5 <br> **Critic:** Codex 5.6 Sol / GPT-OSS 120B <br> **Executor:** Claude Sonnet 5 (Thinking) | Deep Research (`agy` with **Gemini 3.1 Pro High / Gemini 3.6 Flash High**) + System 2 Debate (up to 3 rounds). Critic effort: `high` / `ultra`. |
 | **Sensitive** | PII, medical, credentials | **LM Studio** ALWAYS (local model) | Deep local validation. Fail closed if offline. |
-| **Review/QA** | Post-feature audit & regression check | **Codex 5.6 Sol** / **Claude Opus 5 (Thinking)** | `IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null` |
-| **Context/Search** | Deep codebase scan, dependency tree, log parsing | **Antigravity CLI** (`agy`) with **Gemini 3.6 Flash (High)** or **Gemini 3.1 Pro (High)** | `IN_WORKER_ROUTING=true agy -p "..." < /dev/null` for comprehensive research. |
+| **Review/QA** | Post-feature audit & regression check | **Codex 5.6 Sol** / **Claude Opus 5 (Thinking)** | `ROUTING_DEPTH=1 codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null` |
+| **Context/Search** | Deep codebase scan, dependency tree, log parsing | **Antigravity CLI** (`agy`) with **Gemini 3.6 Flash (High)** or **Gemini 3.1 Pro (High)** | `ROUTING_DEPTH=1 agy -p "..." < /dev/null` for comprehensive research. |
 
 ## Routing Behavior
 1. **Silent availability check:** Before routing, verify the target worker is reachable (e.g., `curl -s http://127.0.0.1:1234/api/v0/models` for LM Studio). Do this silently.
@@ -98,6 +103,7 @@ Supported Active IDE Models:
 4.5. **Codex Model Selection & Effort (Critical):** Never omit the `--model` and `-c model_reasoning_effort` flags in `codex` CLI invocations. Always specify the tier-appropriate model (`gpt-5.6-luna`, `gpt-5.6-terra`, or `gpt-5.6-sol`) and calibrated reasoning effort (`low`, `medium`, `high`, or `ultra`).
 4.6. **Non-Interactive Stdin Guard (Critical):** Every CLI worker invocation (`codex exec`, `claude -p`, `agy -p`) MUST be non-interactive. Always pipe input explicitly (e.g. `echo "$PROMPT" | codex exec ... -`) or append `< /dev/null` (e.g. `codex exec ... "prompt" < /dev/null`). Never leave stdin unhandled without EOF, as CLI tools will block indefinitely waiting for terminal input.
 4.7. **CLI Worker Sandbox Bypass (Critical):** When executing external CLI workers (`codex exec`, `codex review`, `claude -p`, `agy -p`) via `run_command`, the tool call MUST set `BypassSandbox: true`. Standard IDE sandbox mode restricts local loopback socket binding (`127.0.0.1:0`) and IPC pipes, triggering `Operation not permitted (os error 1) - failed to initialize in-process app-server client`. macOS "Full Disk Access" permissions do NOT fix sandbox socket isolation.
+4.8. **Nested Worker Prompt Injection (Critical):** When delegating to a worker, you MUST include this exact string in the prompt: "CRITICAL: You are running as a nested worker (ROUTING_DEPTH=1). Execute directly. Do not route this to another agent." This exact string is the canonical `NESTED_WORKER_WARNING` in `skills/worker-routing/constants.py` (paired with `ROUTING_ENV_VAR` for the `ROUTING_DEPTH` env var name) — adapters and tooling must import it rather than re-declaring the literal. Before injecting it, check whether the warning is already present *anywhere* in the outgoing envelope, not only as a leading prefix — a prompt that already carries the warning further down (e.g. re-sent context, an upstream adapter that already injected it) must not receive a second, duplicate copy.
 5. **Full reference:** See `~/.gemini/config/skills/worker-routing/SKILL.md` for CLI syntax and edge cases.
 6. **Autopilot Consensus Loop (Planner-Critic):** For complex/planning tasks, run an autonomous multi-round consensus debate loop (up to 3 rounds) between the Planner (Claude Opus 5 Thinking / Fable 5) and the Critic (Codex Sol). The loop details are saved in `.scratch/planning_debate.md` for user visibility, while the final resolved implementation plan is written to `implementation_plan.md` for final approval.
 7. **Codebase Design Mandate:** Whenever generating an `implementation_plan.md` for any code-related task, Planner and Critic MUST read and apply the deep module design principles from `/codebase-design` (`/Users/liorparente/.gemini/config/skills/codebase-design/SKILL.md`). Include an explicit Codebase Design & Deep Module section in the plan analyzing public interfaces, module depth, leverage, locality, and test seams before implementation.

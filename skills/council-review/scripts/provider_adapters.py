@@ -1,7 +1,12 @@
 import asyncio
 import json
 import os
+import sys
+from pathlib import Path
 from typing import Dict, Any, List
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "worker-routing"))
+from constants import NESTED_WORKER_WARNING, ROUTING_ENV_VAR
 
 class ReviewerAdapter:
     def __init__(self, provider_id: str):
@@ -21,12 +26,14 @@ class CLIReviewerAdapter(ReviewerAdapter):
         raise NotImplementedError
 
     async def _run_cli(self, args: List[str], stdin_data: str, deadline: int) -> str:
+        if NESTED_WORKER_WARNING not in stdin_data:
+            stdin_data = f"{NESTED_WORKER_WARNING}\n\n{stdin_data}"
         proc = await asyncio.create_subprocess_exec(
             self.executable, *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env={"IN_WORKER_ROUTING": "true", "PATH": os.environ.get("PATH", "")}
+            env={ROUTING_ENV_VAR: "1", "PATH": os.environ.get("PATH", "")}
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(input=stdin_data.encode()), timeout=deadline)

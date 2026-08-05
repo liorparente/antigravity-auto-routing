@@ -8,44 +8,44 @@ This reference manual documents the exact command lines, REST API commands, and 
 
 ### 1. Antigravity CLI (agy) - Gemini 3.5 Flash / Pro
 *Always wrap with `script -q /dev/null` to allocate a PTY and prevent CLI hangs.*
-*Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
+*Always prefix with `ROUTING_DEPTH=1` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Deep Research & codebase scanning (Flash/Pro)
-IN_WORKER_ROUTING=true script -q /dev/null agy -p "Perform deep research on how authentication and token validation are handled across the repository. List all affected files, schemas, and dependencies." --output-format markdown
+ROUTING_DEPTH=1 script -q /dev/null agy -p "Perform deep research on how authentication and token validation are handled across the repository. List all affected files, schemas, and dependencies." --output-format markdown
 
 # Large file / specification parsing
-IN_WORKER_ROUTING=true script -q /dev/null agy -p "Extract API schemas and data contracts from this spec document" -i /path/to/spec.pdf
+ROUTING_DEPTH=1 script -q /dev/null agy -p "Extract API schemas and data contracts from this spec document" -i /path/to/spec.pdf
 ```
 
 ---
 
 ### 2. Claude Code CLI
-*Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
+*Always prefix with `ROUTING_DEPTH=1` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Complex implementation (Fable 5 / Sonnet 5)
-IN_WORKER_ROUTING=true claude -p --allow-dangerously-skip-permissions "Implement the user profile component with full type safety and test coverage"
+ROUTING_DEPTH=1 claude -p --allow-dangerously-skip-permissions "Implement the user profile component with full type safety and test coverage"
 
 # High-precision architectural research & planning (Opus 4.8 / Fable 5)
-IN_WORKER_ROUTING=true claude -p --model claude-opus-4-8 --allow-dangerously-skip-permissions "Draft a comprehensive migration plan for the database schema with zero downtime"
+ROUTING_DEPTH=1 claude -p --model claude-opus-4-8 --allow-dangerously-skip-permissions "Draft a comprehensive migration plan for the database schema with zero downtime"
 ```
 
 ---
 
 ### 3. Codex CLI (v0.125+)
 *Always specify both `--model <model>` (for `exec` commands) or `-c model="<model>"` (for `review` commands), and `-c model_reasoning_effort="low"|"medium"|"high"|"ultra"`, to match the task's complexity and guarantee a perfect score.*
-*Always prefix with `IN_WORKER_ROUTING=true` so the worker's own tool calls aren't re-gated.*
+*Always prefix with `ROUTING_DEPTH=1` so the worker's own tool calls aren't re-gated.*
 ```bash
 # Plan critique (Consensus step — High Effort for Deep Thinking)
-IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "Perform deep reasoning review on this implementation plan: $(cat .claude/plan_draft.md)"
+ROUTING_DEPTH=1 codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "Perform deep reasoning review on this implementation plan: $(cat .claude/plan_draft.md)"
 
 # Code review (QA step — High Effort for Zero-Defect Audit)
-IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="high"
+ROUTING_DEPTH=1 codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="high"
 
 # Trivial task (Luna - gpt-5.6-luna)
-IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "Rename variables in file.js"
+ROUTING_DEPTH=1 codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "Rename variables in file.js"
 
 # Simple task (Terra - gpt-5.6-terra)
-IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "Add input validation and error handling to helper.js"
+ROUTING_DEPTH=1 codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "Add input validation and error handling to helper.js"
 ```
 
 ---
