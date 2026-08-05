@@ -4,8 +4,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
-PROTOCOL_SRC="$SRC_DIR/protocol.md"
+WR_SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
+CR_SRC_DIR="$SCRIPT_DIR/skills/council-review"
+ME_SRC_DIR="$SCRIPT_DIR/skills/model-evaluator"
+PROTOCOL_SRC="$WR_SRC_DIR/protocol.md"
 TARGET_PROJECT_DIR="${1:-.}"
 
 if [ ! -d "$TARGET_PROJECT_DIR" ] || [ ! -r "$PROTOCOL_SRC" ]; then
@@ -14,12 +16,26 @@ if [ ! -d "$TARGET_PROJECT_DIR" ] || [ ! -r "$PROTOCOL_SRC" ]; then
 fi
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
 
-TARGET_DIRS=(
+WR_TARGET_DIRS=(
     "$HOME/.gemini/config/skills/worker-routing"
     "$HOME/.codex/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.agent/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.codex/skills/worker-routing"
+)
+CR_TARGET_DIRS=(
+    "$HOME/.gemini/config/skills/council-review"
+    "$HOME/.codex/skills/council-review"
+    "$TARGET_PROJECT_DIR/.agents/skills/council-review"
+    "$TARGET_PROJECT_DIR/.agent/skills/council-review"
+    "$TARGET_PROJECT_DIR/.codex/skills/council-review"
+)
+ME_TARGET_DIRS=(
+    "$HOME/.gemini/config/skills/model-evaluator"
+    "$HOME/.codex/skills/model-evaluator"
+    "$TARGET_PROJECT_DIR/.agents/skills/model-evaluator"
+    "$TARGET_PROJECT_DIR/.agent/skills/model-evaluator"
+    "$TARGET_PROJECT_DIR/.codex/skills/model-evaluator"
 )
 AGENTS_MD="$TARGET_PROJECT_DIR/AGENTS.md"
 CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
@@ -28,7 +44,9 @@ CLAUDE_RULE="$TARGET_PROJECT_DIR/.claude/rules/worker-routing.md"
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END="# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
 LEGACY_MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
-MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py protocol.md)
+WR_MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py protocol.md)
+CR_MANAGED_FILES=(SKILL.md agents/openai.yaml scripts/council_review.py scripts/provider_adapters.py references/council-manifest-v1.schema.json references/council-policy.json references/domain-decisions.md references/member-review.schema.json)
+ME_MANAGED_FILES=(SKILL.md scripts/evaluator.py scripts/storage.py scripts/router_config_generator.py benchmarks/low.yaml)
 
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
 TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-rollback.XXXXXX")"
@@ -140,10 +158,23 @@ echo "   Target project: $TARGET_PROJECT_DIR"
 echo "📦 Preflighting and staging installation..."
 
 # Stage all source-controlled artifacts before touching an installation target.
-mkdir -p "$STAGING_DIR/files"
-for file in "${MANAGED_FILES[@]}"; do
-    [ -r "$SRC_DIR/$file" ] || { echo "❌ Missing required source: $file" >&2; exit 1; }
-    cp "$SRC_DIR/$file" "$STAGING_DIR/files/$file"
+mkdir -p "$STAGING_DIR/wr_files"
+mkdir -p "$STAGING_DIR/cr_files"
+mkdir -p "$STAGING_DIR/me_files"
+for file in "${WR_MANAGED_FILES[@]}"; do
+    [ -r "$WR_SRC_DIR/$file" ] || { echo "❌ Missing required source: $file" >&2; exit 1; }
+    mkdir -p "$(dirname "$STAGING_DIR/wr_files/$file")"
+    cp "$WR_SRC_DIR/$file" "$STAGING_DIR/wr_files/$file"
+done
+for file in "${CR_MANAGED_FILES[@]}"; do
+    [ -r "$CR_SRC_DIR/$file" ] || { echo "❌ Missing required source: $file" >&2; exit 1; }
+    mkdir -p "$(dirname "$STAGING_DIR/cr_files/$file")"
+    cp "$CR_SRC_DIR/$file" "$STAGING_DIR/cr_files/$file"
+done
+for file in "${ME_MANAGED_FILES[@]}"; do
+    [ -r "$ME_SRC_DIR/$file" ] || { echo "❌ Missing required source: $file" >&2; exit 1; }
+    mkdir -p "$(dirname "$STAGING_DIR/me_files/$file")"
+    cp "$ME_SRC_DIR/$file" "$STAGING_DIR/me_files/$file"
 done
 
 DOCS=("$AGENTS_MD" "$CLAUDE_MD" "$GEMINI_MD")
@@ -168,20 +199,52 @@ if [ "${AUTO_ROUTING_FAIL_AFTER_STAGE:-0}" = "1" ]; then
 fi
 
 write_count=0
-for target_dir in "${TARGET_DIRS[@]}"; do
-    for file in "${MANAGED_FILES[@]}"; do
-        atomic_copy "$STAGING_DIR/files/$file" "$target_dir/$file"
+for target_dir in "${WR_TARGET_DIRS[@]}"; do
+    for file in "${WR_MANAGED_FILES[@]}"; do
+        atomic_copy "$STAGING_DIR/wr_files/$file" "$target_dir/$file"
         write_count=$((write_count + 1))
         if [ "${AUTO_ROUTING_FAIL_AFTER_WRITES:-0}" = "$write_count" ]; then
             echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_WRITES triggered." >&2
             exit 1
         fi
     done
-    # Preserve customized routing configuration; install only the default.
+    # Preserve customized routing configuration; install only the default, or migrate existing
     if [ ! -f "$target_dir/routing-config.json" ]; then
-        atomic_copy "$SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
+        atomic_copy "$WR_SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
+    else
+        # JSON Migration for council_runner audit entry
+        tmp_config="$STAGING_DIR/routing-config-$$.json"
+        if python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], "r") as f:
+        data = json.load(f)
+    if "audit_patterns" not in data:
+        data["audit_patterns"] = {}
+    if "council_runner" not in data["audit_patterns"]:
+        data["audit_patterns"]["council_runner"] = {"command": "council-review", "allow_sandbox": True}
+    with open(sys.argv[2], "w") as f:
+        json.dump(data, f, indent=2)
+    sys.exit(0)
+except Exception as e:
+    sys.exit(1)
+' "$target_dir/routing-config.json" "$tmp_config"; then
+            atomic_copy "$tmp_config" "$target_dir/routing-config.json"
+        fi
     fi
     chmod +x "$target_dir/routing-audit.sh" "$target_dir/agent_council.py"
+done
+
+for target_dir in "${CR_TARGET_DIRS[@]}"; do
+    for file in "${CR_MANAGED_FILES[@]}"; do
+        atomic_copy "$STAGING_DIR/cr_files/$file" "$target_dir/$file"
+    done
+done
+
+for target_dir in "${ME_TARGET_DIRS[@]}"; do
+    for file in "${ME_MANAGED_FILES[@]}"; do
+        atomic_copy "$STAGING_DIR/me_files/$file" "$target_dir/$file"
+    done
 done
 
 atomic_copy "$STAGING_DIR/claude-rule.md" "$CLAUDE_RULE"

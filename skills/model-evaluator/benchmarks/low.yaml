@@ -1,0 +1,6 @@
+- id: format_1
+  prompt: "Return the string 'HELLO WORLD' but in completely lowercase."
+  expected_format: "hello world"
+- id: format_2
+  prompt: "What is 2+2? Output only the number."
+  expected_format: "4"
