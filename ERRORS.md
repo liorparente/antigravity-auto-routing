@@ -64,3 +64,16 @@
 - Issue: The Claude CLI (`claude -p -c ... "Prompt" < /dev/null`) ignored the positional prompt argument due to the flag chain and `/dev/null` redirection.
 - Consequence: Treating the prompt as empty, the CLI defaulted to loading its stateful project history (e.g., from a `.claude` directory) and answered based on an old conversation context (e.g., Phase 3 Auth) instead of the intended prompt.
 - Resolution: Pipe the prompt strictly through `stdin` using `echo "..." | claude -p -`. This forces the CLI to read the exact input and prevents it from falling back to cached stateful history.
+
+## 2026-08-05 — LiteLLM Async Stream Mock Exhaustion
+
+- Issue: When testing an async generator returned by `litellm.acompletion(stream=True)`, setting `mock_acompletion.return_value = mock_stream()` causes the generator to be instantiated once. Subsequent runs in the same test suite get an exhausted generator and fail silently with empty output.
+- Consequence: Multi-model evaluation tests failed inexplicably with `ttft_ms=0` and empty responses, making `success=False` even when the first model passed.
+- Resolution: Use `mock_acompletion.side_effect = mock_stream_factory` where `mock_stream_factory` is a function that returns a fresh async generator for every invocation.
+
+## 2026-08-05 — Strict Preflight Rollback in install.sh
+
+- Issue: `install.sh` aborted the deployment with `Missing required source: SKILL.md` after adding a new skill directory to `MANAGED_FILES`.
+- Consequence: The script atomically rolled back all changes without touching the target deployment directories, leaving the orchestrator un-updated.
+- Root Cause: A scaffolded skill (`council-review`) had no `SKILL.md` file, which was listed as a mandatory file in the `CR_MANAGED_FILES` array.
+- Resolution: Always ensure `SKILL.md` is present in any skill directory added to the auto-routing protocol before invoking `install.sh`.
