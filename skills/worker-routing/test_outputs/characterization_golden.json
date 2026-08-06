@@ -1,0 +1,114 @@
+{
+  "audit_output": {
+    "returncode": 1,
+    "stderr": "  \u26a0\ufe0f  Step 2: unrouted code edit detected (['src/utils.py'])\n  \u26a0\ufe0f  Step 3: unrouted code edit detected (['src/feature.py'])\n",
+    "stdout": "\ud83d\udcca Results:\n  Total file write tool calls:      2\n  Writes to source code files:      2\n  ROUTING declarations found:       3\n  Worker CLI calls found:           1\n  Unrouted code edit violations:    2\n\n\ud83d\udd34 VIOLATION: Unrouted code edit detected in 2 step(s).\n   Every step that writes a source code file must also contain a worker CLI call,\n   regardless of what its [ROUTING:] label says.\n\n--- Detailed source code edits ---\n      1 feature.py\n      1 utils.py\n"
+  },
+  "code_extensions": [
+    "ts",
+    "tsx",
+    "css",
+    "js",
+    "jsx",
+    "py",
+    "go",
+    "rs",
+    "tf",
+    "sql",
+    "sh",
+    "rb",
+    "cpp",
+    "h"
+  ],
+  "compute_metrics_output": {
+    "calibration_markers": 0,
+    "code_write_files": [
+      "src/utils.py",
+      "src/feature.py"
+    ],
+    "code_writes": 2,
+    "declaration_drift": [],
+    "routing_declarations": 3,
+    "total_writes": 2,
+    "violation_details": [
+      [
+        2,
+        []
+      ]
+    ],
+    "violations": [
+      [
+        2,
+        [
+          "src/utils.py"
+        ]
+      ]
+    ],
+    "worker_calls": 1
+  },
+  "log_text": "Step 1: [ROUTING: Direct \u2014 reason: read-only file inspection]\n\nStep 2: [ROUTING: Direct \u2014 reason: quick fix]\nTool call: replace_file_content({\"TargetFile\": \"src/utils.py\", \"ReplacementChunks\": [...]})\n\nStep 3: [ROUTING: codex \u2014 complexity: simple \u2014 effort: low \u2014 reason: implement feature]\nTool call: replace_file_content({\"TargetFile\": \"src/feature.py\", \"ReplacementChunks\": [...]})\nTool call: run_command({\"CommandLine\": \"IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\\\"low\\\" \\\"implement feature X\\\"\"})\n",
+  "note": "Phase 1 characterization golden",
+  "safe_commands": [
+    "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*cat(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*grep(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*rg(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*git\\s+(?:status|log|diff|show|branch)(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*curl\\s+-[a-zA-Z]+(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*jq\\s+[^>|&;]*$",
+    "^\\s*which\\s+[^>|&;]+\\s*$",
+    "^\\s*echo\\s+[^>|&;]*$",
+    "^\\s*pwd\\s*$",
+    "^\\s*find\\s+[^>|&;]*$",
+    "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*lsof(?:\\s+-[a-zA-Z0-9:]+)?(?:\\s+[^>|&;]+)?\\s*$"
+  ],
+  "step_fixtures": [
+    {
+      "commands": [],
+      "index": 1,
+      "routing": "[ROUTING: Direct \u2014 reason: read-only file inspection]",
+      "writes": []
+    },
+    {
+      "commands": [],
+      "index": 2,
+      "routing": "[ROUTING: Direct \u2014 reason: quick fix]",
+      "writes": [
+        "src/utils.py"
+      ]
+    },
+    {
+      "commands": [
+        "IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\" \"implement feature X\""
+      ],
+      "index": 3,
+      "routing": "[ROUTING: codex \u2014 complexity: simple \u2014 effort: low \u2014 reason: implement feature]",
+      "writes": [
+        "src/feature.py"
+      ]
+    }
+  ],
+  "worker_patterns": [
+    "agy",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.1-pro",
+    "claude-opus-5",
+    "claude-fable-5",
+    "claude -p --model",
+    "codex exec",
+    "gpt-oss-120b",
+    "codex-sol",
+    "claude-sonnet-5",
+    "claude -p",
+    "codex exec",
+    "gemini-3.6-flash-low",
+    "codex-terra",
+    "codex-luna",
+    "127.0.0.1:1234/v1/chat",
+    "localhost:1234/v1/chat",
+    "codex review",
+    "claude-opus-5"
+  ]
+}

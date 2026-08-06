@@ -81,12 +81,50 @@ from typing import Any
 
 
 @dataclass(frozen=True)
+class AuditConfig:
+    worker_patterns: list[re.Pattern[str]]
+    safe_patterns: list[re.Pattern[str]]
+    code_extensions: list[str]
+
+
+@dataclass(frozen=True)
 class AuditIssue:
-    code: str
     severity: str
     message: str
-    step_index: int
-    target_files: list[str]
+    discovery_ordinal: int
+
+    def __post_init__(self) -> None:
+        if self.severity not in {"error", "warning"}:
+            raise ValueError("severity must be 'error' or 'warning'")
+
+    def __lt__(self, other: object) -> bool:
+        if not isinstance(other, AuditIssue):
+            return NotImplemented
+        severity_rank = {"error": 0, "warning": 1}
+        return (severity_rank[self.severity], self.discovery_ordinal) < (
+            severity_rank[other.severity],
+            other.discovery_ordinal,
+        )
+
+
+@dataclass(frozen=True)
+class AuditResult:
+    issues: list[AuditIssue]
+    worker_calls: int
+    has_worker_calls: bool
+    total_steps: int
+
+    @property
+    def passed(self) -> bool:
+        return not self.errors
+
+    @property
+    def warnings(self) -> list[AuditIssue]:
+        return [issue for issue in self.issues if issue.severity == "warning"]
+
+    @property
+    def errors(self) -> list[AuditIssue]:
+        return [issue for issue in self.issues if issue.severity == "error"]
 
 
 @dataclass(frozen=True)
@@ -741,12 +779,265 @@ class RoutingAuditEngine:
     """Deep engine orchestrating log parsing, policy evaluation, and reporting."""
 
     def __init__(
-        self, config_path: str | Path | None = None, root_dir: str | Path | None = None
+        self,
+        config_path: str | Path | AuditConfig | None = None,
+        root_dir: str | Path | None = None,
+        *,
+        config: AuditConfig | None = None,
     ) -> None:
+        # ``config_path`` is the original positional API.  Keep accepting the
+        # short-lived positional AuditConfig form for callers from the refactor;
+        # new callers should pass it as ``config=``.
+        if isinstance(config_path, AuditConfig):
+            if config is not None:
+                raise TypeError("config was provided both positionally and by keyword")
+            config = config_path
+            config_path = None
         self.config_path = Path(config_path) if config_path else CONFIG_PATH
         self.root_dir = root_dir
-        with open(self.config_path, "r", encoding="utf-8") as f:
-            self.config = json.load(f)
+        self._legacy_config: dict[str, Any] | None = None
+
+        if config is None:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                legacy_config: dict[str, Any] = json.load(f)
+            self._legacy_config = legacy_config
+            config = AuditConfig(
+                worker_patterns=[
+                    re.compile(r"^" + re.escape(pattern) + r"(?:\s|$)")
+                    for pattern in load_patterns(legacy_config)
+                ],
+                safe_patterns=load_safe_patterns(legacy_config),
+                code_extensions=load_code_extensions(legacy_config),
+            )
+        self.config = config
+
+    def audit(self, steps: list[Step]) -> AuditResult:
+        """Evaluate already-parsed steps without using the legacy facade."""
+        issues: list[AuditIssue] = []
+        worker_calls = 0
+        total_writes = 0
+        code_writes = 0
+        routing_declarations = 0
+        code_extensions = {
+            extension.lower().lstrip(".")
+            for extension in self.config.code_extensions
+        }
+
+        for discovery_ordinal, step in enumerate(steps):
+            if step.routing:
+                routing_declarations += 1
+
+            step_worker_calls = 0
+            step_has_unsafe_execution = False
+
+            for command in step.commands:
+                command_worker_calls = 0
+                command_is_unsafe = any(
+                    marker in command for marker in UNSAFE_SUBSTRINGS
+                )
+                for segment in command_segments(command):
+                    if not segment:
+                        continue
+                    if self._is_worker_invocation(segment):
+                        command_worker_calls += 1
+                    elif not is_command_safe(
+                        segment, self.config.safe_patterns
+                    ):
+                        command_is_unsafe = True
+
+                if command_is_unsafe:
+                    step_has_unsafe_execution = True
+                else:
+                    worker_calls += command_worker_calls
+                    step_worker_calls += command_worker_calls
+
+            if step_has_unsafe_execution:
+                issues.append(
+                    AuditIssue(
+                        "error",
+                        f"Step {step.index}: unsafe or unrouted command execution",
+                        discovery_ordinal,
+                    )
+                )
+
+            for message in self._structural_issues(step):
+                issues.append(AuditIssue("error", message, discovery_ordinal))
+
+            calibration_issue = HMACValidator.validate(step, self.root_dir)
+            if calibration_issue:
+                issues.append(
+                    AuditIssue("error", calibration_issue, discovery_ordinal)
+                )
+
+            if step.unknown_write_tools:
+                issues.append(
+                    AuditIssue(
+                        "error",
+                        "LOG-01 unknown write tool: "
+                        + ", ".join(step.unknown_write_tools),
+                        discovery_ordinal,
+                    )
+                )
+
+            step_code_writes: list[str] = []
+            for target_file in step.writes:
+                total_writes += 1
+                suffix = Path(target_file).suffix.lower().lstrip(".")
+                if suffix in code_extensions:
+                    code_writes += 1
+                    step_code_writes.append(target_file)
+
+            if step_code_writes and step_worker_calls == 0:
+                issues.append(
+                    AuditIssue(
+                        "error",
+                        f"Step {step.index}: unrouted code edit detected "
+                        f"({step_code_writes})",
+                        discovery_ordinal,
+                    )
+                )
+
+        if not any(issue.severity == "error" for issue in issues):
+            if code_writes > worker_calls:
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        f"WARN-01 more code edits ({code_writes}) than worker "
+                        f"calls ({worker_calls})",
+                        len(steps),
+                    )
+                )
+            elif routing_declarations == 0 and total_writes > 0:
+                issues.append(
+                    AuditIssue(
+                        "warning",
+                        f"WARN-02 no routing declarations for {total_writes} "
+                        "file writes",
+                        len(steps),
+                    )
+                )
+
+        return AuditResult(
+            issues=sorted(issues),
+            worker_calls=worker_calls,
+            has_worker_calls=worker_calls > 0,
+            total_steps=len(steps),
+        )
+
+    def _is_worker_invocation(self, command: str) -> bool:
+        stripped = _strip_command_wrappers(command)
+        return any(pattern.match(stripped) for pattern in self.config.worker_patterns)
+
+    def _structural_issues(self, step: Step) -> list[str]:
+        if not step.routing:
+            return []
+
+        declaration = ROUTING_LABEL_RE.search(step.routing)
+        if declaration is None:
+            direct_declaration = re.fullmatch(
+                r"\[ROUTING:\s*Direct\s+—\s*reason:\s*[^\]\n]+\]",
+                step.routing,
+                re.IGNORECASE,
+            )
+            if direct_declaration is None:
+                return [f"Step {step.index}: DEC-03 invalid routing declaration"]
+            return []
+
+        declared_worker = declaration.group("worker").strip().lower()
+        declared_effort = declaration.group("effort").lower()
+        issues: list[str] = []
+
+        for command in step.commands:
+            if any(marker in command for marker in UNSAFE_SUBSTRINGS):
+                continue
+            for segment in command_segments(command):
+                if not segment or not self._is_worker_invocation(segment):
+                    continue
+
+                stripped = _strip_command_wrappers(segment)
+                executable = stripped.split(maxsplit=1)[0].lower()
+                model_match = MODEL_RE.search(segment)
+                effort_match = EFFORT_RE.search(segment)
+                requires_flags = (
+                    executable == "codex" and stripped.startswith("codex exec")
+                ) or executable == "claude"
+
+                if requires_flags and (not model_match or not effort_match):
+                    issues.append(
+                        f"Step {step.index}: DEC-04 missing --model or "
+                        "model_reasoning_effort"
+                    )
+                    continue
+                model = model_match.group("model").lower() if model_match else ""
+                actual_effort = (
+                    effort_match.group("effort").lower() if effort_match else None
+                )
+                if not self._worker_matches_declaration(
+                    executable, model, declared_worker
+                ):
+                    issues.append(
+                        f"Step {step.index}: DEC-01 declaration worker/model drift"
+                    )
+
+                # Flagless worker forms are valid, but must still undergo the
+                # DEC-01 declaration check above.  They have no calibration
+                # flags to validate afterwards.
+                if not requires_flags and not model_match and not effort_match:
+                    continue
+                if actual_effort is not None and actual_effort != declared_effort:
+                    issues.append(
+                        f"Step {step.index}: DEC-02 declaration effort drift"
+                    )
+
+        return issues
+
+    @staticmethod
+    def _worker_matches_declaration(
+        executable: str, model: str, declared_worker: str
+    ) -> bool:
+        expected_tier = next(
+            (tier for tier in ("sol", "terra", "luna") if tier in declared_worker),
+            None,
+        )
+        if "codex" in declared_worker or expected_tier:
+            return executable == "codex" and (
+                # ``codex review`` is intentionally flagless, so DEC-01 can
+                # establish only the executable family in that case.  Model
+                # tier validation remains enforced whenever a model is given.
+                expected_tier is None or not model or expected_tier in model
+            )
+        if any(
+            name in declared_worker
+            for name in (
+                "claude",
+                "sonnet",
+                "opus",
+                "fable",
+                "heavy_doer",
+                "planner",
+            )
+        ):
+            family = next(
+                (
+                    name
+                    for name in ("sonnet", "opus", "fable")
+                    if name in declared_worker
+                ),
+                None,
+            )
+            version_match = re.search(r"\b\d+(?:\.\d+)?\b", declared_worker)
+            expected_version = version_match.group(0) if version_match else None
+            return (
+                executable == "claude"
+                and (family is None or family in model)
+                and (expected_version is None or expected_version in model)
+            )
+        if any(
+            name in declared_worker
+            for name in ("agy", "gemini", "context_specialist")
+        ):
+            return executable == "agy"
+        return False
 
     def get_parser(self, log_file: str, text: str) -> LogParserAdapter:
         if text.strip().startswith("{") or Path(log_file).suffix.lower() == ".jsonl":
@@ -766,7 +1057,11 @@ class RoutingAuditEngine:
         if not steps:
             raise ValueError(f"No steps parsed from log: {log_path}")
 
-        evaluator = PolicyEvaluator(self.config, root_dir=self.root_dir)
+        legacy_config = self._legacy_config
+        if legacy_config is None:
+            with open(self.config_path, "r", encoding="utf-8") as f:
+                legacy_config = json.load(f)
+        evaluator = PolicyEvaluator(legacy_config, root_dir=self.root_dir)
         metrics = evaluator.evaluate(steps)
 
         violation_count = len(metrics["violations"])
