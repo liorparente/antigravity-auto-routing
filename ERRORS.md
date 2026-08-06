@@ -70,3 +70,9 @@
 - Issue: Delegating basic version control operations (`git branch`, `git checkout`) to CLI workers (`codex exec`, `claude -p`) failed because the worker sandbox locks the `.git/` directory (`Operation not permitted`).
 - Consequence: Orchestrator workflows that require branching or reverting were blocked because the routing protocol strictly forbade the Orchestrator from running these commands directly.
 - Resolution: Updated `skills/worker-routing/protocol.md` to add `Basic version control operations` to the "Allowed Direct Actions" list. The Orchestrator is now authorized to bypass worker routing for `git branch`, `git checkout`, `git revert`, and `git reset` and execute them directly via `run_command`. Propagated via `install.sh`.
+
+## 2026-08-06 — Background Worker Collision & Assumed Codebase State
+
+- Issue: The orchestrator launched a nested worker (`codex exec`) in the background to implement Phase 2, but incorrectly assumed the worker failed due to a misread log tail, and simultaneously misjudged the codebase state by assuming a "Phase 0 Restoration" commit had reverted the source files when it had only reverted documentation.
+- Consequence: The orchestrator almost duplicated the worker's effort, experiencing cognitive dissonance when viewing files that were being actively mutated by the background worker, and when discovering Phase 3-5 implementations that were never actually reverted.
+- Resolution: Always use the `manage_task` tool with `status` to ensure background workers have fully terminated before inspecting their output. Additionally, never assume a codebase was cleanly reverted based on a commit message alone without verifying `git diff` or `git log --stat` on the source files.
