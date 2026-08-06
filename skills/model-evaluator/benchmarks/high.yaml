@@ -1,6 +1,0 @@
-- id: logic_1
-  prompt: "I have a 3 gallon jug and a 5 gallon jug. I need exactly 4 gallons of water. How do I do it?"
-  expected_format: "llm_judge"
-- id: code_1
-  prompt: "Write a python function that computes the nth fibonacci number in O(log n) time using matrix exponentiation."
-  expected_format: "llm_judge"
