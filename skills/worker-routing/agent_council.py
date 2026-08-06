@@ -227,7 +227,7 @@ class AgentCouncil:
         for field in CALIBRATION_FIELDS:
             value = manifest.get(field)
             if not isinstance(value, str):
-                raise ValueError(f"calibration manifest field {field!r} must be a string")
+                raise TypeError(f"calibration manifest field {field!r} must be a string")
             payload[field] = value
         return hmac.new(secret, _canonical_json(payload), hashlib.sha256).hexdigest()
 
