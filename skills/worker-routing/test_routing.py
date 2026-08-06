@@ -1220,6 +1220,99 @@ class AgentCouncilSignatureApiTests(unittest.TestCase):
 class RoutingAuditEngineTests(unittest.TestCase):
     """Unit tests for the RoutingAuditEngine, LogParserAdapters, and PolicyEvaluator."""
 
+    def setUp(self) -> None:
+        self.audit_config = routing_check.AuditConfig(
+            worker_patterns=[re.compile(r"^codex exec(?:\s|$)")],
+            safe_patterns=[re.compile(r"^git status(?:\s|$)")],
+            code_extensions=["py"],
+        )
+
+    def test_audit_issue_sorting_prioritizes_severity_then_discovery(self) -> None:
+        issues = [
+            routing_check.AuditIssue("warning", "early warning", 0),
+            routing_check.AuditIssue("error", "later error", 3),
+            routing_check.AuditIssue("error", "early error", 1),
+            routing_check.AuditIssue("warning", "later warning", 2),
+        ]
+
+        self.assertEqual(
+            [issue.message for issue in sorted(issues)],
+            ["early error", "later error", "early warning", "later warning"],
+        )
+
+    def test_engine_audit_accepts_valid_synthetic_worker_step(self) -> None:
+        step = routing_check.Step(
+            7,
+            "[ROUTING: Codex Sol — complexity: simple — effort: high — "
+            "reason: implement feature]",
+        )
+        step.commands.append(
+            "codex exec --model gpt-5.6-sol "
+            '-c model_reasoning_effort="high" implement'
+        )
+        step.writes.append("src/feature.py")
+
+        result = routing_check.RoutingAuditEngine(self.audit_config).audit([step])
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.errors, [])
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(result.worker_calls, 1)
+        self.assertTrue(result.has_worker_calls)
+        self.assertEqual(result.total_steps, 1)
+
+    def test_engine_audit_reports_synthetic_rule_failures(self) -> None:
+        unrouted_write = routing_check.Step(
+            10, "[ROUTING: Direct — reason: unauthorized source edit]"
+        )
+        unrouted_write.writes.append("src/direct.py")
+
+        unsafe_execution = routing_check.Step(
+            20, "[ROUTING: Direct — reason: unsafe execution]"
+        )
+        unsafe_execution.commands.append("python3 mutate.py")
+
+        downgraded_worker = routing_check.Step(
+            30,
+            "[ROUTING: Codex Sol — complexity: complex — effort: high — "
+            "reason: complex change]",
+        )
+        downgraded_worker.commands.append(
+            "codex exec --model gpt-5.6-terra "
+            '-c model_reasoning_effort="medium" implement'
+        )
+
+        malformed_declaration = routing_check.Step(
+            40, "[ROUTING: codex exec without required fields]"
+        )
+
+        result = routing_check.RoutingAuditEngine(self.audit_config).audit(
+            [
+                unrouted_write,
+                unsafe_execution,
+                downgraded_worker,
+                malformed_declaration,
+            ]
+        )
+
+        self.assertFalse(result.passed)
+        self.assertEqual(result.worker_calls, 1)
+        self.assertTrue(result.has_worker_calls)
+        self.assertEqual(result.total_steps, 4)
+        self.assertTrue(
+            any("unrouted code edit" in issue.message for issue in result.errors)
+        )
+        self.assertTrue(
+            any("unsafe or unrouted command" in issue.message for issue in result.errors)
+        )
+        self.assertTrue(any("DEC-01" in issue.message for issue in result.errors))
+        self.assertTrue(any("DEC-02" in issue.message for issue in result.errors))
+        self.assertTrue(any("DEC-03" in issue.message for issue in result.errors))
+        self.assertEqual(
+            [issue.discovery_ordinal for issue in result.errors],
+            sorted(issue.discovery_ordinal for issue in result.errors),
+        )
+
     def test_engine_audit_clean_log_returns_report(self) -> None:
         engine = routing_check.RoutingAuditEngine()
         clean_log = SKILL_DIR / "tests" / "fixtures" / "clean_log.txt"
@@ -1241,6 +1334,45 @@ class RoutingAuditEngineTests(unittest.TestCase):
         jsonl_parser = engine.get_parser("log.jsonl", '{"routing": "direct"}')
         self.assertIsInstance(text_parser, routing_check.TextLogParser)
         self.assertIsInstance(jsonl_parser, routing_check.JsonLinesLogParser)
+
+
+class Phase1CharacterizationTests(unittest.TestCase):
+    GOLDEN_PATH = SKILL_DIR / "test_outputs" / "characterization_golden.json"
+
+    def setUp(self) -> None:
+        if not self.GOLDEN_PATH.exists():
+            self.fail("Golden file missing")
+        self.golden = json.loads(self.GOLDEN_PATH.read_text())
+
+    def _rebuild_steps(self):
+        steps = []
+        for fixture in self.golden["step_fixtures"]:
+            step = routing_check.Step(fixture["index"], fixture["routing"])
+            step.writes.extend(fixture["writes"])
+            step.commands.extend(fixture["commands"])
+            steps.append(step)
+        return steps
+
+    def test_characterize_routing_metrics_exact(self) -> None:
+        steps = self._rebuild_steps()
+        safe_patterns = [re.compile(p) for p in self.golden["safe_commands"]]
+        metrics = routing_check.compute_metrics(
+            steps,
+            self.golden["code_extensions"],
+            self.golden["worker_patterns"],
+            safe_patterns,
+        )
+        normalized = json.loads(json.dumps(metrics))
+        self.assertEqual(normalized, self.golden["compute_metrics_output"])
+
+    def test_characterize_audit_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "characterization_log.txt"
+            log_path.write_text(self.golden["log_text"])
+            result = run_check(str(log_path))
+        self.assertEqual(result.stdout, self.golden["audit_output"]["stdout"])
+        self.assertEqual(result.stderr, self.golden["audit_output"]["stderr"])
+        self.assertEqual(result.returncode, self.golden["audit_output"]["returncode"])
 
 
 if __name__ == "__main__":
