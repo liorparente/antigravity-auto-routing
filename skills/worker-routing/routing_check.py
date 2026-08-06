@@ -36,7 +36,7 @@ Worker-CLI detection only ever looks at the `CommandLine`/`command_line`
 value of an actual `run_command` tool call — never at surrounding prose —
 so a conversational mention of a worker's name can't be mistaken for routing.
 `is_worker_invocation` strips leading environment variable assignments
-(e.g. `ROUTING_DEPTH=1` — see `ROUTING_ENV_VAR` in `constants.py`) and known wrappers (`script -q /dev/null`,
+(e.g. `IN_WORKER_ROUTING=true`) and known wrappers (`script -q /dev/null`,
 `bash -c`) before checking whether the command *starts with* a configured
 worker pattern — a substring mention mid-command (e.g. `echo codex exec`)
 does not count.

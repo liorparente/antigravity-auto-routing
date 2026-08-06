@@ -51,14 +51,6 @@ agent_council = importlib.util.module_from_spec(agent_council_spec)
 sys.modules["agent_council"] = agent_council
 agent_council_spec.loader.exec_module(agent_council)
 
-constants_spec = importlib.util.spec_from_file_location(
-    "constants", SKILL_DIR / "constants.py"
-)
-assert constants_spec is not None and constants_spec.loader is not None
-constants = importlib.util.module_from_spec(constants_spec)
-sys.modules["constants"] = constants
-constants_spec.loader.exec_module(constants)
-
 
 def run_check(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -240,7 +232,7 @@ class RoutingCheckUnitTests(unittest.TestCase):
         self.assertTrue(routing_check.is_worker_invocation('codex exec "fix bug"', patterns))
         self.assertTrue(
             routing_check.is_worker_invocation(
-                f'{constants.ROUTING_ENV_VAR}=1 script -q /dev/null codex exec "fix bug"', patterns
+                'IN_WORKER_ROUTING=true script -q /dev/null codex exec "fix bug"', patterns
             )
         )
 
@@ -457,18 +449,17 @@ class ProtocolDocumentationTests(unittest.TestCase):
             for code_span in re.findall(r"`([^`\n]+)`", matrix_table)
             if any(marker in code_span for marker in command_markers)
         ]
-        depth_prefix = f"{constants.ROUTING_ENV_VAR}=1"
         expected_commands = [
-            f'{depth_prefix} codex exec --model gpt-5.6-luna '
+            'IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna '
             '-c model_reasoning_effort="low" -s workspace-write "..." < /dev/null',
-            f'{depth_prefix} codex exec --model gpt-5.6-terra '
+            'IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra '
             '-c model_reasoning_effort="medium" -s workspace-write "..." < /dev/null',
-            f'{depth_prefix} claude -p --model claude-sonnet-5 '
+            'IN_WORKER_ROUTING=true claude -p --model claude-sonnet-5 '
             '-c model_reasoning_effort="high" --allow-dangerously-skip-permissions '
             '"..." < /dev/null',
-            f"{depth_prefix} codex review --uncommitted -s workspace-write "
+            "IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write "
             '-c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null',
-            f'{depth_prefix} agy -p "..." < /dev/null',
+            'IN_WORKER_ROUTING=true agy -p "..." < /dev/null',
         ]
 
         self.assertIn("**Execution requirement", matrix_intro)
@@ -700,7 +691,7 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
 
     def test_cmd01_chained_command_with_unsafe_tail_flagged(self) -> None:
         step = routing_check.Step(1, "[ROUTING: codex — complexity: simple — effort: low — reason: test]")
-        step.commands.append(f"{constants.ROUTING_ENV_VAR}=1 codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\" && touch x.py")
+        step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\" && touch x.py")
         metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
         self.assertEqual(len(metrics["violations"]), 1)
 
@@ -724,13 +715,13 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
 
     def test_dec01_model_declaration_drift_detected(self) -> None:
         step = routing_check.Step(1, "[ROUTING: Codex Sol — complexity: complex — effort: high — reason: test]")
-        step.commands.append(f"{constants.ROUTING_ENV_VAR}=1 codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\"")
+        step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\"")
         metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
         self.assertEqual(len(metrics["violations"]), 1)
 
     def test_dec02_effort_declaration_drift_detected(self) -> None:
         step = routing_check.Step(1, "[ROUTING: codex — complexity: complex — effort: high — reason: test]")
-        step.commands.append(f"{constants.ROUTING_ENV_VAR}=1 codex exec --model gpt-5.6-sol -c model_reasoning_effort=\"low\"")
+        step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort=\"low\"")
         metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
         self.assertEqual(len(metrics["violations"]), 1)
 
@@ -1010,7 +1001,7 @@ class TransactionalWorkerCallTests(unittest.TestCase):
 
     def test_worker_segment_in_command_with_unsafe_tail_is_not_counted(self) -> None:
         metrics = self._metrics(
-            f"{constants.ROUTING_ENV_VAR}=1 codex exec --model gpt-5.6-luna "
+            "IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna "
             "-c model_reasoning_effort=low && touch x.py"
         )
         self.assertEqual(metrics["worker_calls"], 0)

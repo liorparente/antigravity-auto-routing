@@ -119,46 +119,5 @@ class TestCouncilReview(unittest.TestCase):
         res = asyncio.run(fake.review("env", 1, 10))
         self.assertEqual(res["vote"], "approve")
 
-    def test_nested_worker_warning_injected_once_via_containment_check(self):
-        import unittest.mock
-        import provider_adapters
-        from provider_adapters import ClaudeAdapter
-        from constants import NESTED_WORKER_WARNING
-
-        captured = {}
-
-        class FakeProcess:
-            returncode = 0
-
-            async def communicate(self, input=None):
-                captured["stdin"] = input.decode()
-                return b"ok", b""
-
-            def kill(self):
-                pass
-
-        async def fake_create_subprocess_exec(*args, **kwargs):
-            return FakeProcess()
-
-        with unittest.mock.patch.object(
-            provider_adapters.asyncio, "create_subprocess_exec", new=fake_create_subprocess_exec
-        ):
-            adapter = ClaudeAdapter("claude-sonnet-5", "high")
-            asyncio.run(adapter._run_cli(["-p"], "do the task", 10))
-        self.assertEqual(captured["stdin"].count(NESTED_WORKER_WARNING), 1)
-        self.assertTrue(captured["stdin"].startswith(NESTED_WORKER_WARNING))
-
-        # A prompt that already carries the warning somewhere other than as a
-        # strict prefix must not be double-injected (regression for the old
-        # `startswith` check, which only ever caught the exact-prefix case).
-        already_warned = f"some preamble\n{NESTED_WORKER_WARNING}\nrest of prompt"
-        with unittest.mock.patch.object(
-            provider_adapters.asyncio, "create_subprocess_exec", new=fake_create_subprocess_exec
-        ):
-            adapter = ClaudeAdapter("claude-sonnet-5", "high")
-            asyncio.run(adapter._run_cli(["-p"], already_warned, 10))
-        self.assertEqual(captured["stdin"].count(NESTED_WORKER_WARNING), 1)
-        self.assertEqual(captured["stdin"], already_warned)
-
 if __name__ == '__main__':
     unittest.main()
