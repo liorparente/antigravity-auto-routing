@@ -55,7 +55,6 @@ This script detects source code edits made without worker routing. Violations ar
 - Answering questions, planning, conversation
 - Creating/editing **documentation & visualization artifacts** (`.md` and `.html` files — not `.ts`, `.tsx`, `.css`, `.js`)
 - Read-only diagnostics (`git status`, `git log`, `curl` health checks)
-- Basic version control operations (`git branch`, `git checkout`, `git revert`, `git reset`) — because worker sandboxes block `.git/` write access
 - MCP tool calls (NotebookLM, GA4, GSC, Stitch — these are tools, not code output)
 - `browser_subagent` for UI inspection/QA
 - `/handoff` output (temp .md file, not committed to repo) and `/prototype` throwaway files (local only)
