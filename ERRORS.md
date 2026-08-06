@@ -64,3 +64,9 @@
 - Issue: The Claude CLI (`claude -p -c ... "Prompt" < /dev/null`) ignored the positional prompt argument due to the flag chain and `/dev/null` redirection.
 - Consequence: Treating the prompt as empty, the CLI defaulted to loading its stateful project history (e.g., from a `.claude` directory) and answered based on an old conversation context (e.g., Phase 3 Auth) instead of the intended prompt.
 - Resolution: Pipe the prompt strictly through `stdin` using `echo "..." | claude -p -`. This forces the CLI to read the exact input and prevents it from falling back to cached stateful history.
+
+## 2026-08-06 — Worker Sandbox Blocks Git Operations
+
+- Issue: Delegating basic version control operations (`git branch`, `git checkout`) to CLI workers (`codex exec`, `claude -p`) failed because the worker sandbox locks the `.git/` directory (`Operation not permitted`).
+- Consequence: Orchestrator workflows that require branching or reverting were blocked because the routing protocol strictly forbade the Orchestrator from running these commands directly.
+- Resolution: Updated `skills/worker-routing/protocol.md` to add `Basic version control operations` to the "Allowed Direct Actions" list. The Orchestrator is now authorized to bypass worker routing for `git branch`, `git checkout`, `git revert`, and `git reset` and execute them directly via `run_command`. Propagated via `install.sh`.
