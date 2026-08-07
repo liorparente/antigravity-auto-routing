@@ -76,3 +76,9 @@
 - Issue: The orchestrator launched a nested worker (`codex exec`) in the background to implement Phase 2, but incorrectly assumed the worker failed due to a misread log tail, and simultaneously misjudged the codebase state by assuming a "Phase 0 Restoration" commit had reverted the source files when it had only reverted documentation.
 - Consequence: The orchestrator almost duplicated the worker's effort, experiencing cognitive dissonance when viewing files that were being actively mutated by the background worker, and when discovering Phase 3-5 implementations that were never actually reverted.
 - Resolution: Always use the `manage_task` tool with `status` to ensure background workers have fully terminated before inspecting their output. Additionally, never assume a codebase was cleanly reverted based on a commit message alone without verifying `git diff` or `git log --stat` on the source files.
+
+## 2026-08-07 — Claude Code Session State Leak in Background Workers
+
+- Issue: The CLI worker (`claude -p`) was continuing conversations from the last active session in the workspace instead of starting a fresh, isolated context for each new task. This resulted in workers acting on unrelated context (e.g., from old tasks) and creating cognitive dissonance.
+- Consequence: Worker tasks in new sessions incorrectly referenced plans or context from prior, completed tasks in the same project directory, causing hallucinations and incorrect implementations.
+- Resolution: Added the `--no-session-persistence` flag to all `claude -p` invocations in the worker routing protocol (`protocol.md`, `SKILL.md`, `REFERENCE.md`). This flag prevents Claude Code from saving or resuming disk-based session history, guaranteeing a stateless, clean slate for every worker invocation.
