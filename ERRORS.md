@@ -82,3 +82,9 @@
 - Issue: The CLI worker (`claude -p`) was continuing conversations from the last active session in the workspace instead of starting a fresh, isolated context for each new task. This resulted in workers acting on unrelated context (e.g., from old tasks) and creating cognitive dissonance.
 - Consequence: Worker tasks in new sessions incorrectly referenced plans or context from prior, completed tasks in the same project directory, causing hallucinations and incorrect implementations.
 - Resolution: Added the `--no-session-persistence` flag to all `claude -p` invocations in the worker routing protocol (`protocol.md`, `SKILL.md`, `REFERENCE.md`). This flag prevents Claude Code from saving or resuming disk-based session history, guaranteeing a stateless, clean slate for every worker invocation.
+
+## 2026-08-07 — Brittle Test Assertions on Protocol Commands
+
+- Issue: After updating `protocol.md` to include `--no-session-persistence`, the CI tests failed because `test_routing.py` contained hardcoded strings expecting the exact previous command structure.
+- Consequence: The `unit-tests` GitHub Action failed, blocking the pipeline despite the logic being correct.
+- Resolution: Updated all hardcoded `claude -p` assertion strings in `test_routing.py` to match the new protocol command exactly. Moving forward, any change to CLI command shapes in the documentation or protocol must be accompanied by synchronous updates to the test suite's expected string assertions.
