@@ -17,9 +17,9 @@ The hard-enforced gate, response template, and quality/effort matrix live in [`p
 | :--- | :--- | :--- | :--- |
 | **Orchestrator** | Claude Code / Codex | Active Workspace CLI | Parses user requests, decomposes tasks into `task.md`, and orchestrates the worker pipeline. **Strictly prohibited from self-executing code/commands.** |
 | **Deep Context Specialist** | `agy` (**Gemini 3.6 Flash** / **Gemini 3.1 Pro**) | `agy -p` (PTY wrapped) | Performs deep semantic code searches, parses massive repositories, maps dependencies, and generates distilled context briefs (1,000–2,000 tokens). |
-| **Planner / Deep Thinker** | **Claude Opus 5 (Thinking)** / Claude Fable 5 | `claude -p --model` | Receives distilled context, performs deep reasoning, designs architectural specs, and writes implementation plans (ICoT). |
+| **Planner / Deep Thinker** | **Claude Opus 5 (Thinking)** / Claude Fable 5 | `claude -p --no-session-persistence --model` | Receives distilled context, performs deep reasoning, designs architectural specs, and writes implementation plans (ICoT). |
 | **Critic / Peer Reviewer** | Codex 5.6 Sol / **GPT-OSS 120B (Medium)** | `codex exec` | Peer-reviews Planner drafts with calibrated reasoning effort (`medium`/`high`/`ultra`), flags edge cases, verifies logic consistency, and approves final plans. |
-| **Heavy Doer** | **Claude Sonnet 5 (Thinking)** / Sonnet 5 | `claude -p` | Executes complex, multi-file code modifications, refactorings, and logic implementation. |
+| **Heavy Doer** | **Claude Sonnet 5 (Thinking)** / Sonnet 5 | `claude -p --no-session-persistence` | Executes complex, multi-file code modifications, refactorings, and logic implementation. |
 | **Light Doer** | Codex 5.6 Terra / Luna / **Gemini 3.6 Flash (Low)** | `codex exec` / `agy` | Implements simple steps, boilerplate code, formats files, and writes unit tests with calibrated effort. |
 | **Local / Sensitive Doer** | LM Studio (Qwen 30B / Gemma 4 E4B) | Local API (`127.0.0.1:1234`) | Executes tasks involving PII, credentials, or proprietary logic. Performs deep local validation. |
 | **QA / Auditor** | Codex 5.6 Sol / **Claude Opus 5 (Thinking)** | `codex review` | Audits the final workspace state and uncommitted changes (`codex review --uncommitted` with `high` effort). |
