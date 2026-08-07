@@ -454,7 +454,7 @@ class ProtocolDocumentationTests(unittest.TestCase):
              '-c model_reasoning_effort="low" -s workspace-write "..." < /dev/null'),
             ('IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra '
              '-c model_reasoning_effort="medium" -s workspace-write "..." < /dev/null'),
-            ('IN_WORKER_ROUTING=true claude -p --model claude-sonnet-5 '
+            ('IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-sonnet-5 '
              '-c model_reasoning_effort="high" --allow-dangerously-skip-permissions '
              '"..." < /dev/null'),
             ("IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write "
@@ -738,7 +738,7 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             3, "[ROUTING: Claude Sonnet 5 — complexity: medium — effort: high — reason: implement]"
         )
         claude.commands.append(
-            'claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" '
+            'claude -p --no-session-persistence --model claude-sonnet-5 -c model_reasoning_effort="high" '
             '--allow-dangerously-skip-permissions "implement feature" < /dev/null'
         )
         metrics = routing_check.compute_metrics(
@@ -751,13 +751,13 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             1, "[ROUTING: Claude Opus 5 — complexity: complex — effort: high — reason: plan architectural changes]"
         )
         opus_step.commands.append(
-            'claude -p --model claude-opus-5 -c model_reasoning_effort="high" "plan feature" < /dev/null'
+            'claude -p --no-session-persistence --model claude-opus-5 -c model_reasoning_effort="high" "plan feature" < /dev/null'
         )
         sonnet_step = routing_check.Step(
             2, "[ROUTING: Claude Sonnet 5 — complexity: medium — effort: high — reason: execute implementation]"
         )
         sonnet_step.commands.append(
-            'claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
+            'claude -p --no-session-persistence --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
         )
         metrics = routing_check.compute_metrics(
             [opus_step, sonnet_step], self.code_extensions, self.worker_patterns, self.safe_patterns
@@ -769,7 +769,7 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             1, "[ROUTING: Claude Sonnet 4.6 — complexity: medium — effort: high — reason: legacy model test]"
         )
         step.commands.append(
-            'claude -p --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
+            'claude -p --no-session-persistence --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
         )
         metrics = routing_check.compute_metrics(
             [step], self.code_extensions, self.worker_patterns, self.safe_patterns
