@@ -1265,7 +1265,30 @@ class AgentCouncilSafetyDefectTests(unittest.TestCase):
             with self.assertRaises(agent_council.SensitiveTaskFallbackBlocked):
                 council.run("rotate api_key", "simple", task_id="sensitive-halt")
             telemetry = json.loads(council.telemetry_file.read_text().strip())
+            error_log = (council.root_dir / ".ralph" / "errors.log").read_text()
         self.assertEqual(telemetry["chosen_worker"], "halt")
+        self.assertIn("Task ID: sensitive-halt", error_log)
+        self.assertIn("Primary Worker: local_model", error_log)
+        self.assertIn("local inference endpoint unavailable", error_log)
+        self.assertIn("FAIL-CLOSED", error_log)
+
+    def test_run_escalates_retry_effort_through_council_caller_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            agent_council, "check_local_model_endpoint", return_value=False
+        ), mock.patch.object(
+            agent_council,
+            "escalate_routing_effort",
+            return_value=("high", "claude_opus_5"),
+        ) as escalate:
+            manifest = agent_council.AgentCouncil(Path(tmp)).run(
+                "Refactor routing checks",
+                "simple",
+                task_id="retry-escalation",
+                attempts=2,
+            )
+
+        escalate.assert_called_once_with("simple", "medium", 2)
+        self.assertEqual(manifest["effort"], "high")
 
     def test_sensitive_task_local_failure_never_falls_back_to_cloud(self) -> None:
         """Rule 3.5: sensitive tasks fail closed instead of escalating to a cloud worker."""

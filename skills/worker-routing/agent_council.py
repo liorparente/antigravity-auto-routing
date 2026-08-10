@@ -346,11 +346,20 @@ class AgentCouncil:
             task_id, complexity, route, reason, log_file=self.telemetry_file
         )
         if route == "halt":
-            raise SensitiveTaskFallbackBlocked(
-                f"task {task_id!r} is sensitive but local inference is unavailable; "
-                "failing closed per Rule 3.5"
+            record_local_model_failure(
+                task_id,
+                primary_worker="local_model",
+                error_reason="local inference endpoint unavailable",
+                errors_log=self.root_dir / ".ralph" / "errors.log",
+                is_sensitive=is_sensitive,
             )
         return route
+
+    def escalate_task_effort(
+        self, complexity: str, current_effort: str, attempts: int = 1
+    ) -> tuple[str, str]:
+        """Apply retry escalation through the council's public execution path."""
+        return escalate_routing_effort(complexity, current_effort, attempts)
 
     def _calibration_secret(self) -> bytes:
         """Compatibility wrapper around the central secret provider."""
@@ -387,7 +396,7 @@ class AgentCouncil:
 
         try:
             descriptor = os.open(secret_file, flags)
-        except OSError:
+        except FileNotFoundError:
             if secret_file.is_symlink():
                 raise ValueError(f"calibration secret must be a regular file: {secret_file}")
             if read_only:
@@ -547,7 +556,9 @@ class AgentCouncil:
         return rounds[:MAX_DEBATE_ROUNDS]
 
     @staticmethod
-    def _valid_debate_rounds(rounds: Any, consensus_round: Any) -> bool:
+    def _valid_debate_rounds(
+        rounds: list[dict[str, Any]], consensus_round: int
+    ) -> bool:
         if (
             not isinstance(rounds, list)
             or not 2 <= len(rounds) <= MAX_DEBATE_ROUNDS
@@ -568,7 +579,7 @@ class AgentCouncil:
 
     def _valid_cached_manifest(
         self,
-        manifest: Any,
+        manifest: dict[str, Any],
         *,
         task_id: str,
         task: str,
@@ -659,10 +670,18 @@ class AgentCouncil:
         }
 
     def run(
-        self, task: str, complexity: str, effort: str | None = None, task_id: str | None = None
+        self,
+        task: str,
+        complexity: str,
+        effort: str | None = None,
+        task_id: str | None = None,
+        attempts: int = 1,
     ) -> dict[str, Any]:
         safe = lexical_safety_scan(task)
         normalized_complexity, normalized_effort = evaluate_tier2(complexity, effort)
+        normalized_effort, _worker = self.escalate_task_effort(
+            normalized_complexity, normalized_effort, attempts
+        )
         normalized_task_id = self._task_id(task, normalized_complexity, normalized_effort, task_id)
         self.route_task(task, normalized_complexity, normalized_task_id)
         cache_key = hashlib.sha256(
