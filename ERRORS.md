@@ -127,3 +127,13 @@
 - Cause: `install.sh` synchronizes protocol files to global home directory targets (`~/.gemini/config/skills/worker-routing/`, `~/.codex/skills/worker-routing/`, `~/.gemini/GEMINI.md`) outside the workspace.
 - Resolution: Always invoke `install.sh` via `run_command` with `BypassSandbox: true` to permit global home directory target synchronization.
 
+## 2026-08-10 — Post-Review Maintenance Backlog Execution (Tickets 08 & 09)
+
+- Mission: Settle ADR 0002 debt (Ticket 08) and triage unreferenced helpers (Ticket 09) via worker CLI routing.
+- Key Learnings:
+  1. Standard Sandbox Worktrees: `git worktree add` to directories outside the workspace (`../auto-routing-backlog`) is blocked by IDE sandbox boundaries; creating worktrees inside workspace subdirectories (`.worktrees/backlog`) works cleanly inside standard sandbox mode.
+  2. Pure Frozen Dataclass Pattern: `SecurityContext` in `@dataclass(frozen=True)` avoids `__post_init__` `object.__setattr__` mutation by resolving secrets in factory methods (`SecurityContext.create()`), ensuring pure immutability and simple assignment error testing.
+  3. Telemetry and Fail-Closed Routing: `AgentCouncil.route_task` combines sensitivity classification (`evaluate_sensitivity`), endpoint probing (`check_local_model_endpoint`), and telemetry logging (`log_routing_telemetry`), failing closed via `record_local_model_failure`.
+- Verification: 100 tests pass in `skills/worker-routing/test_routing.py` (`OK`).
+
+
