@@ -51,6 +51,14 @@ agent_council = importlib.util.module_from_spec(agent_council_spec)
 sys.modules["agent_council"] = agent_council
 agent_council_spec.loader.exec_module(agent_council)
 
+advisory_consultation_spec = importlib.util.spec_from_file_location(
+    "advisory_consultation", SKILL_DIR / "advisory_consultation.py"
+)
+assert advisory_consultation_spec is not None and advisory_consultation_spec.loader is not None
+advisory_consultation = importlib.util.module_from_spec(advisory_consultation_spec)
+sys.modules["advisory_consultation"] = advisory_consultation
+advisory_consultation_spec.loader.exec_module(advisory_consultation)
+
 
 def run_check(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -1188,6 +1196,8 @@ class AgentCouncilSafetyDefectTests(unittest.TestCase):
             "codex_terra",
         )
 
+
+class AdvisoryConsultationTests(unittest.TestCase):
     def test_advisory_consultation_debate_raises_not_implemented(self) -> None:
         """The Planner-Critic loop must never report fake consensus.
 
@@ -1196,7 +1206,7 @@ class AgentCouncilSafetyDefectTests(unittest.TestCase):
         than a missing feature.
         """
         with self.assertRaises(NotImplementedError):
-            agent_council.run_advisory_consultation_debate("Plan the auth rewrite")
+            advisory_consultation.run_advisory_consultation_debate("Plan the auth rewrite")
 
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):
