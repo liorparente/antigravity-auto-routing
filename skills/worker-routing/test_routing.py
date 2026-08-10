@@ -1197,16 +1197,141 @@ class AgentCouncilSafetyDefectTests(unittest.TestCase):
         )
 
 
-class AdvisoryConsultationTests(unittest.TestCase):
-    def test_advisory_consultation_debate_raises_not_implemented(self) -> None:
-        """The Planner-Critic loop must never report fake consensus.
+class _RecordingInvoker:
+    """A fake `invoke_worker` callable: scripted responses, recorded calls."""
 
-        The prior stub returned `consensus_reached=True` from an f-string
-        with no model consulted — a lying success stub is more dangerous
-        than a missing feature.
-        """
-        with self.assertRaises(NotImplementedError):
-            advisory_consultation.run_advisory_consultation_debate("Plan the auth rewrite")
+    def __init__(self, responses: list[str]) -> None:
+        self.responses = list(responses)
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, model: str, effort: str, prompt: str) -> str:
+        self.calls.append((model, effort, prompt))
+        return self.responses.pop(0)
+
+
+class AdvisoryConsultationTests(unittest.TestCase):
+    """The Planner-Critic loop must never report fake consensus.
+
+    The prior stub returned `consensus_reached=True` from an f-string with no
+    model consulted — a lying success stub is more dangerous than a missing
+    feature. These tests drive the real single-round loop through the one
+    seam it exposes: the injected `invoke_worker` callable.
+    """
+
+    def test_consensus_on_round_one_writes_plan_and_reports_models_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+            )
+            plan_path = root / "implementation_plan.md"
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(plan_path.read_text(), "Planner's proposed plan.")
+
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.final_plan, "Planner's proposed plan.")
+        self.assertEqual(result.planner_model, "Test Planner")
+        self.assertEqual(result.critic_model, "Test Critic")
+
+    def test_non_approving_critic_yields_no_consensus_and_no_plan_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: REVISE\nNeeds more detail."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(result.final_plan, "")
+
+    def test_unparseable_critic_verdict_is_never_reported_as_consensus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            for critic_response in (
+                "",
+                "\n\n",
+                "This plan looks great, I fully approve of it.",
+                "APPROVE",
+            ):
+                with self.subTest(critic_response=repr(critic_response)):
+                    invoker = _RecordingInvoker(
+                        ["Planner's proposed plan.", critic_response]
+                    )
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite", invoker, root_dir=root
+                    )
+                    self.assertFalse(result.consensus_reached)
+                    self.assertFalse((root / "implementation_plan.md").exists())
+
+    def test_artifacts_land_under_injected_root_and_real_repo_is_untouched(self) -> None:
+        repo_plan = REPO_ROOT / "implementation_plan.md"
+        before_content = repo_plan.read_text() if repo_plan.exists() else None
+        before_mtime = repo_plan.stat().st_mtime if repo_plan.exists() else None
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertTrue((root / "implementation_plan.md").exists())
+
+        after_content = repo_plan.read_text() if repo_plan.exists() else None
+        after_mtime = repo_plan.stat().st_mtime if repo_plan.exists() else None
+        self.assertEqual(before_content, after_content)
+        self.assertEqual(before_mtime, after_mtime)
+
+    def test_nothing_is_created_under_ralph_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertFalse((root / ".ralph").exists())
+
+    def test_both_prompts_carry_worker_mode_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(len(invoker.calls), 2)
+        for _model, _effort, prompt in invoker.calls:
+            self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
 
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):
