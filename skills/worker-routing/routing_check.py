@@ -70,14 +70,52 @@ Exit codes:
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import re
+import shlex
 import sys
 import traceback
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+DIFF_FILE_RE = re.compile(r"^\+\+\+\s+b/(.+)$", re.MULTILINE)
+
+
+def audit_spec_vs_diff(spec_text: str, diff_text: str) -> list[str]:
+    """Parse git diff and flag any modified files that are absent from approved spec components."""
+    modified_files = DIFF_FILE_RE.findall(diff_text)
+    unapproved_files: list[str] = []
+    for filepath in modified_files:
+        filepath_clean = filepath.strip()
+        if filepath_clean not in spec_text and Path(filepath_clean).name not in spec_text:
+            unapproved_files.append(filepath_clean)
+    return unapproved_files
+
+
+def parse_command_tokens(command: str) -> list[str]:
+    """Safely tokenize command line arguments using shlex with fallback."""
+    try:
+        return shlex.split(command, posix=True)
+    except ValueError:
+        return command.split()
+
+
+def append_jsonl_locked(file_path: str | Path, record: dict[str, Any]) -> None:
+    """Safely append a JSON record using advisory file locking (fcntl)."""
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, sort_keys=True) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(line)
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 @dataclass(frozen=True)
@@ -239,15 +277,17 @@ def _strip_command_wrappers(command: str) -> str:
     return stripped.strip()
 
 
-def is_worker_invocation(command: str, worker_patterns: list[str]) -> bool:
+def is_worker_invocation(command: str, worker_patterns: list[str | re.Pattern[str]]) -> bool:
     """True if `command`, once stripped of leading env assignments and
-    known wrappers, actually starts with a configured worker pattern — a
-    substring mention elsewhere in the command (e.g. `echo codex exec`)
-    does not count as delegation."""
+    known wrappers, actually matches a configured worker pattern."""
     stripped = _strip_command_wrappers(command)
     for pattern in worker_patterns:
-        if stripped == pattern or stripped.startswith((pattern + " ", pattern + "\t")):
-            return True
+        if isinstance(pattern, re.Pattern):
+            if pattern.match(stripped):
+                return True
+        else:
+            if stripped == pattern or stripped.startswith((pattern + " ", pattern + "\t")):
+                return True
     return False
 
 
@@ -482,6 +522,75 @@ def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
         return None
 
 
+class SecurityContext:
+    """Encapsulates calibration secret resolution and HMAC verification."""
+
+    def __init__(
+        self,
+        root_dir: str | Path | None = None,
+        secret: bytes | None = None,
+    ) -> None:
+        self.root_dir = root_dir
+        self.secret = secret if secret is not None else get_calibration_secret(root_dir)
+
+    def verify_manifest(self, manifest: dict[str, Any]) -> bool:
+        if self.secret is None:
+            return False
+        from agent_council import AgentCouncil
+
+        return AgentCouncil.verify_signature(
+            manifest, secret=self.secret, root_dir=self.root_dir
+        )
+
+    def validate_step(self, step: Step) -> str | None:
+        if not step.calibration_headers and not step.calibration_manifests:
+            return None
+        if self.secret is None:
+            return CALIBRATION_VIOLATION
+
+        validation_by_signature: dict[str, bool] = {}
+        invalid = False
+        for manifest in step.calibration_manifests:
+            signature = manifest.get("signature")
+            valid = self.verify_manifest(manifest)
+            if isinstance(signature, str):
+                previous = validation_by_signature.get(signature.lower(), True)
+                validation_by_signature[signature.lower()] = previous and valid
+            if not valid:
+                invalid = True
+
+        for header in step.calibration_headers:
+            normalized = header.lower()
+            if (
+                HMAC_SHA256_RE.fullmatch(header) is None
+                or not validation_by_signature.get(normalized, False)
+            ):
+                invalid = True
+        return CALIBRATION_VIOLATION if invalid else None
+
+
+@dataclass(frozen=True)
+class StepAnalysis:
+    """Isolated policy evaluation metrics and issues for one step."""
+
+    index: int
+    has_routing_declaration: bool
+    worker_calls: int
+    has_unrouted_mutation: bool
+    issues: list[str]
+    code_writes: list[str]
+    total_writes: int
+    calibration_markers: int
+
+    @property
+    def has_violations(self) -> bool:
+        return (
+            self.has_unrouted_mutation
+            or bool(self.issues)
+            or (bool(self.code_writes) and self.worker_calls == 0)
+        )
+
+
 def _canonical_calibration_payload(manifest: dict[str, Any]) -> bytes | None:
     payload: dict[str, str] = {}
     for field in CALIBRATION_FIELDS:
@@ -496,33 +605,7 @@ def calibration_signature_issue(
     step: Step, root_dir: str | Path | None = None
 ) -> str | None:
     """Verify all same-step headers/evidence and return DEC-05 at most once."""
-    if not step.calibration_headers and not step.calibration_manifests:
-        return None
-    secret = get_calibration_secret(root_dir)
-    if secret is None:
-        return CALIBRATION_VIOLATION
-
-    validation_by_signature: dict[str, bool] = {}
-    invalid = False
-    for manifest in step.calibration_manifests:
-        signature = manifest.get("signature")
-        valid = HMACValidator.verify_manifest(
-            manifest, secret=secret, root_dir=root_dir
-        )
-        if isinstance(signature, str):
-            previous = validation_by_signature.get(signature.lower(), True)
-            validation_by_signature[signature.lower()] = previous and valid
-        if not valid:
-            invalid = True
-
-    for header in step.calibration_headers:
-        normalized = header.lower()
-        if (
-            HMAC_SHA256_RE.fullmatch(header) is None
-            or not validation_by_signature.get(normalized, False)
-        ):
-            invalid = True
-    return CALIBRATION_VIOLATION if invalid else None
+    return SecurityContext(root_dir=root_dir).validate_step(step)
 
 
 def is_unknown_write_tool(tool_name: Any) -> bool:
@@ -628,14 +711,80 @@ def parse_steps(log_file: str, text: str) -> list[Step]:
     return _parse_text_steps(text)
 
 
+def _analyze_step(
+    step: Step,
+    code_extensions: list[str],
+    worker_patterns: list[str],
+    safe_patterns: list[re.Pattern[str]],
+    security_ctx: SecurityContext | None = None,
+) -> StepAnalysis:
+    """Analyze a single conversation step in isolation (ADR-0003)."""
+    code_ext_set = {e.lower().lstrip(".") for e in code_extensions}
+
+    has_routing_declaration = bool(step.routing)
+    step_worker_calls = 0
+    step_has_unrouted_mutation = False
+    step_issues: list[str] = []
+
+    for command in step.commands:
+        command_worker_calls = 0
+        command_has_unrouted_mutation = any(
+            marker in command for marker in UNSAFE_SUBSTRINGS
+        )
+        for part in command_segments(command):
+            if not part:
+                continue
+            if is_worker_invocation(part, worker_patterns):
+                command_worker_calls += 1
+            elif not is_command_safe(part, safe_patterns):
+                command_has_unrouted_mutation = True
+        if command_has_unrouted_mutation:
+            step_has_unrouted_mutation = True
+        else:
+            step_worker_calls += command_worker_calls
+
+    step_issues.extend(structural_binding_issues(step.routing, step.commands, worker_patterns))
+    calibration_markers = len(step.calibration_headers) + len(
+        step.calibration_manifests
+    )
+
+    if security_ctx is not None:
+        calibration_issue = security_ctx.validate_step(step)
+        if calibration_issue:
+            step_issues.append(calibration_issue)
+
+    if step.unknown_write_tools:
+        step_issues.append("LOG-01 unknown write tool: " + ", ".join(step.unknown_write_tools))
+
+    step_code_writes: list[str] = []
+    total_writes = len(step.writes)
+    for target_file in step.writes:
+        suffix = Path(target_file).suffix.lower().lstrip(".")
+        if suffix in code_ext_set:
+            step_code_writes.append(target_file)
+
+    return StepAnalysis(
+        index=step.index,
+        has_routing_declaration=has_routing_declaration,
+        worker_calls=step_worker_calls,
+        has_unrouted_mutation=step_has_unrouted_mutation,
+        issues=step_issues,
+        code_writes=step_code_writes,
+        total_writes=total_writes,
+        calibration_markers=calibration_markers,
+    )
+
+
 def compute_metrics(
     steps: list[Step],
     code_extensions: list[str],
     worker_patterns: list[str],
     safe_patterns: list[re.Pattern[str]],
     root_dir: str | Path | None = None,
+    security_ctx: SecurityContext | None = None,
 ) -> dict[str, Any]:
-    code_ext_set = {e.lower().lstrip(".") for e in code_extensions}
+    if security_ctx is None:
+        security_ctx = SecurityContext(root_dir=root_dir)
 
     total_writes = 0
     code_writes = 0
@@ -648,57 +797,27 @@ def compute_metrics(
     calibration_markers = 0
 
     for step in steps:
-        if step.routing:
-            routing_declarations += 1
-
-        step_worker_calls = 0
-        step_has_unrouted_mutation = False
-        step_issues: list[str] = []
-
-        for command in step.commands:
-            command_worker_calls = 0
-            command_has_unrouted_mutation = any(
-                marker in command for marker in UNSAFE_SUBSTRINGS
-            )
-            # Reject shell injection/redirect syntax before classifying any
-            # segment as a valid worker invocation (CMD-02/CMD-04).
-            for part in command_segments(command):
-                if not part:
-                    continue
-                if is_worker_invocation(part, worker_patterns):
-                    command_worker_calls += 1
-                elif not is_command_safe(part, safe_patterns):
-                    command_has_unrouted_mutation = True
-            if command_has_unrouted_mutation:
-                step_has_unrouted_mutation = True
-            else:
-                worker_calls += command_worker_calls
-                step_worker_calls += command_worker_calls
-
-        step_issues.extend(structural_binding_issues(step.routing, step.commands, worker_patterns))
-        calibration_markers += len(step.calibration_headers) + len(
-            step.calibration_manifests
+        analysis = _analyze_step(
+            step,
+            code_extensions,
+            worker_patterns,
+            safe_patterns,
+            security_ctx=security_ctx,
         )
-        calibration_issue = HMACValidator.validate(step, root_dir)
-        if calibration_issue:
-            step_issues.append(calibration_issue)
-        if step.unknown_write_tools:
-            step_issues.append("LOG-01 unknown write tool: " + ", ".join(step.unknown_write_tools))
 
-        step_code_writes: list[str] = []
-        for target_file in step.writes:
-            total_writes += 1
-            suffix = Path(target_file).suffix.lower().lstrip(".")
-            if suffix in code_ext_set:
-                code_writes += 1
-                code_write_files.append(target_file)
-                step_code_writes.append(target_file)
+        if analysis.has_routing_declaration:
+            routing_declarations += 1
+        worker_calls += analysis.worker_calls
+        total_writes += analysis.total_writes
+        code_writes += len(analysis.code_writes)
+        code_write_files.extend(analysis.code_writes)
+        calibration_markers += analysis.calibration_markers
 
-        if step_issues:
-            declaration_drift.append((step.index, step_issues))
-        if step_has_unrouted_mutation or step_issues or (step_code_writes and step_worker_calls == 0):
-            violations.append((step.index, step_code_writes))
-            violation_details.append((step.index, step_issues))
+        if analysis.issues:
+            declaration_drift.append((analysis.index, analysis.issues))
+        if analysis.has_violations:
+            violations.append((analysis.index, analysis.code_writes))
+            violation_details.append((analysis.index, analysis.issues))
 
     return {
         "total_writes": total_writes,
@@ -755,7 +874,7 @@ class PolicyEvaluator:
 
 
 class HMACValidator:
-    """Delegates HMAC calibration signature validation to central helpers."""
+    """Deprecated compatibility wrapper delegating to SecurityContext."""
 
     @staticmethod
     def verify_manifest(
@@ -763,16 +882,11 @@ class HMACValidator:
         secret: bytes,
         root_dir: str | Path | None = None,
     ) -> bool:
-        """Use AgentCouncil's shared calibration-v1 verification contract."""
-        from agent_council import AgentCouncil
-
-        return AgentCouncil.verify_signature(
-            manifest, secret=secret, root_dir=root_dir
-        )
+        return SecurityContext(root_dir=root_dir, secret=secret).verify_manifest(manifest)
 
     @staticmethod
     def validate(step: Step, root_dir: str | Path | None = None) -> str | None:
-        return calibration_signature_issue(step, root_dir)
+        return SecurityContext(root_dir=root_dir).validate_step(step)
 
 
 class RoutingAuditEngine:
@@ -785,9 +899,6 @@ class RoutingAuditEngine:
         *,
         config: AuditConfig | None = None,
     ) -> None:
-        # ``config_path`` is the original positional API.  Keep accepting the
-        # short-lived positional AuditConfig form for callers from the refactor;
-        # new callers should pass it as ``config=``.
         if isinstance(config_path, AuditConfig):
             if config is not None:
                 raise TypeError("config was provided both positionally and by keyword")
@@ -795,6 +906,7 @@ class RoutingAuditEngine:
             config_path = None
         self.config_path = Path(config_path) if config_path else CONFIG_PATH
         self.root_dir = root_dir
+        self.security_ctx = SecurityContext(root_dir=root_dir)
         self._legacy_config: dict[str, Any] | None = None
 
         if config is None:
@@ -812,46 +924,30 @@ class RoutingAuditEngine:
         self.config = config
 
     def audit(self, steps: list[Step]) -> AuditResult:
-        """Evaluate already-parsed steps without using the legacy facade."""
+        """Evaluate already-parsed steps delegating to _analyze_step (ADR-0003)."""
         issues: list[AuditIssue] = []
         worker_calls = 0
         total_writes = 0
         code_writes = 0
         routing_declarations = 0
-        code_extensions = {
-            extension.lower().lstrip(".")
-            for extension in self.config.code_extensions
-        }
 
         for discovery_ordinal, step in enumerate(steps):
-            if step.routing:
+            analysis = _analyze_step(
+                step,
+                self.config.code_extensions,
+                self.config.worker_patterns,
+                self.config.safe_patterns,
+                security_ctx=self.security_ctx,
+            )
+
+            if analysis.has_routing_declaration:
                 routing_declarations += 1
 
-            step_worker_calls = 0
-            step_has_unsafe_execution = False
+            worker_calls += analysis.worker_calls
+            total_writes += analysis.total_writes
+            code_writes += len(analysis.code_writes)
 
-            for command in step.commands:
-                command_worker_calls = 0
-                command_is_unsafe = any(
-                    marker in command for marker in UNSAFE_SUBSTRINGS
-                )
-                for segment in command_segments(command):
-                    if not segment:
-                        continue
-                    if self._is_worker_invocation(segment):
-                        command_worker_calls += 1
-                    elif not is_command_safe(
-                        segment, self.config.safe_patterns
-                    ):
-                        command_is_unsafe = True
-
-                if command_is_unsafe:
-                    step_has_unsafe_execution = True
-                else:
-                    worker_calls += command_worker_calls
-                    step_worker_calls += command_worker_calls
-
-            if step_has_unsafe_execution:
+            if analysis.has_unrouted_mutation:
                 issues.append(
                     AuditIssue(
                         "error",
@@ -863,36 +959,23 @@ class RoutingAuditEngine:
             for message in self._structural_issues(step):
                 issues.append(AuditIssue("error", message, discovery_ordinal))
 
-            calibration_issue = HMACValidator.validate(step, self.root_dir)
-            if calibration_issue:
-                issues.append(
-                    AuditIssue("error", calibration_issue, discovery_ordinal)
-                )
-
-            if step.unknown_write_tools:
-                issues.append(
-                    AuditIssue(
-                        "error",
-                        "LOG-01 unknown write tool: "
-                        + ", ".join(step.unknown_write_tools),
-                        discovery_ordinal,
+            # _structural_issues already covers DEC-01/02/03/04; analysis.issues
+            # is the only source for DEC-05 (calibration signature) and LOG-01
+            # (unknown write tool) — without this, audit() silently drops both.
+            for message in analysis.issues:
+                if message.startswith("DEC-05") or message.startswith("LOG-01"):
+                    issues.append(
+                        AuditIssue(
+                            "error", f"Step {step.index}: {message}", discovery_ordinal
+                        )
                     )
-                )
 
-            step_code_writes: list[str] = []
-            for target_file in step.writes:
-                total_writes += 1
-                suffix = Path(target_file).suffix.lower().lstrip(".")
-                if suffix in code_extensions:
-                    code_writes += 1
-                    step_code_writes.append(target_file)
-
-            if step_code_writes and step_worker_calls == 0:
+            if analysis.code_writes and analysis.worker_calls == 0:
                 issues.append(
                     AuditIssue(
                         "error",
                         f"Step {step.index}: unrouted code edit detected "
-                        f"({step_code_writes})",
+                        f"({analysis.code_writes})",
                         discovery_ordinal,
                     )
                 )

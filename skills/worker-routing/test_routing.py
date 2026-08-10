@@ -1143,6 +1143,62 @@ class AgentCouncilDebateTests(unittest.TestCase):
                 )
 
 
+class AgentCouncilSafetyDefectTests(unittest.TestCase):
+    """Regression coverage for reviewed routing-safety defects in agent_council.py."""
+
+    def test_sensitive_task_routes_to_local_model_when_available(self) -> None:
+        """A sensitive task must stay on the local model, never be routed away.
+
+        Prior to the fix, `is_sensitive=True` short-circuited to False —
+        exactly inverted from the privacy rule ("Sensitive ... LM Studio
+        ALWAYS (local model)").
+        """
+        self.assertTrue(
+            agent_council.should_route_to_local_model(
+                "complex", is_sensitive=True, is_local_available=True
+            )
+        )
+
+    def test_non_sensitive_trivial_task_still_routes_local_when_available(self) -> None:
+        self.assertTrue(
+            agent_council.should_route_to_local_model(
+                "trivial", is_sensitive=False, is_local_available=True
+            )
+        )
+
+    def test_sensitive_task_not_routed_local_when_unavailable(self) -> None:
+        self.assertFalse(
+            agent_council.should_route_to_local_model(
+                "complex", is_sensitive=True, is_local_available=False
+            )
+        )
+
+    def test_sensitive_task_local_failure_never_falls_back_to_cloud(self) -> None:
+        """Rule 3.5: sensitive tasks fail closed instead of escalating to a cloud worker."""
+        with self.assertRaises(agent_council.SensitiveTaskFallbackBlocked):
+            agent_council.record_local_model_failure(
+                "task-1", "lmstudio", "connection refused", is_sensitive=True
+            )
+
+    def test_non_sensitive_task_still_falls_back_to_cloud_worker(self) -> None:
+        self.assertEqual(
+            agent_council.record_local_model_failure(
+                "task-1", "lmstudio", "timeout", is_sensitive=False
+            ),
+            "codex_terra",
+        )
+
+    def test_advisory_consultation_debate_raises_not_implemented(self) -> None:
+        """The Planner-Critic loop must never report fake consensus.
+
+        The prior stub returned `consensus_reached=True` from an f-string
+        with no model consulted — a lying success stub is more dangerous
+        than a missing feature.
+        """
+        with self.assertRaises(NotImplementedError):
+            agent_council.run_advisory_consultation_debate("Plan the auth rewrite")
+
+
 class AgentCouncilSignatureApiTests(unittest.TestCase):
     """Public key-loading and signature APIs fail closed for auditors."""
 
@@ -1334,6 +1390,45 @@ class RoutingAuditEngineTests(unittest.TestCase):
         jsonl_parser = engine.get_parser("log.jsonl", '{"routing": "direct"}')
         self.assertIsInstance(text_parser, routing_check.TextLogParser)
         self.assertIsInstance(jsonl_parser, routing_check.JsonLinesLogParser)
+
+    def test_engine_audit_agrees_with_compute_metrics_on_dec05_and_log01(self) -> None:
+        """audit() must surface the same DEC-05/LOG-01 codes compute_metrics does.
+
+        Reproduction: an unknown write tool (LOG-01) plus a malformed
+        calibration header (DEC-05, since no secret is configured in the
+        isolated root_dir) in the same step. Both codes reach
+        `_analyze_step.issues`, but `audit()` historically only re-ran
+        `_structural_issues`, silently dropping them.
+        """
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            step = routing_check.Step(1, "[ROUTING: Direct — reason: test]")
+            step.unknown_write_tools.append("apply_unreviewed_patch")
+            step.calibration_headers.append("not-a-valid-hmac-signature")
+
+            metrics = routing_check.compute_metrics(
+                [step],
+                self.audit_config.code_extensions,
+                self.audit_config.worker_patterns,
+                self.audit_config.safe_patterns,
+                root_dir=tmp,
+            )
+            metrics_codes = {
+                message.split()[0]
+                for _, issues in metrics["violation_details"]
+                for message in issues
+            }
+            self.assertIn("DEC-05", metrics_codes)
+            self.assertIn("LOG-01", metrics_codes)
+
+            engine = routing_check.RoutingAuditEngine(self.audit_config, root_dir=tmp)
+            result = engine.audit([step])
+            audit_codes = {
+                issue.message.split(": ", 1)[1].split()[0] for issue in result.errors
+            }
+
+        self.assertEqual(audit_codes, metrics_codes)
 
 
 class Phase1CharacterizationTests(unittest.TestCase):

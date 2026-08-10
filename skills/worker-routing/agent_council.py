@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import hmac
 import json
@@ -39,6 +40,212 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 UNSAFE_LEXEMES = ("$(", "`", ";", "&&", "||", "|", ">", "<")
 CALIBRATION_FIELDS = ("task_id", "task", "complexity", "effort", "decision", "nonce")
 HMAC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
+SENSITIVE_PATTERNS = (
+    "AGY_CALIBRATION_SECRET",
+    "api_key",
+    "sk-",
+    "bearer ",
+    "BEGIN PRIVATE KEY",
+    "password",
+    "secret",
+    "[SENSITIVE]",
+)
+
+
+def detect_sensitive_data(text: str) -> bool:
+    """Return True if text contains sensitive security patterns or flags."""
+    lowered = text.lower()
+    return any(pattern.lower() in lowered for pattern in SENSITIVE_PATTERNS)
+
+
+def evaluate_sensitivity(task_text: str) -> tuple[bool, bool]:
+    """Evaluate task sensitivity. Returns (is_sensitive, requires_human_approval)."""
+    is_sens = detect_sensitive_data(task_text)
+    return is_sens, is_sens
+
+
+def check_local_model_endpoint(endpoint_url: str = "http://127.0.0.1:1234/v1/models", timeout_seconds: float = 1.0) -> bool:
+    """Non-blocking health probe for local inference server."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(endpoint_url, headers={"User-Agent": "Antigravity/3.4"})
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def should_route_to_local_model(complexity: str, is_sensitive: bool = False, is_local_available: bool = False) -> bool:
+    """Determine whether task should be routed to local model (LM Studio).
+
+    Sensitive tasks (PII, credentials) must stay on the local model whenever
+    it is available — "Sensitive ... LM Studio ALWAYS (local model)" — so
+    sensitivity short-circuits to routing local rather than away from it.
+    """
+    if not is_local_available:
+        return False
+    if is_sensitive:
+        return True
+    normalized = complexity.lower().strip()
+    return normalized in ("trivial", "simple")
+
+
+@dataclass
+class AdvisoryDebateResult:
+    rounds_run: int
+    consensus_reached: bool
+    final_plan: str
+    planner_model: str = "Claude Opus 5 (Thinking)"
+    critic_model: str = "Codex 5.6 Sol"
+
+
+def needs_advisory_consultation(complexity: str, confidence: float = 1.0) -> bool:
+    """Determine whether task requires an advisory Planner-Critic debate loop."""
+    normalized = complexity.lower().strip()
+    if normalized == "ambiguous":
+        return True
+    return confidence < 0.7
+
+
+def run_advisory_consultation_debate(
+    task_description: str,
+    max_rounds: int = MAX_DEBATE_ROUNDS,
+) -> AdvisoryDebateResult:
+    """Execute up to max_rounds of Planner-Critic debate loop for complex/ambiguous tasks.
+
+    Not implemented. The Planner-Critic advisory consultation loop (ADR 0005
+    Pillar 3 / protocol.md Rule 6) requires actually invoking Planner and
+    Critic models; no such loop exists yet. A stub that reported fake
+    consensus was worse than no feature at all, so this fails loudly instead.
+    """
+    raise NotImplementedError(
+        "run_advisory_consultation_debate is not implemented: no Planner or "
+        "Critic model was consulted for "
+        f"{task_description!r}. Callers must not treat this as a reached "
+        "consensus — the real Planner-Critic debate loop is separately "
+        "scheduled work."
+    )
+
+
+def append_jsonl_locked(file_path: str | Path, record: dict[str, Any]) -> None:
+    """Safely append a JSON record using advisory file locking (fcntl)."""
+    import fcntl
+    path = Path(file_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, sort_keys=True) + "\n"
+    with open(path, "a", encoding="utf-8") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(line)
+            f.flush()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def log_routing_telemetry(
+    task_id: str,
+    complexity: str,
+    chosen_worker: str,
+    reason: str,
+    log_file: str | Path | None = None,
+) -> dict[str, Any]:
+    """Record structured telemetry for a routing decision."""
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "task_id": task_id,
+        "complexity": complexity,
+        "chosen_worker": chosen_worker,
+        "reason": reason,
+    }
+    if log_file:
+        append_jsonl_locked(log_file, record)
+    return record
+
+
+class SensitiveTaskFallbackBlocked(RuntimeError):
+    """Raised when a sensitive task's local model fails and Rule 3.5 forbids
+    escalating to a cloud worker: the caller must fail closed instead."""
+
+
+def record_local_model_failure(
+    task_id: str,
+    primary_worker: str,
+    error_reason: str,
+    errors_log: str | Path | None = None,
+    is_sensitive: bool = False,
+) -> str:
+    """Record a local model failure/unavailability event and return next fallback worker.
+
+    Sensitive tasks can never be handed to a cloud worker (Rule 3.5:
+    "Sensitive tasks: Local models only ... -> fail closed immediately"), so
+    this raises :class:`SensitiveTaskFallbackBlocked` instead of returning a
+    cloud worker name.
+    """
+    fallback_worker = "codex_terra"
+    fallback_action = (
+        "FAIL-CLOSED: no cloud fallback permitted for a sensitive task"
+        if is_sensitive
+        else f"Escalated to {fallback_worker}"
+    )
+    if errors_log:
+        err_path = Path(errors_log)
+        err_path.parent.mkdir(parents=True, exist_ok=True)
+        entry = (
+            f"\n## [{time.strftime('%Y-%m-%d %H:%M:%S')}] Local Worker Failure\n"
+            f"- Task ID: {task_id}\n"
+            f"- Primary Worker: {primary_worker}\n"
+            f"- Error: {error_reason}\n"
+            f"- Fallback Action: {fallback_action}\n"
+        )
+        with open(err_path, "a", encoding="utf-8") as f:
+            f.write(entry)
+    if is_sensitive:
+        raise SensitiveTaskFallbackBlocked(
+            f"task {task_id!r} is sensitive: local model failed ({error_reason}) "
+            "and no cloud worker fallback is permitted; failing closed per Rule 3.5"
+        )
+    return fallback_worker
+
+
+def escalate_routing_effort(
+    complexity: str,
+    current_effort: str,
+    attempts: int = 1,
+) -> tuple[str, str]:
+    """Escalate reasoning effort and model tier after 2+ failed worker attempts."""
+    if attempts < 2:
+        return current_effort, "codex_terra" if complexity in ("trivial", "simple") else "claude_sonnet_5"
+
+    effort_ladder = ["low", "medium", "high", "ultra"]
+    cur_idx = effort_ladder.index(current_effort) if current_effort in effort_ladder else 1
+    new_idx = min(cur_idx + (attempts - 1), len(effort_ladder) - 1)
+    escalated_effort = effort_ladder[new_idx]
+
+    if escalated_effort in ("high", "ultra") or complexity in ("medium", "complex"):
+        worker = "claude_opus_5"
+    else:
+        worker = "codex_sol"
+
+    return escalated_effort, worker
+
+
+def generate_debate_stalemate_report(
+    planner_plan: str,
+    critic_plan: str,
+    rounds_run: int = MAX_DEBATE_ROUNDS,
+) -> dict[str, Any]:
+    """Generate a structured visual comparison matrix and options when Planner-Critic debate stalemates."""
+    return {
+        "title": f"STALEMATE: Planner-Critic Debate Unresolved after {rounds_run} Rounds",
+        "rounds": rounds_run,
+        "planner_summary": planner_plan,
+        "critic_summary": critic_plan,
+        "options": [
+            {"id": 1, "label": "Approve Planner Architecture", "description": planner_plan},
+            {"id": 2, "label": "Approve Critic Architecture", "description": critic_plan},
+            {"id": 3, "label": "Escalate to Human Decision", "description": "Halt execution and request user review"},
+        ],
+    }
 
 
 def lexical_safety_scan(task: str) -> bool:
