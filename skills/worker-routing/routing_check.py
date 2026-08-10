@@ -77,10 +77,10 @@ import shlex
 import sys
 import traceback
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
 
 DIFF_FILE_RE = re.compile(r"^\+\+\+\s+b/(.+)$", re.MULTILINE)
 
@@ -277,7 +277,7 @@ def _strip_command_wrappers(command: str) -> str:
     return stripped.strip()
 
 
-def is_worker_invocation(command: str, worker_patterns: list[str | re.Pattern[str]]) -> bool:
+def is_worker_invocation(command: str, worker_patterns: Sequence[str | re.Pattern[str]]) -> bool:
     """True if `command`, once stripped of leading env assignments and
     known wrappers, actually matches a configured worker pattern."""
     stripped = _strip_command_wrappers(command)
@@ -376,7 +376,9 @@ def is_command_safe(command: str, safe_patterns: list[re.Pattern[str]]) -> bool:
 
 
 def structural_binding_issues(
-    routing_str: str | None, commands: list[str], worker_patterns: list[str]
+    routing_str: str | None,
+    commands: list[str],
+    worker_patterns: Sequence[str | re.Pattern[str]],
 ) -> list[str]:
     """Bind a complete declaration to each actual worker segment (DEC-01..04)."""
     if not routing_str:
@@ -462,7 +464,7 @@ def structural_binding_issues(
 def check_structural_binding(
     routing_str: str | None,
     command: str,
-    worker_patterns: list[str],
+    worker_patterns: Sequence[str | re.Pattern[str]],
 ) -> bool:
     """Compatibility wrapper retained for existing callers/tests."""
     return not structural_binding_issues(routing_str, [command], worker_patterns)
@@ -746,7 +748,7 @@ def parse_steps(log_file: str, text: str) -> list[Step]:
 def _analyze_step(
     step: Step,
     code_extensions: list[str],
-    worker_patterns: list[str],
+    worker_patterns: Sequence[str | re.Pattern[str]],
     safe_patterns: list[re.Pattern[str]],
     security_ctx: SecurityContext | None = None,
 ) -> StepAnalysis:
@@ -814,7 +816,7 @@ def _analyze_step(
 def compute_metrics(
     steps: list[Step],
     code_extensions: list[str],
-    worker_patterns: list[str],
+    worker_patterns: Sequence[str | re.Pattern[str]],
     safe_patterns: list[re.Pattern[str]],
     root_dir: str | Path | None = None,
     security_ctx: SecurityContext | None = None,
@@ -999,7 +1001,7 @@ class RoutingAuditEngine:
             # is the only source for DEC-05 (calibration signature) and LOG-01
             # (unknown write tool) — without this, audit() silently drops both.
             for message in analysis.issues:
-                if message.startswith("DEC-05") or message.startswith("LOG-01"):
+                if message.startswith(("DEC-05", "LOG-01")):
                     issues.append(
                         AuditIssue(
                             "error", f"Step {step.index}: {message}", discovery_ordinal

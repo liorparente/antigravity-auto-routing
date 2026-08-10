@@ -78,7 +78,7 @@ def check_local_model_endpoint(
         )
         with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
             return response.status == 200
-    except Exception:
+    except Exception:  # noqa: BLE001 - health probe must never raise; any failure means unreachable.
         return False
 
 
