@@ -9,6 +9,7 @@ or, from this directory:
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import hmac
 import importlib.util
@@ -1307,15 +1308,22 @@ class AgentCouncilSafetyDefectTests(unittest.TestCase):
 
 
 class _RecordingInvoker:
-    """A fake `invoke_worker` callable: scripted responses, recorded calls."""
+    """A fake `invoke_worker` callable: scripted responses, recorded calls.
 
-    def __init__(self, responses: list[str]) -> None:
-        self.responses = list(responses)
+    A scripted entry that is an `Exception` instance is raised instead of
+    returned, so a test can script a worker failure at a specific call.
+    """
+
+    def __init__(self, responses: list[str | Exception]) -> None:
+        self.responses: list[str | Exception] = list(responses)
         self.calls: list[tuple[str, str, str]] = []
 
     def __call__(self, model: str, effort: str, prompt: str) -> str:
         self.calls.append((model, effort, prompt))
-        return self.responses.pop(0)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
 
 
 class AdvisoryConsultationTests(unittest.TestCase):
@@ -1542,7 +1550,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     os.environ, {}, clear=True
                 ):
                     root = Path(tmp)
-                    responses = []
+                    responses: list[str | Exception] = []
                     for i in range(max_rounds):
                         responses.append(f"Planner's plan #{i + 1}.")
                         responses.append(f"VERDICT: REVISE\nStill not good enough #{i + 1}.")
@@ -1582,6 +1590,262 @@ class AdvisoryConsultationTests(unittest.TestCase):
         self.assertEqual(len(invoker.calls), 6)
         for _model, _effort, prompt in invoker.calls:
             self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
+
+    def test_stalemate_after_round_cap_reports_no_consensus_and_no_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's second plan.",
+                    "VERDICT: REVISE\nStill thin.",
+                    "Planner's third plan.",
+                    "VERDICT: REVISE\nNot convinced.",
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 3)
+        self.assertEqual(result.final_plan, "")
+
+    def test_stalemate_carries_both_final_positions_and_three_resolution_options(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's final plan.",
+                    "VERDICT: REVISE\nStill not convinced.",
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, max_rounds=2
+            )
+
+        self.assertIsNotNone(result.stalemate)
+        assert result.stalemate is not None
+        self.assertEqual(result.stalemate.planner_position, "Planner's final plan.")
+        self.assertEqual(
+            result.stalemate.critic_position, "VERDICT: REVISE\nStill not convinced."
+        )
+        self.assertEqual(len(result.stalemate.options), 3)
+        labels = {option.label for option in result.stalemate.options}
+        self.assertEqual(
+            labels,
+            {
+                "Approve Planner Architecture",
+                "Approve Critic Architecture",
+                "Escalate to Human Decision",
+            },
+        )
+
+    def test_pre_existing_plan_file_is_removed_on_every_non_consensus_exit(self) -> None:
+        """The defect carried out of ticket 02: a stale plan must not survive."""
+        scenarios: dict[str, _RecordingInvoker] = {
+            "stalemate": _RecordingInvoker(
+                ["Planner's plan.", "VERDICT: REVISE\nNot convinced."]
+            ),
+            "unparseable": _RecordingInvoker(
+                ["Planner's plan.", "This plan looks fine to me."]
+            ),
+            "worker_error": _RecordingInvoker([RuntimeError("worker unreachable")]),
+        }
+        for name, invoker in scenarios.items():
+            with (
+                self.subTest(scenario=name),
+                tempfile.TemporaryDirectory() as tmp,
+                mock.patch.dict(os.environ, {}, clear=True),
+            ):
+                root = Path(tmp)
+                plan_path = root / "implementation_plan.md"
+                plan_path.write_text("stale plan from an earlier run")
+
+                result = advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
+                )
+
+                self.assertFalse(plan_path.exists())
+                self.assertFalse(result.consensus_reached)
+
+    def test_unparseable_verdict_halts_without_a_second_planner_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "This plan looks fine to me."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, max_rounds=3
+            )
+
+        self.assertEqual(result.outcome, "unparseable_verdict")
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(len(result.rounds), 1)
+        self.assertEqual(
+            result.rounds[0].critic_response, "This plan looks fine to me."
+        )
+
+    def test_raising_worker_halts_with_no_plan_and_visible_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([RuntimeError("worker unreachable")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.final_plan, "")
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertIn("worker unreachable", result.error)
+
+    def test_raising_worker_after_a_completed_round_keeps_that_rounds_history(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    RuntimeError("worker unreachable"),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(len(result.rounds), 1)
+        self.assertEqual(result.rounds[0].planner_proposal, "Planner's first plan.")
+
+    def test_neither_failure_path_reports_consensus(self) -> None:
+        """Criterion 6: no failure path may report a consensus that was not granted."""
+        scenarios: dict[str, _RecordingInvoker] = {
+            "stalemate": _RecordingInvoker(
+                ["Planner's plan.", "VERDICT: REVISE\nNot convinced."]
+            ),
+            "worker_error": _RecordingInvoker([RuntimeError("worker unreachable")]),
+            "unparseable": _RecordingInvoker(
+                ["Planner's plan.", "garbled response"]
+            ),
+        }
+        for name, invoker in scenarios.items():
+            with self.subTest(scenario=name):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
+                    )
+                self.assertFalse(result.consensus_reached)
+                self.assertNotEqual(result.outcome, "consensus")
+
+    def test_non_positive_max_rounds_raises_value_error_without_invoking_worker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            for bad_max_rounds in (0, -1):
+                with self.subTest(max_rounds=bad_max_rounds):
+                    invoker = _RecordingInvoker([])
+                    with self.assertRaises(ValueError):
+                        advisory_consultation.run_advisory_consultation_debate(
+                            "Plan the auth rewrite",
+                            invoker,
+                            root_dir=root,
+                            max_rounds=bad_max_rounds,
+                        )
+                    self.assertEqual(invoker.calls, [])
+
+    def test_stale_plan_cleanup_failure_preserves_worker_error_message(self) -> None:
+        """A cleanup failure must not mask the worker exception that caused it."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            (root / "implementation_plan.md").mkdir()
+            invoker = _RecordingInvoker([RuntimeError("worker unreachable")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertFalse(result.consensus_reached)
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertIn("worker unreachable", result.error)
+        self.assertIn("implementation_plan.md", result.error)
+
+    def test_stale_plan_cleanup_failure_on_unparseable_verdict_does_not_raise(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            (root / "implementation_plan.md").mkdir()
+            invoker = _RecordingInvoker(["Planner's plan.", "garbled response"])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
+            )
+
+        self.assertEqual(result.outcome, "unparseable_verdict")
+        self.assertFalse(result.consensus_reached)
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertIn("implementation_plan.md", result.error)
+
+    def test_consensus_reached_is_derived_from_outcome_and_cannot_be_mutated(
+        self,
+    ) -> None:
+        consensus_result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=1, final_plan="A plan.", outcome="consensus"
+        )
+        stalemate_result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=1, final_plan="", outcome="stalemate"
+        )
+        unparseable_result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=1, final_plan="", outcome="unparseable_verdict"
+        )
+        worker_error_result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=0, final_plan="", outcome="worker_error"
+        )
+        self.assertTrue(consensus_result.consensus_reached)
+        self.assertFalse(stalemate_result.consensus_reached)
+        self.assertFalse(unparseable_result.consensus_reached)
+        self.assertFalse(worker_error_result.consensus_reached)
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            worker_error_result.consensus_reached = True  # type: ignore[misc]
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            worker_error_result.outcome = "consensus"  # type: ignore[misc]
+        self.assertFalse(worker_error_result.consensus_reached)
 
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):

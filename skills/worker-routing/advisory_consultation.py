@@ -20,15 +20,31 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Literal
 
 MAX_DEBATE_ROUNDS = 3
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 
 CRITIC_VERDICT_APPROVE = "VERDICT: APPROVE"
+CRITIC_VERDICT_REVISE = "VERDICT: REVISE"
 
 InvokeWorker = Callable[[str, str, str], str]
+
+# Discriminates how a consultation ended. `consensus_reached` on the result
+# stays consistent with this: True only when outcome == "consensus". The
+# other three are all "no consensus", distinguished for the caller because
+# a stalemate, a malformed verdict, and an unreachable worker each demand a
+# different human response.
+AdvisoryOutcome = Literal[
+    "consensus", "stalemate", "unparseable_verdict", "worker_error"
+]
+
+# The Critic's verdict line, once read, is one of these three states.
+# "unparseable" is deliberately not folded into "revise": a malformed
+# response must halt the consultation, not be fed back to the Planner as if
+# it were a reasoned objection.
+CriticVerdict = Literal["approved", "revise", "unparseable"]
 
 
 @dataclass(frozen=True)
@@ -39,14 +55,47 @@ class AdvisoryDebateRound:
     critic_response: str
 
 
-@dataclass
+@dataclass(frozen=True)
+class AdvisoryResolutionOption:
+    """One way a human can resolve a stalemate."""
+
+    id: int
+    label: str
+    description: str
+
+
+@dataclass(frozen=True)
+class AdvisoryStalemateReport:
+    """Both final positions of an unresolved consultation, plus the human's options.
+
+    Carries no winner: the consultation does not pick one, so this structure
+    has no field capable of holding one.
+    """
+
+    planner_position: str
+    critic_position: str
+    options: tuple[AdvisoryResolutionOption, AdvisoryResolutionOption, AdvisoryResolutionOption]
+
+
+@dataclass(frozen=True)
 class AdvisoryDebateResult:
     rounds_run: int
-    consensus_reached: bool
     final_plan: str
+    outcome: AdvisoryOutcome
     planner_model: str = "Claude Opus 5 (Thinking)"
     critic_model: str = "Codex 5.6 Sol"
     rounds: tuple[AdvisoryDebateRound, ...] = ()
+    stalemate: AdvisoryStalemateReport | None = None
+    error: str | None = None
+
+    @property
+    def consensus_reached(self) -> bool:
+        """True only when `outcome == "consensus"` — never independently settable.
+
+        Frozen and derived so a result can never be constructed or mutated
+        into claiming consensus its outcome does not back.
+        """
+        return self.outcome == "consensus"
 
 
 def needs_advisory_consultation(complexity: str, confidence: float = 1.0) -> bool:
@@ -110,13 +159,67 @@ def _build_critic_prompt(task_description: str, planner_plan: str) -> str:
     )
 
 
-def _critic_approved(critic_response: str) -> bool:
-    """Parse only the first non-empty line; anything else is not approval."""
+def _parse_critic_verdict(critic_response: str) -> CriticVerdict:
+    """Parse only the first non-empty line; anything else is unparseable.
+
+    Absence of rejection is not agreement: only an exact "VERDICT: APPROVE"
+    counts as approval, only an exact "VERDICT: REVISE" counts as a
+    parseable rejection that keeps the loop going, and everything else
+    (empty, prose-only, near-miss) fails closed as "unparseable" rather than
+    being silently treated as either.
+    """
     for line in critic_response.splitlines():
         stripped = line.strip()
-        if stripped:
-            return stripped.upper() == CRITIC_VERDICT_APPROVE
-    return False
+        if not stripped:
+            continue
+        upper = stripped.upper()
+        if upper == CRITIC_VERDICT_APPROVE:
+            return "approved"
+        if upper == CRITIC_VERDICT_REVISE:
+            return "revise"
+        return "unparseable"
+    return "unparseable"
+
+
+def _remove_stale_plan_artifact(plan_path: Path) -> str | None:
+    """Ensure no plan artifact survives a non-consensus exit.
+
+    Only this one path is touched — the module owns nothing else under
+    `root_dir`. Cleanup failure (e.g. `plan_path` is a directory, or its
+    parent is unwritable) must not raise out of the consultation and must
+    not replace whatever error actually caused the non-consensus exit — it
+    is reported back to the caller instead, who folds it into the result.
+    """
+    try:
+        plan_path.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"failed to remove stale plan artifact at {plan_path}: {exc}"
+    return None
+
+
+def _combine_errors(primary: str, cleanup_error: str | None) -> str:
+    """Preserve the original failure while still surfacing a cleanup problem."""
+    if cleanup_error is None:
+        return primary
+    return f"{primary}; {cleanup_error}"
+
+
+def _build_stalemate_report(
+    planner_position: str, critic_position: str
+) -> AdvisoryStalemateReport:
+    return AdvisoryStalemateReport(
+        planner_position=planner_position,
+        critic_position=critic_position,
+        options=(
+            AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
+            AdvisoryResolutionOption(2, "Approve Critic Architecture", critic_position),
+            AdvisoryResolutionOption(
+                3,
+                "Escalate to Human Decision",
+                "Halt execution and request user review",
+            ),
+        ),
+    )
 
 
 def run_advisory_consultation_debate(
@@ -137,65 +240,88 @@ def run_advisory_consultation_debate(
     written to ``root_dir / "implementation_plan.md"`` and consensus is
     reported for that round. Otherwise the Planner is asked again, this
     time holding its previous plan and the Critic's objection, and the
-    exchange repeats up to ``max_rounds`` times. If no round is approved,
-    the honest no-consensus outcome is reported — no plan file, no plan
-    text — with ``rounds_run`` reflecting every exchange that actually ran.
+    exchange repeats up to ``max_rounds`` times.
+
+    Three ways this can end without consensus, and each fails closed the
+    same way — no plan artifact, no winner picked, the failure visible on
+    the result:
+
+    - Stalemate: every round runs and none is approved. The result carries
+      both final positions and three resolution options.
+    - Unparseable verdict: a Critic response has no readable verdict line.
+      This ends the consultation immediately rather than being silently fed
+      back to the Planner as if it were a reasoned rejection.
+    - Worker error: ``invoke_worker`` raises. The exception is caught (never
+      ``BaseException``, so Ctrl-C still propagates) and its message is
+      carried on the result.
+
+    A pre-existing ``implementation_plan.md`` under ``root_dir`` from an
+    earlier run is removed on every one of these three exits, so the
+    artifact on disk is never staler than the result describing it.
+
+    Raises ``ValueError`` if ``max_rounds`` is not at least 1: that is a
+    programming error at the call site, not a genuine Planner-Critic
+    disagreement, and must not be reported back as a fabricated stalemate.
     """
+    if max_rounds < 1:
+        raise ValueError(f"max_rounds must be >= 1, got {max_rounds}")
+
     rounds: list[AdvisoryDebateRound] = []
     previous_plan: str | None = None
     previous_critique: str | None = None
+    plan_path = root_dir / "implementation_plan.md"
 
-    for round_number in range(1, max_rounds + 1):
+    def _result(
+        outcome: AdvisoryOutcome,
+        *,
+        final_plan: str = "",
+        stalemate: AdvisoryStalemateReport | None = None,
+        error: str | None = None,
+    ) -> AdvisoryDebateResult:
+        return AdvisoryDebateResult(
+            rounds_run=len(rounds),
+            final_plan=final_plan,
+            outcome=outcome,
+            planner_model=planner_model,
+            critic_model=critic_model,
+            rounds=tuple(rounds),
+            stalemate=stalemate,
+            error=error,
+        )
+
+    for _round_number in range(1, max_rounds + 1):
         planner_prompt = _build_planner_prompt(
             task_description,
             previous_plan=previous_plan,
             critic_feedback=previous_critique,
         )
-        planner_plan = invoke_worker(planner_model, planner_effort, planner_prompt)
+        try:
+            planner_plan = invoke_worker(planner_model, planner_effort, planner_prompt)
+        except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            return _result("worker_error", error=_combine_errors(str(exc), cleanup_error))
 
         critic_prompt = _build_critic_prompt(task_description, planner_plan)
-        critic_response = invoke_worker(critic_model, critic_effort, critic_prompt)
+        try:
+            critic_response = invoke_worker(critic_model, critic_effort, critic_prompt)
+        except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            return _result("worker_error", error=_combine_errors(str(exc), cleanup_error))
 
         rounds.append(AdvisoryDebateRound(planner_plan, critic_response))
+        verdict = _parse_critic_verdict(critic_response)
 
-        if _critic_approved(critic_response):
-            _atomic_text_write(root_dir / "implementation_plan.md", planner_plan)
-            return AdvisoryDebateResult(
-                rounds_run=round_number,
-                consensus_reached=True,
-                final_plan=planner_plan,
-                planner_model=planner_model,
-                critic_model=critic_model,
-                rounds=tuple(rounds),
-            )
+        if verdict == "approved":
+            _atomic_text_write(plan_path, planner_plan)
+            return _result("consensus", final_plan=planner_plan)
+
+        if verdict == "unparseable":
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            return _result("unparseable_verdict", error=cleanup_error)
 
         previous_plan = planner_plan
         previous_critique = critic_response
 
-    return AdvisoryDebateResult(
-        rounds_run=len(rounds),
-        consensus_reached=False,
-        final_plan="",
-        planner_model=planner_model,
-        critic_model=critic_model,
-        rounds=tuple(rounds),
-    )
-
-
-def generate_debate_stalemate_report(
-    planner_plan: str,
-    critic_plan: str,
-    rounds_run: int = MAX_DEBATE_ROUNDS,
-) -> dict[str, Any]:
-    """Generate a structured visual comparison matrix and options when Planner-Critic debate stalemates."""
-    return {
-        "title": f"STALEMATE: Planner-Critic Debate Unresolved after {rounds_run} Rounds",
-        "rounds": rounds_run,
-        "planner_summary": planner_plan,
-        "critic_summary": critic_plan,
-        "options": [
-            {"id": 1, "label": "Approve Planner Architecture", "description": planner_plan},
-            {"id": 2, "label": "Approve Critic Architecture", "description": critic_plan},
-            {"id": 3, "label": "Escalate to Human Decision", "description": "Halt execution and request user review"},
-        ],
-    }
+    cleanup_error = _remove_stale_plan_artifact(plan_path)
+    stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
+    return _result("stalemate", stalemate=stalemate, error=cleanup_error)
