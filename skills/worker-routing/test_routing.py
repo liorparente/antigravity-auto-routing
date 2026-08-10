@@ -12,7 +12,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib.util
-import inspect
 import json
 import os
 import re
@@ -111,14 +110,9 @@ class RoutingCheckUnitTests(unittest.TestCase):
         self.assertIn("sh", extensions)
 
     def test_security_context_is_immutable_and_compute_metrics_accepts_it(self) -> None:
-        context = routing_check.SecurityContext(secret=b"test-secret")
-        self.assertTrue(routing_check.SecurityContext.__dataclass_params__.frozen)
+        context = routing_check.SecurityContext.create(secret=b"test-secret")
         with self.assertRaises(AttributeError):
             context.secret = b"replacement-secret"  # type: ignore[misc]
-
-        parameters = inspect.signature(routing_check.compute_metrics).parameters
-        self.assertNotIn("root_dir", parameters)
-        self.assertEqual(parameters["security_ctx"].default, None)
 
     def test_worker_pattern_ignores_substrings(self) -> None:
         patterns = routing_check.load_patterns(self.config)
@@ -193,7 +187,10 @@ class RoutingCheckUnitTests(unittest.TestCase):
         )
         step.writes.append("src/feature.py")
         safe_patterns = routing_check.load_safe_patterns(self.config)
-        metrics = routing_check.compute_metrics([step], ["py"], ["claude -p"], safe_patterns)
+        metrics = routing_check.compute_metrics(
+            [step], ["py"], ["claude -p"], safe_patterns,
+            security_ctx=routing_check.SecurityContext.create(),
+        )
         self.assertEqual(metrics["violations"], [(1, ["src/feature.py"])])
 
     def test_safe_commands_allowlist_matches_expected(self) -> None:
@@ -219,7 +216,10 @@ class RoutingCheckUnitTests(unittest.TestCase):
             "lsof -i :9222",
             " lsof -i ",
         ]
-        metrics = routing_check.compute_metrics([step], ["py"], [], safe_patterns)
+        metrics = routing_check.compute_metrics(
+            [step], ["py"], [], safe_patterns,
+            security_ctx=routing_check.SecurityContext.create(),
+        )
         self.assertEqual(metrics["violations"], [])
 
     def test_unrouted_mutation_fails_strict_and_warns(self) -> None:
@@ -707,11 +707,18 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
         self.worker_patterns = routing_check.load_patterns(self.config)
         self.safe_patterns = routing_check.load_safe_patterns(self.config)
         self.code_extensions = routing_check.load_code_extensions(self.config)
+        self.security_ctx = routing_check.SecurityContext.create()
 
     def test_cmd01_chained_command_with_unsafe_tail_flagged(self) -> None:
         step = routing_check.Step(1, "[ROUTING: codex — complexity: simple — effort: low — reason: test]")
         step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\" && touch x.py")
-        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        metrics = routing_check.compute_metrics(
+            [step],
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+            self.security_ctx,
+        )
         self.assertEqual(len(metrics["violations"]), 1)
 
     def test_cmd02_subshell_substitution_rejected(self) -> None:
@@ -728,20 +735,28 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             "bash -c 'codex exec --model gpt-5.6-luna -c model_reasoning_effort=low && touch x.py'"
         )
         metrics = routing_check.compute_metrics(
-            [step], self.code_extensions, self.worker_patterns, self.safe_patterns
+            [step],
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+            self.security_ctx,
         )
         self.assertEqual(len(metrics["violations"]), 1)
 
     def test_dec01_model_declaration_drift_detected(self) -> None:
         step = routing_check.Step(1, "[ROUTING: Codex Sol — complexity: complex — effort: high — reason: test]")
         step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort=\"low\"")
-        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        metrics = routing_check.compute_metrics(
+            [step], self.code_extensions, self.worker_patterns, self.safe_patterns, self.security_ctx
+        )
         self.assertEqual(len(metrics["violations"]), 1)
 
     def test_dec02_effort_declaration_drift_detected(self) -> None:
         step = routing_check.Step(1, "[ROUTING: codex — complexity: complex — effort: high — reason: test]")
         step.commands.append("IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort=\"low\"")
-        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        metrics = routing_check.compute_metrics(
+            [step], self.code_extensions, self.worker_patterns, self.safe_patterns, self.security_ctx
+        )
         self.assertEqual(len(metrics["violations"]), 1)
 
     def test_dec03_approved_agy_codex_review_and_calibrated_claude_are_valid(self) -> None:
@@ -761,7 +776,11 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             '--allow-dangerously-skip-permissions "implement feature" < /dev/null'
         )
         metrics = routing_check.compute_metrics(
-            [agy, review, claude], self.code_extensions, self.worker_patterns, self.safe_patterns
+            [agy, review, claude],
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+            self.security_ctx,
         )
         self.assertEqual(metrics["violations"], [])
 
@@ -779,7 +798,11 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             'claude -p --no-session-persistence --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
         )
         metrics = routing_check.compute_metrics(
-            [opus_step, sonnet_step], self.code_extensions, self.worker_patterns, self.safe_patterns
+            [opus_step, sonnet_step],
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+            self.security_ctx,
         )
         self.assertEqual(metrics["violations"], [])
 
@@ -791,7 +814,11 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
             'claude -p --no-session-persistence --model claude-sonnet-5 -c model_reasoning_effort="high" "implement feature" < /dev/null'
         )
         metrics = routing_check.compute_metrics(
-            [step], self.code_extensions, self.worker_patterns, self.safe_patterns
+            [step],
+            self.code_extensions,
+            self.worker_patterns,
+            self.safe_patterns,
+            self.security_ctx,
         )
         self.assertEqual(len(metrics["violations"]), 1)
 
@@ -814,7 +841,9 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
     def test_log01_unknown_write_tool_fails_closed(self) -> None:
         step = routing_check.Step(1, "[ROUTING: Direct — reason: test]")
         step.unknown_write_tools.append("apply_unreviewed_patch")
-        metrics = routing_check.compute_metrics([step], self.code_extensions, self.worker_patterns, self.safe_patterns)
+        metrics = routing_check.compute_metrics(
+            [step], self.code_extensions, self.worker_patterns, self.safe_patterns, self.security_ctx
+        )
         self.assertEqual(len(metrics["violations"]), 1)
         self.assertIn("LOG-01", metrics["violation_details"][0][1][0])
 
@@ -871,7 +900,7 @@ class CalibrationSignatureTests(unittest.TestCase):
     def _metrics(
         self, step: object, root_dir: Path | None = None
     ) -> dict[str, object]:
-        security_ctx = routing_check.SecurityContext(root_dir=root_dir)
+        security_ctx = routing_check.SecurityContext.create(root_dir=root_dir)
         return routing_check.compute_metrics(
             [step],
             self.code_extensions,
@@ -940,6 +969,7 @@ class CalibrationSignatureTests(unittest.TestCase):
                 self.code_extensions,
                 self.worker_patterns,
                 self.safe_patterns,
+                security_ctx=routing_check.SecurityContext.create(),
             )
         self.assertEqual(metrics["calibration_markers"], 1)
         self.assertEqual(
@@ -979,6 +1009,7 @@ class CalibrationSignatureTests(unittest.TestCase):
                 self.code_extensions,
                 self.worker_patterns,
                 self.safe_patterns,
+                security_ctx=routing_check.SecurityContext.create(),
             )
         self.assertEqual(metrics["violations"], [])
         self.assertEqual(len(steps[0].calibration_headers), 1)
@@ -1005,6 +1036,7 @@ class TransactionalWorkerCallTests(unittest.TestCase):
         self.worker_patterns = routing_check.load_patterns(config)
         self.safe_patterns = routing_check.load_safe_patterns(config)
         self.code_extensions = routing_check.load_code_extensions(config)
+        self.security_ctx = routing_check.SecurityContext.create()
 
     def _metrics(self, *commands: str) -> dict[str, object]:
         step = routing_check.Step(
@@ -1017,6 +1049,7 @@ class TransactionalWorkerCallTests(unittest.TestCase):
             self.code_extensions,
             self.worker_patterns,
             self.safe_patterns,
+            self.security_ctx,
         )
 
     def test_worker_segment_in_command_with_unsafe_tail_is_not_counted(self) -> None:
@@ -1559,7 +1592,7 @@ class RoutingAuditEngineTests(unittest.TestCase):
                 self.audit_config.code_extensions,
                 self.audit_config.worker_patterns,
                 self.audit_config.safe_patterns,
-                security_ctx=routing_check.SecurityContext(root_dir=tmp),
+                security_ctx=routing_check.SecurityContext.create(root_dir=tmp),
             )
             metrics_codes = {
                 message.split()[0]
@@ -1603,6 +1636,7 @@ class Phase1CharacterizationTests(unittest.TestCase):
             self.golden["code_extensions"],
             self.golden["worker_patterns"],
             safe_patterns,
+            security_ctx=routing_check.SecurityContext.create(),
         )
         normalized = json.loads(json.dumps(metrics))
         self.assertEqual(normalized, self.golden["compute_metrics_output"])

@@ -461,15 +461,6 @@ def structural_binding_issues(
     return issues
 
 
-def check_structural_binding(
-    routing_str: str | None,
-    command: str,
-    worker_patterns: Sequence[str | re.Pattern[str]],
-) -> bool:
-    """Compatibility wrapper retained for existing callers/tests."""
-    return not structural_binding_issues(routing_str, [command], worker_patterns)
-
-
 class Step:
     """One logical unit of a conversation log."""
 
@@ -558,12 +549,18 @@ def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
 class SecurityContext:
     """Encapsulates calibration secret resolution and HMAC verification."""
 
-    root_dir: str | Path | None = None
-    secret: bytes | None = None
+    root_dir: str | Path | None
+    secret: bytes | None
 
-    def __post_init__(self) -> None:
-        if self.secret is None:
-            object.__setattr__(self, "secret", get_calibration_secret(self.root_dir))
+    @classmethod
+    def create(
+        cls, root_dir: str | Path | None = None, secret: bytes | None = None
+    ) -> SecurityContext:
+        """Resolve the verifier secret before constructing an immutable context."""
+        return cls(
+            root_dir=root_dir,
+            secret=secret if secret is not None else get_calibration_secret(root_dir),
+        )
 
     def verify_manifest(self, manifest: dict[str, Any]) -> bool:
         if self.secret is None:
@@ -635,11 +632,9 @@ def _canonical_calibration_payload(manifest: dict[str, Any]) -> bytes | None:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def calibration_signature_issue(
-    step: Step, security_ctx: SecurityContext | None = None
-) -> str | None:
+def calibration_signature_issue(step: Step, security_ctx: SecurityContext) -> str | None:
     """Verify all same-step headers/evidence and return DEC-05 at most once."""
-    return (security_ctx or SecurityContext()).validate_step(step)
+    return security_ctx.validate_step(step)
 
 
 def is_unknown_write_tool(tool_name: Any) -> bool:
@@ -750,7 +745,7 @@ def _analyze_step(
     code_extensions: list[str],
     worker_patterns: Sequence[str | re.Pattern[str]],
     safe_patterns: list[re.Pattern[str]],
-    security_ctx: SecurityContext | None = None,
+    security_ctx: SecurityContext,
 ) -> StepAnalysis:
     """Analyze a single conversation step in isolation (ADR-0003)."""
     code_ext_set = {e.lower().lstrip(".") for e in code_extensions}
@@ -784,10 +779,9 @@ def _analyze_step(
         step.calibration_manifests
     )
 
-    if security_ctx is not None:
-        calibration_issue = security_ctx.validate_step(step)
-        if calibration_issue:
-            step_issues.append(calibration_issue)
+    calibration_issue = security_ctx.validate_step(step)
+    if calibration_issue:
+        step_issues.append(calibration_issue)
 
     if step.unknown_write_tools:
         step_issues.append(
@@ -818,11 +812,8 @@ def compute_metrics(
     code_extensions: list[str],
     worker_patterns: Sequence[str | re.Pattern[str]],
     safe_patterns: list[re.Pattern[str]],
-    security_ctx: SecurityContext | None = None,
+    security_ctx: SecurityContext,
 ) -> dict[str, Any]:
-    if security_ctx is None:
-        security_ctx = SecurityContext()
-
     total_writes = 0
     code_writes = 0
     routing_declarations = 0
@@ -899,7 +890,7 @@ class PolicyEvaluator:
         security_ctx: SecurityContext | None = None,
     ) -> None:
         self.config = config
-        self.security_ctx = security_ctx or SecurityContext()
+        self.security_ctx = security_ctx or SecurityContext.create()
         self.worker_patterns = load_patterns(config)
         self.code_extensions = load_code_extensions(config)
         self.safe_patterns = load_safe_patterns(config)
@@ -931,7 +922,7 @@ class RoutingAuditEngine:
             config_path = None
         self.config_path = Path(config_path) if config_path else CONFIG_PATH
         self.root_dir = root_dir
-        self.security_ctx = SecurityContext(root_dir=root_dir)
+        self.security_ctx = SecurityContext.create(root_dir=root_dir)
         self._legacy_config: dict[str, Any] | None = None
 
         if config is None:
@@ -1202,9 +1193,8 @@ class RoutingAuditEngine:
 def run_audit(
     config: dict[str, Any],
     log_file: str,
+    security_ctx: SecurityContext,
     strict: bool = False,
-    root_dir: str | Path | None = None,
-    security_ctx: SecurityContext | None = None,
 ) -> int:
     worker_patterns = load_patterns(config)
     code_extensions = load_code_extensions(config)
@@ -1232,7 +1222,6 @@ def run_audit(
         print(f"❌ No steps parsed from log: {log_file}")
         return 2
 
-    security_ctx = security_ctx or SecurityContext(root_dir=root_dir)
     metrics = compute_metrics(
         steps, code_extensions, worker_patterns, safe_patterns, security_ctx=security_ctx
     )
@@ -1324,13 +1313,13 @@ def main() -> None:
         print("Usage: routing_check.py [--strict] <log_file>", file=sys.stderr)
         sys.exit(2)
 
-    security_ctx = SecurityContext()
+    security_ctx = SecurityContext.create()
     sys.exit(
         run_audit(
             config,
             sys.argv[1],
-            strict=strict,
             security_ctx=security_ctx,
+            strict=strict,
         )
     )
 
