@@ -136,4 +136,12 @@
   3. Telemetry and Fail-Closed Routing: `AgentCouncil.route_task` combines sensitivity classification (`evaluate_sensitivity`), endpoint probing (`check_local_model_endpoint`), and telemetry logging (`log_routing_telemetry`), failing closed via `record_local_model_failure`.
 - Verification: 100 tests pass in `skills/worker-routing/test_routing.py` (`OK`).
 
+## 2026-08-10 — CI Mypy Type Checking Resolution on Dynamic JSON Dictionary Lookups
+
+- Mission: Resolve GitHub Actions CI workflow failure on commit `61d41c1`.
+- Root Cause: `_valid_debate_rounds` parameter annotations were typed as `list[dict[str, Any]]` and `int`. Callers passing `manifest.get("debate_rounds")` and `manifest.get("consensus_round")` (which return `Any | None`) triggered `mypy` error `Argument 1 to "_valid_debate_rounds" has incompatible type "Any | None"; expected "list[dict[str, Any]]"`.
+- Resolution: Typing dynamic dictionary validation helpers to accept `Any` parameter types allows `manifest.get(...)` calls to pass without `mypy` type friction while internal `isinstance()` runtime guards ensure strict validation.
+- Verification: Executed full CI suite locally (`./.venv/bin/ruff`, `./.venv/bin/mypy`, `shellcheck`, `python3 test_routing.py`). All 4 checks pass cleanly (105 tests OK). Committed `8e79aa6` and pushed to `origin main`.
+
+
 
