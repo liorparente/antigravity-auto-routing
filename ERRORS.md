@@ -114,4 +114,3 @@
 - Empirical Test Result: Failed immediately with `Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)`. Re-running the exact same invocation with `BypassSandbox: true` succeeded (`exit code 0`). Environment variables do not resolve macOS IDE process socket isolation.
 - Resolution: Updated `knowledge/institutional-memory.md` to remove the false claim and explicitly defer to `protocol.md` Rule 4.7 (`BypassSandbox: true`).
 - Systemic Pattern: Third instance of documented resolutions found not matching empirical reality. Always require empirical test evidence before writing workarounds into institutional memory.
-
