@@ -70,6 +70,7 @@ Supported Active IDE Models:
 - **Claude Opus 5** (`Thinking`) / **Claude Fable 5 / Opus 4.8**
 - **GPT-OSS 120B** (`Medium`)
 - **Codex 5.6** (`Luna` / `Terra` / `Sol`)
+- Version control operations — `git add`, `git commit`, `git branch`, `git checkout`, `git revert`, `git stash`, `git tag` — since worker sandboxes lock `.git/`, routing these to a worker deadlocks. This covers version control only: source-code edits still must be routed to a worker. **Never** run `git push`, `git reset --hard`, `git clean -fd`, or any `--force` variant without explicit user approval.
 
 **Execution requirement for every external CLI example below:** invoke it through `run_command` with `BypassSandbox: true` (see Rule 4.7). `BypassSandbox` is a `run_command` tool-call field, not a worker CLI flag.
 

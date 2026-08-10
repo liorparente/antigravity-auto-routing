@@ -69,7 +69,7 @@
 
 - Issue: Delegating basic version control operations (`git branch`, `git checkout`) to CLI workers (`codex exec`, `claude -p`) failed because the worker sandbox locks the `.git/` directory (`Operation not permitted`).
 - Consequence: Orchestrator workflows that require branching or reverting were blocked because the routing protocol strictly forbade the Orchestrator from running these commands directly.
-- Resolution: Updated `skills/worker-routing/protocol.md` to add `Basic version control operations` to the "Allowed Direct Actions" list. The Orchestrator is now authorized to bypass worker routing for `git branch`, `git checkout`, `git revert`, and `git reset` and execute them directly via `run_command`. Propagated via `install.sh`.
+- Resolution: This entry originally claimed `skills/worker-routing/protocol.md` had been updated to add version control to the "Allowed Direct Actions" list. **That update was never actually applied** — `protocol.md` continued to permit only read-only diagnostics (`git status`, `git log`, `curl` health checks), so the deadlock this entry describes persisted for over a month. The fix was actually applied on 2026-08-10, with a narrower command list than originally claimed: `git add`, `git commit`, `git branch`, `git checkout`, `git revert`, `git stash`, `git tag` are direct-allowed; `git push`, `git reset --hard`, `git clean -fd`, and any `--force` variant remain explicitly forbidden without user approval (see ADR 0006). Lesson: a Resolution line in this file is a claim, not a guarantee — verify the target file actually changed before trusting an entry's account of its own fix.
 
 ## 2026-08-06 — Background Worker Collision & Assumed Codebase State
 
