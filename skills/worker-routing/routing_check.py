@@ -402,7 +402,8 @@ def structural_binding_issues(
             # execution calibration flags.  Codex exec/Claude execution must
             # bind both flags whenever a full declaration is present.
             requires_flags = (
-                (executable == "codex" and _strip_command_wrappers(segment).startswith("codex exec"))
+                executable == "codex"
+                and _strip_command_wrappers(segment).startswith("codex exec")
                 or executable == "claude"
             )
             if requires_flags and (not model_match or not effort_match):
@@ -412,11 +413,34 @@ def structural_binding_issues(
                 continue
             model = model_match.group("model").lower() if model_match else ""
             actual_effort = effort_match.group("effort").lower() if effort_match else None
-            expected_tier = next((tier for tier in ("sol", "terra", "luna") if tier in declared_worker), None)
+            expected_tier = next(
+                (tier for tier in ("sol", "terra", "luna") if tier in declared_worker),
+                None,
+            )
             if "codex" in declared_worker or expected_tier:
-                worker_matches = executable == "codex" and (expected_tier is None or expected_tier in model)
-            elif any(name in declared_worker for name in ("claude", "sonnet", "opus", "fable", "heavy_doer", "planner")):
-                family = next((name for name in ("sonnet", "opus", "fable") if name in declared_worker), None)
+                worker_matches = (
+                    executable == "codex"
+                    and (expected_tier is None or expected_tier in model)
+                )
+            elif any(
+                name in declared_worker
+                for name in (
+                    "claude",
+                    "sonnet",
+                    "opus",
+                    "fable",
+                    "heavy_doer",
+                    "planner",
+                )
+            ):
+                family = next(
+                    (
+                        name
+                        for name in ("sonnet", "opus", "fable")
+                        if name in declared_worker
+                    ),
+                    None,
+                )
                 ver_match = re.search(r"\b\d+(?:\.\d+)?\b", declared_worker)
                 expected_ver = ver_match.group(0) if ver_match else None
                 worker_matches = (
@@ -435,7 +459,11 @@ def structural_binding_issues(
     return issues
 
 
-def check_structural_binding(routing_str: str | None, command: str, worker_patterns: list[str]) -> bool:
+def check_structural_binding(
+    routing_str: str | None,
+    command: str,
+    worker_patterns: list[str],
+) -> bool:
     """Compatibility wrapper retained for existing callers/tests."""
     return not structural_binding_issues(routing_str, [command], worker_patterns)
 
@@ -514,6 +542,8 @@ def _add_calibration_text(step: Step, text: str) -> None:
 
 def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
     """Read the verifier secret without creating or modifying project state."""
+    # Keep this import lazy: routing_check.py is loaded directly by path in
+    # standalone audit contexts, before its sibling module is on sys.path.
     from agent_council import AgentCouncil
 
     try:
@@ -536,6 +566,8 @@ class SecurityContext:
     def verify_manifest(self, manifest: dict[str, Any]) -> bool:
         if self.secret is None:
             return False
+        # See get_calibration_secret: direct-path execution needs this sibling
+        # import to remain lazy until the caller has installed it.
         from agent_council import AgentCouncil
 
         return AgentCouncil.verify_signature(
@@ -743,7 +775,9 @@ def _analyze_step(
         else:
             step_worker_calls += command_worker_calls
 
-    step_issues.extend(structural_binding_issues(step.routing, step.commands, worker_patterns))
+    step_issues.extend(
+        structural_binding_issues(step.routing, step.commands, worker_patterns)
+    )
     calibration_markers = len(step.calibration_headers) + len(
         step.calibration_manifests
     )
@@ -754,7 +788,9 @@ def _analyze_step(
             step_issues.append(calibration_issue)
 
     if step.unknown_write_tools:
-        step_issues.append("LOG-01 unknown write tool: " + ", ".join(step.unknown_write_tools))
+        step_issues.append(
+            "LOG-01 unknown write tool: " + ", ".join(step.unknown_write_tools)
+        )
 
     step_code_writes: list[str] = []
     total_writes = len(step.writes)
@@ -1148,7 +1184,9 @@ class RoutingAuditEngine:
         metrics = evaluator.evaluate(steps)
 
         violation_count = len(metrics["violations"])
-        violation = (metrics["code_writes"] > 0 and metrics["worker_calls"] == 0) or violation_count > 0
+        violation = (
+            metrics["code_writes"] > 0 and metrics["worker_calls"] == 0
+        ) or violation_count > 0
         warning = (
             metrics["code_writes"] > metrics["worker_calls"] and not violation
         ) or (
@@ -1243,16 +1281,26 @@ def run_audit(
         print("   Every step that writes a source code file must also contain a worker CLI call,")
         print("   regardless of what its [ROUTING:] label says.")
         for step_index, files in metrics["violations"]:
-            print(f"  ⚠️  Step {step_index}: unrouted code edit detected ({files})", file=sys.stderr)
+            print(
+                f"  ⚠️  Step {step_index}: unrouted code edit detected ({files})",
+                file=sys.stderr,
+            )
         violation = True
 
     warning = False
     if metrics["code_writes"] > metrics["worker_calls"] and not violation:
-        print(f"🟡 WARNING: More code edits ({metrics['code_writes']}) than worker calls ({metrics['worker_calls']}).")
+        print(
+            "🟡 WARNING: More code edits "
+            f"({metrics['code_writes']}) than worker calls "
+            f"({metrics['worker_calls']})."
+        )
         print("   Some edits may not have been properly routed.")
         warning = True
     elif metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0 and not violation:
-        print(f"🟡 WARNING: No [ROUTING:] declarations found, but {metrics['total_writes']} file writes occurred.")
+        print(
+            "🟡 WARNING: No [ROUTING:] declarations found, but "
+            f"{metrics['total_writes']} file writes occurred."
+        )
         warning = True
     elif not violation:
         print("✅ No violations detected.")

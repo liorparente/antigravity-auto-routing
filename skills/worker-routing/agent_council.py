@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import hashlib
 import hmac
 import json
@@ -21,12 +22,14 @@ import secrets
 import shlex
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 CACHE_TTL_SECONDS = 24 * 60 * 60
 CACHE_VERSION = 2
 MAX_DEBATE_ROUNDS = 3
+PROTOCOL_VERSION = "3.5"
 VALID_COMPLEXITIES = frozenset({"trivial", "simple", "medium", "complex"})
 VALID_EFFORTS = frozenset({"low", "medium", "high", "ultra"})
 DEFAULT_EFFORTS = {
@@ -63,18 +66,27 @@ def evaluate_sensitivity(task_text: str) -> tuple[bool, bool]:
     return is_sens, is_sens
 
 
-def check_local_model_endpoint(endpoint_url: str = "http://127.0.0.1:1234/v1/models", timeout_seconds: float = 1.0) -> bool:
+def check_local_model_endpoint(
+    endpoint_url: str = "http://127.0.0.1:1234/v1/models",
+    timeout_seconds: float = 1.0,
+) -> bool:
     """Non-blocking health probe for local inference server."""
     try:
-        import urllib.request
-        req = urllib.request.Request(endpoint_url, headers={"User-Agent": "Antigravity/3.4"})
+        req = urllib.request.Request(
+            endpoint_url,
+            headers={"User-Agent": f"Antigravity/{PROTOCOL_VERSION}"},
+        )
         with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
             return response.status == 200
     except Exception:
         return False
 
 
-def should_route_to_local_model(complexity: str, is_sensitive: bool = False, is_local_available: bool = False) -> bool:
+def should_route_to_local_model(
+    complexity: str,
+    is_sensitive: bool = False,
+    is_local_available: bool = False,
+) -> bool:
     """Determine whether task should be routed to local model (LM Studio).
 
     Sensitive tasks (PII, credentials) must stay on the local model whenever
@@ -91,7 +103,6 @@ def should_route_to_local_model(complexity: str, is_sensitive: bool = False, is_
 
 def append_jsonl_locked(file_path: str | Path, record: dict[str, Any]) -> None:
     """Safely append a JSON record using advisory file locking (fcntl)."""
-    import fcntl
     path = Path(file_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, sort_keys=True) + "\n"
@@ -176,7 +187,12 @@ def escalate_routing_effort(
 ) -> tuple[str, str]:
     """Escalate reasoning effort and model tier after 2+ failed worker attempts."""
     if attempts < 2:
-        return current_effort, "codex_terra" if complexity in ("trivial", "simple") else "claude_sonnet_5"
+        worker = (
+            "codex_terra"
+            if complexity in ("trivial", "simple")
+            else "claude_sonnet_5"
+        )
+        return current_effort, worker
 
     effort_ladder = ["low", "medium", "high", "ultra"]
     cur_idx = effort_ladder.index(current_effort) if current_effort in effort_ladder else 1
