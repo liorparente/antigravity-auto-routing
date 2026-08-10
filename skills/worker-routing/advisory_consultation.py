@@ -31,6 +31,14 @@ CRITIC_VERDICT_APPROVE = "VERDICT: APPROVE"
 InvokeWorker = Callable[[str, str, str], str]
 
 
+@dataclass(frozen=True)
+class AdvisoryDebateRound:
+    """One Planner/Critic exchange: the proposal offered and the verdict it drew."""
+
+    planner_proposal: str
+    critic_response: str
+
+
 @dataclass
 class AdvisoryDebateResult:
     rounds_run: int
@@ -38,6 +46,7 @@ class AdvisoryDebateResult:
     final_plan: str
     planner_model: str = "Claude Opus 5 (Thinking)"
     critic_model: str = "Codex 5.6 Sol"
+    rounds: tuple[AdvisoryDebateRound, ...] = ()
 
 
 def needs_advisory_consultation(complexity: str, confidence: float = 1.0) -> bool:
@@ -64,12 +73,27 @@ def _atomic_text_write(path: Path, content: str) -> None:
         raise
 
 
-def _build_planner_prompt(task_description: str) -> str:
+def _build_planner_prompt(
+    task_description: str,
+    *,
+    previous_plan: str | None = None,
+    critic_feedback: str | None = None,
+) -> str:
+    if previous_plan is None or critic_feedback is None:
+        return (
+            f"{WORKER_MODE_TOKEN}\n"
+            "You are the Planner in an AdvisoryConsultation. Propose a concise, "
+            "concrete implementation plan for the task below.\n\n"
+            f"Task: {task_description}"
+        )
     return (
         f"{WORKER_MODE_TOKEN}\n"
-        "You are the Planner in an AdvisoryConsultation. Propose a concise, "
-        "concrete implementation plan for the task below.\n\n"
-        f"Task: {task_description}"
+        "You are the Planner in an AdvisoryConsultation. The Critic did not "
+        "approve your previous plan. Revise your plan to address the "
+        "Critic's objection below.\n\n"
+        f"Task: {task_description}\n\n"
+        f"Your previous plan:\n{previous_plan}\n\n"
+        f"Critic's response:\n{critic_feedback}"
     )
 
 
@@ -106,38 +130,55 @@ def run_advisory_consultation_debate(
     planner_effort: str = "high",
     critic_effort: str = "high",
 ) -> AdvisoryDebateResult:
-    """Run a single Planner/Critic exchange and report the honest outcome.
+    """Run the Planner/Critic exchange, revising on objection, and report the outcome.
 
-    Only one round is executed today: one Planner call proposes a plan, one
-    Critic call judges it. On explicit approval the agreed plan is written
-    to ``root_dir / "implementation_plan.md"`` and consensus is reported.
-    Any other Critic response — revision requested, unparseable, empty —
-    is reported honestly as no consensus, with no plan file and no plan
-    text. ``max_rounds`` is accepted for forward compatibility with a future
-    multi-round loop; this implementation always runs exactly one round.
+    Round 1: the Planner proposes a plan from the task description alone,
+    and the Critic judges it. If the Critic approves, the agreed plan is
+    written to ``root_dir / "implementation_plan.md"`` and consensus is
+    reported for that round. Otherwise the Planner is asked again, this
+    time holding its previous plan and the Critic's objection, and the
+    exchange repeats up to ``max_rounds`` times. If no round is approved,
+    the honest no-consensus outcome is reported — no plan file, no plan
+    text — with ``rounds_run`` reflecting every exchange that actually ran.
     """
-    planner_prompt = _build_planner_prompt(task_description)
-    planner_plan = invoke_worker(planner_model, planner_effort, planner_prompt)
+    rounds: list[AdvisoryDebateRound] = []
+    previous_plan: str | None = None
+    previous_critique: str | None = None
 
-    critic_prompt = _build_critic_prompt(task_description, planner_plan)
-    critic_response = invoke_worker(critic_model, critic_effort, critic_prompt)
-
-    if _critic_approved(critic_response):
-        _atomic_text_write(root_dir / "implementation_plan.md", planner_plan)
-        return AdvisoryDebateResult(
-            rounds_run=1,
-            consensus_reached=True,
-            final_plan=planner_plan,
-            planner_model=planner_model,
-            critic_model=critic_model,
+    for round_number in range(1, max_rounds + 1):
+        planner_prompt = _build_planner_prompt(
+            task_description,
+            previous_plan=previous_plan,
+            critic_feedback=previous_critique,
         )
+        planner_plan = invoke_worker(planner_model, planner_effort, planner_prompt)
+
+        critic_prompt = _build_critic_prompt(task_description, planner_plan)
+        critic_response = invoke_worker(critic_model, critic_effort, critic_prompt)
+
+        rounds.append(AdvisoryDebateRound(planner_plan, critic_response))
+
+        if _critic_approved(critic_response):
+            _atomic_text_write(root_dir / "implementation_plan.md", planner_plan)
+            return AdvisoryDebateResult(
+                rounds_run=round_number,
+                consensus_reached=True,
+                final_plan=planner_plan,
+                planner_model=planner_model,
+                critic_model=critic_model,
+                rounds=tuple(rounds),
+            )
+
+        previous_plan = planner_plan
+        previous_critique = critic_response
 
     return AdvisoryDebateResult(
-        rounds_run=1,
+        rounds_run=len(rounds),
         consensus_reached=False,
         final_plan="",
         planner_model=planner_model,
         critic_model=critic_model,
+        rounds=tuple(rounds),
     )
 
 
