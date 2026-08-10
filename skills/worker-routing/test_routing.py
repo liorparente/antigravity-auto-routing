@@ -1354,12 +1354,20 @@ class AdvisoryConsultationTests(unittest.TestCase):
         self.assertEqual(result.critic_model, "Test Critic")
 
     def test_non_approving_critic_yields_no_consensus_and_no_plan_file(self) -> None:
+        """A Critic that withholds approval every round exhausts max_rounds honestly."""
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: REVISE\nNeeds more detail."]
+                [
+                    "Planner's proposed plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's revised plan.",
+                    "VERDICT: REVISE\nStill missing detail.",
+                    "Planner's third plan.",
+                    "VERDICT: REVISE\nNot convinced.",
+                ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -1367,10 +1375,12 @@ class AdvisoryConsultationTests(unittest.TestCase):
             self.assertFalse((root / "implementation_plan.md").exists())
 
         self.assertFalse(result.consensus_reached)
-        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(result.rounds_run, 3)
         self.assertEqual(result.final_plan, "")
+        self.assertEqual(len(invoker.calls), 6)
 
     def test_unparseable_critic_verdict_is_never_reported_as_consensus(self) -> None:
+        """Verdict parsing is the subject here, not round count, so pin max_rounds=1."""
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -1386,7 +1396,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                         ["Planner's proposed plan.", critic_response]
                     )
                     result = advisory_consultation.run_advisory_consultation_debate(
-                        "Plan the auth rewrite", invoker, root_dir=root
+                        "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
                     )
                     self.assertFalse(result.consensus_reached)
                     self.assertFalse((root / "implementation_plan.md").exists())
@@ -1439,6 +1449,137 @@ class AdvisoryConsultationTests(unittest.TestCase):
             )
 
         self.assertEqual(len(invoker.calls), 2)
+        for _model, _effort, prompt in invoker.calls:
+            self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
+
+    def test_rejection_sends_the_critics_objection_back_to_the_planner(self) -> None:
+        """A rejection must drive a second Planner call that actually holds the critique."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nMissing a rollback strategy.",
+                    "Planner's revised plan.",
+                    "VERDICT: APPROVE\nRollback strategy addressed.",
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(len(invoker.calls), 4)
+        second_planner_prompt = invoker.calls[2][2]
+        self.assertIn("Missing a rollback strategy.", second_planner_prompt)
+        self.assertIn("Planner's first plan.", second_planner_prompt)
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 2)
+        self.assertEqual(result.final_plan, "Planner's revised plan.")
+
+    def test_consensus_on_third_exchange_reports_three_rounds_and_writes_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's second plan.",
+                    "VERDICT: REVISE\nStill thin.",
+                    "Planner's third plan.",
+                    "VERDICT: APPROVE\nThis works.",
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            plan_path = root / "implementation_plan.md"
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(plan_path.read_text(), "Planner's third plan.")
+
+        self.assertEqual(len(invoker.calls), 6)
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 3)
+        self.assertEqual(result.final_plan, "Planner's third plan.")
+
+    def test_result_retains_each_rounds_exchange_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's second plan.",
+                    "VERDICT: APPROVE\nGood now.",
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(len(result.rounds), 2)
+        self.assertEqual(result.rounds[0].planner_proposal, "Planner's first plan.")
+        self.assertEqual(
+            result.rounds[0].critic_response, "VERDICT: REVISE\nNeeds more detail."
+        )
+        self.assertEqual(result.rounds[1].planner_proposal, "Planner's second plan.")
+        self.assertEqual(
+            result.rounds[1].critic_response, "VERDICT: APPROVE\nGood now."
+        )
+
+    def test_critic_that_never_approves_produces_exactly_two_times_max_rounds_calls(
+        self,
+    ) -> None:
+        """Criterion 4, strict: no path may over- or under-run the configured cap."""
+        for max_rounds in (2, 4):
+            with self.subTest(max_rounds=max_rounds):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    responses = []
+                    for i in range(max_rounds):
+                        responses.append(f"Planner's plan #{i + 1}.")
+                        responses.append(f"VERDICT: REVISE\nStill not good enough #{i + 1}.")
+                    invoker = _RecordingInvoker(responses)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        max_rounds=max_rounds,
+                    )
+                    self.assertFalse((root / "implementation_plan.md").exists())
+
+                self.assertEqual(len(invoker.calls), 2 * max_rounds)
+                self.assertEqual(result.rounds_run, max_rounds)
+                self.assertFalse(result.consensus_reached)
+                self.assertEqual(result.final_plan, "")
+
+    def test_worker_mode_token_present_in_every_round_of_multi_round_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's second plan.",
+                    "VERDICT: REVISE\nStill thin.",
+                    "Planner's third plan.",
+                    "VERDICT: APPROVE\nThis works.",
+                ]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(len(invoker.calls), 6)
         for _model, _effort, prompt in invoker.calls:
             self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
 
