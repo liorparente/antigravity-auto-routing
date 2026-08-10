@@ -556,9 +556,7 @@ class AgentCouncil:
         return rounds[:MAX_DEBATE_ROUNDS]
 
     @staticmethod
-    def _valid_debate_rounds(
-        rounds: list[dict[str, Any]], consensus_round: int
-    ) -> bool:
+    def _valid_debate_rounds(rounds: Any, consensus_round: Any) -> bool:
         if (
             not isinstance(rounds, list)
             or not 2 <= len(rounds) <= MAX_DEBATE_ROUNDS
