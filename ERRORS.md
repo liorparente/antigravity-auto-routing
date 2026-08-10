@@ -114,3 +114,16 @@
 - Empirical Test Result: Failed immediately with `Error: failed to initialize in-process app-server client: Operation not permitted (os error 1)`. Re-running the exact same invocation with `BypassSandbox: true` succeeded (`exit code 0`). Environment variables do not resolve macOS IDE process socket isolation.
 - Resolution: Updated `knowledge/institutional-memory.md` to remove the false claim and explicitly defer to `protocol.md` Rule 4.7 (`BypassSandbox: true`).
 - Systemic Pattern: Third instance of documented resolutions found not matching empirical reality. Always require empirical test evidence before writing workarounds into institutional memory.
+
+## 2026-08-10 — `codex review` Positional Prompt Argument Syntax
+
+- Issue: Invocations of `codex review --uncommitted "Prompt"` failed with `error: the argument '--uncommitted' cannot be used with '[PROMPT]'`.
+- Cause: Codex CLI positional `[PROMPT]` argument is mutually exclusive with `--uncommitted` flag in `codex review`.
+- Resolution: Omit `--uncommitted` when providing a explicit positional prompt string (e.g. `codex review -c sandbox_mode="workspace-write" -c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null`).
+
+## 2026-08-10 — Protocol `install.sh` Requires `BypassSandbox: true` for Home Directory Writes
+
+- Issue: Running `install.sh` inside standard IDE sandbox (`BypassSandbox: false`) failed with `cp: ~/.gemini/config/... Operation not permitted`.
+- Cause: `install.sh` synchronizes protocol files to global home directory targets (`~/.gemini/config/skills/worker-routing/`, `~/.codex/skills/worker-routing/`, `~/.gemini/GEMINI.md`) outside the workspace.
+- Resolution: Always invoke `install.sh` via `run_command` with `BypassSandbox: true` to permit global home directory target synchronization.
+
