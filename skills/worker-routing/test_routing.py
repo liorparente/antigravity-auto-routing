@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib.util
+import inspect
 import json
 import os
 import re
@@ -108,6 +109,16 @@ class RoutingCheckUnitTests(unittest.TestCase):
         extensions = routing_check.load_code_extensions(self.config)
         self.assertIn("py", extensions)
         self.assertIn("sh", extensions)
+
+    def test_security_context_is_immutable_and_compute_metrics_accepts_it(self) -> None:
+        context = routing_check.SecurityContext(secret=b"test-secret")
+        self.assertTrue(routing_check.SecurityContext.__dataclass_params__.frozen)
+        with self.assertRaises(AttributeError):
+            context.secret = b"replacement-secret"  # type: ignore[misc]
+
+        parameters = inspect.signature(routing_check.compute_metrics).parameters
+        self.assertNotIn("root_dir", parameters)
+        self.assertEqual(parameters["security_ctx"].default, None)
 
     def test_worker_pattern_ignores_substrings(self) -> None:
         patterns = routing_check.load_patterns(self.config)
@@ -860,12 +871,13 @@ class CalibrationSignatureTests(unittest.TestCase):
     def _metrics(
         self, step: object, root_dir: Path | None = None
     ) -> dict[str, object]:
+        security_ctx = routing_check.SecurityContext(root_dir=root_dir)
         return routing_check.compute_metrics(
             [step],
             self.code_extensions,
             self.worker_patterns,
             self.safe_patterns,
-            root_dir=root_dir,
+            security_ctx=security_ctx,
         )
 
     def test_valid_header_and_six_field_manifest_pass(self) -> None:
@@ -1547,7 +1559,7 @@ class RoutingAuditEngineTests(unittest.TestCase):
                 self.audit_config.code_extensions,
                 self.audit_config.worker_patterns,
                 self.audit_config.safe_patterns,
-                root_dir=tmp,
+                security_ctx=routing_check.SecurityContext(root_dir=tmp),
             )
             metrics_codes = {
                 message.split()[0]

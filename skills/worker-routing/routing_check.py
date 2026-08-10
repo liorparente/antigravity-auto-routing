@@ -554,16 +554,16 @@ def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
         return None
 
 
+@dataclass(frozen=True)
 class SecurityContext:
     """Encapsulates calibration secret resolution and HMAC verification."""
 
-    def __init__(
-        self,
-        root_dir: str | Path | None = None,
-        secret: bytes | None = None,
-    ) -> None:
-        self.root_dir = root_dir
-        self.secret = secret if secret is not None else get_calibration_secret(root_dir)
+    root_dir: str | Path | None = None
+    secret: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.secret is None:
+            object.__setattr__(self, "secret", get_calibration_secret(self.root_dir))
 
     def verify_manifest(self, manifest: dict[str, Any]) -> bool:
         if self.secret is None:
@@ -636,10 +636,10 @@ def _canonical_calibration_payload(manifest: dict[str, Any]) -> bytes | None:
 
 
 def calibration_signature_issue(
-    step: Step, root_dir: str | Path | None = None
+    step: Step, security_ctx: SecurityContext | None = None
 ) -> str | None:
     """Verify all same-step headers/evidence and return DEC-05 at most once."""
-    return SecurityContext(root_dir=root_dir).validate_step(step)
+    return (security_ctx or SecurityContext()).validate_step(step)
 
 
 def is_unknown_write_tool(tool_name: Any) -> bool:
@@ -818,11 +818,10 @@ def compute_metrics(
     code_extensions: list[str],
     worker_patterns: Sequence[str | re.Pattern[str]],
     safe_patterns: list[re.Pattern[str]],
-    root_dir: str | Path | None = None,
     security_ctx: SecurityContext | None = None,
 ) -> dict[str, Any]:
     if security_ctx is None:
-        security_ctx = SecurityContext(root_dir=root_dir)
+        security_ctx = SecurityContext()
 
     total_writes = 0
     code_writes = 0
@@ -894,9 +893,13 @@ class JsonLinesLogParser(LogParserAdapter):
 class PolicyEvaluator:
     """Evaluates steps against routing policy configuration."""
 
-    def __init__(self, config: dict[str, Any], root_dir: str | Path | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        security_ctx: SecurityContext | None = None,
+    ) -> None:
         self.config = config
-        self.root_dir = root_dir
+        self.security_ctx = security_ctx or SecurityContext()
         self.worker_patterns = load_patterns(config)
         self.code_extensions = load_code_extensions(config)
         self.safe_patterns = load_safe_patterns(config)
@@ -907,24 +910,8 @@ class PolicyEvaluator:
             self.code_extensions,
             self.worker_patterns,
             self.safe_patterns,
-            root_dir=self.root_dir,
+            security_ctx=self.security_ctx,
         )
-
-
-class HMACValidator:
-    """Deprecated compatibility wrapper delegating to SecurityContext."""
-
-    @staticmethod
-    def verify_manifest(
-        manifest: dict[str, Any],
-        secret: bytes,
-        root_dir: str | Path | None = None,
-    ) -> bool:
-        return SecurityContext(root_dir=root_dir, secret=secret).verify_manifest(manifest)
-
-    @staticmethod
-    def validate(step: Step, root_dir: str | Path | None = None) -> str | None:
-        return SecurityContext(root_dir=root_dir).validate_step(step)
 
 
 class RoutingAuditEngine:
@@ -1182,7 +1169,7 @@ class RoutingAuditEngine:
         if legacy_config is None:
             with open(self.config_path, "r", encoding="utf-8") as f:
                 legacy_config = json.load(f)
-        evaluator = PolicyEvaluator(legacy_config, root_dir=self.root_dir)
+        evaluator = PolicyEvaluator(legacy_config, security_ctx=self.security_ctx)
         metrics = evaluator.evaluate(steps)
 
         violation_count = len(metrics["violations"])
@@ -1217,6 +1204,7 @@ def run_audit(
     log_file: str,
     strict: bool = False,
     root_dir: str | Path | None = None,
+    security_ctx: SecurityContext | None = None,
 ) -> int:
     worker_patterns = load_patterns(config)
     code_extensions = load_code_extensions(config)
@@ -1244,8 +1232,9 @@ def run_audit(
         print(f"❌ No steps parsed from log: {log_file}")
         return 2
 
+    security_ctx = security_ctx or SecurityContext(root_dir=root_dir)
     metrics = compute_metrics(
-        steps, code_extensions, worker_patterns, safe_patterns, root_dir=root_dir
+        steps, code_extensions, worker_patterns, safe_patterns, security_ctx=security_ctx
     )
 
     raw_has_writes = any(t in text for t in WRITE_TOOLS)
@@ -1335,7 +1324,15 @@ def main() -> None:
         print("Usage: routing_check.py [--strict] <log_file>", file=sys.stderr)
         sys.exit(2)
 
-    sys.exit(run_audit(config, sys.argv[1], strict=strict))
+    security_ctx = SecurityContext()
+    sys.exit(
+        run_audit(
+            config,
+            sys.argv[1],
+            strict=strict,
+            security_ctx=security_ctx,
+        )
+    )
 
 
 if __name__ == "__main__":
