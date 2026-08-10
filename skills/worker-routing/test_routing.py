@@ -451,15 +451,15 @@ class ProtocolDocumentationTests(unittest.TestCase):
         ]
         expected_commands = [
             ('IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna '
-             '-c model_reasoning_effort="low" -s workspace-write "..." < /dev/null'),
+             '-c model_reasoning_effort="low" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
             ('IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra '
-             '-c model_reasoning_effort="medium" -s workspace-write "..." < /dev/null'),
+             '-c model_reasoning_effort="medium" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
             ('IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-sonnet-5 '
-             '-c model_reasoning_effort="high" --allow-dangerously-skip-permissions '
-             '"..." < /dev/null'),
-            ("IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write "
-             '-c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null'),
-            'IN_WORKER_ROUTING=true agy -p "..." < /dev/null',
+             '--effort high --allow-dangerously-skip-permissions --permission-mode bypassPermissions '
+             '"[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
+            ("IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode=\"workspace-write\" "
+             '-c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
+            'IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null',
         ]
 
         self.assertIn("**Execution requirement", matrix_intro)

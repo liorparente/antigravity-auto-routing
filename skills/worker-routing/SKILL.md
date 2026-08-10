@@ -3,7 +3,7 @@ name: Auto Routing Protocol
 description: "Antigravity = pure orchestrator for Maximum Quality & Zero-Defect Execution ('Perfect Score Standard'). Every mission begins with deep research (agy) and deep thinking (Claude/Codex Sol), calibrating worker reasoning effort (low/medium/high/ultra) to guarantee top-tier performance. Use when orchestrating complex multi-agent tasks, performing worker routing calibration, running Agent Council reviews, or managing model effort tiers."
 ---
 
-# Auto Routing & Collaboration Protocol v3.4 (Quality-First Standard)
+# Auto Routing & Collaboration Protocol v3.5 (Quality-First Standard)
 
 This protocol defines the multi-model agent hierarchy and collaborative workflows. Antigravity acts as a **pure orchestrator**, delegating all context gathering, planning, execution, and verification steps to specialized models to optimize accuracy, structural soundness, and performance score.
 
@@ -39,13 +39,13 @@ All Phase 0–3 external CLI worker invocations must follow [Rule 4.7 in `protoc
 ### Phase 0: Deep Research & Context Distillation
 Before any code or plan is written, the Orchestrator invokes `agy` (Gemini 3.6 Flash / 3.1 Pro) to perform a comprehensive codebase research pass.
 * **Goal:** Understand existing contracts, edge cases, dependencies, and side effects.
-* **Command:** `IN_WORKER_ROUTING=true script -q /dev/null agy -p "Perform deep research on {TOPIC}. Map out all affected files, imports, exported interfaces, and potential breaking changes."`
+* **Command:** `IN_WORKER_ROUTING=true script -q /dev/null agy -p "[WORKER-MODE: AGY-NESTED-EXEC] Perform deep research on {TOPIC}. Map out all affected files, imports, exported interfaces, and potential breaking changes."`
 
 ### Phase 1: Deep Thinking & Planner-Critic Consensus Loop (System 2 Planning)
 For all Medium and Complex tasks, planning undergoes deep reasoning and peer review:
 1. **Drafting:** The **Planner** (Claude Opus 5 Thinking / Fable 5) designs an interface-first implementation plan.
 2. **Autonomous Debate Loop:** The **Critic** (Codex 5.6 Sol / GPT-OSS 120B) reviews the draft plan using `medium`/`high` reasoning effort, flagging missing edge cases or performance flaws. Up to 3 rounds until consensus.
-   * **Command:** `cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "Perform deep review of this plan. Check for race conditions, type safety, edge cases, and performance." < /dev/null`
+   * **Command:** `cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] Perform deep review of this plan. Check for race conditions, type safety, edge cases, and performance." < /dev/null`
 3. **Consensus Delivery:** Save final approved plan to `implementation_plan.md` for user approval.
 
 ### Phase 2: Task Decomposition & Execution
@@ -56,7 +56,7 @@ Upon user approval, the Orchestrator initializes `task.md` with structured sub-t
 ### Phase 3: Zero-Defect Verification & QA
 * The **Doer** runs local unit/integration tests to verify behavior.
 * The Orchestrator invokes **Codex 5.6 Sol** with `high` effort for a final audit of the diff:
-  * **Command:** `IN_WORKER_ROUTING=true codex review --uncommitted -s workspace-write -c model="gpt-5.6-sol" -c model_reasoning_effort="high" < /dev/null`
+  * **Command:** `IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode="workspace-write" -c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null`
 
 ---
 
@@ -74,4 +74,4 @@ See [`protocol.md`](protocol.md) for the authoritative Quality-First complexity 
 4. **Flow State Context Cleaning:** Run `/clear` when transitioning between major feature tasks.
 
 ---
-*Auto Routing & Collaboration Protocol v3.4 - Quality-First Standard*
+*Auto Routing & Collaboration Protocol v3.5 - Quality-First Standard*
