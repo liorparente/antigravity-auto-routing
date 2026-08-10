@@ -1206,25 +1206,66 @@ class AgentCouncilSafetyDefectTests(unittest.TestCase):
         exactly inverted from the privacy rule ("Sensitive ... LM Studio
         ALWAYS (local model)").
         """
-        self.assertTrue(
+        self.assertEqual(
             agent_council.should_route_to_local_model(
                 "complex", is_sensitive=True, is_local_available=True
-            )
+            ),
+            "route_local",
         )
 
     def test_non_sensitive_trivial_task_still_routes_local_when_available(self) -> None:
-        self.assertTrue(
+        self.assertEqual(
             agent_council.should_route_to_local_model(
                 "trivial", is_sensitive=False, is_local_available=True
-            )
+            ),
+            "route_local",
         )
 
     def test_sensitive_task_not_routed_local_when_unavailable(self) -> None:
-        self.assertFalse(
+        self.assertEqual(
             agent_council.should_route_to_local_model(
                 "complex", is_sensitive=True, is_local_available=False
-            )
+            ),
+            "halt",
         )
+
+    def test_cloud_route_is_selected_without_local_model(self) -> None:
+        self.assertEqual(
+            agent_council.should_route_to_local_model(
+                "simple", is_sensitive=False, is_local_available=False
+            ),
+            "route_cloud",
+        )
+
+    def test_evaluate_sensitivity_distinguishes_credentials(self) -> None:
+        self.assertEqual(
+            agent_council.evaluate_sensitivity("[SENSITIVE] customer data"),
+            (True, False),
+        )
+        self.assertEqual(
+            agent_council.evaluate_sensitivity("rotate bearer token"),
+            (True, True),
+        )
+
+    def test_run_uses_local_route_and_records_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            agent_council, "check_local_model_endpoint", return_value=True
+        ):
+            council = agent_council.AgentCouncil(Path(tmp))
+            council.run("Refactor routing checks", "simple", task_id="local-route")
+            telemetry = json.loads(council.telemetry_file.read_text().strip())
+        self.assertEqual(telemetry["chosen_worker"], "route_local")
+        self.assertEqual(telemetry["task_id"], "local-route")
+
+    def test_run_fails_closed_for_sensitive_task_without_local_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            agent_council, "check_local_model_endpoint", return_value=False
+        ):
+            council = agent_council.AgentCouncil(Path(tmp))
+            with self.assertRaises(agent_council.SensitiveTaskFallbackBlocked):
+                council.run("rotate api_key", "simple", task_id="sensitive-halt")
+            telemetry = json.loads(council.telemetry_file.read_text().strip())
+        self.assertEqual(telemetry["chosen_worker"], "halt")
 
     def test_sensitive_task_local_failure_never_falls_back_to_cloud(self) -> None:
         """Rule 3.5: sensitive tasks fail closed instead of escalating to a cloud worker."""

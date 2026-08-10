@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Deterministic three-tier task-routing decision engine.
 
-The council deliberately has no model or network dependency.  Tier 1 rejects
+The council includes a bounded local-inference health probe. Tier 1 rejects
 shell-shaped task descriptions with :mod:`shlex`; Tier 2 normalizes the
 requested calibration; and Tier 3 asynchronously creates a signed decision
-manifest.  A manifest is both written per task and retained in a 24-hour
+manifest. A manifest is both written per task and retained in a 24-hour
 planning cache, so repeated planning is deterministic and inexpensive.
 """
 from __future__ import annotations
@@ -61,9 +61,14 @@ def detect_sensitive_data(text: str) -> bool:
 
 
 def evaluate_sensitivity(task_text: str) -> tuple[bool, bool]:
-    """Evaluate task sensitivity. Returns (is_sensitive, requires_human_approval)."""
-    is_sens = detect_sensitive_data(task_text)
-    return is_sens, is_sens
+    """Return whether a task is sensitive and whether it includes credentials."""
+    lowered = task_text.lower()
+    is_sensitive = detect_sensitive_data(task_text)
+    contains_credentials = any(
+        keyword in lowered
+        for keyword in ("api_key", "sk-", "bearer ", "private key", "password")
+    )
+    return is_sensitive, contains_credentials
 
 
 def check_local_model_endpoint(
@@ -86,19 +91,18 @@ def should_route_to_local_model(
     complexity: str,
     is_sensitive: bool = False,
     is_local_available: bool = False,
-) -> bool:
-    """Determine whether task should be routed to local model (LM Studio).
+) -> str:
+    """Return the required routing action for a calibrated task.
 
-    Sensitive tasks (PII, credentials) must stay on the local model whenever
-    it is available — "Sensitive ... LM Studio ALWAYS (local model)" — so
-    sensitivity short-circuits to routing local rather than away from it.
+    Sensitive work must remain local; when local inference is unavailable the
+    caller must fail closed rather than selecting a cloud worker.
     """
-    if not is_local_available:
-        return False
     if is_sensitive:
-        return True
+        return "route_local" if is_local_available else "halt"
     normalized = complexity.lower().strip()
-    return normalized in ("trivial", "simple")
+    if is_local_available and normalized in ("trivial", "simple"):
+        return "route_local"
+    return "route_cloud"
 
 
 def append_jsonl_locked(file_path: str | Path, record: dict[str, Any]) -> None:
@@ -314,6 +318,39 @@ class AgentCouncil:
         self.root_dir = (root_dir or Path.cwd()).resolve()
         self.decisions_dir = self.root_dir / ".ralph" / "decisions"
         self.cache_file = self.root_dir / ".ralph" / "cache" / "planning_cache.json"
+        self.telemetry_file = self.root_dir / ".ralph" / "routing_telemetry.jsonl"
+
+    def route_task(self, task: str, complexity: str, task_id: str) -> str:
+        """Evaluate the local-only policy and record the resulting route.
+
+        This is intentionally the only caller path that combines sensitivity
+        classification, endpoint probing, policy selection, and telemetry.
+        """
+        is_sensitive, contains_credentials = evaluate_sensitivity(task)
+        is_local_available = check_local_model_endpoint()
+        route = should_route_to_local_model(
+            complexity,
+            is_sensitive=is_sensitive,
+            is_local_available=is_local_available,
+        )
+        reason = (
+            "sensitive task contains credentials; local inference required"
+            if contains_credentials
+            else "sensitive task; local inference required"
+            if is_sensitive
+            else "local inference available for low-complexity task"
+            if route == "route_local"
+            else "cloud routing selected by calibrated policy"
+        )
+        log_routing_telemetry(
+            task_id, complexity, route, reason, log_file=self.telemetry_file
+        )
+        if route == "halt":
+            raise SensitiveTaskFallbackBlocked(
+                f"task {task_id!r} is sensitive but local inference is unavailable; "
+                "failing closed per Rule 3.5"
+            )
+        return route
 
     def _calibration_secret(self) -> bytes:
         """Compatibility wrapper around the central secret provider."""
@@ -627,6 +664,7 @@ class AgentCouncil:
         safe = lexical_safety_scan(task)
         normalized_complexity, normalized_effort = evaluate_tier2(complexity, effort)
         normalized_task_id = self._task_id(task, normalized_complexity, normalized_effort, task_id)
+        self.route_task(task, normalized_complexity, normalized_task_id)
         cache_key = hashlib.sha256(
             _canonical_json(
                 {
