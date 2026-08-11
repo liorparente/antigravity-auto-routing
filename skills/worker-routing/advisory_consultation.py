@@ -8,10 +8,9 @@ must never be dropped into that module, or it would silently destroy the
 determinism its cache and signature depend on. This module is where that
 loop belongs instead.
 
-The only path to a worker is the ``invoke_worker`` callable each caller
-injects: ``(model, effort, prompt) -> text``. This module never imports
-``subprocess``, ``socket``, or any HTTP client, so the whole loop is
-exercisable offline with a fake.
+Callers may inject an ``invoke_worker`` callable: ``(model, effort, prompt)
+-> text``. When omitted, the production invoker is imported lazily, so the
+loop remains exercisable offline with a fake.
 """
 from __future__ import annotations
 
@@ -309,7 +308,7 @@ def _build_stalemate_report(
 
 def run_advisory_consultation_debate(
     task_description: str,
-    invoke_worker: InvokeWorker,
+    invoke_worker: InvokeWorker | None = None,
     *,
     root_dir: Path,
     max_rounds: int = MAX_DEBATE_ROUNDS,
@@ -393,6 +392,14 @@ def run_advisory_consultation_debate(
             f"human approval required: task text matched sensitivity marker '{marker}'"
         )
         return _result("sensitivity_halt", error=_combine_errors(reason, cleanup_error))
+
+    if invoke_worker is None:
+        try:
+            from production_invoker import invoke_worker as production_invoke_worker
+        except Exception as exc:  # noqa: BLE001 - a production worker failure fails closed.
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            return _result("worker_error", error=_combine_errors(str(exc), cleanup_error))
+        invoke_worker = production_invoke_worker
 
     for _round_number in range(1, max_rounds + 1):
         planner_prompt = _build_planner_prompt(
