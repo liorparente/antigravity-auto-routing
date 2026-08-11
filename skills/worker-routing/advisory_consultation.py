@@ -59,6 +59,15 @@ AdvisoryOutcome = Literal[
 # it were a reasoned objection.
 CriticVerdict = Literal["approved", "revise", "unparseable"]
 
+# Spec 0003 (CriticalDialogue) ticket 01: the occasion a consultation runs
+# under. "ambiguity" is the sole occasion spec 0001 shipped — every default
+# below resolves to it, so an existing call site that never mentions
+# `occasion` keeps behaving exactly as it did before this type existed. The
+# other three are the seam this ticket builds: `_MISSION_COPY` backs each
+# with prompt content, but wiring their real trigger predicates (spec 0003's
+# ticket 03) and blocking stance (ticket 04) is deliberately not done here.
+Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
+
 # Mirrors `agent_council.SENSITIVE_PATTERNS` rather than importing it:
 # importing `agent_council` would pull `urllib.request`, `asyncio`, and
 # `fcntl` into a module whose docstring promises no HTTP client and full
@@ -111,6 +120,24 @@ class AdvisoryStalemateReport:
 
 @dataclass(frozen=True)
 class AdvisoryDebateResult:
+    """`occasion` records which of the four `Occasion` values this
+    consultation ran under (spec 0003 ticket 01). Defaulted to "ambiguity",
+    spec 0001's sole occasion, so every pre-existing construction of this
+    dataclass — in this module and in tests — that never mentions occasion
+    keeps meaning exactly what it meant before this field existed.
+
+    `occasion` is appended after `error`, last in field order, rather than
+    inserted next to `outcome` where it reads more naturally: per
+    institutional memory's 2026-08-06 backward-compatibility gotcha, a new
+    dataclass field must either be keyword-only or preserve the original
+    field order, because every field here is a plain (not keyword-only)
+    dataclass attribute and a positional construction beyond `outcome` — none
+    exists in this repo today, but nothing forbids one tomorrow — would
+    otherwise silently bind into the wrong field instead of failing loudly.
+    Appending preserves the original order exactly; only a genuinely new
+    positional argument could ever reach `occasion`.
+    """
+
     rounds_run: int
     final_plan: str
     outcome: AdvisoryOutcome
@@ -119,6 +146,7 @@ class AdvisoryDebateResult:
     rounds: tuple[AdvisoryDebateRound, ...] = ()
     stalemate: AdvisoryStalemateReport | None = None
     error: str | None = None
+    occasion: Occasion = "ambiguity"
 
     @property
     def consensus_reached(self) -> bool:
@@ -154,40 +182,141 @@ def _atomic_text_write(path: Path, content: str) -> None:
         raise
 
 
+@dataclass(frozen=True)
+class _MissionCopy:
+    """The occasion-specific framing sentences `_build_planner_prompt` and
+    `_build_critic_prompt` select between (spec 0003 ticket 01).
+
+    One instance per `Occasion` value, held in `_MISSION_COPY` — an
+    exhaustive mapping, not a partial one with a fallback, so selecting an
+    occasion this module doesn't know about fails loudly (a `KeyError` from
+    the lookup) rather than silently borrowing another occasion's mission.
+    `ambiguity`'s two sentences and `artifact_label` are spec 0001's
+    hardcoded prompt text verbatim: selecting it must reproduce
+    byte-identical prompts to before this module became occasion-aware.
+    The other three occasions' copy is deliberately minimal — proving the
+    routing seam works is this ticket's job; writing each occasion's real
+    mission content belongs to the ticket that wires its triggers.
+    """
+
+    planner_intro: str
+    planner_revision_intro: str
+    artifact_label: str
+    critic_intro: str
+
+
+_MISSION_COPY: dict[Occasion, _MissionCopy] = {
+    "ambiguity": _MissionCopy(
+        planner_intro=(
+            "You are the Planner in an AdvisoryConsultation. Propose a "
+            "concise, concrete implementation plan for the task below."
+        ),
+        planner_revision_intro=(
+            "You are the Planner in an AdvisoryConsultation. The Critic did "
+            "not approve your previous plan. Revise your plan to address "
+            "the Critic's objection below."
+        ),
+        artifact_label="plan",
+        critic_intro=(
+            "You are the Critic in an AdvisoryConsultation. Judge the "
+            "Planner's plan below on its merits."
+        ),
+    ),
+    "plan-review": _MissionCopy(
+        planner_intro=(
+            "You are the Planner in a CriticalDialogue plan review. "
+            "Propose a concise, concrete implementation plan for the task "
+            "below."
+        ),
+        planner_revision_intro=(
+            "You are the Planner in a CriticalDialogue plan review. The "
+            "Critic did not approve your previous plan. Revise your plan "
+            "to address the Critic's objection below."
+        ),
+        artifact_label="plan",
+        critic_intro=(
+            "You are the Critic in a CriticalDialogue plan review. Judge "
+            "the Planner's plan below on its merits."
+        ),
+    ),
+    "code-review": _MissionCopy(
+        planner_intro=(
+            "You are the Planner in a CriticalDialogue code review, "
+            "defending the diff under review. Propose a concise, concrete "
+            "rationale for the diff below."
+        ),
+        planner_revision_intro=(
+            "You are the Planner in a CriticalDialogue code review. The "
+            "Critic did not approve your previous defense of the diff. "
+            "Revise it to address the Critic's objection below."
+        ),
+        artifact_label="diff defense",
+        critic_intro=(
+            "You are the Critic in a CriticalDialogue code review. Judge "
+            "the diff below on its merits."
+        ),
+    ),
+    "post-mortem": _MissionCopy(
+        planner_intro=(
+            "You are the Planner in a CriticalDialogue post-mortem. "
+            "Propose a concise, concrete lesson to record for the failure "
+            "below."
+        ),
+        planner_revision_intro=(
+            "You are the Planner in a CriticalDialogue post-mortem. The "
+            "Critic did not approve your previous lesson. Revise it to "
+            "address the Critic's objection below."
+        ),
+        artifact_label="lesson",
+        critic_intro=(
+            "You are the Critic in a CriticalDialogue post-mortem. Judge "
+            "the lesson below on its merits."
+        ),
+    ),
+}
+
+
 def _build_planner_prompt(
     task_description: str,
     *,
+    occasion: Occasion = "ambiguity",
     previous_plan: str | None = None,
     critic_feedback: str | None = None,
 ) -> str:
+    mission = _MISSION_COPY[occasion]
     if previous_plan is None or critic_feedback is None:
         return (
             f"{WORKER_MODE_TOKEN}\n"
-            "You are the Planner in an AdvisoryConsultation. Propose a concise, "
-            "concrete implementation plan for the task below.\n\n"
+            f"{mission.planner_intro}\n\n"
             f"Task: {task_description}"
         )
     return (
         f"{WORKER_MODE_TOKEN}\n"
-        "You are the Planner in an AdvisoryConsultation. The Critic did not "
-        "approve your previous plan. Revise your plan to address the "
-        "Critic's objection below.\n\n"
+        f"{mission.planner_revision_intro}\n\n"
         f"Task: {task_description}\n\n"
-        f"Your previous plan:\n{previous_plan}\n\n"
+        f"Your previous {mission.artifact_label}:\n{previous_plan}\n\n"
         f"Critic's response:\n{critic_feedback}"
     )
 
 
-def _build_critic_prompt(task_description: str, planner_plan: str) -> str:
+def _build_critic_prompt(
+    task_description: str, planner_plan: str, *, occasion: Occasion = "ambiguity"
+) -> str:
     # The prompt still asks for an exact verdict line: the tolerance added in
     # `_is_tolerant_revise` is a parser-side safety net for what real models
     # actually emit, not a relaxation of the contract we ask for. Asking for
     # exactness and parsing with tolerance are not in tension — the ask stays
     # strict so most responses need no tolerance at all.
+    #
+    # The verdict-line instruction and closing "Planner's plan:" label stay
+    # fixed across every occasion, unlike the intro above: they are the
+    # VerdictContract's territory (spec 0003 ticket 02), not this ticket's,
+    # and ticket 02 needs one shared shape to extend across all four
+    # occasions rather than four independently-drifting copies.
+    mission = _MISSION_COPY[occasion]
     return (
         f"{WORKER_MODE_TOKEN}\n"
-        "You are the Critic in an AdvisoryConsultation. Judge the Planner's "
-        "plan below on its merits.\n\n"
+        f"{mission.critic_intro}\n\n"
         "Open your response with exactly one verdict line, then your "
         f"critique: either \"{CRITIC_VERDICT_APPROVE}\" if the plan is sound "
         "as written, or \"VERDICT: REVISE\" if it is not.\n\n"
@@ -565,6 +694,7 @@ def run_advisory_consultation_debate(
     invoke_worker: InvokeWorker | None = None,
     *,
     root_dir: Path,
+    occasion: Occasion = "ambiguity",
     max_rounds: int = MAX_DEBATE_ROUNDS,
     planner_model: str = "Claude Opus 5 (Thinking)",
     critic_model: str = "Codex 5.6 Sol",
@@ -630,19 +760,34 @@ def run_advisory_consultation_debate(
     folded into the result's ``error`` field rather than raised or allowed
     to replace the primary outcome.
 
-    Raises ``ValueError`` if ``max_rounds`` is not at least 1: that is a
-    programming error at the call site, not a genuine Planner-Critic
+    ``occasion`` (spec 0003 ticket 01) selects which mission the Planner and
+    Critic prompts carry — see ``_MISSION_COPY``. It defaults to
+    ``"ambiguity"``, spec 0001's sole occasion, so a call site that never
+    mentions it behaves exactly as before this parameter existed: same
+    prompts, same outcomes, same call counts. It is recorded on the returned
+    ``AdvisoryDebateResult`` so a caller can observe which occasion ran.
+    Wiring the other three occasions' real trigger predicates and blocking
+    stance is later tickets' work, not this function's.
+
+    Raises ``ValueError`` if ``max_rounds`` is not at least 1, or if
+    ``occasion`` is not one of the four ``Occasion`` values: both are
+    programming errors at the call site, not a genuine Planner-Critic
     disagreement, and must not be reported back as a fabricated stalemate.
     Validation deliberately precedes the sensitivity gate, so a sensitive
-    task with an invalid `max_rounds` raises rather than returning a
-    `sensitivity_halt` result. Neither ordering contacts a worker, so both
-    preserve the security boundary; only the caller-facing report differs.
-    The exception is the louder halt because it cannot be ignored, whereas
-    reordering would give a genuine call-site bug a plausible-looking result
-    instead of the error that says the caller's code is wrong.
+    task with an invalid `max_rounds` or `occasion` raises rather than
+    returning a `sensitivity_halt` result. Neither ordering contacts a
+    worker, so both preserve the security boundary; only the caller-facing
+    report differs. The exception is the louder halt because it cannot be
+    ignored, whereas reordering would give a genuine call-site bug a
+    plausible-looking result instead of the error that says the caller's
+    code is wrong.
     """
     if max_rounds < 1:
         raise ValueError(f"max_rounds must be >= 1, got {max_rounds}")
+    if occasion not in _MISSION_COPY:
+        raise ValueError(
+            f"unknown occasion {occasion!r}; expected one of {tuple(_MISSION_COPY)}"
+        )
 
     rounds: list[AdvisoryDebateRound] = []
     previous_plan: str | None = None
@@ -684,6 +829,7 @@ def run_advisory_consultation_debate(
             rounds_run=len(rounds),
             final_plan=final_plan,
             outcome=outcome,
+            occasion=occasion,
             planner_model=planner_model,
             critic_model=critic_model,
             rounds=tuple(rounds),
@@ -739,6 +885,7 @@ def run_advisory_consultation_debate(
     for _round_number in range(1, max_rounds + 1):
         planner_prompt = _build_planner_prompt(
             task_description,
+            occasion=occasion,
             previous_plan=previous_plan,
             critic_feedback=previous_critique,
         )
@@ -748,7 +895,9 @@ def run_advisory_consultation_debate(
             cleanup_error = _remove_stale_plan_artifact(plan_path)
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
-        critic_prompt = _build_critic_prompt(task_description, planner_plan)
+        critic_prompt = _build_critic_prompt(
+            task_description, planner_plan, occasion=occasion
+        )
         try:
             critic_response = invoke_worker(critic_model, critic_effort, critic_prompt)
         except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.

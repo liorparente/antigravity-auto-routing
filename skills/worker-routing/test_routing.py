@@ -1975,6 +1975,110 @@ class AdvisoryConsultationTests(unittest.TestCase):
         self.assertFalse(worker_error_result.consensus_reached)
 
 
+class AdvisoryOccasionParameterizationTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 01: the consultation loop becomes
+    occasion-aware. `occasion` selects the mission prompt and is carried on
+    the result; the pre-existing `ambiguity` occasion (spec 0001) must keep
+    behaving exactly as it did before this seam existed — this class is the
+    proof, alongside every pre-existing `AdvisoryConsultationTests` case
+    passing unmodified with `occasion` never mentioned.
+    """
+
+    def test_default_occasion_is_ambiguity_and_is_recorded_on_the_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(result.occasion, "ambiguity")
+
+    def test_each_occasion_is_invocable_and_recorded_on_the_result(self) -> None:
+        """Criterion 4: plan-review and code-review (and, since the `Occasion`
+        type carries all four values, post-mortem and ambiguity too) must be
+        invocable through the public seam without raising, each producing a
+        result that names the occasion it ran under."""
+        for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker(
+                        ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                    )
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Review the change",
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                    )
+                self.assertEqual(result.occasion, occasion)
+                self.assertEqual(result.outcome, "consensus")
+                self.assertEqual(len(invoker.calls), 2)
+
+    def test_unknown_occasion_raises_without_invoking_any_worker(self) -> None:
+        """Mirrors the existing `max_rounds` contract: an invalid `occasion`
+        is a call-site programming error and must surface as a raise, not
+        silently fall back to `ambiguity` or fail deep inside prompt-building
+        with a bare `KeyError`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            with self.assertRaises(ValueError):
+                advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite",
+                    invoker,
+                    root_dir=root,
+                    occasion="not-a-real-occasion",  # type: ignore[arg-type]
+                )
+            self.assertEqual(invoker.calls, [])
+
+    def test_mission_prompt_selection_is_a_genuine_function_of_occasion(self) -> None:
+        """Prompt *wording* stays unpinned per spec 0003's testing policy, but
+        the seam this ticket builds must be provably more than
+        occasion-in-same-prompt-out. The four occasions' round-1 Planner
+        prompts, and their matching Critic prompts, are compared pairwise for
+        inequality only — never for specific content."""
+        occasions = ("ambiguity", "plan-review", "code-review", "post-mortem")
+        planner_prompts: dict[str, str] = {}
+        critic_prompts: dict[str, str] = {}
+        for occasion in occasions:
+            with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                os.environ, {}, clear=True
+            ):
+                root = Path(tmp)
+                invoker = _RecordingInvoker(
+                    ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                )
+                advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite", invoker, root_dir=root, occasion=occasion
+                )
+            planner_prompts[occasion] = invoker.calls[0][2]
+            critic_prompts[occasion] = invoker.calls[1][2]
+
+        self.assertEqual(len(set(planner_prompts.values())), len(occasions))
+        self.assertEqual(len(set(critic_prompts.values())), len(occasions))
+
+    def test_occasion_field_defaults_to_ambiguity_on_direct_construction(self) -> None:
+        """Mirrors `test_consensus_reached_is_derived_from_outcome_and_cannot_be_mutated`
+        above: existing direct `AdvisoryDebateResult(...)` construction sites
+        that never mention `occasion` — in this test file and in production
+        code — must keep working and must mean "ambiguity", not break on a
+        newly-required positional/keyword argument."""
+        result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=1, final_plan="A plan.", outcome="consensus"
+        )
+        self.assertEqual(result.occasion, "ambiguity")
+
+
 class AdvisorySensitivityGateTests(unittest.TestCase):
     """A sensitive task must never reach a cloud Planner or Critic.
 
