@@ -1821,6 +1821,115 @@ class AdvisoryConsultationTests(unittest.TestCase):
         assert result.error is not None
         self.assertIn("implementation_plan.md", result.error)
 
+    def test_tolerant_revise_forms_drive_a_real_revision_round(self) -> None:
+        """A Critic that writes REVISE loosely must still get a second Planner call."""
+        tolerated_revise_responses = (
+            "VERDICT: REVISE",
+            "VERDICT: REVISE.",
+            "VERDICT: REVISE:",
+            "VERDICT: REVISE - needs a rollback strategy",
+            "VERDICT: REVISE — needs a rollback strategy",
+            "verdict: revise (missing error handling)",
+        )
+        for critic_response in tolerated_revise_responses:
+            with self.subTest(critic_response=critic_response):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker(
+                        [
+                            "Planner's first plan.",
+                            critic_response,
+                            "Planner's revised plan.",
+                            "VERDICT: APPROVE\nGood now.",
+                        ]
+                    )
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite", invoker, root_dir=root
+                    )
+
+                self.assertEqual(len(invoker.calls), 4)
+                second_planner_prompt = invoker.calls[2][2]
+                self.assertIn(critic_response, second_planner_prompt)
+                self.assertTrue(result.consensus_reached)
+                self.assertEqual(result.rounds_run, 2)
+
+    def test_revise_near_misses_still_halt_as_unparseable(self) -> None:
+        rejected_responses = (
+            "VERDICT: REVISED PLAN ATTACHED",
+            "VERDICT: REVISEMENT",
+            "Looks like it needs revision",
+            "   \n\n   ",
+        )
+        for critic_response in rejected_responses:
+            with self.subTest(critic_response=repr(critic_response)):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker(
+                        ["Planner's proposed plan.", critic_response]
+                    )
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite", invoker, root_dir=root, max_rounds=3
+                    )
+
+                self.assertEqual(result.outcome, "unparseable_verdict")
+                self.assertEqual(len(invoker.calls), 2)
+
+    def test_near_miss_approve_and_revise_are_not_treated_symmetrically(self) -> None:
+        """Pins the asymmetry: near-miss APPROVE never reaches consensus, but the
+        matching near-miss REVISE forms still drive a revision round. A future
+        refactor that "tidies up" the two branches into symmetry must fail this.
+        """
+        near_miss_approvals = (
+            "VERDICT: APPROVE.",
+            "VERDICT: APPROVE - looks good",
+            "VERDICT: APPROVED",
+        )
+        for critic_response in near_miss_approvals:
+            with self.subTest(critic_response=critic_response):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker(
+                        ["Planner's proposed plan.", critic_response]
+                    )
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
+                    )
+                    self.assertFalse((root / "implementation_plan.md").exists())
+
+                self.assertFalse(result.consensus_reached)
+                self.assertEqual(result.outcome, "unparseable_verdict")
+
+        near_miss_revises = (
+            "VERDICT: REVISE.",
+            "VERDICT: REVISE - looks good",
+        )
+        for critic_response in near_miss_revises:
+            with self.subTest(critic_response=critic_response):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker(
+                        [
+                            "Planner's first plan.",
+                            critic_response,
+                            "Planner's revised plan.",
+                            "VERDICT: APPROVE\nGood now.",
+                        ]
+                    )
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite", invoker, root_dir=root
+                    )
+
+                self.assertEqual(len(invoker.calls), 4)
+                self.assertTrue(result.consensus_reached)
+
     def test_consensus_reached_is_derived_from_outcome_and_cannot_be_mutated(
         self,
     ) -> None:

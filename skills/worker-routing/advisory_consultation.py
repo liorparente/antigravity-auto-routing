@@ -147,6 +147,11 @@ def _build_planner_prompt(
 
 
 def _build_critic_prompt(task_description: str, planner_plan: str) -> str:
+    # The prompt still asks for an exact verdict line: the tolerance added in
+    # `_is_tolerant_revise` is a parser-side safety net for what real models
+    # actually emit, not a relaxation of the contract we ask for. Asking for
+    # exactness and parsing with tolerance are not in tension — the ask stays
+    # strict so most responses need no tolerance at all.
     return (
         f"{WORKER_MODE_TOKEN}\n"
         "You are the Critic in an AdvisoryConsultation. Judge the Planner's "
@@ -159,14 +164,42 @@ def _build_critic_prompt(task_description: str, planner_plan: str) -> str:
     )
 
 
+def _is_tolerant_revise(upper_line: str) -> bool:
+    """True when `upper_line` opens with "VERDICT: REVISE" followed by
+    end-of-line or a non-alphanumeric separator.
+
+    Deliberately not a bare `str.startswith`: that would also match
+    "VERDICT: REVISED PLAN ATTACHED" and "VERDICT: REVISEMENT", neither of
+    which is the Critic asking for a revision round. Requiring the character
+    right after the prefix to be either absent or non-alphanumeric is what
+    tells "REVISE" apart from a word that merely starts with it.
+
+    This tolerance has no APPROVE counterpart, and that asymmetry is
+    intentional: an unparseable response must fail closed, and folding a
+    near-miss APPROVE into approval would risk reporting a consensus nobody
+    granted. A near-miss REVISE carries no such risk — at worst it continues
+    the revision loop, which is what the Critic asked for anyway. See
+    `_parse_critic_verdict`.
+    """
+    if not upper_line.startswith(CRITIC_VERDICT_REVISE):
+        return False
+    remainder = upper_line[len(CRITIC_VERDICT_REVISE) :]
+    if not remainder:
+        return True
+    return not remainder[0].isalnum()
+
+
 def _parse_critic_verdict(critic_response: str) -> CriticVerdict:
     """Parse only the first non-empty line; anything else is unparseable.
 
     Absence of rejection is not agreement: only an exact "VERDICT: APPROVE"
-    counts as approval, only an exact "VERDICT: REVISE" counts as a
-    parseable rejection that keeps the loop going, and everything else
-    (empty, prose-only, near-miss) fails closed as "unparseable" rather than
-    being silently treated as either.
+    counts as approval — no prefix matching, no punctuation or trailing-text
+    tolerance, ever, because a wrongly-inferred approval would report a
+    consensus nobody granted. "VERDICT: REVISE" is read tolerantly instead
+    (see `_is_tolerant_revise`), because a rejection that keeps the loop
+    going carries none of that risk. Everything else (empty, prose-only,
+    a genuine near-miss like "REVISED") fails closed as "unparseable"
+    rather than being silently treated as either.
     """
     for line in critic_response.splitlines():
         stripped = line.strip()
@@ -175,7 +208,7 @@ def _parse_critic_verdict(critic_response: str) -> CriticVerdict:
         upper = stripped.upper()
         if upper == CRITIC_VERDICT_APPROVE:
             return "approved"
-        if upper == CRITIC_VERDICT_REVISE:
+        if _is_tolerant_revise(upper):
             return "revise"
         return "unparseable"
     return "unparseable"
