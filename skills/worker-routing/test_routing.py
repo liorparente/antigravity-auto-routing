@@ -1957,6 +1957,155 @@ class AdvisoryConsultationTests(unittest.TestCase):
         self.assertFalse(worker_error_result.consensus_reached)
 
 
+class AdvisorySensitivityGateTests(unittest.TestCase):
+    """A sensitive task must never reach a cloud Planner or Critic.
+
+    Ticket 05: `run_advisory_consultation_debate` gates on the task text
+    before contacting any worker, distinct from the four outcomes that
+    already exist because it never even enters the round loop.
+    """
+
+    def test_credential_marker_halts_before_any_worker_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite using api_key=sk-abc123 for the test fixture",
+                invoker,
+                root_dir=root,
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertFalse(result.consensus_reached)
+
+    def test_explicit_sensitive_marker_halts_before_any_worker_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "[SENSITIVE] Plan the customer PII migration",
+                invoker,
+                root_dir=root,
+            )
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertFalse(result.consensus_reached)
+
+    def test_sensitivity_halt_is_distinct_from_consensus_and_stalemate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite, password=hunter2",
+                _RecordingInvoker([]),
+                root_dir=root,
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertNotEqual(result.outcome, "consensus")
+        self.assertNotEqual(result.outcome, "stalemate")
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 0)
+        self.assertEqual(result.rounds, ())
+        self.assertEqual(result.final_plan, "")
+        self.assertIsNone(result.stalemate)
+
+    def test_halt_reason_states_human_approval_required_and_names_the_marker(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Rotate the api_key before the migration",
+                _RecordingInvoker([]),
+                root_dir=root,
+            )
+
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertIn("human approval", result.error.lower())
+        self.assertIn("api_key", result.error)
+
+    def test_halt_reason_never_leaks_task_text_or_matched_secret_value(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            task = "Plan the rollout; api_key=sk-supersecretvalue-do-not-print"
+            result = advisory_consultation.run_advisory_consultation_debate(
+                task, _RecordingInvoker([]), root_dir=root
+            )
+
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertNotIn("supersecretvalue", result.error)
+        self.assertNotIn("sk-supersecretvalue-do-not-print", result.error)
+        self.assertNotIn(task, result.error)
+
+    def test_pre_existing_plan_file_is_removed_on_sensitivity_halt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan_path = root / "implementation_plan.md"
+            plan_path.write_text("stale plan from an earlier run")
+
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the rollout, secret=whatever",
+                _RecordingInvoker([]),
+                root_dir=root,
+            )
+
+            self.assertFalse(plan_path.exists())
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+
+    def test_gate_checks_the_task_not_worker_responses(self) -> None:
+        """A non-sensitive task must run the loop normally even if a worker's
+        own response happens to contain a sensitive marker — the gate is a
+        pre-check on the task text, never a filter on what a worker says."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's plan mentions api_key rotation as a step.",
+                    "VERDICT: APPROVE\nLooks solid.",
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(result.outcome, "consensus")
+        self.assertTrue(result.consensus_reached)
+
+    def test_sensitivity_markers_are_a_superset_of_agent_council_patterns(self) -> None:
+        """Drift guard for the deliberate duplication: `advisory_consultation`
+        does not import `agent_council` (see the comment on
+        `SENSITIVITY_MARKERS`), so this test is what keeps the two pattern
+        sets from silently diverging."""
+        advisory_markers = {marker.lower() for marker in advisory_consultation.SENSITIVITY_MARKERS}
+        council_patterns = {pattern.lower() for pattern in agent_council.SENSITIVE_PATTERNS}
+        self.assertTrue(council_patterns.issubset(advisory_markers))
+
+
 class AgentCouncilSignatureApiTests(unittest.TestCase):
     """Public key-loading and signature APIs fail closed for auditors."""
 

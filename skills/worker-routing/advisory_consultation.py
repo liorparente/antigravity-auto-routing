@@ -33,11 +33,19 @@ InvokeWorker = Callable[[str, str, str], str]
 
 # Discriminates how a consultation ended. `consensus_reached` on the result
 # stays consistent with this: True only when outcome == "consensus". The
-# other three are all "no consensus", distinguished for the caller because
-# a stalemate, a malformed verdict, and an unreachable worker each demand a
-# different human response.
+# other four are all "no consensus", distinguished for the caller because a
+# stalemate, a malformed verdict, an unreachable worker, and a sensitivity
+# halt each demand a different human response. "sensitivity_halt" is kept
+# distinct from "stalemate" and "worker_error" rather than folded into
+# either: it is a pre-flight refusal on the task text, so no worker was ever
+# contacted — it is neither a disagreement (stalemate) nor a failure to
+# reach one (worker_error).
 AdvisoryOutcome = Literal[
-    "consensus", "stalemate", "unparseable_verdict", "worker_error"
+    "consensus",
+    "stalemate",
+    "unparseable_verdict",
+    "worker_error",
+    "sensitivity_halt",
 ]
 
 # The Critic's verdict line, once read, is one of these three states.
@@ -45,6 +53,25 @@ AdvisoryOutcome = Literal[
 # response must halt the consultation, not be fed back to the Planner as if
 # it were a reasoned objection.
 CriticVerdict = Literal["approved", "revise", "unparseable"]
+
+# Mirrors `agent_council.SENSITIVE_PATTERNS` rather than importing it:
+# importing `agent_council` would pull `urllib.request`, `asyncio`, and
+# `fcntl` into a module whose docstring promises no HTTP client and full
+# offline exercisability, and these files are loaded by path rather than as
+# a package, so the import would need a `sys.path` hack. `test_routing.py`
+# already loads both modules and asserts this tuple is a superset of
+# `agent_council.SENSITIVE_PATTERNS`, so the duplication cannot silently
+# drift apart. Same precedent this module already set for `MAX_DEBATE_ROUNDS`.
+SENSITIVITY_MARKERS = (
+    "AGY_CALIBRATION_SECRET",
+    "api_key",
+    "sk-",
+    "bearer ",
+    "BEGIN PRIVATE KEY",
+    "password",
+    "secret",
+    "[SENSITIVE]",
+)
 
 
 @dataclass(frozen=True)
@@ -214,6 +241,22 @@ def _parse_critic_verdict(critic_response: str) -> CriticVerdict:
     return "unparseable"
 
 
+def _detect_sensitivity_marker(text: str) -> str | None:
+    """Return the first `SENSITIVITY_MARKERS` entry found in `text`, or None.
+
+    Returns the marker constant itself, never the surrounding text it
+    matched against — the caller reports this back as the reason a
+    consultation halted, so the marker name alone must be able to explain
+    the halt without ever repeating the task text or the secret value that
+    tripped it.
+    """
+    lowered = text.lower()
+    for marker in SENSITIVITY_MARKERS:
+        if marker.lower() in lowered:
+            return marker
+    return None
+
+
 def _remove_stale_plan_artifact(plan_path: Path) -> str | None:
     """Ensure no plan artifact survives a non-consensus exit.
 
@@ -222,6 +265,15 @@ def _remove_stale_plan_artifact(plan_path: Path) -> str | None:
     parent is unwritable) must not raise out of the consultation and must
     not replace whatever error actually caused the non-consensus exit — it
     is reported back to the caller instead, who folds it into the result.
+
+    The marker-only redaction boundary covers task text: nothing derived
+    from `task_description` reaches a reason beyond the matched marker
+    constant. A cleanup suffix may instead name `plan_path`, which comes
+    from caller-injected `root_dir` (the repository root in production),
+    never from the task. Suppressing that suffix was deliberately rejected:
+    its OSError text tells the operator why a stale plan survived the halt,
+    and already contains the path, so redaction would discard the diagnostic
+    rather than make it shorter.
     """
     try:
         plan_path.unlink(missing_ok=True)
@@ -275,10 +327,15 @@ def run_advisory_consultation_debate(
     time holding its previous plan and the Critic's objection, and the
     exchange repeats up to ``max_rounds`` times.
 
-    Three ways this can end without consensus, and each fails closed the
+    Four ways this can end without consensus, and each fails closed the
     same way — no plan artifact, no winner picked, the failure visible on
     the result:
 
+    - Sensitivity halt: the task text itself carries a secret, credential,
+      or personal-data marker. Checked before any worker is contacted — no
+      Planner proposal, no Critic verdict, nothing sensitive ever leaves
+      this process. The result names which marker tripped the halt (never
+      the surrounding text) and states that human approval is required.
     - Stalemate: every round runs and none is approved. The result carries
       both final positions and three resolution options.
     - Unparseable verdict: a Critic response has no readable verdict line.
@@ -289,12 +346,19 @@ def run_advisory_consultation_debate(
       carried on the result.
 
     A pre-existing ``implementation_plan.md`` under ``root_dir`` from an
-    earlier run is removed on every one of these three exits, so the
+    earlier run is removed on every one of these four exits, so the
     artifact on disk is never staler than the result describing it.
 
     Raises ``ValueError`` if ``max_rounds`` is not at least 1: that is a
     programming error at the call site, not a genuine Planner-Critic
     disagreement, and must not be reported back as a fabricated stalemate.
+    Validation deliberately precedes the sensitivity gate, so a sensitive
+    task with an invalid `max_rounds` raises rather than returning a
+    `sensitivity_halt` result. Neither ordering contacts a worker, so both
+    preserve the security boundary; only the caller-facing report differs.
+    The exception is the louder halt because it cannot be ignored, whereas
+    reordering would give a genuine call-site bug a plausible-looking result
+    instead of the error that says the caller's code is wrong.
     """
     if max_rounds < 1:
         raise ValueError(f"max_rounds must be >= 1, got {max_rounds}")
@@ -321,6 +385,14 @@ def run_advisory_consultation_debate(
             stalemate=stalemate,
             error=error,
         )
+
+    marker = _detect_sensitivity_marker(task_description)
+    if marker is not None:
+        cleanup_error = _remove_stale_plan_artifact(plan_path)
+        reason = (
+            f"human approval required: task text matched sensitivity marker '{marker}'"
+        )
+        return _result("sensitivity_halt", error=_combine_errors(reason, cleanup_error))
 
     for _round_number in range(1, max_rounds + 1):
         planner_prompt = _build_planner_prompt(
