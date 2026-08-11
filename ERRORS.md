@@ -141,7 +141,18 @@
 - Mission: Resolve GitHub Actions CI workflow failure on commit `61d41c1`.
 - Root Cause: `_valid_debate_rounds` parameter annotations were typed as `list[dict[str, Any]]` and `int`. Callers passing `manifest.get("debate_rounds")` and `manifest.get("consensus_round")` (which return `Any | None`) triggered `mypy` error `Argument 1 to "_valid_debate_rounds" has incompatible type "Any | None"; expected "list[dict[str, Any]]"`.
 - Resolution: Typing dynamic dictionary validation helpers to accept `Any` parameter types allows `manifest.get(...)` calls to pass without `mypy` type friction while internal `isinstance()` runtime guards ensure strict validation.
-- Verification: Executed full CI suite locally (`./.venv/bin/ruff`, `./.venv/bin/mypy`, `shellcheck`, `python3 test_routing.py`). All 4 checks pass cleanly (105 tests OK). Committed `8e79aa6` and pushed to `origin main`.
+
+
+
+## 2026-08-11 — Ticket 07 Production Worker Invoker, Code Review & Deployment
+
+- Mission: Implement Ticket 07 (`Production Worker Invoker`), execute Two-Axis Code Review (Standards + Spec) via Codex 5.6 Sol, fix code review findings, and deploy/synchronize via `install.sh`.
+- Key Learnings & Failure Patterns:
+  1. **`uninstall.sh` File List Synchronization**: Adding new managed files (`advisory_consultation.py`, `production_invoker.py`) to `install.sh`'s `MANAGED_FILES` array without updating `uninstall.sh`'s `rm -f` file list breaks uninstallation tests (`test_uninstall_sh_removes_generated_docs`). `rmdir` fails to delete target directories because non-deleted files remain. *Rule: Always update `uninstall.sh` file cleanup list whenever modifying `install.sh` `MANAGED_FILES`.*
+  2. **Strict Worker Token Prefix Guard (`startswith`)**: Using substring match (`WORKER_MODE_TOKEN in prompt`) allows prompts discussing the token mid-prompt to bypass prepending, causing workers to self-block at the routing gate. *Rule: Always check `prompt.startswith(WORKER_MODE_TOKEN)`.*
+  3. **Display Model Name Normalization (`MODEL_ALIASES`)**: High-level orchestrators use display labels (`"Claude Opus 5 (Thinking)"`, `"Codex 5.6 Sol"`, `"Gemini 3.6 Flash (High)"`), whereas CLI workers require strict model identifiers (`claude-opus-5`, `gpt-5.6-sol`, `gemini-3.6-flash`). *Rule: Use explicit `MODEL_ALIASES` normalization dictionary that fails closed (`ValueError`) on unmapped names.*
+- Verification: 10/10 invoker tests OK, 127/127 routing tests OK (`test_routing.py`), `ruff` and `mypy` 0 errors. Committed `ae76189`.
+
 
 
 
