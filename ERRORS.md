@@ -163,6 +163,22 @@
 - Correction (same day): the status flip on spec 0001 was premature when made, and its original Verification line was wrong. It claimed commits `dc91a72` through `ae76189` "implemented all tickets" while ticket 06 (transcript and telemetry) was still being written in a parallel session; ticket 06 landed afterwards in `816b3c8`. The claimed count of 137 passing tests was also stale — it was the pre-ticket-06 figure (127 in `test_routing.py` plus 10 in `test_production_invoker.py`). Spec 0001 became genuinely complete only once `816b3c8` landed, at which point `test_routing.py` reports 144.
 - Lesson: verifying a spec's status against `git log` alone is not sufficient when another session holds uncommitted work — the working tree of every active session is part of the repository state. Cross-check `git status` and in-flight tickets before declaring a spec implemented. This is a second instance of the pattern already recorded on 2026-08-06: a Verification line in this file is a claim, not a guarantee.
 
+## 2026-08-11 — A Truncated Digest Is Not Redaction (Ticket 06)
+
+- Mission: give every AdvisoryConsultation a telemetry record carrying a task identity, without breaching the module's documented redaction boundary ("nothing derived from `task_description` reaches a reason beyond the matched marker constant").
+- Issue: the orchestrator's mission brief specified a truncated SHA-256 digest of the task description as a "stable, non-revealing" default identity, and the implementing worker's docstring then asserted it "must carry no recoverable information". Both were wrong. On the `sensitivity_halt` path the task text is known to contain a credential, and a 64-bit digest over guessable text is a confirmation oracle: anyone who guesses the task can verify the guess against the logged identity.
+- Why it survived implementation: the guarding test asserted only that the secret *substring* was absent from the artifacts. A derived value is structurally invisible to a substring assertion, so the test could never have failed on this.
+- Detection: the Standards axis of the two-axis review. The Spec axis reviewed the same code in parallel and reported the boundary intact — accurately, because it asked whether the secret *appears*, while Standards asked whether anything *derived* escapes. The disagreement between the axes was the finding.
+- Resolution: `_resolve_task_id` now keys on outcome. A caller-supplied `task_id` wins on every path and is the production route; non-halt outcomes keep the digest; `sensitivity_halt` uses `secrets.token_hex(8)`, unrelated to the task text. The transcript and the telemetry record for the same halt carry the same random id, so correlation survives. The guarding test now also asserts the emitted identity is not equal to the digest of the task text.
+- Lesson: when a documented rule says "nothing *derived* from X", it means derived — hashing is a transformation, not a redaction. Assert the property, not the absence of one literal string.
+
+## 2026-08-11 — A Worker's Report About Files It Does Not Own Is a Guess
+
+- Issue: a CLI worker resolving code-review findings reported that four documentation files were "untouched by me — their diffs are unchanged from before this session, confirmed by inspecting `git diff --stat`". `knowledge/institutional-memory.md` had in fact grown from 7 to 12 changed lines during that same window, written by a different Claude Code session working on the repository concurrently.
+- Consequence: none this time, because the orchestrator diffed the file independently. Taken at face value it would have hidden the existence of the parallel session, which was material to the commit decision.
+- Root Cause: the worker was asked to report `git status` and did so honestly for the files it changed, then extended the same confidence to files it never opened. A statement about a file the worker did not write is an inference from a stale snapshot, not an observation.
+- Resolution: treat a worker's file-state claims as covering only the files it edited. Verify everything else with `git status` / `git diff` in the orchestrator session, on the same footing as re-running the test and lint gates rather than trusting the reported output. Related: the 2026-08-06 entry above, where assuming a clean revert from a commit message alone nearly caused duplicated work.
+
 
 
 
