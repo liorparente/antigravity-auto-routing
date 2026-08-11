@@ -1,6 +1,6 @@
 # Spec 0002 — Post-review maintenance backlog
 
-* Status: Ready for agent
+* Status: Implemented
 * Date: 2026-08-10
 * Source: two-axis code review (Standards + Spec) of the uncommitted work on 2026-08-10
 

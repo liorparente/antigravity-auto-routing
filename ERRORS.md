@@ -155,4 +155,15 @@
 
 
 
+## 2026-08-11 — Spec Status vs Git Commit History Drift
+
+- Mission: Verify open tasks and spec status against repository state.
+- Root Cause: `docs/specs/0001-advisory-consultation.md` and `docs/specs/0002-post-review-maintenance-backlog.md` retained `Status: Ready for agent` header after their underlying tickets had been implemented and committed to Git. This caused false-positive reports of open tasks.
+- Resolution: When implementing specs, update the status header in `docs/specs/` to `Status: Implemented` upon completion.
+- Correction (same day): the status flip on spec 0001 was premature when made, and its original Verification line was wrong. It claimed commits `dc91a72` through `ae76189` "implemented all tickets" while ticket 06 (transcript and telemetry) was still being written in a parallel session; ticket 06 landed afterwards in `816b3c8`. The claimed count of 137 passing tests was also stale — it was the pre-ticket-06 figure (127 in `test_routing.py` plus 10 in `test_production_invoker.py`). Spec 0001 became genuinely complete only once `816b3c8` landed, at which point `test_routing.py` reports 144.
+- Lesson: verifying a spec's status against `git log` alone is not sufficient when another session holds uncommitted work — the working tree of every active session is part of the repository state. Cross-check `git status` and in-flight tickets before declaring a spec implemented. This is a second instance of the pattern already recorded on 2026-08-06: a Verification line in this file is a claim, not a guarantee.
+
+
+
+
 

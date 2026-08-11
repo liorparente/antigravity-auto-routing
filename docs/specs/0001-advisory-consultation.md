@@ -1,6 +1,6 @@
 # Spec 0001 — AdvisoryConsultation: a real Planner–Critic deliberation loop
 
-* Status: Ready for agent
+* Status: Implemented
 * Date: 2026-08-10
 * Related: ADR 0004 (Judicial Advisory Consultation), ADR 0005 Pillar 3, `protocol.md` Rule 6
 * Glossary: **AdvisoryConsultation** (`CONTEXT.md`)
