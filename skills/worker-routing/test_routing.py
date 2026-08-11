@@ -1411,8 +1411,12 @@ class AdvisoryConsultationTests(unittest.TestCase):
 
     def test_artifacts_land_under_injected_root_and_real_repo_is_untouched(self) -> None:
         repo_plan = REPO_ROOT / "implementation_plan.md"
-        before_content = repo_plan.read_text() if repo_plan.exists() else None
-        before_mtime = repo_plan.stat().st_mtime if repo_plan.exists() else None
+        repo_transcript = REPO_ROOT / ".scratch" / "planning_debate.md"
+        repo_telemetry = REPO_ROOT / ".ralph" / "routing_telemetry.jsonl"
+        before = {
+            path: (path.read_text(), path.stat().st_mtime) if path.exists() else None
+            for path in (repo_plan, repo_transcript, repo_telemetry)
+        }
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
@@ -1425,13 +1429,24 @@ class AdvisoryConsultationTests(unittest.TestCase):
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertTrue((root / "implementation_plan.md").exists())
+            self.assertTrue((root / ".scratch" / "planning_debate.md").exists())
+            self.assertTrue((root / ".ralph" / "routing_telemetry.jsonl").exists())
 
-        after_content = repo_plan.read_text() if repo_plan.exists() else None
-        after_mtime = repo_plan.stat().st_mtime if repo_plan.exists() else None
-        self.assertEqual(before_content, after_content)
-        self.assertEqual(before_mtime, after_mtime)
+        after = {
+            path: (path.read_text(), path.stat().st_mtime) if path.exists() else None
+            for path in (repo_plan, repo_transcript, repo_telemetry)
+        }
+        self.assertEqual(before, after)
 
-    def test_nothing_is_created_under_ralph_directory(self) -> None:
+    def test_ralph_directory_contains_nothing_but_the_telemetry_file(self) -> None:
+        """Ticket 06: telemetry now lands at `.ralph/routing_telemetry.jsonl`, and
+        that is the ONLY thing a consultation ever creates under `.ralph` —
+        asserted as an allowlist of the whole directory listing, not a
+        denylist of the two names (`decisions`, `cache`) ticket 06 happened
+        to predict a collision with. A denylist stops catching new writes
+        the moment anything else starts touching the directory — it would
+        not have caught `agent_council.py`'s own `.ralph/errors.log`, which
+        this whole-directory allowlist does."""
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -1442,7 +1457,10 @@ class AdvisoryConsultationTests(unittest.TestCase):
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
-            self.assertFalse((root / ".ralph").exists())
+            self.assertEqual(
+                sorted(p.name for p in (root / ".ralph").iterdir()),
+                ["routing_telemetry.jsonl"],
+            )
 
     def test_both_prompts_carry_worker_mode_token(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -2104,6 +2122,430 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         advisory_markers = {marker.lower() for marker in advisory_consultation.SENSITIVITY_MARKERS}
         council_patterns = {pattern.lower() for pattern in agent_council.SENSITIVE_PATTERNS}
         self.assertTrue(council_patterns.issubset(advisory_markers))
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
+    """Ticket 06: every exit path writes a human-readable transcript and one
+    structured telemetry record, and neither ever leaks task text or a
+    matched secret value on a sensitivity halt."""
+
+    TRANSCRIPT_RELATIVE_PATH = Path(".scratch") / "planning_debate.md"
+    TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
+
+    def test_consensus_writes_transcript_with_the_rounds_exchange(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertIn("Outcome:** consensus", transcript)
+        self.assertIn("Plan the auth rewrite", transcript)
+        self.assertIn("Round 1", transcript)
+        self.assertIn("Planner's proposed plan.", transcript)
+        self.assertIn("VERDICT: APPROVE\nLooks solid.", transcript)
+
+    def test_stalemate_writes_transcript_with_every_round_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's second plan.",
+                    "VERDICT: REVISE\nStill thin.",
+                    "Planner's third plan.",
+                    "VERDICT: REVISE\nNot convinced.",
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertIn("Outcome:** stalemate", transcript)
+        first_round = transcript.index("Round 1")
+        second_round = transcript.index("Round 2")
+        third_round = transcript.index("Round 3")
+        self.assertLess(first_round, second_round)
+        self.assertLess(second_round, third_round)
+        for text in (
+            "Planner's first plan.",
+            "Needs more detail.",
+            "Planner's second plan.",
+            "Still thin.",
+            "Planner's third plan.",
+            "Not convinced.",
+        ):
+            self.assertIn(text, transcript)
+
+    def test_unparseable_verdict_writes_transcript_with_the_one_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "This plan looks fine to me."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, max_rounds=3
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+
+        self.assertEqual(result.outcome, "unparseable_verdict")
+        self.assertIn("Outcome:** unparseable_verdict", transcript)
+        self.assertIn("Planner's plan.", transcript)
+        self.assertIn("This plan looks fine to me.", transcript)
+
+    def test_worker_error_writes_transcript_including_completed_rounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    RuntimeError("worker unreachable"),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertIn("Outcome:** worker_error", transcript)
+        self.assertIn("Planner's first plan.", transcript)
+        self.assertIn("Needs more detail.", transcript)
+
+    def test_sensitivity_halt_writes_a_redacted_transcript(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the rollout, password=hunter2",
+                _RecordingInvoker([]),
+                root_dir=root,
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertIn("Outcome:** sensitivity_halt", transcript)
+        self.assertIn("password", transcript)
+        self.assertIn("human approval", transcript.lower())
+        self.assertNotIn("hunter2", transcript)
+        self.assertNotIn("Plan the rollout", transcript)
+
+    def test_redaction_boundary_secret_reaches_neither_artifact(self) -> None:
+        """The hardest constraint: a sensitivity halt's secret value must
+        appear in NEITHER the transcript NOR the telemetry record — and
+        the emitted task identity itself must not be a value an auditor (or
+        an attacker) could recompute from guessed task text, or the digest
+        is a confirmation oracle in all but name."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            task = "Plan the rollout; api_key=sk-supersecretvalue-do-not-print"
+            advisory_consultation.run_advisory_consultation_debate(
+                task, _RecordingInvoker([]), root_dir=root
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+            telemetry_text = (root / self.TELEMETRY_RELATIVE_PATH).read_text()
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        for leak in ("supersecretvalue", "sk-supersecretvalue-do-not-print", task):
+            self.assertNotIn(leak, transcript)
+            self.assertNotIn(leak, telemetry_text)
+
+        emitted_task_id = records[0]["task_id"]
+        digest_of_task_text = hashlib.sha256(task.encode("utf-8")).hexdigest()[:16]
+        self.assertNotEqual(
+            emitted_task_id,
+            digest_of_task_text,
+            "sensitivity_halt task_id must not be derived from task_description",
+        )
+        self.assertIn(
+            emitted_task_id,
+            transcript,
+            "transcript and telemetry for the same halt must carry the same task_id",
+        )
+
+    def test_telemetry_record_carries_task_identity_rounds_outcome_and_models(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    "VERDICT: REVISE\nNeeds more detail.",
+                    "Planner's revised plan.",
+                    "VERDICT: APPROVE\nGood now.",
+                ]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+                task_id="ticket-06-demo",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["task_id"], "ticket-06-demo")
+        self.assertEqual(record["rounds_run"], 2)
+        self.assertEqual(record["outcome"], "consensus")
+        self.assertEqual(record["planner_model"], "Test Planner")
+        self.assertEqual(record["critic_model"], "Test Critic")
+        self.assertIn("timestamp", record)
+
+    def test_exactly_one_telemetry_record_is_emitted_per_consultation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(len(records), 1)
+
+    def test_default_task_id_is_a_stable_hash_not_the_task_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            for _ in range(2):
+                invoker = _RecordingInvoker(
+                    ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                )
+                advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite", invoker, root_dir=root
+                )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        expected = hashlib.sha256(b"Plan the auth rewrite").hexdigest()[:16]
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertEqual(record["task_id"], expected)
+            self.assertNotIn("Plan the auth rewrite", record["task_id"])
+
+    def test_max_rounds_below_one_raises_before_writing_any_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite",
+                    _RecordingInvoker([]),
+                    root_dir=root,
+                    max_rounds=0,
+                )
+            self.assertFalse((root / self.TRANSCRIPT_RELATIVE_PATH).exists())
+            self.assertFalse((root / self.TELEMETRY_RELATIVE_PATH).exists())
+
+    def test_transcript_is_overwritten_not_appended_across_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_invoker = _RecordingInvoker(
+                ["First run's plan.", "VERDICT: APPROVE\nFirst run approved."]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the first task", first_invoker, root_dir=root
+            )
+            second_invoker = _RecordingInvoker(
+                ["Second run's plan.", "VERDICT: APPROVE\nSecond run approved."]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the second task", second_invoker, root_dir=root
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+
+        self.assertIn("Second run's plan.", transcript)
+        self.assertNotIn("First run's plan.", transcript)
+        self.assertNotIn("Plan the first task", transcript)
+
+    def test_transcript_write_failure_does_not_mask_the_primary_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            (root / ".scratch").write_text("not a directory")
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertTrue((root / "implementation_plan.md").exists())
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.final_plan, "Planner's plan.")
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertIn("transcript", result.error.lower())
+
+    def test_telemetry_write_failure_does_not_mask_the_primary_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            (root / ".ralph").write_text("not a directory")
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertTrue((root / "implementation_plan.md").exists())
+            self.assertTrue((root / self.TRANSCRIPT_RELATIVE_PATH).exists())
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertTrue(result.consensus_reached)
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertIn("telemetry", result.error.lower())
+
+    def test_consensus_plan_write_failure_does_not_mask_the_primary_outcome(
+        self,
+    ) -> None:
+        """Ticket 06's first acceptance criterion is that a transcript is
+        written for all four outcomes including consensus. The plan-artifact
+        write is the one unguarded I/O on the consensus path: making
+        `implementation_plan.md` a directory beforehand must not let
+        `IsADirectoryError` propagate out of the debate function before the
+        transcript and telemetry are written. The Critic genuinely approved,
+        so the outcome must still be `consensus` and `final_plan` must still
+        carry the agreed text — only `error` should report the write
+        failure."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            (root / "implementation_plan.md").mkdir()
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
+            telemetry_records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.final_plan, "Planner's plan.")
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertIn("implementation_plan.md", result.error)
+        self.assertIn("Outcome:** consensus", transcript)
+        self.assertEqual(len(telemetry_records), 1)
+        self.assertEqual(telemetry_records[0]["outcome"], "consensus")
+
+    def test_telemetry_and_agent_council_share_the_same_log_file(self) -> None:
+        """Drift guard: an auditor reads one stream, not two — the log file
+        `AgentCouncil` already writes must be the exact file this module
+        writes to, not a lookalike path."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            council = agent_council.AgentCouncil(root_dir=root)
+            self.assertEqual(
+                council.telemetry_file,
+                (root / self.TELEMETRY_RELATIVE_PATH).resolve(),
+            )
+            records = _read_jsonl(council.telemetry_file)
+
+        self.assertEqual(len(records), 1)
+
+    def test_append_jsonl_locked_matches_agent_council_byte_for_byte(self) -> None:
+        """Drift guard for the deliberate duplication of `_append_jsonl_locked`
+        (see its docstring, and the identical precedent this test mirrors:
+        `test_sensitivity_markers_are_a_superset_of_agent_council_patterns`).
+        Pinning only the log path (as `test_telemetry_and_agent_council_share_the_same_log_file`
+        does) leaves the record encoding (`sort_keys`, the trailing newline)
+        free to drift apart silently. This asserts the two writers produce
+        byte-identical output for the same record, so an encoding change on
+        either side fails loudly. It proves nothing about the lock semantics
+        (`fcntl.flock`): a byte comparison of the two output files cannot
+        observe locking behaviour, only the encoding it produced. Lock-
+        semantics drift is NOT covered by this or any other test here."""
+        record = {"b": 2, "a": 1, "outcome": "consensus", "kind": "advisory_consultation"}
+        with tempfile.TemporaryDirectory() as tmp:
+            advisory_path = Path(tmp) / "advisory.jsonl"
+            council_path = Path(tmp) / "council.jsonl"
+            advisory_consultation._append_jsonl_locked(advisory_path, record)
+            agent_council.append_jsonl_locked(council_path, record)
+            self.assertEqual(advisory_path.read_bytes(), council_path.read_bytes())
+
+    def test_advisory_record_carries_kind_council_record_does_not(self) -> None:
+        """Spec 0001 US 12: both `AgentCouncil` and this module append to the
+        same `.ralph/routing_telemetry.jsonl`, so an auditor needs a way to
+        tell the two record families apart to reconstruct which decisions
+        were model-deliberated. `kind` is that discriminator, and it is
+        deliberately one-sided: an advisory record carries it, a council
+        record never does (`agent_council.log_routing_telemetry`'s record
+        shape is asserted by its own tests and is off-limits here), so the
+        absence of `kind` reliably identifies a council decision. This test
+        pins that asymmetry as the contract."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            agent_council, "check_local_model_endpoint", return_value=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Plan.", "VERDICT: APPROVE\nGood."])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="advisory-1",
+            )
+            agent_council.AgentCouncil(root_dir=root).run(
+                "Refactor routing checks", "simple", task_id="council-1"
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        by_task_id = {record["task_id"]: record for record in records}
+        self.assertEqual(by_task_id["advisory-1"]["kind"], "advisory_consultation")
+        self.assertNotIn("kind", by_task_id["council-1"])
 
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):

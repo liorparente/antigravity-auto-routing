@@ -14,8 +14,14 @@ loop remains exercisable offline with a fake.
 """
 from __future__ import annotations
 
+import dataclasses
+import fcntl
+import hashlib
+import json
 import os
+import secrets
 import tempfile
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -281,11 +287,259 @@ def _remove_stale_plan_artifact(plan_path: Path) -> str | None:
     return None
 
 
-def _combine_errors(primary: str, cleanup_error: str | None) -> str:
-    """Preserve the original failure while still surfacing a cleanup problem."""
-    if cleanup_error is None:
-        return primary
-    return f"{primary}; {cleanup_error}"
+def _fold_error(existing: str | None, addition: str | None) -> str | None:
+    """Combine a possibly-absent primary error with a possibly-absent addition.
+
+    Used at every point in this module where a secondary failure can occur
+    alongside a primary one: the `_result` choke point, where the primary
+    error is itself optional depending on which exit path is folding a
+    transcript- or telemetry-write failure into it, and the outcome branches
+    above it, where the primary error (a halt reason or a caught worker
+    exception) is always present but a cleanup failure alongside it may or
+    may not be. Same non-negotiable rule everywhere it's called, and the one
+    `_remove_stale_plan_artifact` documents too: a secondary I/O failure is
+    reported, never allowed to mask or replace the primary outcome.
+    """
+    if addition is None:
+        return existing
+    if existing is None:
+        return addition
+    return f"{existing}; {addition}"
+
+
+def _default_task_id(task_description: str) -> str:
+    """Derive a stable task identity from `task_description` when the caller
+    supplied none.
+
+    A truncated SHA-256 hex digest, never the task text itself. This is the
+    default for every outcome except `sensitivity_halt` — see
+    `_resolve_task_id` for why a halt cannot use it: a digest, however
+    non-reversible, is still a confirmation oracle over guessable task text,
+    and the redaction boundary around a halt forbids anything derived from
+    `task_description` at all.
+    """
+    return hashlib.sha256(task_description.encode("utf-8")).hexdigest()[:16]
+
+
+def _resolve_task_id(
+    task_description: str, task_id: str | None, outcome: AdvisoryOutcome
+) -> str:
+    """Resolve the task identity `_result` emits to both artifacts for one outcome.
+
+    A caller-supplied `task_id` always wins, on every outcome: the caller
+    chose it, so it carries none of the risk a value this module derived
+    would. Absent one, every outcome but `sensitivity_halt` falls back to
+    `_default_task_id` — a stable digest of `task_description`, safe to
+    reuse across runs of the same task.
+
+    `sensitivity_halt` is the one outcome that must never fall back to that
+    digest: the module's redaction boundary (see `_detect_sensitivity_marker`
+    and `_render_sensitivity_halt_transcript`) promises nothing derived from
+    `task_description` escapes a halt, and a digest over guessable task text
+    is exactly the confirmation oracle that promise rules out. Its default is
+    instead a random identity, unrelated to the task text, generated fresh
+    per halt — an auditor can still count and correlate distinct halts
+    against their transcripts by this id, just not recover anything about
+    what was halted from it.
+    """
+    if task_id is not None:
+        return task_id
+    if outcome == "sensitivity_halt":
+        return secrets.token_hex(8)
+    return _default_task_id(task_description)
+
+
+def _render_consultation_transcript(
+    task_description: str, result: AdvisoryDebateResult
+) -> str:
+    """Render the round-by-round transcript for every outcome except a halt.
+
+    Reached for every outcome except `sensitivity_halt` (see
+    `_render_sensitivity_halt_transcript` for that redacted counterpart), so
+    `task_description` and each round's full Planner/Critic text are fair
+    game here — that is the entire point of a transcript. Takes the already-
+    built `result` rather than its individual fields: `outcome`, `rounds`,
+    `planner_model`, and `critic_model` are its own field set, and threading
+    them through as a separate parameter clump would just re-derive what the
+    result object already carries.
+    """
+    rounds = result.rounds
+    lines = [
+        "# AdvisoryConsultation Transcript",
+        "",
+        f"**Outcome:** {result.outcome}",
+        f"**Planner:** {result.planner_model}",
+        f"**Critic:** {result.critic_model}",
+        f"**Rounds run:** {len(rounds)}",
+        "",
+        "## Task",
+        "",
+        task_description,
+        "",
+    ]
+    if not rounds:
+        lines.append("_No rounds were run._")
+    for index, round_ in enumerate(rounds, start=1):
+        lines.extend(
+            [
+                f"## Round {index}",
+                "",
+                f"### Planner ({result.planner_model})",
+                "",
+                round_.planner_proposal,
+                "",
+                f"### Critic ({result.critic_model})",
+                "",
+                round_.critic_response,
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def _render_sensitivity_halt_transcript(marker: str, task_id: str) -> str:
+    """Render the redacted transcript written on a `sensitivity_halt`.
+
+    The redaction boundary documented on `_detect_sensitivity_marker`: nothing
+    derived from the task text may appear here, only the matched marker
+    constant, the halt's `task_id`, and the fact that human approval is
+    required. `marker` is required, not optional: a halt with no marker to
+    report is a programming error inside this module (the only call site
+    only reaches this function when `_detect_sensitivity_marker` already
+    found one), so it must be impossible to construct this transcript with
+    nothing to blame the halt on rather than silently rendering an empty
+    explanation. `task_id` is included so this transcript and the
+    `sensitivity_halt` telemetry record for the same halt can be correlated
+    by an auditor — see `_resolve_task_id`.
+    """
+    return "\n".join(
+        [
+            "# AdvisoryConsultation Transcript",
+            "",
+            "**Outcome:** sensitivity_halt",
+            f"**Task ID:** {task_id}",
+            "",
+            (
+                f"Task text matched sensitivity marker `{marker}`. Human approval "
+                "is required before this task may proceed."
+            ),
+            "",
+            "No Planner or Critic was contacted. No task details are recorded here.",
+        ]
+    )
+
+
+def _write_transcript(path: Path, content: str) -> str | None:
+    """Write the transcript fresh (never appended) so a stale transcript from
+    an earlier run can never survive. Failure is reported, never raised."""
+    try:
+        _atomic_text_write(path, content)
+    except OSError as exc:
+        return f"failed to write consultation transcript at {path}: {exc}"
+    return None
+
+
+def _append_jsonl_locked(path: Path, record: dict[str, object]) -> None:
+    """Append one JSON record to `path` under an exclusive advisory lock.
+
+    Mirrors `agent_council.append_jsonl_locked` rather than importing it:
+    importing `agent_council` would pull `urllib.request`, `asyncio`, and its
+    own `fcntl` usage into a module whose docstring promises offline
+    exercisability, and these files are loaded by path rather than as a
+    package (see the identical precedent on `SENSITIVITY_MARKERS`).
+    `test_routing.py` asserts this writes to the same path
+    `AgentCouncil.telemetry_file` uses AND that the two writers produce
+    byte-identical output for the same record, so neither the log path nor
+    the record encoding (`sort_keys`, the trailing newline) can silently
+    drift apart from that precedent. The lock semantics (`fcntl.flock`
+    itself) are NOT covered by that or any other test — a byte comparison
+    of the two output files cannot observe locking behaviour.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, sort_keys=True) + "\n"
+    with open(path, "a", encoding="utf-8") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            stream.write(line)
+            stream.flush()
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+@dataclass(frozen=True)
+class AdvisoryTelemetryRecord:
+    """The one structured telemetry record a consultation emits.
+
+    A dataclass, like every other concept in this module, rather than a bare
+    mapping — the dataclass is what carries the field contract; `to_mapping`
+    is just its JSON-serialisable wire form for `_append_jsonl_locked`.
+    Carries only the derived/supplied task identity — never task text or a
+    matched secret value — alongside rounds run, outcome, and both model
+    names, so an auditor can tell which decisions were genuinely deliberated
+    without the log becoming a second place secrets can leak from.
+
+    `kind` is the field that makes Spec 0001 US 12 joinable: both
+    `AgentCouncil` and this module append to the same
+    `.ralph/routing_telemetry.jsonl` stream, and this is the only field that
+    tells the two record families apart. It is deliberately one-sided — a
+    council record carries no `kind` at all, rather than a matching
+    `"council_decision"` value — because `agent_council.log_routing_telemetry`'s
+    record shape is asserted by its own tests and is off-limits for this
+    module to change. An auditor reads the absence of `kind` as "council
+    decision"; do not "helpfully" normalise that asymmetry away later by
+    adding the field to both sides, or the join breaks.
+    """
+
+    timestamp: str
+    task_id: str
+    rounds_run: int
+    outcome: AdvisoryOutcome
+    planner_model: str
+    critic_model: str
+    kind: str = "advisory_consultation"
+
+    def to_mapping(self) -> dict[str, object]:
+        """The JSON-serialisable wire form `_write_telemetry_record` writes.
+
+        `dataclasses.asdict` rather than a hand-enumerated dict: a
+        hand-enumerated field list is exactly the kind of duplication this
+        module refuses everywhere else (see `SENSITIVITY_MARKERS` and
+        `_append_jsonl_locked`) unless a test pins it against drift — asdict
+        removes the duplication instead of needing that guard. Field order
+        does not matter: `_append_jsonl_locked` writes with `sort_keys=True`.
+        """
+        return dataclasses.asdict(self)
+
+
+def _build_telemetry_record(
+    result: AdvisoryDebateResult, *, task_id: str
+) -> AdvisoryTelemetryRecord:
+    """Build the one telemetry record a consultation emits.
+
+    Takes the already-built `result` rather than its individual fields, for
+    the same reason `_render_consultation_transcript` does: `rounds_run`,
+    `outcome`, `planner_model`, and `critic_model` are the result's own
+    field set. `task_id` is passed separately because it genuinely isn't —
+    the result carries no task identity, by design (see `AdvisoryDebateResult`
+    and `_resolve_task_id`).
+    """
+    return AdvisoryTelemetryRecord(
+        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        task_id=task_id,
+        rounds_run=result.rounds_run,
+        outcome=result.outcome,
+        planner_model=result.planner_model,
+        critic_model=result.critic_model,
+    )
+
+
+def _write_telemetry_record(path: Path, record: AdvisoryTelemetryRecord) -> str | None:
+    """Render `record` to its wire form and write it. Failure is reported, never raised."""
+    try:
+        _append_jsonl_locked(path, record.to_mapping())
+    except OSError as exc:
+        return f"failed to write consultation telemetry at {path}: {exc}"
+    return None
 
 
 def _build_stalemate_report(
@@ -316,15 +570,22 @@ def run_advisory_consultation_debate(
     critic_model: str = "Codex 5.6 Sol",
     planner_effort: str = "high",
     critic_effort: str = "high",
+    task_id: str | None = None,
 ) -> AdvisoryDebateResult:
     """Run the Planner/Critic exchange, revising on objection, and report the outcome.
 
     Round 1: the Planner proposes a plan from the task description alone,
     and the Critic judges it. If the Critic approves, the agreed plan is
     written to ``root_dir / "implementation_plan.md"`` and consensus is
-    reported for that round. Otherwise the Planner is asked again, this
-    time holding its previous plan and the Critic's objection, and the
-    exchange repeats up to ``max_rounds`` times.
+    reported for that round. A failure writing that file is folded into
+    the result's ``error`` field rather than raised: the Critic genuinely
+    approved, so the outcome stays ``consensus`` and ``final_plan`` still
+    carries the agreed text even though it never reached disk — a caller
+    that trusts ``final_plan`` without also checking ``error`` is the one
+    place in this module where that trust is not yet backed by the file
+    system. Otherwise the Planner is asked again, this time holding its
+    previous plan and the Critic's objection, and the exchange repeats up
+    to ``max_rounds`` times.
 
     Four ways this can end without consensus, and each fails closed the
     same way — no plan artifact, no winner picked, the failure visible on
@@ -348,6 +609,27 @@ def run_advisory_consultation_debate(
     earlier run is removed on every one of these four exits, so the
     artifact on disk is never staler than the result describing it.
 
+    Every one of the five outcomes — including consensus — writes a fresh,
+    human-readable transcript to ``root_dir / ".scratch" / "planning_debate.md"``
+    (never appended, so a stale transcript can't survive) and emits exactly
+    one structured telemetry record to
+    ``root_dir / ".ralph" / "routing_telemetry.jsonl"``. On a
+    ``sensitivity_halt`` the transcript carries only the matched marker
+    constant, never the task text; every other outcome's transcript carries
+    the full task description and each round's Planner/Critic exchange. The
+    telemetry record never carries task text or a matched secret value on
+    any path — only ``task_id``, rounds run, outcome, and both model names.
+    ``task_id`` is the ``task_id`` keyword argument when supplied; otherwise
+    it defaults to a truncated SHA-256 digest of ``task_description`` for
+    every outcome except ``sensitivity_halt``, and to a random identity,
+    unrelated to the task text, for that one outcome (a digest is itself a
+    confirmation oracle over guessable task text — see ``_resolve_task_id``).
+    On a halt the same resolved id appears on both the transcript and the
+    telemetry record, so the two stay correlated for an auditor even though
+    neither carries the task text. A failure writing either artifact is
+    folded into the result's ``error`` field rather than raised or allowed
+    to replace the primary outcome.
+
     Raises ``ValueError`` if ``max_rounds`` is not at least 1: that is a
     programming error at the call site, not a genuine Planner-Critic
     disagreement, and must not be reported back as a fabricated stalemate.
@@ -366,6 +648,8 @@ def run_advisory_consultation_debate(
     previous_plan: str | None = None
     previous_critique: str | None = None
     plan_path = root_dir / "implementation_plan.md"
+    transcript_path = root_dir / ".scratch" / "planning_debate.md"
+    telemetry_path = root_dir / ".ralph" / "routing_telemetry.jsonl"
 
     def _result(
         outcome: AdvisoryOutcome,
@@ -373,8 +657,30 @@ def run_advisory_consultation_debate(
         final_plan: str = "",
         stalemate: AdvisoryStalemateReport | None = None,
         error: str | None = None,
+        sensitivity_marker: str | None = None,
     ) -> AdvisoryDebateResult:
-        return AdvisoryDebateResult(
+        """The single choke point every return passes through.
+
+        Writing the transcript and telemetry record here — rather than at
+        each call site — makes "every exit path gets both artifacts" a
+        structural guarantee instead of six remembered writes. Task identity
+        is resolved here too, per outcome, rather than once up front: the
+        `sensitivity_halt` default (a random id) must never be the same code
+        path as every other outcome's default (a digest of the task text) —
+        see `_resolve_task_id`. Because this closure runs at most once per
+        call to `run_advisory_consultation_debate` (every branch below
+        returns immediately through it), resolving per-call here is exactly
+        as "once" as resolving up front would have been.
+        """
+        # Provisional: its `error` is pre-fold (the transcript- and
+        # telemetry-write failures below haven't been folded in yet), and it
+        # is what the renderers below actually see. The caller instead gets
+        # the post-fold `AdvisoryDebateResult` built at the end of this
+        # function. This gap is inherent — a write's own error can't be known
+        # before the write happens — so a renderer must never read `.error`
+        # off this object; neither renderer does today, but nothing enforces
+        # that beyond this comment.
+        provisional_result = AdvisoryDebateResult(
             rounds_run=len(rounds),
             final_plan=final_plan,
             outcome=outcome,
@@ -385,20 +691,49 @@ def run_advisory_consultation_debate(
             error=error,
         )
 
+        resolved_task_id = _resolve_task_id(task_description, task_id, outcome)
+
+        if outcome == "sensitivity_halt":
+            if sensitivity_marker is None:
+                raise ValueError(
+                    "sensitivity_halt outcome requires a sensitivity_marker "
+                    "(programming error: this module's only sensitivity_halt "
+                    "call site always supplies one)"
+                )
+            transcript = _render_sensitivity_halt_transcript(
+                sensitivity_marker, resolved_task_id
+            )
+        else:
+            transcript = _render_consultation_transcript(task_description, provisional_result)
+        folded_error = _fold_error(
+            provisional_result.error, _write_transcript(transcript_path, transcript)
+        )
+
+        record = _build_telemetry_record(provisional_result, task_id=resolved_task_id)
+        folded_error = _fold_error(
+            folded_error, _write_telemetry_record(telemetry_path, record)
+        )
+
+        return dataclasses.replace(provisional_result, error=folded_error)
+
     marker = _detect_sensitivity_marker(task_description)
     if marker is not None:
         cleanup_error = _remove_stale_plan_artifact(plan_path)
         reason = (
             f"human approval required: task text matched sensitivity marker '{marker}'"
         )
-        return _result("sensitivity_halt", error=_combine_errors(reason, cleanup_error))
+        return _result(
+            "sensitivity_halt",
+            error=_fold_error(reason, cleanup_error),
+            sensitivity_marker=marker,
+        )
 
     if invoke_worker is None:
         try:
             from production_invoker import invoke_worker as production_invoke_worker
         except Exception as exc:  # noqa: BLE001 - a production worker failure fails closed.
             cleanup_error = _remove_stale_plan_artifact(plan_path)
-            return _result("worker_error", error=_combine_errors(str(exc), cleanup_error))
+            return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
         invoke_worker = production_invoke_worker
 
     for _round_number in range(1, max_rounds + 1):
@@ -411,21 +746,25 @@ def run_advisory_consultation_debate(
             planner_plan = invoke_worker(planner_model, planner_effort, planner_prompt)
         except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
             cleanup_error = _remove_stale_plan_artifact(plan_path)
-            return _result("worker_error", error=_combine_errors(str(exc), cleanup_error))
+            return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
         critic_prompt = _build_critic_prompt(task_description, planner_plan)
         try:
             critic_response = invoke_worker(critic_model, critic_effort, critic_prompt)
         except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
             cleanup_error = _remove_stale_plan_artifact(plan_path)
-            return _result("worker_error", error=_combine_errors(str(exc), cleanup_error))
+            return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
         rounds.append(AdvisoryDebateRound(planner_plan, critic_response))
         verdict = _parse_critic_verdict(critic_response)
 
         if verdict == "approved":
-            _atomic_text_write(plan_path, planner_plan)
-            return _result("consensus", final_plan=planner_plan)
+            write_error: str | None = None
+            try:
+                _atomic_text_write(plan_path, planner_plan)
+            except OSError as exc:
+                write_error = f"failed to write plan artifact at {plan_path}: {exc}"
+            return _result("consensus", final_plan=planner_plan, error=write_error)
 
         if verdict == "unparseable":
             cleanup_error = _remove_stale_plan_artifact(plan_path)
