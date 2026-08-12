@@ -209,10 +209,28 @@ _TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
 
 @dataclass(frozen=True)
 class AdvisoryDebateRound:
-    """One Planner/Critic exchange: the proposal offered and the verdict it drew."""
+    """One Planner/Critic exchange: the proposal offered and the verdict(s) it drew.
+
+    `critic_response` is unrenamed and means exactly what it always meant:
+    the sole Critic's response in pair mode, and — spec 0003 ticket 05 —
+    Critic A's response in panel mode. Every pre-existing pair-mode
+    construction and read site, in this module and in tests, keeps meaning
+    exactly what it meant before panel mode existed.
+
+    `critic_b_response` is new (ticket 05) and appended last with a `None`
+    default so this stays additive, not a reshape: `None` on every pair-mode
+    round, populated only for a panel-mode round, where a second,
+    independently invoked Critic reviews the same Planner proposal that
+    Critic A saw. A caller distinguishes a pair round from a panel round by
+    `critic_b_response is None` — exactly what `_render_consultation_transcript`
+    does below. Ticket 06 owns giving a *stalemate report* three properly
+    labeled voices; this dataclass only needs to carry the second response
+    at all, which is as far as this ticket's scope goes.
+    """
 
     planner_proposal: str
     critic_response: str
+    critic_b_response: str | None = None
 
 
 @dataclass(frozen=True)
@@ -906,6 +924,22 @@ def _render_consultation_transcript(
     if not rounds:
         lines.append("_No rounds were run._")
     for index, round_ in enumerate(rounds, start=1):
+        # `critic_b_response is not None` is exactly `AdvisoryDebateRound`'s
+        # own pair-vs-panel discriminant (see its docstring): a pair-mode
+        # round leaves this branch untaken, so its rendered output — the
+        # `### Critic (...)` header and nothing after the sole response — is
+        # byte-identical to every transcript this function rendered before
+        # panel mode existed (spec 0003 ticket 05). A panel-mode round gets a
+        # second, plainly-labeled section for Critic B; giving Critic B's
+        # header a model name to match Critic A's requires a field this
+        # ticket deliberately does not add to `AdvisoryDebateResult` — see
+        # the ticket's report for why that is ticket 10's job, not this one's.
+        is_panel_round = round_.critic_b_response is not None
+        critic_a_header = (
+            f"### Critic A ({result.critic_model})"
+            if is_panel_round
+            else f"### Critic ({result.critic_model})"
+        )
         lines.extend(
             [
                 f"## Round {index}",
@@ -914,12 +948,21 @@ def _render_consultation_transcript(
                 "",
                 round_.planner_proposal,
                 "",
-                f"### Critic ({result.critic_model})",
+                critic_a_header,
                 "",
                 round_.critic_response,
                 "",
             ]
         )
+        if round_.critic_b_response is not None:
+            lines.extend(
+                [
+                    "### Critic B",
+                    "",
+                    round_.critic_b_response,
+                    "",
+                ]
+            )
     return "\n".join(lines)
 
 
@@ -1086,17 +1129,76 @@ def _build_stalemate_report(
     )
 
 
+# Spec 0003 (CriticalDialogue) ticket 05: which occasion/complexity
+# combinations run the panel topology (one Planner, two Critics) instead of
+# the pair topology (one Planner, one Critic) spec 0001 shipped. Only these
+# two occasions, and only at Complex tier: the spec's "Tiered topology"
+# paragraph names plan-review and code-review specifically ("for Complex
+# tasks, a panel of one Planner and two Critics from two families other than
+# the Planner's"), and the ticket's own acceptance criteria are explicit that
+# ambiguity and post-mortem keep the pair topology "unchanged" even at
+# Complex tier — a panel is not simply "whatever runs at Complex complexity."
+_PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
+
+
+def _is_panel_topology(occasion: Occasion, complexity: str) -> bool:
+    """True when `occasion`/`complexity` select the panel topology.
+
+    Normalizes `complexity` with the same `.lower().strip()` idiom every
+    other complexity-reading function in this module already uses
+    (`needs_advisory_consultation`, `needs_plan_review_consultation`,
+    `needs_code_review_consultation`) — convergent reuse of that
+    normalization, not a dependency on any of them. Deliberately permissive
+    like those three, not validated like `occasion`/`max_rounds` below: a
+    `complexity` value this function doesn't recognize as `"complex"` simply
+    keeps the pair topology, exactly as `needs_plan_review_consultation`
+    treats any complexity outside `("medium", "complex")` as "does not fire"
+    rather than raising. `VALID_COMPLEXITIES` in `agent_council.py` is this
+    repo's complexity vocabulary (`trivial`/`simple`/`medium`/`complex`);
+    this function is not the place that enforces membership in it — the
+    caller's own complexity-classification step already did, before this
+    function is ever reached.
+    """
+    normalized = complexity.lower().strip()
+    return occasion in _PANEL_TOPOLOGY_OCCASIONS and normalized == "complex"
+
+
+def _combine_panel_critic_feedback(critic_a_response: str, critic_b_response: str) -> str:
+    """Fold both Critics' responses into the single feedback string
+    `_build_planner_prompt`'s `critic_feedback` parameter — and, after the
+    round cap, `_build_stalemate_report`'s `critic_position` parameter —
+    already expect.
+
+    Both of those functions are one-critic shaped, and ticket 05 reuses both
+    completely unmodified rather than forking panel-only variants of either
+    (see the ticket's own instructions: extend the round loop, don't write a
+    parallel one). This is the seam that makes that reuse possible: collapse
+    two responses into the one string the existing single-critic-shaped
+    machinery already knows how to hold. It is deliberately not fancier than
+    a labeled concatenation — a real three-voice shape for the *stalemate
+    report* specifically is ticket 06's job, not this one's; see that
+    ticket's issue file for why the shape here should stay this simple for
+    now.
+    """
+    return f"Critic A:\n{critic_a_response}\n\nCritic B:\n{critic_b_response}"
+
+
 def run_advisory_consultation_debate(
     task_description: str,
     invoke_worker: InvokeWorker | None = None,
     *,
     root_dir: Path,
     occasion: Occasion = "ambiguity",
+    complexity: str = "medium",
     max_rounds: int = MAX_DEBATE_ROUNDS,
     planner_model: str = "Claude Opus 5 (Thinking)",
     critic_model: str = "Codex 5.6 Sol",
     planner_effort: str = "high",
     critic_effort: str = "high",
+    critic_a_model: str = "Codex 5.6 Sol",
+    critic_a_effort: str = "high",
+    critic_b_model: str = "Gemini 3.6 Flash",
+    critic_b_effort: str = "high",
     task_id: str | None = None,
 ) -> AdvisoryDebateResult:
     """Run the Planner/Critic exchange, revising on objection, and report the outcome.
@@ -1166,6 +1268,40 @@ def run_advisory_consultation_debate(
     Wiring the other three occasions' real trigger predicates and blocking
     stance is later tickets' work, not this function's.
 
+    ``complexity`` (spec 0003 ticket 05) selects, together with ``occasion``,
+    which topology this round loop runs: the pair topology spec 0001 shipped
+    (one Planner, one Critic — ``critic_model``/``critic_effort``), or the
+    panel topology (one Planner, two independently invoked Critics —
+    ``critic_a_model``/``critic_a_effort`` and ``critic_b_model``/
+    ``critic_b_effort``) ticket 05 adds. The panel topology is selected only
+    when ``occasion`` is ``"plan-review"`` or ``"code-review"`` *and*
+    ``complexity`` normalizes to ``"complex"`` (see ``_is_panel_topology``);
+    every other combination — including ``"complex"`` ambiguity or
+    post-mortem — keeps the pair topology completely unchanged, and a call
+    site that never mentions ``complexity`` defaults to ``"medium"``, which
+    never selects a panel, so every pre-ticket-05 call site behaves exactly
+    as before this parameter existed.
+
+    In a panel round both Critics review the exact same Planner proposal
+    (the same ``critic_prompt`` text ``_build_critic_prompt`` already builds
+    for pair mode, addressed to each Critic's own ``model``/``effort`` at
+    the ``invoke_worker`` call site — the prompt text itself does not differ
+    between Critic A and Critic B), and each response is parsed through the
+    same ``_parse_critic_verdict`` (ticket 02) against that proposal.
+    Consensus requires *both* Critics' verdict to be ``"approved"`` in the
+    same round; an unparseable verdict from either Critic ends the
+    consultation immediately, exactly as a single unparseable verdict does
+    in pair mode; any other combination (a split verdict, or both Critics
+    objecting) folds both responses into one feedback string
+    (``_combine_panel_critic_feedback``) and starts another round, up to the
+    same ``max_rounds`` cap pair mode obeys — panel mode adds no rounds of
+    its own. A panel that never reaches consensus by the cap produces a
+    stalemate report built by the same ``_build_stalemate_report`` pair mode
+    uses, with both Critics' last combined feedback standing in for the
+    single Critic's position; ticket 06 is what gives a panel stalemate
+    three properly separated voices; this function's stalemate shape for a
+    panel is deliberately no fancier than that until then.
+
     Raises ``ValueError`` if ``max_rounds`` is not at least 1, or if
     ``occasion`` is not one of the four ``Occasion`` values: both are
     programming errors at the call site, not a genuine Planner-Critic
@@ -1185,6 +1321,18 @@ def run_advisory_consultation_debate(
         raise ValueError(
             f"unknown occasion {occasion!r}; expected one of {tuple(_MISSION_COPY)}"
         )
+
+    panel_mode = _is_panel_topology(occasion, complexity)
+    # The `critic_model` the result/transcript/telemetry actually report.
+    # Pair mode reports the `critic_model` parameter exactly as it always
+    # has (every pre-ticket-05 assertion on `result.critic_model` stays
+    # valid unmodified); panel mode reports Critic A's model instead, since
+    # `critic_model` itself is never invoked in that mode and would
+    # otherwise report a model this run never contacted. Recording both
+    # Critics' models on the result is ticket 10's telemetry-extension job,
+    # not this one's — see this ticket's report for why that line is drawn
+    # here.
+    result_critic_model = critic_a_model if panel_mode else critic_model
 
     rounds: list[AdvisoryDebateRound] = []
     previous_plan: str | None = None
@@ -1228,7 +1376,7 @@ def run_advisory_consultation_debate(
             outcome=outcome,
             occasion=occasion,
             planner_model=planner_model,
-            critic_model=critic_model,
+            critic_model=result_critic_model,
             rounds=tuple(rounds),
             stalemate=stalemate,
             error=error,
@@ -1292,9 +1440,74 @@ def run_advisory_consultation_debate(
             cleanup_error = _remove_stale_plan_artifact(plan_path)
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
+        # `critic_prompt` is built once and reused verbatim for every Critic
+        # in the round — one call in pair mode, two independent
+        # `invoke_worker` calls (Critic A, Critic B) in panel mode — never
+        # rebuilt per-Critic. Spec 0003 ticket 05: a panel Critic is
+        # addressed as a distinct role by the `model` argument it is invoked
+        # with, not by different prompt text, so `_build_critic_prompt`
+        # needs no panel-awareness of its own.
         critic_prompt = _build_critic_prompt(
             task_description, planner_plan, occasion=occasion
         )
+
+        if panel_mode:
+            try:
+                critic_a_response = invoke_worker(
+                    critic_a_model, critic_a_effort, critic_prompt
+                )
+            except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
+                cleanup_error = _remove_stale_plan_artifact(plan_path)
+                return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
+            try:
+                critic_b_response = invoke_worker(
+                    critic_b_model, critic_b_effort, critic_prompt
+                )
+            except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
+                cleanup_error = _remove_stale_plan_artifact(plan_path)
+                return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
+
+            rounds.append(
+                AdvisoryDebateRound(planner_plan, critic_a_response, critic_b_response)
+            )
+            # Same VerdictContract parser (ticket 02), applied independently
+            # to each Critic's response, both checked against the same
+            # reviewed artifact `planner_plan` — never against each other.
+            verdict_a = _parse_critic_verdict(critic_a_response, planner_plan)
+            verdict_b = _parse_critic_verdict(critic_b_response, planner_plan)
+
+            # An unparseable verdict from either Critic ends the panel
+            # immediately, exactly as pair mode's single unparseable verdict
+            # does: a malformed response must halt, never be folded into
+            # "the panel asked for a revision" as if it were a reasoned
+            # objection from whichever Critic actually engaged.
+            if verdict_a.verdict == "unparseable" or verdict_b.verdict == "unparseable":
+                cleanup_error = _remove_stale_plan_artifact(plan_path)
+                return _result("unparseable_verdict", error=cleanup_error)
+
+            if verdict_a.verdict == "approved" and verdict_b.verdict == "approved":
+                panel_write_error: str | None = None
+                try:
+                    _atomic_text_write(plan_path, planner_plan)
+                except OSError as exc:
+                    panel_write_error = (
+                        f"failed to write plan artifact at {plan_path}: {exc}"
+                    )
+                return _result(
+                    "consensus", final_plan=planner_plan, error=panel_write_error
+                )
+
+            # Any other combination — one approves and one objects, or both
+            # object — is not consensus and starts another round. Both
+            # responses fold into the single feedback string
+            # `_build_planner_prompt`/`_build_stalemate_report` expect, so
+            # both stay completely unmodified for panel mode.
+            previous_plan = planner_plan
+            previous_critique = _combine_panel_critic_feedback(
+                critic_a_response, critic_b_response
+            )
+            continue
+
         try:
             critic_response = invoke_worker(critic_model, critic_effort, critic_prompt)
         except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
@@ -1324,6 +1537,12 @@ def run_advisory_consultation_debate(
         previous_critique = critic_response
 
     cleanup_error = _remove_stale_plan_artifact(plan_path)
+    # Shared by both topologies: in panel mode `previous_critique` already
+    # holds `_combine_panel_critic_feedback`'s two-voice string, so this
+    # stalemate report's `critic_position` reads as both Critics' combined
+    # last feedback rather than needing a panel-specific branch here.
+    # Ticket 06 gives a panel stalemate three properly separated voices;
+    # this is deliberately the simplest report that stays truthful until then.
     stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
     return _result("stalemate", stalemate=stalemate, error=cleanup_error)
 

@@ -1327,6 +1327,47 @@ class _RecordingInvoker:
         return response
 
 
+class _RoleKeyedInvoker:
+    """A fake `invoke_worker` for panel-mode tests: scripted per role, per round.
+
+    Spec 0003 ticket 05's role-distinguishing mechanism is the `model`
+    argument each panel role is invoked with — the Planner, Critic A, and
+    Critic B each get their own `model` value at the call site (see
+    `run_advisory_consultation_debate`'s `planner_model`/`critic_a_model`/
+    `critic_b_model` parameters) — so this fake keys its script by that same
+    `model` string. `responses` maps a `model` value to the ordered queue of
+    responses that role receives, one per round: the first call with a given
+    `model` pops that role's round-1 entry, the second call pops round 2,
+    and so on, which is what makes "Planner / Critic A / Critic B each get
+    independently scripted responses" (spec 0003's Testing Decisions,
+    "the fake is keyed by role and round") true of this fake specifically.
+    An unscripted call for a `model` whose queue is empty raises
+    `AssertionError` immediately rather than a confusing `IndexError`, so a
+    test with too few scripted rounds fails at the exact call it under-
+    scripted.
+    """
+
+    def __init__(self, responses: dict[str, list[str | Exception]]) -> None:
+        self.responses: dict[str, list[str | Exception]] = {
+            model: list(queue) for model, queue in responses.items()
+        }
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, model: str, effort: str, prompt: str) -> str:
+        self.calls.append((model, effort, prompt))
+        queue = self.responses.get(model)
+        if not queue:
+            raise AssertionError(
+                f"_RoleKeyedInvoker: no scripted response left for model {model!r} "
+                f"(call {len(self.calls)}); scripted models were "
+                f"{sorted(self.responses)!r}"
+            )
+        response = queue.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
 def _approve(artifact_text: str, note: str = "Looks solid.") -> str:
     """Build a scripted Critic response that satisfies the VerdictContract's
     APPROVE path (spec 0003 ticket 02): rationale, then one verified quote —
@@ -2195,6 +2236,456 @@ class AdvisoryConsultationTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             worker_error_result.outcome = "consensus"  # type: ignore[misc]
         self.assertFalse(worker_error_result.consensus_reached)
+
+
+class AdvisoryPanelTopologyTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 05: Complex-tier plan-review and
+    code-review occasions run a panel — one Planner, two independently
+    invoked Critics — instead of the pair topology `AdvisoryConsultationTests`
+    above exercises. Every test here drives the loop through the same public
+    `run_advisory_consultation_debate` seam those tests use, with the new
+    `complexity` keyword argument and the new `critic_a_model`/`critic_b_model`
+    role slots. `_RoleKeyedInvoker` (defined above `_approve`) is what lets a
+    single scripted run address the Planner, Critic A, and Critic B
+    independently, per round — spec 0003's Testing Decisions: "the fake is
+    keyed by role and round."
+    """
+
+    def test_complex_plan_review_both_critics_approve_round_one_reaches_consensus(
+        self,
+    ) -> None:
+        """Criterion 1 and 2: Complex-tier plan-review invokes three workers,
+        each independently addressable, and both Critics approving in round
+        one is consensus."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's proposed plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan, "Critic A: solid.")],
+                    "Test Critic B": [_approve(plan, "Critic B: solid.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            plan_path = root / "implementation_plan.md"
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(plan_path.read_text(), plan)
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(result.final_plan, plan)
+        self.assertEqual(len(invoker.calls), 3)
+        called_models = {model for model, _effort, _prompt in invoker.calls}
+        self.assertEqual(
+            called_models, {"Test Planner", "Test Critic A", "Test Critic B"}
+        )
+
+    def test_complex_code_review_also_runs_the_panel(self) -> None:
+        """The panel topology is not plan-review-only: code-review at Complex
+        tier is named in the same acceptance criterion."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Diff defense."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan)],
+                    "Test Critic B": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Review the diff",
+                invoker,
+                root_dir=root,
+                occasion="code-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(len(invoker.calls), 3)
+
+    def test_split_verdict_is_not_consensus_and_triggers_a_second_round_with_both_critics_reinvoked(
+        self,
+    ) -> None:
+        """Criterion 3: one Critic approving and the other objecting is not
+        consensus; both Critics must be re-invoked in the following round,
+        not just the one that objected."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "Planner's first plan."
+            second_plan = "Planner's revised plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [first_plan, second_plan],
+                    "Test Critic A": [
+                        _approve(first_plan, "A: fine as-is."),
+                        _approve(second_plan, "A: still fine."),
+                    ],
+                    "Test Critic B": [
+                        _revise("B: needs a rollback plan."),
+                        _approve(second_plan, "B: rollback addressed."),
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 2)
+        self.assertEqual(len(invoker.calls), 6)
+        second_round_models = [model for model, _e, _p in invoker.calls[3:6]]
+        self.assertEqual(
+            second_round_models, ["Test Planner", "Test Critic A", "Test Critic B"]
+        )
+        second_planner_prompt = invoker.calls[3][2]
+        self.assertIn("B: needs a rollback plan.", second_planner_prompt)
+
+    def test_both_critics_reject_every_round_produces_stalemate_at_the_cap(
+        self,
+    ) -> None:
+        """The other 'other combination': both Critics objecting every round
+        must exhaust exactly `MAX_DEBATE_ROUNDS` rounds and end in a
+        stalemate, never a fabricated consensus."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [f"Planner's plan #{i}." for i in range(1, 4)],
+                    "Test Critic A": [
+                        _revise(f"A: not yet #{i}.") for i in range(1, 4)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B: not yet #{i}.") for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.rounds_run, advisory_consultation.MAX_DEBATE_ROUNDS)
+        self.assertEqual(result.rounds_run, 3)
+        self.assertEqual(len(invoker.calls), 9)
+        self.assertIsNotNone(result.stalemate)
+
+    def test_panel_round_cap_is_exactly_three_never_four(self) -> None:
+        """Criterion 5, strict: `MAX_DEBATE_ROUNDS` must not change for panel
+        mode. Exactly 3 rounds' worth of responses (9 calls) are scripted
+        per role; if the loop ever over-ran to a fourth round,
+        `_RoleKeyedInvoker` would raise `AssertionError` on the exhausted
+        queue rather than silently returning a stale response, so a 4-round
+        run could never reach this test's assertions at all.
+        """
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [f"Plan #{i}." for i in range(1, 4)],
+                    "Test Critic A": [f"A objects #{i}.\nVERDICT: REVISE" for i in range(1, 4)],
+                    "Test Critic B": [f"B objects #{i}.\nVERDICT: REVISE" for i in range(1, 4)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="code-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.rounds_run, 3)
+        self.assertEqual(len(invoker.calls), 9)
+        self.assertEqual(advisory_consultation.MAX_DEBATE_ROUNDS, 3)
+
+    def test_non_complex_plan_review_stays_pair_mode_with_exactly_two_workers(
+        self,
+    ) -> None:
+        """Criterion 4 (regression): plan-review/code-review at any
+        complexity below Complex must keep invoking exactly two workers,
+        completely unchanged from before this ticket."""
+        for complexity in ("trivial", "simple", "medium"):
+            with self.subTest(complexity=complexity):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    plan = "Planner's plan."
+                    invoker = _RecordingInvoker([plan, _approve(plan)])
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        occasion="plan-review",
+                        complexity=complexity,
+                    )
+                self.assertEqual(len(invoker.calls), 2)
+                self.assertTrue(result.consensus_reached)
+
+    def test_complex_ambiguity_and_post_mortem_stay_pair_mode_with_exactly_two_workers(
+        self,
+    ) -> None:
+        """Criterion 4 (regression), the other half: Complex-tier occasions
+        outside plan-review/code-review keep the pair topology completely
+        unchanged — a panel is not simply 'whatever runs at Complex
+        complexity.'"""
+        for occasion in ("ambiguity", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    plan = "Planner's plan."
+                    invoker = _RecordingInvoker([plan, _approve(plan)])
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                        complexity="complex",
+                    )
+                self.assertEqual(len(invoker.calls), 2)
+                self.assertTrue(result.consensus_reached)
+
+    def test_default_complexity_never_selects_the_panel(self) -> None:
+        """A call site that never mentions `complexity` (every pre-ticket-05
+        call site, including every `AdvisoryConsultationTests` case above)
+        must keep behaving exactly as before this parameter existed: pair
+        mode, two workers."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+            )
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertTrue(result.consensus_reached)
+
+    def test_panel_round_stores_both_critics_responses(self) -> None:
+        """`AdvisoryDebateRound.critic_b_response` (ticket 05) carries Critic
+        B's response; `critic_response` still carries Critic A's, unrenamed."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            a_response = _approve(plan, "Critic A note.")
+            b_response = _approve(plan, "Critic B note.")
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [a_response],
+                    "Test Critic B": [b_response],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(len(result.rounds), 1)
+        self.assertEqual(result.rounds[0].critic_response, a_response)
+        self.assertEqual(result.rounds[0].critic_b_response, b_response)
+
+    def test_pair_mode_round_leaves_critic_b_response_none(self) -> None:
+        """The additive-field guarantee: a pair-mode round's new field is
+        `None`, never populated by anything pair mode does."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(len(result.rounds), 1)
+        self.assertIsNone(result.rounds[0].critic_b_response)
+
+    def test_unparseable_verdict_from_either_critic_halts_the_panel_immediately(
+        self,
+    ) -> None:
+        """A malformed response from either Critic must halt the panel the
+        same way a single malformed response halts pair mode — never folded
+        into 'the panel asked for a revision' as if it were a reasoned
+        objection from whichever Critic actually engaged."""
+        plan = "Planner's plan."
+        scenarios: dict[str, dict[str, list[str | Exception]]] = {
+            "critic_a_unparseable": {
+                "Test Planner": [plan],
+                "Test Critic A": ["no verdict line here"],
+                "Test Critic B": [_approve(plan)],
+            },
+            "critic_b_unparseable": {
+                "Test Planner": [plan],
+                "Test Critic A": [_approve(plan)],
+                "Test Critic B": ["no verdict line here"],
+            },
+            "both_unparseable": {
+                "Test Planner": [plan],
+                "Test Critic A": ["garbled"],
+                "Test Critic B": ["also garbled"],
+            },
+        }
+        for name, responses in scenarios.items():
+            with self.subTest(scenario=name):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RoleKeyedInvoker(responses)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        occasion="plan-review",
+                        complexity="complex",
+                        planner_model="Test Planner",
+                        critic_a_model="Test Critic A",
+                        critic_b_model="Test Critic B",
+                    )
+                    self.assertFalse((root / "implementation_plan.md").exists())
+                self.assertEqual(result.outcome, "unparseable_verdict")
+                self.assertEqual(len(invoker.calls), 3)
+
+    def test_panel_worker_mode_token_present_in_every_role_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan)],
+                    "Test Critic B": [_approve(plan)],
+                }
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(len(invoker.calls), 3)
+        for _model, _effort, prompt in invoker.calls:
+            self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
+
+    def test_transcript_renders_both_critics_for_a_panel_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan, "Critic A verbatim note.")],
+                    "Test Critic B": [_approve(plan, "Critic B verbatim note.")],
+                }
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn("Critic A verbatim note.", transcript)
+        self.assertIn("Critic B verbatim note.", transcript)
+        self.assertIn("### Critic A", transcript)
+        self.assertIn("### Critic B", transcript)
+
+    def test_pair_mode_transcript_header_is_byte_identical_to_before_panel_mode(
+        self,
+    ) -> None:
+        """Pins `_render_consultation_transcript`'s pair-mode output: adding
+        the panel-mode branch must not change a single byte of what a
+        pair-mode transcript renders."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn("### Critic (Test Critic)", transcript)
+        self.assertNotIn("Critic A", transcript)
+        self.assertNotIn("Critic B", transcript)
 
 
 class AdvisoryOccasionParameterizationTests(unittest.TestCase):
