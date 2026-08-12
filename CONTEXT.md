@@ -64,6 +64,9 @@ The upgraded [[AdvisoryConsultation]] machinery serving four occasions — ambig
 ### VerdictContract
 The response contract a Critic must satisfy for its approval to count: rationale before the verdict line, quotes from the reviewed artifact that verify mechanically, and enumerable atomic objections. An approval carrying zero engagement units parses as "not approved" — the structural defense against rubber-stamping, extending spec 0001's rule that absence of rejection is not agreement.
 
+### DegradationLadder
+The per-session budget response of a [[CriticalDialogue]]: `dialogue_budget.session_dialogue_cap` in `routing-config.json` is a degradation trigger, not a hard ceiling. Spend below the cap runs undegraded (rung 0); each further cap's-width of spend takes one rung — reduced rounds (1), a single cheap model in every seat at low effort (2, recorded as degraded independence), and only at three times the cap the skip rung (3), so a cap of 10 admits up to 30 dialogues — the last 20 of them degraded — before every further one is skipped. A cap of zero (or negative) degenerates to always-skip. Every rung is visible: rung 2 flags `degraded_independence`, rung 3 is its own `budget_skipped` outcome, and every rung reaches the [[AdvisoryTelemetryRecord]] as `degradation_rung`. Spec 0003 ticket 09.
+
 ### LearningJournal
 A dedicated, content-free JSONL stream recording four signal families per action — worker execution, ground-truth outcomes, dialogue quality, and protocol compliance. Kept separate from the audited [[AdvisoryTelemetryRecord]] stream so the audit contract stays frozen. Carries numbers, categories, and ids only; a coarse task-type tag on normal tasks; no tag of any kind on sensitivity halts. Records correlate via [[TaskIdentity]]. Spec 0004.
 
