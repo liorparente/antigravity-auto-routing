@@ -40,6 +40,47 @@
     "Claude Opus 5 (Thinking)",
     "GPT-OSS 120B (Medium)"
   ],
+  "critical_dialogue": {
+    "code_review_diff_line_threshold": 300,
+    "security_sensitive_path_patterns": [
+      "auth",
+      "credential",
+      "secret",
+      ".env",
+      "password",
+      "token",
+      "/keys/",
+      "security",
+      "iam",
+      "acl",
+      "permission"
+    ]
+  },
+  "roster_topology": {
+    "role_fallback_chains": {
+      "planner": [
+        "Claude Opus 5 (Thinking)",
+        "Claude Fable 5",
+        "Codex 5.6 Sol",
+        "Gemini 3.6 Flash (High)",
+        "Gemma 4 E4B"
+      ],
+      "critic_a": [
+        "Codex 5.6 Sol",
+        "GPT-OSS 120B (Medium)",
+        "Gemini 3.6 Flash (High)",
+        "Claude Opus 5 (Thinking)",
+        "Qwen3-Coder-Next"
+      ],
+      "critic_b": [
+        "Gemini 3.6 Flash",
+        "Gemini 3.1 Pro (High)",
+        "Codex 5.6 Sol",
+        "Claude Opus 5 (Thinking)",
+        "Gemma 4 E4B"
+      ]
+    }
+  },
   "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"],
   "safe_commands": [
     "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",

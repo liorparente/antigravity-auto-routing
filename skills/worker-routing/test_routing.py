@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -1327,6 +1328,283 @@ class _RecordingInvoker:
         return response
 
 
+class _RoleKeyedInvoker:
+    """A fake `invoke_worker` for panel-mode tests: scripted per role, per round.
+
+    Spec 0003 ticket 05's role-distinguishing mechanism is the `model`
+    argument each panel role is invoked with — the Planner, Critic A, and
+    Critic B each get their own `model` value at the call site (see
+    `run_advisory_consultation_debate`'s `planner_model`/`critic_a_model`/
+    `critic_b_model` parameters) — so this fake keys its script by that same
+    `model` string. `responses` maps a `model` value to the ordered queue of
+    responses that role receives, one per round: the first call with a given
+    `model` pops that role's round-1 entry, the second call pops round 2,
+    and so on, which is what makes "Planner / Critic A / Critic B each get
+    independently scripted responses" (spec 0003's Testing Decisions,
+    "the fake is keyed by role and round") true of this fake specifically.
+    An unscripted call for a `model` whose queue is empty raises
+    `AssertionError` immediately rather than a confusing `IndexError`, so a
+    test with too few scripted rounds fails at the exact call it under-
+    scripted.
+    """
+
+    def __init__(self, responses: dict[str, list[str | Exception]]) -> None:
+        self.responses: dict[str, list[str | Exception]] = {
+            model: list(queue) for model, queue in responses.items()
+        }
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, model: str, effort: str, prompt: str) -> str:
+        self.calls.append((model, effort, prompt))
+        queue = self.responses.get(model)
+        if not queue:
+            raise AssertionError(
+                f"_RoleKeyedInvoker: no scripted response left for model {model!r} "
+                f"(call {len(self.calls)}); scripted models were "
+                f"{sorted(self.responses)!r}"
+            )
+        response = queue.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _approve(artifact_text: str, note: str = "Looks solid.") -> str:
+    """Build a scripted Critic response that satisfies the VerdictContract's
+    APPROVE path (spec 0003 ticket 02): rationale, then one verified quote —
+    the entire `artifact_text` (always trivially verbatim-contained in
+    itself), stated as `QUOTE: "<artifact_text>"` — then the verdict line
+    last. `artifact_text` must be exactly the Planner's plan text the
+    surrounding test scripts for that same round, since
+    `_parse_critic_verdict` verifies the quote against it.
+
+    Used throughout this file wherever a scripted Critic response must
+    actually reach `outcome == "consensus"`. Tests that probe the
+    VerdictContract's parsing rules themselves — the engagement-unit
+    counting, quote verification, and bare-approval rejection — live in
+    `VerdictContractParserTests` and build their response text by hand,
+    per spec 0003's pinned exception for VerdictContract parse behavior.
+    """
+    return f'{note}\nQUOTE: "{artifact_text}"\nVERDICT: APPROVE'
+
+
+def _revise(note: str) -> str:
+    """Build a scripted Critic response that satisfies the VerdictContract's
+    REVISE path. REVISE carries no engagement-unit requirement (spec 0003
+    ticket 02) — only APPROVE does — so the rationale/objection text alone,
+    with the verdict line last, is sufficient.
+    """
+    return f"{note}\nVERDICT: REVISE"
+
+
+def _reachable(*families: str) -> "advisory_consultation.IsFamilyReachable":
+    """Build a scripted `is_family_reachable` fake for `resolve_roster` and
+    `run_advisory_consultation_debate`'s `reachability_check` parameter
+    (spec 0003 ticket 07): reachable for exactly the named families,
+    unreachable for everything else. This is that seam's offline fake, the
+    same role `_RecordingInvoker`/`_RoleKeyedInvoker` play for
+    `invoke_worker` — no real network or local-endpoint probe, ever, per
+    this ticket's own testability requirement ("this must be testable
+    offline with a fake, exactly like `invoke_worker` is injected today").
+    `_reachable()` with no arguments is the "nothing is up" fake used to
+    exercise `RosterResolutionError`.
+    """
+    allowed = set(families)
+    return lambda family: family in allowed
+
+
+class VerdictContractParserTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 02: `_parse_critic_verdict` under
+    the VerdictContract. This is the one class in this file permitted to
+    assert on the exact textual shape of a Critic response — the QUOTE:/N.
+    line syntax and the verdict line — per the spec's Testing Decisions
+    pinned exception for VerdictContract parse behavior. Every other test in
+    this file that needs a scripted APPROVE/REVISE response should go
+    through `_approve`/`_revise` instead of hand-rolling the contract text,
+    so those tests stay agnostic to exactly this syntax.
+
+    Calls `advisory_consultation._parse_critic_verdict` directly rather than
+    through the full debate loop: the loop is exercised end-to-end elsewhere
+    (`AdvisoryConsultationTests`), and driving every one of ticket 02's
+    acceptance criteria through a full Planner/Critic round trip would
+    duplicate this file's slowest fixture for no additional coverage of the
+    parser itself.
+    """
+
+    def test_rationale_quotes_and_objections_before_approve_parses_as_approved_with_counts(
+        self,
+    ) -> None:
+        artifact_text = (
+            "The system shall retry failed writes up to three times before "
+            "surfacing an error to the caller."
+        )
+        critic_response = (
+            "This is a reasonable first pass at the retry behaviour.\n"
+            'QUOTE: "retry failed writes up to three times"\n'
+            "1. The backoff strategy between retries is unspecified.\n"
+            "2. Nothing says whether the operation must be idempotent.\n"
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 1)
+        self.assertEqual(result.objection_count, 2)
+
+    def test_bare_approve_with_zero_engagement_units_parses_as_not_approved(
+        self,
+    ) -> None:
+        result = advisory_consultation._parse_critic_verdict(
+            "VERDICT: APPROVE", "The reviewed artifact text."
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_quote_absent_from_artifact_does_not_count_and_leaves_response_not_approved(
+        self,
+    ) -> None:
+        artifact_text = "The system shall retry failed writes up to three times."
+        critic_response = (
+            "Looks fine to me.\n"
+            'QUOTE: "this exact text never appears in the artifact"\n'
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_mixed_valid_and_invalid_quotes_only_the_verbatim_one_counts(
+        self,
+    ) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "Partial engagement.\n"
+            'QUOTE: "Ship the feature behind a flag."\n'
+            'QUOTE: "this text is fabricated and not in the artifact"\n'
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 1)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_zero_objections_is_valid_when_at_least_one_quote_verifies(self) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "Solid reasoning, nothing to add.\n"
+            'QUOTE: "Ship the feature behind a flag."\n'
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 1)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_zero_quotes_and_zero_objections_parses_as_not_approved_even_with_rationale(
+        self,
+    ) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "I read this carefully and it seems fine overall, no notes.\n"
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_objections_alone_with_no_verified_quotes_do_not_earn_approval(self) -> None:
+        """The asymmetric half of the rule: spec 0003's VerdictContract
+        paragraph only licenses "zero objections is fine alongside a
+        verified quote" — never the mirror "zero quotes is fine alongside
+        objections". Objections are unverified free text a Critic could
+        fabricate without reading anything; only a quote is mechanically
+        checked against the artifact, so only a quote may unlock approval.
+        Several numbered objections, with zero verified quotes, must still
+        parse as not-approved.
+        """
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "No verbatim passage is worth quoting, but I have concerns.\n"
+            "1. The flag's default state is not specified.\n"
+            "2. Nothing says who owns the flag once it is removed.\n"
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 2)
+
+    def test_unparseable_response_with_no_recognizable_verdict_line_is_not_approved(
+        self,
+    ) -> None:
+        for critic_response in (
+            "",
+            "   \n\n   ",
+            "This plan looks fine to me, no verdict line at all.",
+        ):
+            with self.subTest(critic_response=repr(critic_response)):
+                result = advisory_consultation._parse_critic_verdict(
+                    critic_response, "The reviewed artifact text."
+                )
+
+                self.assertEqual(result.verdict, "unparseable")
+                self.assertNotEqual(result.verdict, "approved")
+
+    def test_revise_still_works_with_rationale_and_objections_before_it(self) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "This needs another pass before it is ready.\n"
+            "1. The rollback plan is missing.\n"
+            "2. No mention of the flag's default state.\n"
+            "VERDICT: REVISE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "revise")
+        self.assertEqual(result.objection_count, 2)
+
+    def test_result_is_a_verdict_contract_result_with_all_three_fields(self) -> None:
+        result = advisory_consultation._parse_critic_verdict(
+            "VERDICT: APPROVE", "irrelevant artifact text"
+        )
+
+        self.assertIsInstance(result, advisory_consultation.VerdictContractResult)
+        self.assertEqual(
+            dataclasses.fields(advisory_consultation.VerdictContractResult).__len__(),
+            3,
+        )
+
+
 class AdvisoryConsultationTests(unittest.TestCase):
     """The Planner-Critic loop must never report fake consensus.
 
@@ -1342,7 +1620,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
@@ -1371,11 +1649,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's proposed plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's revised plan.",
-                    "VERDICT: REVISE\nStill missing detail.",
+                    _revise("Still missing detail."),
                     "Planner's third plan.",
-                    "VERDICT: REVISE\nNot convinced.",
+                    _revise("Not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1424,7 +1702,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -1453,7 +1731,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -1469,7 +1747,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -1488,9 +1766,9 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nMissing a rollback strategy.",
+                    _revise("Missing a rollback strategy."),
                     "Planner's revised plan.",
-                    "VERDICT: APPROVE\nRollback strategy addressed.",
+                    _approve("Planner's revised plan.", "Rollback strategy addressed."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1513,11 +1791,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: APPROVE\nThis works.",
+                    _approve("Planner's third plan.", "This works."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1540,9 +1818,9 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: APPROVE\nGood now.",
+                    _approve("Planner's second plan.", "Good now."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1552,11 +1830,12 @@ class AdvisoryConsultationTests(unittest.TestCase):
         self.assertEqual(len(result.rounds), 2)
         self.assertEqual(result.rounds[0].planner_proposal, "Planner's first plan.")
         self.assertEqual(
-            result.rounds[0].critic_response, "VERDICT: REVISE\nNeeds more detail."
+            result.rounds[0].critic_response, _revise("Needs more detail.")
         )
         self.assertEqual(result.rounds[1].planner_proposal, "Planner's second plan.")
         self.assertEqual(
-            result.rounds[1].critic_response, "VERDICT: APPROVE\nGood now."
+            result.rounds[1].critic_response,
+            _approve("Planner's second plan.", "Good now."),
         )
 
     def test_critic_that_never_approves_produces_exactly_two_times_max_rounds_calls(
@@ -1572,7 +1851,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     responses: list[str | Exception] = []
                     for i in range(max_rounds):
                         responses.append(f"Planner's plan #{i + 1}.")
-                        responses.append(f"VERDICT: REVISE\nStill not good enough #{i + 1}.")
+                        responses.append(_revise(f"Still not good enough #{i + 1}."))
                     invoker = _RecordingInvoker(responses)
                     result = advisory_consultation.run_advisory_consultation_debate(
                         "Plan the auth rewrite",
@@ -1595,11 +1874,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: APPROVE\nThis works.",
+                    _approve("Planner's third plan.", "This works."),
                 ]
             )
             advisory_consultation.run_advisory_consultation_debate(
@@ -1618,11 +1897,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: REVISE\nNot convinced.",
+                    _revise("Not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1645,9 +1924,9 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's final plan.",
-                    "VERDICT: REVISE\nStill not convinced.",
+                    _revise("Still not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1658,7 +1937,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         assert result.stalemate is not None
         self.assertEqual(result.stalemate.planner_position, "Planner's final plan.")
         self.assertEqual(
-            result.stalemate.critic_position, "VERDICT: REVISE\nStill not convinced."
+            result.stalemate.critic_position, _revise("Still not convinced.")
         )
         self.assertEqual(len(result.stalemate.options), 3)
         labels = {option.label for option in result.stalemate.options}
@@ -1675,7 +1954,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         """The defect carried out of ticket 02: a stale plan must not survive."""
         scenarios: dict[str, _RecordingInvoker] = {
             "stalemate": _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: REVISE\nNot convinced."]
+                ["Planner's plan.", _revise("Not convinced.")]
             ),
             "unparseable": _RecordingInvoker(
                 ["Planner's plan.", "This plan looks fine to me."]
@@ -1747,7 +2026,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     RuntimeError("worker unreachable"),
                 ]
             )
@@ -1764,7 +2043,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         """Criterion 6: no failure path may report a consensus that was not granted."""
         scenarios: dict[str, _RecordingInvoker] = {
             "stalemate": _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: REVISE\nNot convinced."]
+                ["Planner's plan.", _revise("Not convinced.")]
             ),
             "worker_error": _RecordingInvoker([RuntimeError("worker unreachable")]),
             "unparseable": _RecordingInvoker(
@@ -1861,7 +2140,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                             "Planner's first plan.",
                             critic_response,
                             "Planner's revised plan.",
-                            "VERDICT: APPROVE\nGood now.",
+                            _approve("Planner's revised plan.", "Good now."),
                         ]
                     )
                     result = advisory_consultation.run_advisory_consultation_debate(
@@ -1939,7 +2218,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                             "Planner's first plan.",
                             critic_response,
                             "Planner's revised plan.",
-                            "VERDICT: APPROVE\nGood now.",
+                            _approve("Planner's revised plan.", "Good now."),
                         ]
                     )
                     result = advisory_consultation.run_advisory_consultation_debate(
@@ -1976,6 +2255,1491 @@ class AdvisoryConsultationTests(unittest.TestCase):
         self.assertFalse(worker_error_result.consensus_reached)
 
 
+class AdvisoryPanelTopologyTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 05: Complex-tier plan-review and
+    code-review occasions run a panel — one Planner, two independently
+    invoked Critics — instead of the pair topology `AdvisoryConsultationTests`
+    above exercises. Every test here drives the loop through the same public
+    `run_advisory_consultation_debate` seam those tests use, with the new
+    `complexity` keyword argument and the new `critic_a_model`/`critic_b_model`
+    role slots. `_RoleKeyedInvoker` (defined above `_approve`) is what lets a
+    single scripted run address the Planner, Critic A, and Critic B
+    independently, per round — spec 0003's Testing Decisions: "the fake is
+    keyed by role and round."
+    """
+
+    def test_complex_plan_review_both_critics_approve_round_one_reaches_consensus(
+        self,
+    ) -> None:
+        """Criterion 1 and 2: Complex-tier plan-review invokes three workers,
+        each independently addressable, and both Critics approving in round
+        one is consensus."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's proposed plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan, "Critic A: solid.")],
+                    "Test Critic B": [_approve(plan, "Critic B: solid.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            plan_path = root / "implementation_plan.md"
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(plan_path.read_text(), plan)
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(result.final_plan, plan)
+        self.assertEqual(len(invoker.calls), 3)
+        called_models = {model for model, _effort, _prompt in invoker.calls}
+        self.assertEqual(
+            called_models, {"Test Planner", "Test Critic A", "Test Critic B"}
+        )
+
+    def test_complex_code_review_also_runs_the_panel(self) -> None:
+        """The panel topology is not plan-review-only: code-review at Complex
+        tier is named in the same acceptance criterion."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Diff defense."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan)],
+                    "Test Critic B": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Review the diff",
+                invoker,
+                root_dir=root,
+                occasion="code-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(len(invoker.calls), 3)
+
+    def test_split_verdict_is_not_consensus_and_triggers_a_second_round_with_both_critics_reinvoked(
+        self,
+    ) -> None:
+        """Criterion 3: one Critic approving and the other objecting is not
+        consensus; both Critics must be re-invoked in the following round,
+        not just the one that objected."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "Planner's first plan."
+            second_plan = "Planner's revised plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [first_plan, second_plan],
+                    "Test Critic A": [
+                        _approve(first_plan, "A: fine as-is."),
+                        _approve(second_plan, "A: still fine."),
+                    ],
+                    "Test Critic B": [
+                        _revise("B: needs a rollback plan."),
+                        _approve(second_plan, "B: rollback addressed."),
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.rounds_run, 2)
+        self.assertEqual(len(invoker.calls), 6)
+        second_round_models = [model for model, _e, _p in invoker.calls[3:6]]
+        self.assertEqual(
+            second_round_models, ["Test Planner", "Test Critic A", "Test Critic B"]
+        )
+        second_planner_prompt = invoker.calls[3][2]
+        self.assertIn("B: needs a rollback plan.", second_planner_prompt)
+
+    def test_both_critics_reject_every_round_produces_stalemate_at_the_cap(
+        self,
+    ) -> None:
+        """The other 'other combination': both Critics objecting every round
+        must exhaust exactly `MAX_DEBATE_ROUNDS` rounds and end in a
+        stalemate, never a fabricated consensus."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [f"Planner's plan #{i}." for i in range(1, 4)],
+                    "Test Critic A": [
+                        _revise(f"A: not yet #{i}.") for i in range(1, 4)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B: not yet #{i}.") for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.rounds_run, advisory_consultation.MAX_DEBATE_ROUNDS)
+        self.assertEqual(result.rounds_run, 3)
+        self.assertEqual(len(invoker.calls), 9)
+        self.assertIsNotNone(result.stalemate)
+
+    def test_panel_round_cap_is_exactly_three_never_four(self) -> None:
+        """Criterion 5, strict: `MAX_DEBATE_ROUNDS` must not change for panel
+        mode. Exactly 3 rounds' worth of responses (9 calls) are scripted
+        per role; if the loop ever over-ran to a fourth round,
+        `_RoleKeyedInvoker` would raise `AssertionError` on the exhausted
+        queue rather than silently returning a stale response, so a 4-round
+        run could never reach this test's assertions at all.
+        """
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [f"Plan #{i}." for i in range(1, 4)],
+                    "Test Critic A": [f"A objects #{i}.\nVERDICT: REVISE" for i in range(1, 4)],
+                    "Test Critic B": [f"B objects #{i}.\nVERDICT: REVISE" for i in range(1, 4)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="code-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.rounds_run, 3)
+        self.assertEqual(len(invoker.calls), 9)
+        self.assertEqual(advisory_consultation.MAX_DEBATE_ROUNDS, 3)
+
+    def test_non_complex_plan_review_stays_pair_mode_with_exactly_two_workers(
+        self,
+    ) -> None:
+        """Criterion 4 (regression): plan-review/code-review at any
+        complexity below Complex must keep invoking exactly two workers,
+        completely unchanged from before this ticket."""
+        for complexity in ("trivial", "simple", "medium"):
+            with self.subTest(complexity=complexity):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    plan = "Planner's plan."
+                    invoker = _RecordingInvoker([plan, _approve(plan)])
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        occasion="plan-review",
+                        complexity=complexity,
+                    )
+                self.assertEqual(len(invoker.calls), 2)
+                self.assertTrue(result.consensus_reached)
+
+    def test_complex_ambiguity_and_post_mortem_stay_pair_mode_with_exactly_two_workers(
+        self,
+    ) -> None:
+        """Criterion 4 (regression), the other half: Complex-tier occasions
+        outside plan-review/code-review keep the pair topology completely
+        unchanged — a panel is not simply 'whatever runs at Complex
+        complexity.'"""
+        for occasion in ("ambiguity", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    plan = "Planner's plan."
+                    invoker = _RecordingInvoker([plan, _approve(plan)])
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                        complexity="complex",
+                    )
+                self.assertEqual(len(invoker.calls), 2)
+                self.assertTrue(result.consensus_reached)
+
+    def test_default_complexity_never_selects_the_panel(self) -> None:
+        """A call site that never mentions `complexity` (every pre-ticket-05
+        call site, including every `AdvisoryConsultationTests` case above)
+        must keep behaving exactly as before this parameter existed: pair
+        mode, two workers."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+            )
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertTrue(result.consensus_reached)
+
+    def test_panel_round_stores_both_critics_responses(self) -> None:
+        """`AdvisoryDebateRound.critic_b_response` (ticket 05) carries Critic
+        B's response; `critic_response` still carries Critic A's, unrenamed."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            a_response = _approve(plan, "Critic A note.")
+            b_response = _approve(plan, "Critic B note.")
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [a_response],
+                    "Test Critic B": [b_response],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(len(result.rounds), 1)
+        self.assertEqual(result.rounds[0].critic_response, a_response)
+        self.assertEqual(result.rounds[0].critic_b_response, b_response)
+
+    def test_pair_mode_round_leaves_critic_b_response_none(self) -> None:
+        """The additive-field guarantee: a pair-mode round's new field is
+        `None`, never populated by anything pair mode does."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(len(result.rounds), 1)
+        self.assertIsNone(result.rounds[0].critic_b_response)
+
+    def test_unparseable_verdict_from_either_critic_halts_the_panel_immediately(
+        self,
+    ) -> None:
+        """A malformed response from either Critic must halt the panel the
+        same way a single malformed response halts pair mode — never folded
+        into 'the panel asked for a revision' as if it were a reasoned
+        objection from whichever Critic actually engaged."""
+        plan = "Planner's plan."
+        scenarios: dict[str, dict[str, list[str | Exception]]] = {
+            "critic_a_unparseable": {
+                "Test Planner": [plan],
+                "Test Critic A": ["no verdict line here"],
+                "Test Critic B": [_approve(plan)],
+            },
+            "critic_b_unparseable": {
+                "Test Planner": [plan],
+                "Test Critic A": [_approve(plan)],
+                "Test Critic B": ["no verdict line here"],
+            },
+            "both_unparseable": {
+                "Test Planner": [plan],
+                "Test Critic A": ["garbled"],
+                "Test Critic B": ["also garbled"],
+            },
+        }
+        for name, responses in scenarios.items():
+            with self.subTest(scenario=name):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RoleKeyedInvoker(responses)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        occasion="plan-review",
+                        complexity="complex",
+                        planner_model="Test Planner",
+                        critic_a_model="Test Critic A",
+                        critic_b_model="Test Critic B",
+                    )
+                    self.assertFalse((root / "implementation_plan.md").exists())
+                self.assertEqual(result.outcome, "unparseable_verdict")
+                self.assertEqual(len(invoker.calls), 3)
+
+    def test_panel_worker_mode_token_present_in_every_role_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan)],
+                    "Test Critic B": [_approve(plan)],
+                }
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(len(invoker.calls), 3)
+        for _model, _effort, prompt in invoker.calls:
+            self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
+
+    def test_transcript_renders_both_critics_for_a_panel_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan, "Critic A verbatim note.")],
+                    "Test Critic B": [_approve(plan, "Critic B verbatim note.")],
+                }
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn("Critic A verbatim note.", transcript)
+        self.assertIn("Critic B verbatim note.", transcript)
+        self.assertIn("### Critic A", transcript)
+        self.assertIn("### Critic B", transcript)
+
+    def test_pair_mode_transcript_header_is_byte_identical_to_before_panel_mode(
+        self,
+    ) -> None:
+        """Pins `_render_consultation_transcript`'s pair-mode output: adding
+        the panel-mode branch must not change a single byte of what a
+        pair-mode transcript renders."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn("### Critic (Test Critic)", transcript)
+        self.assertNotIn("Critic A", transcript)
+        self.assertNotIn("Critic B", transcript)
+
+
+class AdvisoryPanelStalemateReportTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 06: a panel stalemate report must
+    carry three distinct final positions — the Planner's, Critic A's, and
+    Critic B's — rather than the single folded/combined string
+    `_combine_panel_critic_feedback` produced through ticket 05. Every test
+    here drives the loop through the same public
+    `run_advisory_consultation_debate` seam `AdvisoryPanelTopologyTests`
+    uses, with scripted Critic A/Critic B responses that are textually
+    different so a folded string and three separated fields are
+    distinguishable by inspection.
+    """
+
+    def test_split_verdict_at_cap_stalemate_carries_planner_and_both_critics_distinct_positions(
+        self,
+    ) -> None:
+        """Criterion 1: a split verdict (one Critic approves, one objects)
+        every round through the cap produces a stalemate report carrying the
+        Planner's final plan and both Critics' final positions, verbatim and
+        un-concatenated."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plans = [f"Planner's plan #{i}." for i in range(1, 4)]
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": plans,
+                    "Test Critic A": [
+                        _approve(plan, f"A approves plan #{i}.")
+                        for i, plan in enumerate(plans, start=1)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B still objects, round #{i}.") for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertIsNotNone(result.stalemate)
+        assert result.stalemate is not None
+        self.assertEqual(result.stalemate.planner_position, plans[-1])
+        self.assertIn("A approves plan #3.", result.stalemate.critic_position)
+        self.assertIsNotNone(result.stalemate.critic_b_position)
+        assert result.stalemate.critic_b_position is not None
+        self.assertIn(
+            "B still objects, round #3.", result.stalemate.critic_b_position
+        )
+        # Not folded: Critic A's text never leaks into Critic B's field or
+        # vice versa, unlike the ticket-05 `_combine_panel_critic_feedback`
+        # string this report replaces.
+        self.assertNotIn("B still objects", result.stalemate.critic_position)
+        self.assertNotIn("A approves", result.stalemate.critic_b_position)
+
+    def test_both_critics_reject_at_cap_stalemate_carries_planner_and_both_critics_distinct_positions(
+        self,
+    ) -> None:
+        """Criterion 2: both Critics rejecting every round through the cap
+        also produces a stalemate report with all three positions present
+        and distinguishable."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plans = [f"Planner's plan #{i}." for i in range(1, 4)]
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": plans,
+                    "Test Critic A": [
+                        _revise(f"A objects, round #{i}.") for i in range(1, 4)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B objects differently, round #{i}.")
+                        for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="code-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertIsNotNone(result.stalemate)
+        assert result.stalemate is not None
+        self.assertEqual(result.stalemate.planner_position, plans[-1])
+        self.assertIn("A objects, round #3.", result.stalemate.critic_position)
+        assert result.stalemate.critic_b_position is not None
+        self.assertIn(
+            "B objects differently, round #3.", result.stalemate.critic_b_position
+        )
+        self.assertNotIn("B objects differently", result.stalemate.critic_position)
+        self.assertNotIn("A objects,", result.stalemate.critic_b_position)
+
+    def test_panel_stalemate_resolution_options_remain_three_and_never_pick_a_winner(
+        self,
+    ) -> None:
+        """Criterion 3: the options stay exactly approve-Planner /
+        approve-Critic(s) / escalate-to-human in shape, and the report
+        carries no field capable of naming a winner."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plans = [f"Planner's plan #{i}." for i in range(1, 4)]
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": plans,
+                    "Test Critic A": [
+                        _revise(f"A objects, round #{i}.") for i in range(1, 4)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B objects, round #{i}.") for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        assert result.stalemate is not None
+        self.assertEqual(len(result.stalemate.options), 3)
+        self.assertEqual(
+            [option.id for option in result.stalemate.options], [1, 2, 3]
+        )
+        field_names = {field.name for field in dataclasses.fields(result.stalemate)}
+        self.assertEqual(
+            field_names,
+            {"planner_position", "critic_position", "options", "critic_b_position"},
+        )
+        option_field_names = {
+            field.name for field in dataclasses.fields(result.stalemate.options[0])
+        }
+        self.assertEqual(option_field_names, {"id", "label", "description"})
+
+    def test_unparseable_critic_in_panel_never_produces_a_stalemate_report(
+        self,
+    ) -> None:
+        """An unparseable verdict from either Critic halts the panel
+        immediately (ticket 05's behavior) rather than going through
+        `_build_stalemate_report` at all — confirmed unaffected by this
+        ticket's changes."""
+        plan = "Planner's plan."
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": ["no verdict line here"],
+                    "Test Critic B": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.outcome, "unparseable_verdict")
+        self.assertIsNone(result.stalemate)
+
+    def test_pair_mode_stalemate_report_leaves_critic_b_position_none(self) -> None:
+        """The additive-field guarantee, mirrored from
+        `AdvisoryDebateRound.critic_b_response`: a pair-mode stalemate's new
+        field is `None`, never populated by anything pair mode does. Pair
+        mode's own `test_stalemate_carries_both_final_positions_and_three_resolution_options`
+        (in `AdvisoryConsultationTests`) already pins the two-voice shape
+        byte-for-byte and is left completely unmodified by this ticket; this
+        test adds only the one new-field assertion that test predates."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's final plan.",
+                    _revise("Still not convinced."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, max_rounds=2
+            )
+
+        assert result.stalemate is not None
+        self.assertIsNone(result.stalemate.critic_b_position)
+
+
+class ModelFamilyClassifierTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 07: `classify_model_family` is
+    the pure function every later piece of roster-resolution
+    infrastructure is built on — "Family, not model, is the independence
+    unit" (spec's Implementation Decisions paragraph of the same name)."""
+
+    def test_claude_models_share_one_family(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Claude Fable 5"),
+        )
+
+    def test_codex_and_gpt_share_one_family(self) -> None:
+        """The ticket's own brief: "gpt"/"codex" substrings both map to the
+        Codex/GPT family — routing-config.json's own `critic` role block
+        already lists "Codex 5.6 Sol" and "GPT-OSS 120B (Medium)" as
+        interchangeable alternatives within one role."""
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("GPT-OSS 120B (Medium)"),
+        )
+
+    def test_gemini_models_share_one_family(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+            advisory_consultation.classify_model_family("Gemini 3.1 Pro (High)"),
+        )
+
+    def test_the_four_cloud_families_are_pairwise_distinct(self) -> None:
+        families = {
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+        }
+        self.assertEqual(len(families), 3)
+
+    def test_each_local_model_lineage_is_its_own_family(self) -> None:
+        """The spec's own phrase: "each local model lineage counts as its
+        own family" — two different local checkpoints must classify to two
+        different families, and neither may collide with a cloud family."""
+        gemma = advisory_consultation.classify_model_family("Gemma 4 E4B")
+        qwen = advisory_consultation.classify_model_family("Qwen3-Coder-Next")
+        self.assertNotEqual(gemma, qwen)
+        cloud_families = {
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+        }
+        self.assertNotIn(gemma, cloud_families)
+        self.assertNotIn(qwen, cloud_families)
+
+    def test_same_local_lineage_different_checkpoint_is_one_family(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Gemma 4 E4B"),
+            advisory_consultation.classify_model_family("Gemma 2 9B"),
+        )
+
+    def test_classification_is_case_insensitive_for_cloud_families(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("claude opus 5"),
+            advisory_consultation.classify_model_family("CLAUDE OPUS 5"),
+        )
+
+    def test_digit_leading_local_model_names_do_not_collide_on_a_middle_fragment(
+        self,
+    ) -> None:
+        """Regression for a code-review finding: `_LOCAL_LINEAGE_PATTERN`
+        must anchor to the LEADING run of alphabetic characters (`.match`),
+        not the first one found anywhere in the string (`.search`). Before
+        this was anchored, two unrelated digit-led local model names could
+        silently collide into the same family via a coincidental middle
+        fragment — e.g. both matching "b" from "70B-Instruct" and
+        "4B-Mixtral" — which would have defeated the exact independence
+        guarantee `resolve_roster` exists to enforce. Neither fixture here
+        starts with a letter, so neither hits the leading-alpha-run branch
+        at all; both fall through to the full-lowered-name fallback
+        instead, which keeps them distinct without merging on a fragment.
+        """
+        seventy_b = advisory_consultation.classify_model_family("70B-Instruct")
+        four_b = advisory_consultation.classify_model_family("4B-Mixtral")
+        self.assertNotEqual(seventy_b, four_b)
+        cloud_families = {
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+        }
+        self.assertNotIn(seventy_b, cloud_families)
+        self.assertNotIn(four_b, cloud_families)
+
+    def test_digit_leading_local_model_name_falls_back_to_full_lowered_name(
+        self,
+    ) -> None:
+        """Locks in the exact fallback value for a name with no leading
+        alphabetic run at all: the full lowercased, stripped name — not an
+        exception, not `"unknown"` (that is reserved for a genuinely empty
+        or all-punctuation name), and not a fragment `.search` would have
+        found anywhere else in the string."""
+        self.assertEqual(
+            advisory_consultation.classify_model_family("70B-Instruct"),
+            "70b-instruct",
+        )
+
+
+class RosterResolutionTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 07: `resolve_roster` assigns a
+    model to each role in a pair or panel topology, preferring a distinct
+    family per role and degrading to family reuse only when the reachable
+    families genuinely run out. Every test drives the public
+    `resolve_roster` seam with a scripted `is_family_reachable` fake
+    (`_reachable`, defined above `VerdictContractParserTests`) — no real
+    reachability probe, ever.
+    """
+
+    def test_pair_roster_spans_two_distinct_families_when_reachable(self) -> None:
+        """Criterion 1 (pair half): 2+ reachable families never repeat
+        across roles."""
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(len(roster.assignments), 2)
+        self.assertEqual(len(families), 2)
+        self.assertFalse(roster.degraded_independence)
+
+    def test_panel_roster_spans_three_distinct_families_when_reachable(self) -> None:
+        """Criterion 1 (panel half): 2+ (here 3) reachable families never
+        repeat across roles."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(len(roster.assignments), 3)
+        self.assertEqual(len(families), 3)
+        self.assertFalse(roster.degraded_independence)
+
+    def test_unreachable_preferred_family_substitutes_next_in_chain_not_degraded(
+        self,
+    ) -> None:
+        """Criterion 2: `critic_a`'s preferred family (codex-gpt, from
+        "Codex 5.6 Sol") is unreachable; the resolver must move to the next
+        family in `critic_a`'s own configured fallback chain rather than
+        immediately reusing the Planner's family."""
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude", "gemini")
+        )
+        critic_a = next(a for a in roster.assignments if a.role == "critic_a")
+        self.assertNotEqual(critic_a.family, "codex-gpt")
+        self.assertEqual(critic_a.family, "gemini")
+        self.assertFalse(roster.degraded_independence)
+
+    def test_single_reachable_family_forces_reuse_and_flags_degraded_for_pair(
+        self,
+    ) -> None:
+        """Criterion 3 (pair half): the fallback chain exhausted to one
+        remaining family forces same-family and sets the marker."""
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(families, {"claude"})
+        self.assertTrue(roster.degraded_independence)
+
+    def test_single_reachable_family_forces_reuse_and_flags_degraded_for_panel(
+        self,
+    ) -> None:
+        """Criterion 3 (panel half): same as above, for a three-role panel."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(families, {"claude"})
+        self.assertEqual(len(roster.assignments), 3)
+        self.assertTrue(roster.degraded_independence)
+
+    def test_panel_with_two_reachable_families_reuses_one_and_flags_degraded(
+        self,
+    ) -> None:
+        """The ticket's own named ambiguity: a panel needs three distinct
+        families for full independence, but only two are reachable. This
+        module reads "a single family remains" (spec 0003's Implementation
+        Decisions) as "resolution was forced to reuse a family already
+        claimed within this roster" — see `resolve_roster`'s docstring for
+        the full reasoning — which is true here even though two distinct
+        families are reachable overall, so this must still degrade rather
+        than silently running a two-out-of-three-independent panel."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude", "codex-gpt")
+        )
+        families = [a.family for a in roster.assignments]
+        self.assertEqual(len(families), 3)
+        self.assertEqual(set(families), {"claude", "codex-gpt"})
+        self.assertTrue(roster.degraded_independence)
+
+    def test_normal_run_never_flags_degraded(self) -> None:
+        """Criterion 5: a normal (non-degraded) run never carries the marker."""
+        for topology in ("pair", "panel"):
+            with self.subTest(topology=topology):
+                roster = advisory_consultation.resolve_roster(
+                    topology,
+                    is_family_reachable=_reachable("claude", "codex-gpt", "gemini"),
+                )
+                self.assertFalse(roster.degraded_independence)
+
+    def test_model_for_raises_key_error_outside_the_topology(self) -> None:
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude", "codex-gpt")
+        )
+        with self.assertRaises(KeyError):
+            roster.model_for("critic_b")
+
+    def test_no_reachable_family_at_all_raises_roster_resolution_error(self) -> None:
+        with self.assertRaises(advisory_consultation.RosterResolutionError):
+            advisory_consultation.resolve_roster("pair", is_family_reachable=_reachable())
+
+    def test_unknown_topology_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            advisory_consultation.resolve_roster(
+                "trio",  # type: ignore[arg-type]
+                is_family_reachable=_reachable("claude"),
+            )
+
+    def test_default_chains_match_pre_ticket_07_parameter_defaults(self) -> None:
+        """When everything is reachable, resolution reproduces exactly the
+        hardcoded defaults `run_advisory_consultation_debate` already
+        shipped before this ticket existed — this ticket adds a resolution
+        *path*, it does not change what "everything is up" already looked
+        like."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
+        )
+        self.assertEqual(roster.model_for("planner"), "Claude Opus 5 (Thinking)")
+        self.assertEqual(roster.model_for("critic_a"), "Codex 5.6 Sol")
+        self.assertEqual(roster.model_for("critic_b"), "Gemini 3.6 Flash")
+
+    def test_fallback_chains_are_read_from_config_not_hardcoded(self) -> None:
+        """Drift guard mirroring `test_code_review_threshold_is_read_from_injected_config_not_hardcoded`'s
+        own style: pointing `config_path` at a file with a different chain
+        must change the resolver's answer, proving the chain is genuinely
+        read from config rather than merely referenced by key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "roster_topology": {
+                            "role_fallback_chains": {
+                                "planner": ["Qwen3-Coder-Next"],
+                                "critic_a": ["Gemma 4 E4B"],
+                                "critic_b": ["Claude Opus 5 (Thinking)"],
+                            }
+                        }
+                    }
+                )
+            )
+            roster = advisory_consultation.resolve_roster(
+                "pair",
+                is_family_reachable=_reachable("qwen", "gemma"),
+                config_path=config_path,
+            )
+        planner = next(a for a in roster.assignments if a.role == "planner")
+        critic_a = next(a for a in roster.assignments if a.role == "critic_a")
+        self.assertEqual(planner.model, "Qwen3-Coder-Next")
+        self.assertEqual(critic_a.model, "Gemma 4 E4B")
+
+    def test_missing_roster_topology_section_falls_back_to_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            config_path.write_text(json.dumps({}))
+            roster = advisory_consultation.resolve_roster(
+                "pair",
+                is_family_reachable=_reachable("claude", "codex-gpt"),
+                config_path=config_path,
+            )
+        self.assertEqual(roster.model_for("planner"), "Claude Opus 5 (Thinking)")
+        self.assertEqual(roster.model_for("critic_a"), "Codex 5.6 Sol")
+
+
+class AdvisoryRosterIntegrationTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 07: `reachability_check` wired
+    into `run_advisory_consultation_debate` as an opt-in roster-resolution
+    seam. Every pre-existing test in this file never mentions this
+    parameter, so it always defaults to `None` and continues to invoke
+    exactly the explicit/default models it always did — the entire
+    pre-existing 204-test suite, `AdvisoryConsultationTests` and
+    `AdvisoryPanelTopologyTests` above included, is this ticket's
+    regression guard that the opt-in changes nothing when a caller does not
+    ask for it.
+    """
+
+    def test_reachability_check_none_leaves_default_models_untouched(self) -> None:
+        """The opt-in contract's other half, explicit: omitting
+        `reachability_check` (its default, `None`) must invoke exactly the
+        models the caller passed, never a roster-resolved substitute, and
+        `degraded_independence` must stay `False`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+            )
+
+        self.assertEqual(result.planner_model, "Test Planner")
+        self.assertEqual(result.critic_model, "Test Critic")
+        self.assertFalse(result.degraded_independence)
+        called_models = {model for model, _e, _p in invoker.calls}
+        self.assertEqual(called_models, {"Test Planner", "Test Critic"})
+
+    def test_pair_roster_resolved_end_to_end_with_three_reachable_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": [plan],
+                    "Codex 5.6 Sol": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.planner_model, "Claude Opus 5 (Thinking)")
+        self.assertEqual(result.critic_model, "Codex 5.6 Sol")
+        self.assertFalse(result.degraded_independence)
+
+    def test_panel_roster_resolved_end_to_end_spans_three_distinct_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": [plan],
+                    "Codex 5.6 Sol": [_approve(plan, "Critic A: solid.")],
+                    "Gemini 3.6 Flash": [_approve(plan, "Critic B: solid.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(len(invoker.calls), 3)
+        called_families = {
+            advisory_consultation.classify_model_family(model)
+            for model, _e, _p in invoker.calls
+        }
+        self.assertEqual(len(called_families), 3)
+        self.assertFalse(result.degraded_independence)
+
+    def test_degraded_independence_surfaces_in_telemetry_record(self) -> None:
+        """Criterion 4 (telemetry half): the marker reaches the structured record."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude"),
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertTrue(result.degraded_independence)
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["degraded_independence"])
+
+    def test_degraded_independence_surfaces_in_transcript_text(self) -> None:
+        """Criterion 4 (transcript half): a test asserting on transcript
+        content finds the marker, not just the structured record."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude"),
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+
+    def test_normal_reachable_run_carries_no_degraded_marker_in_either_artifact(
+        self,
+    ) -> None:
+        """Criterion 5, end to end: a normal run through the public entry
+        point never carries the marker in either artifact."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": [plan],
+                    "Codex 5.6 Sol": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertFalse(result.degraded_independence)
+        self.assertNotIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertFalse(records[0]["degraded_independence"])
+
+    def test_roster_resolution_error_fails_closed_as_worker_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                _RecordingInvoker([]),
+                root_dir=root,
+                reachability_check=_reachable(),  # nothing reachable at all
+            )
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertFalse(result.consensus_reached)
+        self.assertFalse((root / "implementation_plan.md").exists())
+
+
+class AdvisoryOccasionParameterizationTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 01: the consultation loop becomes
+    occasion-aware. `occasion` selects the mission prompt and is carried on
+    the result; the pre-existing `ambiguity` occasion (spec 0001) must keep
+    behaving exactly as it did before this seam existed — this class is the
+    proof, alongside every pre-existing `AdvisoryConsultationTests` case
+    passing unmodified with `occasion` never mentioned.
+    """
+
+    def test_default_occasion_is_ambiguity_and_is_recorded_on_the_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertEqual(result.occasion, "ambiguity")
+
+    def test_each_occasion_is_invocable_and_recorded_on_the_result(self) -> None:
+        """Criterion 4: plan-review and code-review (and, since the `Occasion`
+        type carries all four values, post-mortem and ambiguity too) must be
+        invocable through the public seam without raising, each producing a
+        result that names the occasion it ran under."""
+        for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker(
+                        ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
+                    )
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Review the change",
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                    )
+                self.assertEqual(result.occasion, occasion)
+                self.assertEqual(result.outcome, "consensus")
+                self.assertEqual(len(invoker.calls), 2)
+
+    def test_unknown_occasion_raises_without_invoking_any_worker(self) -> None:
+        """Mirrors the existing `max_rounds` contract: an invalid `occasion`
+        is a call-site programming error and must surface as a raise, not
+        silently fall back to `ambiguity` or fail deep inside prompt-building
+        with a bare `KeyError`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            with self.assertRaises(ValueError):
+                advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite",
+                    invoker,
+                    root_dir=root,
+                    occasion="not-a-real-occasion",  # type: ignore[arg-type]
+                )
+            self.assertEqual(invoker.calls, [])
+
+    def test_mission_prompt_selection_is_a_genuine_function_of_occasion(self) -> None:
+        """Prompt *wording* stays unpinned per spec 0003's testing policy, but
+        the seam this ticket builds must be provably more than
+        occasion-in-same-prompt-out. The four occasions' round-1 Planner
+        prompts, and their matching Critic prompts, are compared pairwise for
+        inequality only — never for specific content."""
+        occasions = ("ambiguity", "plan-review", "code-review", "post-mortem")
+        planner_prompts: dict[str, str] = {}
+        critic_prompts: dict[str, str] = {}
+        for occasion in occasions:
+            with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                os.environ, {}, clear=True
+            ):
+                root = Path(tmp)
+                invoker = _RecordingInvoker(
+                    ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
+                )
+                advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite", invoker, root_dir=root, occasion=occasion
+                )
+            planner_prompts[occasion] = invoker.calls[0][2]
+            critic_prompts[occasion] = invoker.calls[1][2]
+
+        self.assertEqual(len(set(planner_prompts.values())), len(occasions))
+        self.assertEqual(len(set(critic_prompts.values())), len(occasions))
+
+    def test_occasion_field_defaults_to_ambiguity_on_direct_construction(self) -> None:
+        """Mirrors `test_consensus_reached_is_derived_from_outcome_and_cannot_be_mutated`
+        above: existing direct `AdvisoryDebateResult(...)` construction sites
+        that never mention `occasion` — in this test file and in production
+        code — must keep working and must mean "ambiguity", not break on a
+        newly-required positional/keyword argument."""
+        result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=1, final_plan="A plan.", outcome="consensus"
+        )
+        self.assertEqual(result.occasion, "ambiguity")
+
+
+class AdvisoryAmbiguityTriggerUnchangedTests(unittest.TestCase):
+    """Spec 0003 ticket 03 requires `needs_advisory_consultation` — the sole
+    trigger predicate spec 0001 shipped — to be left completely untouched by
+    this ticket's new occasion predicates. No test in the pre-existing suite
+    exercised it directly (confirmed by searching this file before ticket 03
+    started), so there was no pre-existing coverage to preserve unchanged;
+    this class is new characterization coverage that pins today's behavior
+    so a future change to this function is forced to notice it broke the
+    ambiguity occasion, exactly as if the coverage had always been here.
+    """
+
+    def test_ambiguous_complexity_always_needs_consultation(self) -> None:
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("ambiguous"))
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("Ambiguous", 1.0))
+
+    def test_low_confidence_needs_consultation_regardless_of_complexity(self) -> None:
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("trivial", 0.5))
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("complex", 0.69))
+
+    def test_high_confidence_non_ambiguous_complexity_does_not_need_consultation(self) -> None:
+        self.assertFalse(advisory_consultation.needs_advisory_consultation("medium", 0.9))
+        self.assertFalse(advisory_consultation.needs_advisory_consultation("complex"))
+
+    def test_confidence_boundary_is_exclusive_at_0_7(self) -> None:
+        self.assertFalse(advisory_consultation.needs_advisory_consultation("simple", 0.7))
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("simple", 0.6999))
+
+
+class AdvisoryTriggerWiringTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 03: the three new occasion trigger
+    predicates — `needs_plan_review_consultation`, `needs_code_review_consultation`,
+    and `needs_post_mortem_consultation`. Each is a standalone function, not a
+    generalization of `needs_advisory_consultation` (see
+    `AdvisoryAmbiguityTriggerUnchangedTests` above for proof that one is
+    untouched). These are pure predicates over signals a caller already has
+    in hand — no worker is invoked, no artifact is written — so every test
+    here calls the function directly with no debate loop, no injected root
+    directory, and no fake invoker.
+    """
+
+    # -- plan-review ---------------------------------------------------
+
+    def test_plan_review_fires_at_medium_and_complex(self) -> None:
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation("medium"))
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation("complex"))
+        # Case/whitespace tolerance mirrors `needs_advisory_consultation`'s
+        # own `.lower().strip()` normalization, not a coincidence — both
+        # predicates read the same caller-supplied complexity string.
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation(" Medium "))
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation("COMPLEX"))
+
+    def test_plan_review_does_not_fire_at_simple_or_trivial(self) -> None:
+        self.assertFalse(advisory_consultation.needs_plan_review_consultation("simple"))
+        self.assertFalse(advisory_consultation.needs_plan_review_consultation("trivial"))
+
+    # -- code-review -----------------------------------------------------
+
+    def test_code_review_fires_at_medium_and_complex_with_zero_risk_signals(self) -> None:
+        self.assertTrue(advisory_consultation.needs_code_review_consultation("medium"))
+        self.assertTrue(advisory_consultation.needs_code_review_consultation("complex"))
+
+    def test_code_review_does_not_fire_at_trivial_or_simple_with_no_risk_signal(self) -> None:
+        self.assertFalse(advisory_consultation.needs_code_review_consultation("trivial"))
+        self.assertFalse(advisory_consultation.needs_code_review_consultation("simple"))
+
+    def test_code_review_fires_at_trivial_when_tests_are_failing(self) -> None:
+        self.assertTrue(
+            advisory_consultation.needs_code_review_consultation(
+                "trivial", tests_failing=True
+            )
+        )
+
+    def test_code_review_fires_at_simple_when_diff_exceeds_configured_threshold(
+        self,
+    ) -> None:
+        # Uses the real routing-config.json threshold (300 lines) as the
+        # boundary: one line under does not fire, one line over does. This
+        # is deliberately over the *real* config, not an injected one — see
+        # the config-injection test below for proof the value is genuinely
+        # read from config rather than a Python-side literal that happens to
+        # match it today.
+        self.assertFalse(
+            advisory_consultation.needs_code_review_consultation(
+                "simple", diff_line_count=300
+            )
+        )
+        self.assertTrue(
+            advisory_consultation.needs_code_review_consultation(
+                "simple", diff_line_count=301
+            )
+        )
+
+    def test_code_review_fires_at_trivial_when_a_changed_path_is_security_sensitive(
+        self,
+    ) -> None:
+        self.assertTrue(
+            advisory_consultation.needs_code_review_consultation(
+                "trivial", changed_paths=["src/auth/login.py"]
+            )
+        )
+
+    def test_code_review_does_not_fire_at_trivial_for_an_ordinary_changed_path(
+        self,
+    ) -> None:
+        self.assertFalse(
+            advisory_consultation.needs_code_review_consultation(
+                "trivial", changed_paths=["src/widgets/button.py"]
+            )
+        )
+
+    def test_code_review_threshold_is_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        """Proves the diff-size threshold is genuinely read from config —
+        not merely referenced by key — by injecting two different config
+        files and observing the trigger's boolean answer flip for the exact
+        same `diff_line_count` input."""
+        with tempfile.TemporaryDirectory() as tmp:
+            low_threshold_config = Path(tmp) / "low.json"
+            low_threshold_config.write_text(
+                json.dumps({"critical_dialogue": {"code_review_diff_line_threshold": 5}})
+            )
+            high_threshold_config = Path(tmp) / "high.json"
+            high_threshold_config.write_text(
+                json.dumps(
+                    {"critical_dialogue": {"code_review_diff_line_threshold": 5000}}
+                )
+            )
+
+            fires_low = advisory_consultation.needs_code_review_consultation(
+                "trivial", diff_line_count=10, config_path=low_threshold_config
+            )
+            fires_high = advisory_consultation.needs_code_review_consultation(
+                "trivial", diff_line_count=10, config_path=high_threshold_config
+            )
+
+        self.assertTrue(fires_low)
+        self.assertFalse(fires_high)
+
+    def test_code_review_security_paths_are_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        """Same proof as the threshold test above, for
+        `security_sensitive_path_patterns`: a pattern present only in the
+        injected config fires, and a real-config pattern absent from the
+        injected config does not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            custom_config = Path(tmp) / "custom.json"
+            custom_config.write_text(
+                json.dumps(
+                    {
+                        "critical_dialogue": {
+                            "security_sensitive_path_patterns": ["quux_only_here"]
+                        }
+                    }
+                )
+            )
+
+            fires_on_custom_pattern = advisory_consultation.needs_code_review_consultation(
+                "trivial",
+                changed_paths=["src/quux_only_here/module.py"],
+                config_path=custom_config,
+            )
+            does_not_fire_on_real_config_pattern = (
+                advisory_consultation.needs_code_review_consultation(
+                    "trivial",
+                    changed_paths=["src/auth/login.py"],
+                    config_path=custom_config,
+                )
+            )
+
+        self.assertTrue(fires_on_custom_pattern)
+        self.assertFalse(does_not_fire_on_real_config_pattern)
+
+    # -- post-mortem -------------------------------------------------------
+
+    def test_post_mortem_does_not_fire_with_no_signal(self) -> None:
+        self.assertFalse(advisory_consultation.needs_post_mortem_consultation())
+
+    def test_post_mortem_fires_on_failure(self) -> None:
+        self.assertTrue(advisory_consultation.needs_post_mortem_consultation(failed=True))
+
+    def test_post_mortem_fires_on_two_failure_escalation(self) -> None:
+        # Tracks `advisory_consultation.ESCALATION_FAILURE_THRESHOLD`, the
+        # same named constant `agent_council.escalate_routing_effort` uses
+        # for "2+ failed worker attempts" — see
+        # `test_escalation_failure_threshold_matches_agent_council_constant`
+        # below for the drift guard between the two modules' copies of it.
+        threshold = advisory_consultation.ESCALATION_FAILURE_THRESHOLD
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                consecutive_failures=threshold - 1
+            )
+        )
+        self.assertTrue(
+            advisory_consultation.needs_post_mortem_consultation(
+                consecutive_failures=threshold
+            )
+        )
+        self.assertTrue(
+            advisory_consultation.needs_post_mortem_consultation(
+                consecutive_failures=threshold + 1
+            )
+        )
+
+    def test_escalation_failure_threshold_matches_agent_council_constant(self) -> None:
+        """Drift guard for the deliberate duplication: `advisory_consultation`
+        does not import `agent_council` (see the comment on
+        `ESCALATION_FAILURE_THRESHOLD`), so this test is what keeps the two
+        modules' copies of the protocol's 2-failure escalation threshold
+        from silently diverging — mirrors
+        `test_sensitivity_markers_are_a_superset_of_agent_council_patterns`'s
+        role for `SENSITIVITY_MARKERS`/`SENSITIVE_PATTERNS`."""
+        self.assertEqual(
+            advisory_consultation.ESCALATION_FAILURE_THRESHOLD,
+            agent_council.ESCALATION_FAILURE_THRESHOLD,
+        )
+
+    def test_post_mortem_fires_on_a_stalemate_from_any_non_post_mortem_occasion(
+        self,
+    ) -> None:
+        for occasion in ("ambiguity", "plan-review", "code-review"):
+            with self.subTest(occasion=occasion):
+                self.assertTrue(
+                    advisory_consultation.needs_post_mortem_consultation(
+                        occasion=occasion, stalemate_occurred=True
+                    )
+                )
+
+    def test_post_mortem_stalemate_does_not_recursively_trigger_another_post_mortem(
+        self,
+    ) -> None:
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                occasion="post-mortem", stalemate_occurred=True
+            )
+        )
+
+    def test_post_mortem_occasion_never_fires_on_any_signal_not_just_stalemate(
+        self,
+    ) -> None:
+        """The recursion guard is a blanket "a post-mortem's own outcome
+        must NOT recursively trigger another post-mortem" (spec 0003 ticket
+        03), not narrowly scoped to the stalemate example the ticket
+        happens to spell out — a post-mortem dialogue that itself failed, or
+        that is somehow read as its own second consecutive failure, must not
+        chain into a further post-mortem either."""
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                occasion="post-mortem", failed=True
+            )
+        )
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                occasion="post-mortem", consecutive_failures=5
+            )
+        )
+
+
 class AdvisorySensitivityGateTests(unittest.TestCase):
     """A sensitive task must never reach a cloud Planner or Critic.
 
@@ -1990,7 +3754,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite using api_key=sk-abc123 for the test fixture",
@@ -2009,7 +3773,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "[SENSITIVE] Plan the customer PII migration",
@@ -2104,7 +3868,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's plan mentions api_key rotation as a step.",
-                    "VERDICT: APPROVE\nLooks solid.",
+                    _approve("Planner's plan mentions api_key rotation as a step."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -2143,7 +3907,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2155,7 +3919,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         self.assertIn("Plan the auth rewrite", transcript)
         self.assertIn("Round 1", transcript)
         self.assertIn("Planner's proposed plan.", transcript)
-        self.assertIn("VERDICT: APPROVE\nLooks solid.", transcript)
+        self.assertIn(_approve("Planner's proposed plan."), transcript)
 
     def test_stalemate_writes_transcript_with_every_round_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -2165,11 +3929,11 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: REVISE\nNot convinced.",
+                    _revise("Not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -2220,7 +3984,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     RuntimeError("worker unreachable"),
                 ]
             )
@@ -2298,9 +4062,9 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's revised plan.",
-                    "VERDICT: APPROVE\nGood now.",
+                    _approve("Planner's revised plan.", "Good now."),
                 ]
             )
             advisory_consultation.run_advisory_consultation_debate(
@@ -2328,7 +4092,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2344,7 +4108,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             for _ in range(2):
                 invoker = _RecordingInvoker(
-                    ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                    ["Planner's plan.", _approve("Planner's plan.")]
                 )
                 advisory_consultation.run_advisory_consultation_debate(
                     "Plan the auth rewrite", invoker, root_dir=root
@@ -2378,13 +4142,13 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             first_invoker = _RecordingInvoker(
-                ["First run's plan.", "VERDICT: APPROVE\nFirst run approved."]
+                ["First run's plan.", _approve("First run's plan.", "First run approved.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the first task", first_invoker, root_dir=root
             )
             second_invoker = _RecordingInvoker(
-                ["Second run's plan.", "VERDICT: APPROVE\nSecond run approved."]
+                ["Second run's plan.", _approve("Second run's plan.", "Second run approved.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the second task", second_invoker, root_dir=root
@@ -2402,7 +4166,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".scratch").write_text("not a directory")
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2423,7 +4187,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".ralph").write_text("not a directory")
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2455,7 +4219,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             (root / "implementation_plan.md").mkdir()
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2482,7 +4246,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2532,7 +4296,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             agent_council, "check_local_model_endpoint", return_value=True
         ):
             root = Path(tmp)
-            invoker = _RecordingInvoker(["Plan.", "VERDICT: APPROVE\nGood."])
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.", "Good.")])
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
@@ -2547,6 +4311,263 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         by_task_id = {record["task_id"]: record for record in records}
         self.assertEqual(by_task_id["advisory-1"]["kind"], "advisory_consultation")
         self.assertNotIn("kind", by_task_id["council-1"])
+
+
+class _BlockingThenScriptedInvoker:
+    """A fake `invoke_worker`: the FIRST call sets `called_event` and then
+    blocks on `release_event` until the test releases it; every call
+    (including that first one, once unblocked) pops its response off
+    `responses` exactly like `_RecordingInvoker` does.
+
+    Built for `AdvisoryBlockingStanceTests`'s non-blocking-dispatch proof:
+    blocking only the first call is sufficient to prove a whole consultation
+    cannot have completed yet (round 1 needs a Planner call before it can
+    even reach the Critic), while still letting the rest of the scripted
+    exchange run normally to completion once released — no test needs to
+    script a block on every call just to prove one debate never finished
+    early.
+    """
+
+    def __init__(self, responses: list[str | Exception], *, release_event: threading.Event, called_event: threading.Event) -> None:
+        self.responses: list[str | Exception] = list(responses)
+        self.release_event = release_event
+        self.called_event = called_event
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, model: str, effort: str, prompt: str) -> str:
+        self.calls.append((model, effort, prompt))
+        if len(self.calls) == 1:
+            self.called_event.set()
+            self.release_event.wait(timeout=5)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class AdvisoryBlockingStanceTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 04: "Plan-review and code-review
+    dialogues gate progress. Post-mortems run in the background and never
+    block; their occurrence and outcome are still recorded" (Implementation
+    Decisions, "Blocking stance").
+
+    Plan-review and code-review need no production code change — calling
+    `run_advisory_consultation_debate` synchronously already blocks the
+    caller, because it is an ordinary function call. The first test below is
+    a characterization test for that fact, pinned via call ordering so a
+    future change cannot silently make either occasion non-blocking without
+    a test noticing. The rest of this class exercises the one piece of new
+    production code this ticket does add: `dispatch_post_mortem_consultation`,
+    the background-thread wrapper that gives the post-mortem occasion its
+    non-blocking stance.
+    """
+
+    def test_plan_review_and_code_review_block_the_caller_until_the_debate_resolves(
+        self,
+    ) -> None:
+        """Criterion 1 and criterion 4 (call ordering as the observable
+        proof): for both occasions that must gate progress, every worker
+        call the fake records happens strictly between the call to
+        `run_advisory_consultation_debate` and the line after it — the
+        caller's next line of code provably does not run until the dialogue
+        result is available."""
+        for occasion in ("plan-review", "code-review"):
+            with self.subTest(occasion=occasion):
+                order: list[str] = []
+                scripted_responses = iter(["Planner's plan.", _approve("Planner's plan.")])
+
+                def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
+                    order.append("invoker_called")
+                    return next(scripted_responses)
+
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    order.append("before_call")
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Review the change",
+                        fake_invoke_worker,
+                        root_dir=root,
+                        occasion=occasion,
+                    )
+                    order.append("after_call")
+
+                self.assertEqual(
+                    order,
+                    ["before_call", "invoker_called", "invoker_called", "after_call"],
+                    "the caller's own code must not run between the dispatch and the "
+                    "dialogue's resolution for a blocking occasion",
+                )
+                self.assertEqual(result.outcome, "consensus")
+
+    def test_dispatch_post_mortem_consultation_returns_before_the_debate_completes(
+        self,
+    ) -> None:
+        """Criterion 2 and criterion 4: dispatching a post-mortem must hand
+        control back to the caller while the underlying debate is still
+        provably incomplete — proven here by blocking the fake worker on a
+        `threading.Event` the test controls and observing, immediately after
+        `dispatch_post_mortem_consultation` returns, that (a) the fake has
+        been entered (so the background thread genuinely started running
+        the real debate loop, not a no-op) and (b) no transcript exists yet
+        (so that debate cannot have reached its own choke point, which is
+        the only place either artifact gets written)."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            release_event = threading.Event()
+            called_event = threading.Event()
+            invoker = _BlockingThenScriptedInvoker(
+                ["Planner's lesson.", _approve("Planner's lesson.")],
+                release_event=release_event,
+                called_event=called_event,
+            )
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+            )
+
+            self.assertTrue(
+                called_event.wait(timeout=5), "background thread never invoked the worker"
+            )
+            self.assertFalse(
+                (root / AdvisoryTranscriptAndTelemetryTests.TRANSCRIPT_RELATIVE_PATH).exists(),
+                "transcript must not exist while the debate is still blocked — its "
+                "presence here would mean dispatch waited for the debate after all",
+            )
+            self.assertFalse(
+                (root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH).exists(),
+                "telemetry must not exist while the debate is still blocked",
+            )
+
+            release_event.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+    def test_dispatch_post_mortem_consultation_writes_transcript_and_telemetry_once_the_thread_completes(
+        self,
+    ) -> None:
+        """Criterion 3: once the background thread finishes, the post-mortem's
+        transcript and telemetry are discoverable at exactly the paths a
+        synchronous call would have used, with the same content a
+        synchronous call would have produced — "exactly as if it had
+        blocked" (ticket 04's own wording). Also confirms
+        `dispatch_post_mortem_consultation` genuinely runs the post-mortem
+        occasion (not e.g. the default "ambiguity") by checking the
+        recorded Planner prompt."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            release_event = threading.Event()
+            called_event = threading.Event()
+            invoker = _BlockingThenScriptedInvoker(
+                ["Planner's lesson.", _approve("Planner's lesson.")],
+                release_event=release_event,
+                called_event=called_event,
+            )
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+                task_id="post-mortem-ticket-04-demo",
+            )
+            called_event.wait(timeout=5)
+            release_event.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+            transcript = (
+                root / AdvisoryTranscriptAndTelemetryTests.TRANSCRIPT_RELATIVE_PATH
+            ).read_text()
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertIn("Outcome:** consensus", transcript)
+        self.assertIn("Planner's lesson.", transcript)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["task_id"], "post-mortem-ticket-04-demo")
+        self.assertEqual(records[0]["outcome"], "consensus")
+        self.assertIn("post-mortem", invoker.calls[0][2].lower())
+
+    def test_dispatch_post_mortem_consultation_records_unexpected_exceptions_instead_of_dropping_them(
+        self,
+    ) -> None:
+        """Standards-axis hardening: `run_advisory_consultation_debate`
+        already fails closed for every documented outcome (worker error,
+        stalemate, unparseable verdict, sensitivity halt) by writing a
+        transcript and telemetry record before returning. But if it — or a
+        future change to it — ever raised something outside those
+        documented paths, that exception would propagate through
+        `Thread.run()` and hit Python's default unhandled-exception-in-
+        thread behavior: printed once to stderr, then gone, with nothing
+        written and nothing the dispatching caller can observe. This test
+        forces exactly that by patching `run_advisory_consultation_debate`
+        itself to raise, then proves `_run_dispatched_post_mortem`'s
+        exception net still produces a discoverable transcript and
+        telemetry record rather than letting the bug vanish silently."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            advisory_consultation,
+            "run_advisory_consultation_debate",
+            side_effect=RuntimeError("unexpected bug: sentinel-oops"),
+        ):
+            root = Path(tmp)
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for a mystery failure",
+                _RecordingInvoker([]),
+                root_dir=root,
+                task_id="post-mortem-crash-demo",
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            transcript = (
+                root / AdvisoryTranscriptAndTelemetryTests.TRANSCRIPT_RELATIVE_PATH
+            ).read_text()
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertIn("sentinel-oops", transcript)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["task_id"], "post-mortem-crash-demo")
+        self.assertEqual(records[0]["outcome"], "worker_error")
+
+    def test_dispatch_post_mortem_consultation_rejects_bad_max_rounds_synchronously(
+        self,
+    ) -> None:
+        """Design decision this ticket resolved: `max_rounds` is validated
+        BEFORE the background thread is started, not inside it — a bad
+        value is a call-site programming error
+        (`run_advisory_consultation_debate` itself raises `ValueError` for
+        it), and letting that raise happen only inside a background thread
+        would turn it into a silent, uncaught thread exception instead of a
+        `ValueError` the caller can actually catch. Proven here by asserting
+        no thread is left running and the fake worker is never invoked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            threads_before = threading.active_count()
+            invoker = _RecordingInvoker([])
+
+            with self.assertRaises(ValueError):
+                advisory_consultation.dispatch_post_mortem_consultation(
+                    "Post-mortem for a stalemate",
+                    invoker,
+                    root_dir=root,
+                    max_rounds=0,
+                )
+
+            self.assertEqual(threading.active_count(), threads_before)
+            self.assertEqual(invoker.calls, [])
 
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):
