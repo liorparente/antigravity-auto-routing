@@ -1920,10 +1920,13 @@ def _render_consultation_transcript(
             [
                 (
                     f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could "
-                    "not achieve full cross-family independence — the roster "
-                    "resolver was forced to assign the same model family to "
-                    "more than one role. Treat this consultation's outcome "
-                    "with reduced confidence."
+                    "not achieve full cross-family independence — the "
+                    "effective roster assigns the same model family to more "
+                    "than one role, whether because the roster resolver was "
+                    "forced into family reuse by unavailability or because "
+                    "budget rung 2 substituted one cheap model into every "
+                    "seat. Treat this consultation's outcome with reduced "
+                    "confidence."
                 ),
                 "",
             ]
@@ -3019,7 +3022,14 @@ def run_advisory_consultation_debate(
         # exact self-preference hazard this flag exists to surface, and an
         # auditor filtering telemetry on `degraded_independence` must see
         # these dialogues too, not only `resolve_roster`'s own degraded
-        # assignments.
+        # assignments. This deliberately includes `is_canary=True` runs,
+        # even though a canary invokes only the Critic role: the flag
+        # states the effective roster's family collapse, and on a canary
+        # record it carries exactly the signal a canary auditor needs —
+        # the probe measured the degraded cheap Critic, not the production
+        # Critic. Mission-level aggregation never sees it, because canary
+        # records are mandatorily filtered out (`outcome != "canary"`, per
+        # `AdvisoryTelemetryRecord`'s own WARNING).
         roster_degraded_independence = True
 
     # Spec 0003 (CriticalDialogue) ticket 08: the seeded-flaw canary round.

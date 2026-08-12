@@ -5414,10 +5414,10 @@ class DialogueBudgetLadderTests(unittest.TestCase):
     """Spec 0003 (CriticalDialogue) ticket 09: `resolve_degradation_rung` is
     a pure function over a caller-tracked session-spend counter and the
     configured `dialogue_budget.session_dialogue_cap`, config-driven rather
-    than a hardcoded literal -- mirroring `is_canary_dialogue`'s identical
+    than a hardcoded literal — mirroring `is_canary_dialogue`'s identical
     `_load_canary_cadence_config` pattern. Thresholds fall at multiples of
     the cap: spend under 1x the cap is rung 0, 1x-2x is rung 1, 2x-3x is
-    rung 2, 3x and beyond is rung 3 -- see the module comment above
+    rung 2, 3x and beyond is rung 3 — see the module comment above
     `DegradationRung` for the full reasoning.
     """
 
@@ -5447,7 +5447,7 @@ class DialogueBudgetLadderTests(unittest.TestCase):
         self.assertEqual(advisory_consultation.resolve_degradation_rung(100 * cap), 3)
 
     def test_negative_spend_is_always_rung_zero(self) -> None:
-        """A caller passing a negative spend is under budget by construction --
+        """A caller passing a negative spend is under budget by construction —
         `resolve_degradation_rung` never raises for it (see its docstring)."""
         self.assertEqual(advisory_consultation.resolve_degradation_rung(-5), 0)
 
@@ -5478,7 +5478,7 @@ class DialogueBudgetLadderTests(unittest.TestCase):
         self.assertEqual(rung_high, 0)
 
     def test_zero_cap_degenerates_to_always_rung_three(self) -> None:
-        """A session with no budget at all has no room for any dialogue --
+        """A session with no budget at all has no room for any dialogue —
         see the module comment above `DegradationRung` for why this is the
         correct reading rather than a special case the function must guard."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -5499,7 +5499,7 @@ class DialogueBudgetLadderTests(unittest.TestCase):
 class DegradedRosterModelTests(unittest.TestCase):
     """Spec 0003 (CriticalDialogue) ticket 09 (revised): `_load_degraded_roster_model`
     reads rung 2's substitute model from `routing-config.json`'s existing
-    `light_doer` role block -- `light_doer.name` lists several
+    `light_doer` role block — `light_doer.name` lists several
     interchangeable alternatives (e.g. "Codex 5.6 Terra / Luna / Gemini 3.6
     Flash (Low)"), and this function reads the first one, the same
     "first is primary" convention `DEFAULT_ROSTER_FALLBACK_CHAINS` already
@@ -5555,13 +5555,13 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     `session_spend_so_far` defaults to `0`, which always resolves to rung 0
     for any positive configured cap, so every pre-existing test in this
     file never mentions this parameter and continues to invoke exactly the
-    rounds/effort it always did -- the entire pre-existing suite is this
+    rounds/effort it always did — the entire pre-existing suite is this
     ticket's regression guard that the opt-in changes nothing when a caller
     does not ask for it, mirroring ticket 07's and ticket 08's identical
     regression argument for their own opt-in seams.
 
     The checked-in `routing-config.json` sets `dialogue_budget.session_dialogue_cap`
-    to `10`, matching `DEFAULT_SESSION_DIALOGUE_CAP` exactly -- these tests
+    to `10`, matching `DEFAULT_SESSION_DIALOGUE_CAP` exactly — these tests
     read `DEFAULT_SESSION_DIALOGUE_CAP` rather than hardcoding `10`, so they
     stay correct even if that checked-in value and the default are ever
     changed together.
@@ -5593,7 +5593,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
 
     def test_sensitivity_halt_takes_priority_over_the_budget_ladder(self) -> None:
         """The sensitivity gate 'still precedes everything' (spec 0003's own
-        phrase) -- a session deep into budget exhaustion must still halt on
+        phrase) — a session deep into budget exhaustion must still halt on
         sensitive task text before the budget ladder is ever consulted, and
         report no degradation for a dialogue that never ran, exactly like
         `AdvisoryRosterIntegrationTests` already proves for roster
@@ -5651,7 +5651,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
 
     def test_rung_one_reduces_rounds_in_panel_topology_too(self) -> None:
         """The round reduction is a plain `max_rounds` reassignment the
-        round loop already reads regardless of topology -- proves it holds
+        round loop already reads regardless of topology — proves it holds
         for the panel loop (spec 0003 ticket 05) as well as the pair loop."""
         cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -5709,7 +5709,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self,
     ) -> None:
         """Ticket 09 (revised): the ticket's own 'What to build' prose is
-        specific -- rung 2 must 'cheapen the roster (e.g. fall back toward
+        specific — rung 2 must 'cheapen the roster (e.g. fall back toward
         lighter/local families)', not only lower effort. This proves the
         `model` argument `invoke_worker` actually receives changes too, to
         `_load_degraded_roster_model`'s substitute (drawn from
@@ -5751,7 +5751,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     ) -> None:
         """Rung 2's model substitution is applied AFTER roster resolution
         specifically so it wins even when `reachability_check` also
-        resolved a roster for this call -- budget exhaustion is a
+        resolved a roster for this call — budget exhaustion is a
         stronger, later-stage override than family independence. Proves
         that every `invoke_worker` call carries the degraded model, not
         whatever `resolve_roster` would otherwise have picked — and that
@@ -5862,7 +5862,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self,
     ) -> None:
         """Design decision: a fully exhausted budget skips the dialogue
-        unconditionally, even for a call that also opted into `is_canary` --
+        unconditionally, even for a call that also opted into `is_canary` —
         a canary probe still contacts a real Critic, and rung 3 exists
         specifically to guarantee zero worker contact this call. See this
         ticket's report for why the two seams compose this way rather than
@@ -6047,6 +6047,48 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(result.topology, "panel")
         self.assertEqual(len(invoker.calls), 3)
         self.assertTrue(result.degraded_independence)
+
+    def test_rung_two_canary_reports_degraded_independence_by_design(self) -> None:
+        """Pins the canary × rung-2 combination as designed behavior, not an
+        accident: an `is_canary=True` run at rung 2 reports
+        `degraded_independence=True` even though a canary invokes only the
+        Critic role. The flag states the effective roster's family collapse
+        — rung 2 substituted the one cheap model into every seat, and the
+        one seat this probe actually used got that degraded model — so on a
+        canary record it carries exactly the signal a canary auditor needs:
+        this probe measured the degraded cheap Critic, not the production
+        Critic. And it can never distort mission-level statistics, because
+        canary records are mandatorily filtered out of mission aggregation
+        (`outcome != "canary"`, per `AdvisoryTelemetryRecord`'s own
+        WARNING) — the flag rides only where the canary auditor looks."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        degraded_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_approve_fixture(fixture)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                canary_fixture=fixture,
+                session_spend_so_far=2 * cap,
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertTrue(result.degraded_independence)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "canary")
+        self.assertTrue(records[0]["degraded_independence"])
+        self.assertEqual(len(invoker.calls), 1)
+        self.assertEqual(invoker.calls[0][0], degraded_model)
 
 
 class AdvisoryTelemetryExtensionsTests(unittest.TestCase):

@@ -11,7 +11,6 @@ import unittest
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-
 BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/")
 MODEL = os.environ.get("LMSTUDIO_MODEL", "qwen3-coder-next-mlx")
 TIMEOUT_SECONDS = 120
