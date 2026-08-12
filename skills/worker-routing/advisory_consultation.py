@@ -1342,9 +1342,7 @@ def needs_post_mortem_consultation(
         return True
     if consecutive_failures >= ESCALATION_FAILURE_THRESHOLD:
         return True
-    if stalemate_occurred:
-        return True
-    return False
+    return stalemate_occurred
 
 
 def _atomic_text_write(path: Path, content: str) -> None:

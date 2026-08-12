@@ -23,7 +23,16 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest import mock
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    # For type annotations only — at runtime `advisory_consultation` is the
+    # dynamically loaded module object below, whose attributes mypy cannot
+    # resolve inside annotations.
+    from advisory_consultation import CanaryFixture, IsFamilyReachable
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent
@@ -1397,7 +1406,7 @@ def _revise(note: str) -> str:
 
 
 def _approve_fixture(
-    fixture: advisory_consultation.CanaryFixture, note: str = "Looks solid."
+    fixture: CanaryFixture, note: str = "Looks solid."
 ) -> str:
     """Build a scripted Critic response that approves `fixture` under the
     VerdictContract, for canary tests (spec 0003 ticket 08).
@@ -1420,7 +1429,7 @@ def _approve_fixture(
     return f'{note}\nQUOTE: "{quotable_line}"\nVERDICT: APPROVE'
 
 
-def _reachable(*families: str) -> "advisory_consultation.IsFamilyReachable":
+def _reachable(*families: str) -> IsFamilyReachable:
     """Build a scripted `is_family_reachable` fake for `resolve_roster` and
     `run_advisory_consultation_debate`'s `reachability_check` parameter
     (spec 0003 ticket 07): reachable for exactly the named families,
@@ -2754,7 +2763,11 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
             plans = [f"Planner's plan #{i}." for i in range(1, 4)]
             invoker = _RoleKeyedInvoker(
                 {
-                    "Test Planner": plans,
+                    # `list(plans)` re-types the entry as this dict literal's
+                    # `list[str | Exception]` value type without widening
+                    # `plans` itself, which the surrounding test keeps as
+                    # `list[str]`.
+                    "Test Planner": list(plans),
                     "Test Critic A": [
                         _approve(plan, f"A approves plan #{i}.")
                         for i, plan in enumerate(plans, start=1)
@@ -2804,7 +2817,11 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
             plans = [f"Planner's plan #{i}." for i in range(1, 4)]
             invoker = _RoleKeyedInvoker(
                 {
-                    "Test Planner": plans,
+                    # `list(plans)` re-types the entry as this dict literal's
+                    # `list[str | Exception]` value type without widening
+                    # `plans` itself, which the surrounding test keeps as
+                    # `list[str]`.
+                    "Test Planner": list(plans),
                     "Test Critic A": [
                         _revise(f"A objects, round #{i}.") for i in range(1, 4)
                     ],
@@ -2850,7 +2867,11 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
             plans = [f"Planner's plan #{i}." for i in range(1, 4)]
             invoker = _RoleKeyedInvoker(
                 {
-                    "Test Planner": plans,
+                    # `list(plans)` re-types the entry as this dict literal's
+                    # `list[str | Exception]` value type without widening
+                    # `plans` itself, which the surrounding test keeps as
+                    # `list[str]`.
+                    "Test Planner": list(plans),
                     "Test Critic A": [
                         _revise(f"A objects, round #{i}.") for i in range(1, 4)
                     ],
@@ -4399,9 +4420,19 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
                 order: list[str] = []
                 scripted_responses = iter(["Planner's plan.", _approve("Planner's plan.")])
 
-                def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
-                    order.append("invoker_called")
-                    return next(scripted_responses)
+                def fake_invoke_worker(
+                    model: str,
+                    effort: str,
+                    prompt: str,
+                    *,
+                    # Bind the loop-scoped fixtures as defaults (B023): each
+                    # subTest iteration gets its own fake closed over its own
+                    # `order`/`scripted_responses`.
+                    _order: list[str] = order,
+                    _responses: Iterator[str] = scripted_responses,
+                ) -> str:
+                    _order.append("invoker_called")
+                    return next(_responses)
 
                 with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
                     os.environ, {}, clear=True
