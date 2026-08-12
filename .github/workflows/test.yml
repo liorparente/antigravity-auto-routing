@@ -21,6 +21,7 @@ jobs:
         skills/worker-routing/learning_journal.py
         skills/worker-routing/production_invoker.py
         skills/worker-routing/test_production_invoker.py
+        skills/worker-routing/learning_outcomes.py
     steps:
       - uses: actions/checkout@v4
 

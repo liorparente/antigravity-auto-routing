@@ -3989,5 +3989,228 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             self.assertTrue(record["success"])
 
 
+learning_outcomes_spec = importlib.util.spec_from_file_location(
+    "learning_outcomes", SKILL_DIR / "learning_outcomes.py"
+)
+assert learning_outcomes_spec is not None and learning_outcomes_spec.loader is not None
+learning_outcomes = importlib.util.module_from_spec(learning_outcomes_spec)
+sys.modules["learning_outcomes"] = learning_outcomes
+learning_outcomes_spec.loader.exec_module(learning_outcomes)
+
+
+class OutcomeRecordingTests(unittest.TestCase):
+    """Ticket 14: ground truth gets joined to the decision that produced it.
+
+    `learning_journal.OutcomeRecord` already carries the schema and the
+    (signal, verdict) pairing; these tests exercise the public surface a
+    caller far from that schema actually calls — `learning_outcomes`'s four
+    `record_*` functions — and the one path (the stalemate resolution) that
+    is wired into the real `advisory_consultation` flow rather than tested
+    against a hand-built stand-in.
+    """
+
+    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
+
+    def test_record_test_result_writes_pass_and_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            error_pass = learning_outcomes.record_test_result(
+                "task-tests-1", passed=True, root_dir=root
+            )
+            error_fail = learning_outcomes.record_test_result(
+                "task-tests-2", passed=False, root_dir=root
+            )
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertIsNone(error_pass)
+        self.assertIsNone(error_fail)
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0]["kind"], "outcome")
+        self.assertEqual(records[0]["task_id"], "task-tests-1")
+        self.assertEqual(records[0]["signal"], "tests")
+        self.assertEqual(records[0]["verdict"], "pass")
+        self.assertEqual(records[1]["task_id"], "task-tests-2")
+        self.assertEqual(records[1]["verdict"], "fail")
+
+    def test_record_review_verdict_writes_approved_and_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_outcomes.record_review_verdict(
+                "task-review-1", approved=True, root_dir=root
+            )
+            learning_outcomes.record_review_verdict(
+                "task-review-2", approved=False, root_dir=root
+            )
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertEqual(records[0]["signal"], "review")
+        self.assertEqual(records[0]["verdict"], "approved")
+        self.assertEqual(records[1]["verdict"], "rejected")
+
+    def test_record_plan_outcome_writes_accepted_and_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_outcomes.record_plan_outcome(
+                "task-plan-1", accepted=True, root_dir=root
+            )
+            learning_outcomes.record_plan_outcome(
+                "task-plan-2", accepted=False, root_dir=root
+            )
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertEqual(records[0]["signal"], "plan")
+        self.assertEqual(records[0]["verdict"], "accepted")
+        self.assertEqual(records[1]["verdict"], "rejected")
+
+    def _run_to_stalemate(self, root: Path):
+        invoker = _RecordingInvoker(
+            [
+                "Planner's first plan.",
+                "VERDICT: REVISE\nNeeds more detail.",
+                "Planner's second plan.",
+                "VERDICT: REVISE\nStill thin.",
+                "Planner's third plan.",
+                "VERDICT: REVISE\nNot convinced.",
+            ]
+        )
+        return advisory_consultation.run_advisory_consultation_debate(
+            "Plan the auth rewrite", invoker, root_dir=root, task_id="task-stalemate-1"
+        )
+
+    def test_record_stalemate_resolution_is_wired_to_a_real_stalemate_report(self) -> None:
+        """Drives an actual stalemate through `run_advisory_consultation_debate`
+        rather than a hand-built `AdvisoryStalemateReport`, then records the
+        human's pick of the Critic's option — proving the function is wired
+        to the real consultation path, not a stand-in for one."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = self._run_to_stalemate(root)
+            assert result.stalemate is not None
+            critic_option = next(
+                option
+                for option in result.stalemate.options
+                if option.label == "Approve Critic Architecture"
+            )
+
+            error = learning_outcomes.record_stalemate_resolution(
+                "task-stalemate-1", result.stalemate, critic_option, root_dir=root
+            )
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertIsNone(error)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["kind"], "outcome")
+        self.assertEqual(records[0]["task_id"], "task-stalemate-1")
+        self.assertEqual(records[0]["signal"], "stalemate_resolution")
+        self.assertEqual(records[0]["verdict"], "critic")
+
+    def test_record_stalemate_resolution_maps_all_three_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = self._run_to_stalemate(root)
+            assert result.stalemate is not None
+
+            for expected_verdict, option in zip(
+                ("planner", "critic", "human"), result.stalemate.options
+            ):
+                learning_outcomes.record_stalemate_resolution(
+                    "task-stalemate-1", result.stalemate, option, root_dir=root
+                )
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertEqual([record["verdict"] for record in records], ["planner", "critic", "human"])
+
+    def test_record_stalemate_resolution_rejects_an_option_from_a_different_report(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = self._run_to_stalemate(root)
+            assert result.stalemate is not None
+            foreign_option = advisory_consultation.AdvisoryResolutionOption(
+                1, "Approve Planner Architecture", "a hand-built, non-matching position"
+            )
+
+            with self.assertRaises(ValueError):
+                learning_outcomes.record_stalemate_resolution(
+                    "task-stalemate-1", result.stalemate, foreign_option, root_dir=root
+                )
+
+            self.assertFalse((root / self.JOURNAL_RELATIVE_PATH).exists())
+
+    def test_missing_task_id_is_refused_rather_than_writing_an_orphan_record(self) -> None:
+        """"Unknown task" handling: this module never fabricates a `task_id`
+        for an outcome. An empty one is refused loudly, and no orphan record
+        reaches the journal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaises(ValueError):
+                learning_outcomes.record_test_result("", passed=True, root_dir=root)
+
+            self.assertFalse((root / self.JOURNAL_RELATIVE_PATH).exists())
+
+    def test_task_description_shaped_task_id_is_refused(self) -> None:
+        """Content-freedom holds at this surface too: a caller cannot smuggle
+        task text in through `task_id` — the shape gate `TaskLabel.for_task`
+        already enforces rejects it before anything is written."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaises(ValueError):
+                learning_outcomes.record_review_verdict(
+                    "fix the login 500 for the ACME account", approved=True, root_dir=root
+                )
+
+            self.assertFalse((root / self.JOURNAL_RELATIVE_PATH).exists())
+
+    def test_write_failure_is_reported_to_the_caller_and_never_raised(self) -> None:
+        """Matches ticket 13's contract: a broken `.ralph` degrades the
+        learning loop, it never breaks the caller recording the outcome."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".ralph").write_text("not a directory")
+
+            error = learning_outcomes.record_plan_outcome(
+                "task-plan-write-failure", accepted=True, root_dir=root
+            )
+
+            self.assertIsNotNone(error)
+            assert error is not None
+            self.assertIn("learning journal", error.lower())
+
+    def test_outcome_joins_to_its_decision_by_task_id(self) -> None:
+        """User story 2: a decision recorded via the worker-execution family
+        and its later outcome share one `task_id` a scoreboard reads together."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            journaled_invoker = production_invoker.make_journaled_invoke_worker(
+                learning_journal.TaskLabel.for_task("task-join-1", task_type="feature"),
+                root_dir=root,
+                runner=mock.Mock(
+                    return_value=subprocess.CompletedProcess([], 0, "worker output", "")
+                ),
+            )
+            journaled_invoker("claude-sonnet-5", "high", "do the thing")
+
+            learning_outcomes.record_test_result("task-join-1", passed=True, root_dir=root)
+
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        kinds_by_task = {record["kind"]: record for record in records}
+        self.assertEqual(kinds_by_task["worker_execution"]["task_id"], "task-join-1")
+        self.assertEqual(kinds_by_task["outcome"]["task_id"], "task-join-1")
+        self.assertEqual(kinds_by_task["outcome"]["signal"], "tests")
+        self.assertEqual(kinds_by_task["outcome"]["verdict"], "pass")
+
+
 if __name__ == "__main__":
     unittest.main()
