@@ -193,6 +193,356 @@ DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
     "permission",
 )
 
+# Spec 0003 (CriticalDialogue) ticket 07: "Family, not model, is the
+# independence unit" (spec's Implementation Decisions paragraph of the same
+# name). A family is a provider lineage — the Claude family, the Codex/GPT
+# family, the Gemini family, and each local model lineage counts as its own
+# family — not an individual model name. `classify_model_family` is the pure
+# function every later piece of this ticket's infrastructure is built on:
+# the roster resolver below calls it to decide whether two roles' assigned
+# models are independent, and a caller wiring telemetry (ticket 10) or a
+# canary fixture (ticket 08) can call it directly on any model name without
+# reaching into this module's other machinery.
+#
+# The four cloud lineages are recognized by a small, fixed vocabulary of
+# provider-name substrings, not by an exhaustive model list pulled from
+# `routing-config.json`'s `supported_models` — deliberately, per this
+# ticket's own brief ("don't hardcode an exhaustive model list ... but use
+# your judgment"). Provider lineage is a property of the name itself: every
+# Claude model's name contains "claude", and that stays true for models this
+# file has never seen; `supported_models` is merely today's roster snapshot
+# and would need an edit for every new tier that ships, which would make
+# family classification silently stale the moment a new model landed in
+# config but not in this list. "codex" and "gpt" both resolve to one
+# "codex-gpt" family — spelled out explicitly in this ticket's own
+# instructions — because `routing-config.json`'s `critic` role block already
+# lists "Codex 5.6 Sol" and "GPT-OSS 120B (Medium)" as interchangeable
+# alternatives within one role, i.e. this repo's own config already treats
+# them as the same lineage for routing purposes.
+#
+# Anything matching none of the four substrings is treated as its own local
+# lineage — the spec's "each local model lineage counts as its own family" —
+# derived from the model's own name rather than looked up in a table this
+# module would otherwise need to keep in sync with every local model ever
+# loaded into LM Studio. The leading run of alphabetic characters in the
+# name, case-folded, is that lineage's identifier: "Gemma 4 E4B" and a
+# future "Gemma 2 9B" both become "gemma" (two checkpoints of one base model
+# are one lineage), while "Qwen3-Coder-Next" becomes "qwen" — a genuinely
+# different local model gets a genuinely different family. This is a
+# heuristic, not a registry lookup, on purpose: it needs no maintenance as
+# new local checkpoints are loaded, which a hardcoded local-model list would.
+_CLOUD_FAMILY_SUBSTRINGS: tuple[tuple[str, str], ...] = (
+    ("claude", "claude"),
+    ("gemini", "gemini"),
+    ("codex", "codex-gpt"),
+    ("gpt", "codex-gpt"),
+)
+
+_LOCAL_LINEAGE_PATTERN = re.compile(r"[a-zA-Z]+")
+
+
+def classify_model_family(model_name: str) -> str:
+    """Return the provider-lineage family `model_name` belongs to.
+
+    Pure and total: every input string maps to some family string, and this
+    never raises. See the module comment above `_CLOUD_FAMILY_SUBSTRINGS`
+    for the exact rule and why the cloud vocabulary is a small fixed set
+    rather than a model list, and why a local model's family is derived
+    from its own name rather than looked up. Matching is case-insensitive
+    and substring-based (`"claude" in lowered`), same style
+    `_detect_sensitivity_marker` already uses for `SENSITIVITY_MARKERS`.
+
+    The local-lineage fallback uses `_LOCAL_LINEAGE_PATTERN.match`, which
+    Python anchors at index 0, not `.search` — deliberately: this function's
+    own contract is "the LEADING run of alphabetic characters", and `.match`
+    is what actually enforces that anchor. `.search` would instead find the
+    first alphabetic run anywhere in the string, which for a digit-led local
+    name (e.g. a hypothetical "70B-Instruct" or "4B-Mixtral") would pick out
+    whatever short fragment happens to occur first ("b", "instruct") — an
+    unstable, coincidental identifier two genuinely unrelated local models
+    could easily collide into, silently defeating the independence guarantee
+    `resolve_roster` exists to enforce. A `model_name` with no leading
+    alphabetic run at all (digit-led, or empty) instead falls through to the
+    final fallback below: the full lowercased, stripped name is used as its
+    own family identifier, or `"unknown"` if that is also empty. That
+    fallback can never falsely equate two different digit-led names (each
+    gets its own family, keyed off its own full text), and never leaves a
+    "different family" check silently satisfied by an empty-string family
+    either.
+    """
+    lowered = model_name.lower()
+    for substring, family in _CLOUD_FAMILY_SUBSTRINGS:
+        if substring in lowered:
+            return family
+    match = _LOCAL_LINEAGE_PATTERN.match(model_name)
+    if match:
+        return match.group(0).lower()
+    return lowered.strip() or "unknown"
+
+
+# Spec 0003 (CriticalDialogue) ticket 07: the two topologies a roster can be
+# resolved for. "critic_a" doubles as pair mode's sole critic role — the
+# same "`critic_position` means Critic A in panel mode" convention
+# `AdvisoryStalemateReport`'s docstring already established (pair mode
+# simply never resolves a `critic_b`), rather than inventing a third,
+# pair-only role name that would need its own fallback chain in config for
+# no semantic reason: a pair's one Critic and a panel's Critic A play
+# exactly the same role.
+RosterTopology = Literal["pair", "panel"]
+RosterRole = Literal["planner", "critic_a", "critic_b"]
+
+_PAIR_ROSTER_ROLES: tuple[RosterRole, ...] = ("planner", "critic_a")
+_PANEL_ROSTER_ROLES: tuple[RosterRole, ...] = ("planner", "critic_a", "critic_b")
+
+# The independence unit's own callable seam: `(family) -> bool`, injected by
+# the caller exactly like `InvokeWorker` above — this is what lets
+# `resolve_roster` be exercised offline with a scripted fake instead of a
+# real reachability probe (a curl to LM Studio, a provider health check),
+# per this ticket's own instruction and the precedent every other seam in
+# this module already sets.
+IsFamilyReachable = Callable[[str], bool]
+
+
+class RosterResolutionError(RuntimeError):
+    """Raised when `resolve_roster` finds no reachable family for a role at all.
+
+    Distinct from degraded independence: degradation means a family had to
+    be reused across roles, and `resolve_roster` still returns a complete,
+    usable result for that case — see `RosterResolution.degraded_independence`.
+    This error means a role's entire fallback chain, every family it names,
+    reported unreachable, so no assignment exists for that role at all. A
+    caller integrating this into `run_advisory_consultation_debate` treats
+    it the same as any other pre-flight failure to reach a worker: fail
+    closed, never fabricate a roster to paper over it.
+    """
+
+
+# Spec 0003 (CriticalDialogue) ticket 07: each role's ordered fallback chain
+# of candidate models, config-driven (see `_load_roster_fallback_chains`)
+# rather than hardcoded here — mirroring the `critical_dialogue` section
+# ticket 03 added to `routing-config.json`, and for the identical reason: a
+# config read is the only way a test (or a future operator) can point this
+# module at a different roster and observe the resolver's answer change,
+# which is the only way to prove a value is genuinely read from config
+# rather than merely referenced by key. These `DEFAULT_*` chains are the
+# fallback for a config file missing the `roster_topology` section (or one
+# of its role keys) — mirroring `DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD`'s
+# identical role above — never what production actually uses, since
+# `routing-config.json` supplies its own section as of this ticket.
+#
+# Every chain's first entry is exactly the parameter default
+# `run_advisory_consultation_debate` already shipped before this ticket
+# existed (`planner_model="Claude Opus 5 (Thinking)"`,
+# `critic_a_model="Codex 5.6 Sol"`, `critic_b_model="Gemini 3.6 Flash"`), so
+# a fully-reachable environment resolves to exactly the roster those
+# hardcoded defaults already produced — this ticket adds a resolution
+# *path*, it does not change what "everything is up" already looked like.
+# Each chain's later entries walk through the protocol's documented
+# fallback ordering (`protocol.md` section 3.5, "Complex/Planning: Claude
+# Opus 5 (Thinking) -> Claude Fable/Opus 4.8 -> codex Sol") before ending on
+# a local model, so "local families qualify" (the spec's own phrase) is a
+# real, reachable last resort in every chain, not merely a claim.
+DEFAULT_ROSTER_FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
+    "planner": (
+        "Claude Opus 5 (Thinking)",
+        "Claude Fable 5",
+        "Codex 5.6 Sol",
+        "Gemini 3.6 Flash (High)",
+        "Gemma 4 E4B",
+    ),
+    "critic_a": (
+        "Codex 5.6 Sol",
+        "GPT-OSS 120B (Medium)",
+        "Gemini 3.6 Flash (High)",
+        "Claude Opus 5 (Thinking)",
+        "Qwen3-Coder-Next",
+    ),
+    "critic_b": (
+        "Gemini 3.6 Flash",
+        "Gemini 3.1 Pro (High)",
+        "Codex 5.6 Sol",
+        "Claude Opus 5 (Thinking)",
+        "Gemma 4 E4B",
+    ),
+}
+
+
+def _load_roster_fallback_chains(config_path: Path) -> dict[str, tuple[str, ...]]:
+    """Read each role's fallback chain from `config_path`'s `roster_topology`
+    section, falling back to `DEFAULT_ROSTER_FALLBACK_CHAINS` per role (or
+    wholesale when the section itself is absent) — same pattern
+    `_load_code_review_risk_config` above uses for `critical_dialogue`,
+    including its no-try/except contract: a missing or malformed
+    `config_path` raises whatever `open`/`json.load` raises rather than
+    being silently swallowed, because production always calls this with the
+    default `_CONFIG_PATH`, which is checked into the repo.
+    """
+    with open(config_path, "r", encoding="utf-8") as stream:
+        config = json.load(stream)
+    section = config.get("roster_topology", {})
+    configured_chains = section.get("role_fallback_chains", {})
+    resolved: dict[str, tuple[str, ...]] = {}
+    for role, default_chain in DEFAULT_ROSTER_FALLBACK_CHAINS.items():
+        resolved[role] = tuple(configured_chains.get(role, default_chain))
+    return resolved
+
+
+@dataclass(frozen=True)
+class RosterAssignment:
+    """One role's resolved model, and the family `classify_model_family`
+    placed it in."""
+
+    role: RosterRole
+    model: str
+    family: str
+
+
+@dataclass(frozen=True)
+class RosterResolution:
+    """The result of resolving one topology's roster against live reachability.
+
+    `degraded_independence` is this ticket's own exposed signal: True
+    whenever any two roles in `assignments` ended up sharing a family,
+    because `resolve_roster` could not find enough distinct reachable
+    families to give every role its own. See `resolve_roster`'s docstring
+    for the exact "single family remains" reading this field implements —
+    this dataclass is deliberately where a caller (including ticket 10's
+    telemetry-extension work) reads whether degradation occurred, per this
+    ticket's own instruction to expose it here even where wiring it further
+    would overstep this ticket's scope.
+    """
+
+    topology: RosterTopology
+    assignments: tuple[RosterAssignment, ...]
+    degraded_independence: bool
+
+    def model_for(self, role: RosterRole) -> str:
+        """The resolved model for `role`.
+
+        Raises `KeyError` if `role` was never part of this resolution's
+        topology (e.g. asking a pair-mode result for `"critic_b"`) —
+        deliberately loud rather than returning an empty string, since that
+        is always a call-site bug, not a legitimate "no such role" state.
+        """
+        for assignment in self.assignments:
+            if assignment.role == role:
+                return assignment.model
+        raise KeyError(f"role {role!r} is not part of this {self.topology} roster")
+
+
+def resolve_roster(
+    topology: RosterTopology,
+    *,
+    is_family_reachable: IsFamilyReachable,
+    config_path: Path = _CONFIG_PATH,
+) -> RosterResolution:
+    """Assign a model to each role `topology` requires, preferring a
+    distinct family per role and degrading to family reuse only when the
+    reachable families genuinely run out.
+
+    Roles are resolved in a fixed order — `planner`, then `critic_a`, then
+    (panel only) `critic_b` — each walking its own config-driven fallback
+    chain (`_load_roster_fallback_chains`) and classifying every candidate
+    with `classify_model_family`. For each role, two passes:
+
+    1. Prefer the first candidate whose family both `is_family_reachable`
+       and is not already claimed by an earlier role in this resolution.
+       This is "substitute the next family in the fallback chain" (the
+       ticket's own phrase): a role whose *preferred* family is unreachable
+       does not immediately degrade, it just keeps walking its own chain,
+       exactly the same as any other unreachable candidate.
+    2. Only if no candidate offers a fresh, reachable family does resolution
+       fall back to the first candidate that is merely reachable (even
+       though its family is already used elsewhere in this roster) — and
+       only this second pass sets `degraded_independence`.
+
+    A role whose chain offers no reachable family at all, in either pass,
+    raises `RosterResolutionError` — resolution never fabricates an
+    assignment nobody can actually reach.
+
+    **Reading "a single family remains" (spec 0003's "Degraded
+    independence, never silence" paragraph).** The spec's literal words —
+    "Only when a single family remains does the dialogue run same-family" —
+    admit two readings: (a) exactly one family is reachable across the
+    entire environment, or (b) resolution has been forced to reuse a family
+    already claimed within *this* roster, however many families remain
+    reachable elsewhere. This function implements reading (b), for two
+    reasons. First, the spec's own next clause is about causation, not a
+    global census: "and then it carries an explicit degraded-independence
+    marker" — the marker exists to flag *this dialogue's* weakened
+    independence, and a dialogue's independence is exactly as weakened by
+    "2 roles, 1 shared family, while a third unrelated family sits
+    reachable but unused by this topology" as by "literally 1 family total
+    reachable" — reading (a) would leave the former case silently
+    unflagged, which contradicts the spec's own repeated "Never silently"
+    refrain (Problem Statement, Implementation Decisions, and User Story 14
+    all restate it). Second, reading (b) is strictly the more conservative
+    of the two — it flags a superset of what reading (a) would — so it
+    never under-reports a compromised roster, only ever over-reports
+    relative to the narrower literal reading, which is the safe direction
+    to err in for an audit signal. Concretely: a panel needing 3 families
+    with only 2 reachable is degraded under this reading (one family
+    serves two roles) even though "a single family" was never literally
+    true — this is the ticket's own suggested resolution for that exact
+    ambiguity, spelled out here rather than left implicit.
+
+    Raises `ValueError` for a `topology` that is not `"pair"` or `"panel"`
+    — a call-site programming error, not a roster outcome.
+    """
+    if topology == "pair":
+        roles: tuple[RosterRole, ...] = _PAIR_ROSTER_ROLES
+    elif topology == "panel":
+        roles = _PANEL_ROSTER_ROLES
+    else:
+        raise ValueError(f"unknown roster topology {topology!r}; expected 'pair' or 'panel'")
+
+    chains = _load_roster_fallback_chains(config_path)
+    used_families: set[str] = set()
+    assignments: list[RosterAssignment] = []
+    degraded = False
+
+    for role in roles:
+        chain = chains[role]
+        chosen: tuple[str, str] | None = None
+
+        for model in chain:
+            family = classify_model_family(model)
+            if is_family_reachable(family) and family not in used_families:
+                chosen = (model, family)
+                break
+
+        if chosen is None:
+            for model in chain:
+                family = classify_model_family(model)
+                if is_family_reachable(family):
+                    chosen = (model, family)
+                    degraded = True
+                    break
+
+        if chosen is None:
+            raise RosterResolutionError(
+                f"no reachable family for role {role!r}: every family in its "
+                f"fallback chain {list(chain)!r} reported unreachable"
+            )
+
+        assignments.append(RosterAssignment(role=role, model=chosen[0], family=chosen[1]))
+        used_families.add(chosen[1])
+
+    return RosterResolution(
+        topology=topology,
+        assignments=tuple(assignments),
+        degraded_independence=degraded,
+    )
+
+
+# Spec 0003 (CriticalDialogue) ticket 07: the literal substring
+# `_render_consultation_transcript` writes into a degraded-independence
+# transcript, and what a test greps for. Named and exported so a caller
+# never needs to hand-copy the marker text to check for it — see the
+# acceptance criterion that a test asserting on transcript content must
+# find this, not just the structured record.
+DEGRADED_INDEPENDENCE_MARKER = "DEGRADED INDEPENDENCE"
+
 # Spec 0003 (CriticalDialogue) ticket 04: named once and reused by both
 # `run_advisory_consultation_debate` and the crash-recovery path inside
 # `dispatch_post_mortem_consultation`'s thread target, rather than left as
@@ -297,6 +647,23 @@ class AdvisoryDebateResult:
     otherwise silently bind into the wrong field instead of failing loudly.
     Appending preserves the original order exactly; only a genuinely new
     positional argument could ever reach `occasion`.
+
+    `degraded_independence` (spec 0003 ticket 07) is appended after
+    `occasion` for the identical reason and by the identical rule: every
+    pre-ticket-07 construction of this dataclass — in this module and in
+    tests — that never mentions it keeps meaning exactly what it meant
+    before this field existed, defaulting to `False`. True only when
+    `run_advisory_consultation_debate` resolved its roster via an injected
+    `reachability_check` (see that function's docstring) and
+    `resolve_roster` reported `RosterResolution.degraded_independence` —
+    i.e. two or more roles in this consultation had to share a model
+    family. A run that never opts into roster resolution at all — every
+    call site in this repo today — always carries `False` here, never
+    silently `True`: this field is deliberately not inferred from
+    `planner_model == critic_model` after the fact, because two roles
+    sharing a literal model name by caller coincidence (an explicit
+    `critic_model="Test Critic"` in a test, say) is not the same claim as
+    "the roster resolver was forced to reuse a family."
     """
 
     rounds_run: int
@@ -308,6 +675,7 @@ class AdvisoryDebateResult:
     stalemate: AdvisoryStalemateReport | None = None
     error: str | None = None
     occasion: Occasion = "ambiguity"
+    degraded_independence: bool = False
 
     @property
     def consensus_reached(self) -> bool:
@@ -940,11 +1308,35 @@ def _render_consultation_transcript(
         f"**Critic:** {result.critic_model}",
         f"**Rounds run:** {len(rounds)}",
         "",
-        "## Task",
-        "",
-        task_description,
-        "",
     ]
+    # Spec 0003 (CriticalDialogue) ticket 07: only present when
+    # `result.degraded_independence` is True — never an always-rendered
+    # "Degraded independence: False" line — so a normal run's transcript
+    # never contains `DEGRADED_INDEPENDENCE_MARKER` at all, which is the
+    # literal acceptance criterion ("A normal ... run never carries the
+    # marker") a test can grep for with `assertNotIn`, not merely a falsy
+    # field a reader has to notice.
+    if result.degraded_independence:
+        lines.extend(
+            [
+                (
+                    f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could "
+                    "not achieve full cross-family independence — the roster "
+                    "resolver was forced to assign the same model family to "
+                    "more than one role. Treat this consultation's outcome "
+                    "with reduced confidence."
+                ),
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "## Task",
+            "",
+            task_description,
+            "",
+        ]
+    )
     if not rounds:
         lines.append("_No rounds were run._")
     for index, round_ in enumerate(rounds, start=1):
@@ -1081,6 +1473,21 @@ class AdvisoryTelemetryRecord:
     module to change. An auditor reads the absence of `kind` as "council
     decision"; do not "helpfully" normalise that asymmetry away later by
     adding the field to both sides, or the join breaks.
+
+    `degraded_independence` (spec 0003 ticket 07) is appended after `kind`,
+    last in field order — the same append-only rule `AdvisoryDebateResult`
+    documents on its own `degraded_independence` field, which is this
+    field's sole source: `_build_telemetry_record` copies
+    `result.degraded_independence` verbatim, never re-derives it. This is
+    deliberately a minimal, additive field rather than an attempt to
+    anticipate ticket 10's full telemetry-extension scope (occasion,
+    topology, per-round verdict sequence, engagement-unit counts, canary
+    flag/result, and a general degradation-flags field for the budget
+    ladder ticket 09 adds) — this ticket's acceptance criteria require only
+    that the degraded-independence marker itself reach the telemetry
+    record, not that this record anticipate every later ticket's shape.
+    Ticket 10 extends this record further; this field is what it has to
+    build on for this one signal.
     """
 
     timestamp: str
@@ -1090,6 +1497,7 @@ class AdvisoryTelemetryRecord:
     planner_model: str
     critic_model: str
     kind: str = "advisory_consultation"
+    degraded_independence: bool = False
 
     def to_mapping(self) -> dict[str, object]:
         """The JSON-serialisable wire form `_write_telemetry_record` writes.
@@ -1123,6 +1531,7 @@ def _build_telemetry_record(
         outcome=result.outcome,
         planner_model=result.planner_model,
         critic_model=result.critic_model,
+        degraded_independence=result.degraded_independence,
     )
 
 
@@ -1276,6 +1685,8 @@ def run_advisory_consultation_debate(
     critic_b_model: str = "Gemini 3.6 Flash",
     critic_b_effort: str = "high",
     task_id: str | None = None,
+    reachability_check: IsFamilyReachable | None = None,
+    roster_config_path: Path = _CONFIG_PATH,
 ) -> AdvisoryDebateResult:
     """Run the Planner/Critic exchange, revising on objection, and report the outcome.
 
@@ -1379,6 +1790,36 @@ def run_advisory_consultation_debate(
     ``critic_b_position`` carries Critic B's, never a folded combination of
     the two — see ``AdvisoryStalemateReport``'s docstring.
 
+    ``reachability_check`` (spec 0003 ticket 07) is the opt-in seam for
+    family-aware roster resolution: ``None`` by default, which leaves every
+    pre-ticket-07 call site's behaviour completely unchanged — the explicit
+    ``planner_model``/``critic_model``/``critic_a_model``/``critic_b_model``
+    arguments (or their existing string defaults) are used exactly as they
+    always were, and ``degraded_independence`` on the result stays ``False``.
+    Supplying a callable opts in: it is passed to ``resolve_roster`` (with
+    the topology this call already selected via ``occasion``/``complexity``)
+    as the injected ``is_family_reachable`` check, and the roster it returns
+    *replaces* ``planner_model``/``critic_a_model``/``critic_model`` (kept
+    equal to the resolved ``critic_a_model`` in both topologies, matching
+    ``result_critic_model``'s existing pair/panel convention above) and, in
+    panel mode, ``critic_b_model`` — whatever those parameters were
+    explicitly passed as is then ignored for this call. This is a
+    deliberate all-or-nothing seam, not a per-parameter merge: mixing "some
+    roles explicit, some resolved" would need a way to tell "caller passed
+    this explicitly" apart from "caller left this at its default string",
+    which plain string parameters cannot express. A caller wanting some
+    roles pinned and others resolved should call ``resolve_roster`` itself
+    and pass its own choice of explicit model arguments — that public
+    function is exactly the alternative integration point for that case,
+    already exposed as its own callable rather than folded into this one.
+    ``roster_config_path`` threads through to ``resolve_roster`` unchanged,
+    defaulting to this module's own ``routing-config.json``, exactly like
+    ``needs_code_review_consultation``'s ``config_path`` parameter. A
+    ``RosterResolutionError`` (no reachable family at all for some role) is
+    caught and reported as a ``worker_error`` outcome, the same fail-closed
+    treatment every other pre-flight failure to reach a worker already gets
+    in this function.
+
     Raises ``ValueError`` if ``max_rounds`` is not at least 1, or if
     ``occasion`` is not one of the four ``Occasion`` values: both are
     programming errors at the call site, not a genuine Planner-Critic
@@ -1410,6 +1851,16 @@ def run_advisory_consultation_debate(
     # not this one's — see this ticket's report for why that line is drawn
     # here.
     result_critic_model = critic_a_model if panel_mode else critic_model
+    # Spec 0003 (CriticalDialogue) ticket 07: set (if at all) only by the
+    # roster-resolution block below, which runs after the sensitivity gate
+    # and before this closure is ever invoked — see that block's own
+    # comment for why. Declared here, before `_result` is defined, purely
+    # so the sensitivity-halt branch (which calls `_result` before roster
+    # resolution ever runs) reads a real `False` rather than raising
+    # `UnboundLocalError`: a halted task never reaches roster resolution at
+    # all, and correctly reports no degradation for a dialogue that never
+    # ran.
+    roster_degraded_independence = False
 
     rounds: list[AdvisoryDebateRound] = []
     previous_plan: str | None = None
@@ -1469,6 +1920,7 @@ def run_advisory_consultation_debate(
             rounds=tuple(rounds),
             stalemate=stalemate,
             error=error,
+            degraded_independence=roster_degraded_independence,
         )
 
         resolved_task_id = _resolve_task_id(task_description, task_id, outcome)
@@ -1507,6 +1959,36 @@ def run_advisory_consultation_debate(
             error=_fold_error(reason, cleanup_error),
             sensitivity_marker=marker,
         )
+
+    # Spec 0003 (CriticalDialogue) ticket 07: opt-in roster resolution.
+    # Placed after the sensitivity gate (a halted task never needs a
+    # roster) and before any worker is contacted (a resolved roster must be
+    # in place before the first `invoke_worker` call uses it). Reassigning
+    # `planner_model`/`critic_model`/`critic_a_model`/`critic_b_model` and
+    # `result_critic_model` here, as plain enclosing-scope locals, is
+    # sufficient for `_result` to see the resolved values: `_result` is a
+    # closure that reads them at call time, not at its definition point
+    # above, and its only call so far (`sensitivity_halt`) has already
+    # returned by the time control reaches here.
+    if reachability_check is not None:
+        roster_topology: RosterTopology = "panel" if panel_mode else "pair"
+        try:
+            roster = resolve_roster(
+                roster_topology,
+                is_family_reachable=reachability_check,
+                config_path=roster_config_path,
+            )
+        except RosterResolutionError as exc:
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
+
+        planner_model = roster.model_for("planner")
+        critic_a_model = roster.model_for("critic_a")
+        critic_model = critic_a_model
+        if panel_mode:
+            critic_b_model = roster.model_for("critic_b")
+        result_critic_model = critic_a_model if panel_mode else critic_model
+        roster_degraded_independence = roster.degraded_independence
 
     if invoke_worker is None:
         try:

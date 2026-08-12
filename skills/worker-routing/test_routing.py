@@ -1396,6 +1396,22 @@ def _revise(note: str) -> str:
     return f"{note}\nVERDICT: REVISE"
 
 
+def _reachable(*families: str) -> "advisory_consultation.IsFamilyReachable":
+    """Build a scripted `is_family_reachable` fake for `resolve_roster` and
+    `run_advisory_consultation_debate`'s `reachability_check` parameter
+    (spec 0003 ticket 07): reachable for exactly the named families,
+    unreachable for everything else. This is that seam's offline fake, the
+    same role `_RecordingInvoker`/`_RoleKeyedInvoker` play for
+    `invoke_worker` — no real network or local-endpoint probe, ever, per
+    this ticket's own testability requirement ("this must be testable
+    offline with a fake, exactly like `invoke_worker` is injected today").
+    `_reachable()` with no arguments is the "nothing is up" fake used to
+    exercise `RosterResolutionError`.
+    """
+    allowed = set(families)
+    return lambda family: family in allowed
+
+
 class VerdictContractParserTests(unittest.TestCase):
     """Spec 0003 (CriticalDialogue) ticket 02: `_parse_critic_verdict` under
     the VerdictContract. This is the one class in this file permitted to
@@ -2904,6 +2920,460 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
 
         assert result.stalemate is not None
         self.assertIsNone(result.stalemate.critic_b_position)
+
+
+class ModelFamilyClassifierTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 07: `classify_model_family` is
+    the pure function every later piece of roster-resolution
+    infrastructure is built on — "Family, not model, is the independence
+    unit" (spec's Implementation Decisions paragraph of the same name)."""
+
+    def test_claude_models_share_one_family(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Claude Fable 5"),
+        )
+
+    def test_codex_and_gpt_share_one_family(self) -> None:
+        """The ticket's own brief: "gpt"/"codex" substrings both map to the
+        Codex/GPT family — routing-config.json's own `critic` role block
+        already lists "Codex 5.6 Sol" and "GPT-OSS 120B (Medium)" as
+        interchangeable alternatives within one role."""
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("GPT-OSS 120B (Medium)"),
+        )
+
+    def test_gemini_models_share_one_family(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+            advisory_consultation.classify_model_family("Gemini 3.1 Pro (High)"),
+        )
+
+    def test_the_four_cloud_families_are_pairwise_distinct(self) -> None:
+        families = {
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+        }
+        self.assertEqual(len(families), 3)
+
+    def test_each_local_model_lineage_is_its_own_family(self) -> None:
+        """The spec's own phrase: "each local model lineage counts as its
+        own family" — two different local checkpoints must classify to two
+        different families, and neither may collide with a cloud family."""
+        gemma = advisory_consultation.classify_model_family("Gemma 4 E4B")
+        qwen = advisory_consultation.classify_model_family("Qwen3-Coder-Next")
+        self.assertNotEqual(gemma, qwen)
+        cloud_families = {
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+        }
+        self.assertNotIn(gemma, cloud_families)
+        self.assertNotIn(qwen, cloud_families)
+
+    def test_same_local_lineage_different_checkpoint_is_one_family(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("Gemma 4 E4B"),
+            advisory_consultation.classify_model_family("Gemma 2 9B"),
+        )
+
+    def test_classification_is_case_insensitive_for_cloud_families(self) -> None:
+        self.assertEqual(
+            advisory_consultation.classify_model_family("claude opus 5"),
+            advisory_consultation.classify_model_family("CLAUDE OPUS 5"),
+        )
+
+    def test_digit_leading_local_model_names_do_not_collide_on_a_middle_fragment(
+        self,
+    ) -> None:
+        """Regression for a code-review finding: `_LOCAL_LINEAGE_PATTERN`
+        must anchor to the LEADING run of alphabetic characters (`.match`),
+        not the first one found anywhere in the string (`.search`). Before
+        this was anchored, two unrelated digit-led local model names could
+        silently collide into the same family via a coincidental middle
+        fragment — e.g. both matching "b" from "70B-Instruct" and
+        "4B-Mixtral" — which would have defeated the exact independence
+        guarantee `resolve_roster` exists to enforce. Neither fixture here
+        starts with a letter, so neither hits the leading-alpha-run branch
+        at all; both fall through to the full-lowered-name fallback
+        instead, which keeps them distinct without merging on a fragment.
+        """
+        seventy_b = advisory_consultation.classify_model_family("70B-Instruct")
+        four_b = advisory_consultation.classify_model_family("4B-Mixtral")
+        self.assertNotEqual(seventy_b, four_b)
+        cloud_families = {
+            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
+            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
+            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+        }
+        self.assertNotIn(seventy_b, cloud_families)
+        self.assertNotIn(four_b, cloud_families)
+
+    def test_digit_leading_local_model_name_falls_back_to_full_lowered_name(
+        self,
+    ) -> None:
+        """Locks in the exact fallback value for a name with no leading
+        alphabetic run at all: the full lowercased, stripped name — not an
+        exception, not `"unknown"` (that is reserved for a genuinely empty
+        or all-punctuation name), and not a fragment `.search` would have
+        found anywhere else in the string."""
+        self.assertEqual(
+            advisory_consultation.classify_model_family("70B-Instruct"),
+            "70b-instruct",
+        )
+
+
+class RosterResolutionTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 07: `resolve_roster` assigns a
+    model to each role in a pair or panel topology, preferring a distinct
+    family per role and degrading to family reuse only when the reachable
+    families genuinely run out. Every test drives the public
+    `resolve_roster` seam with a scripted `is_family_reachable` fake
+    (`_reachable`, defined above `VerdictContractParserTests`) — no real
+    reachability probe, ever.
+    """
+
+    def test_pair_roster_spans_two_distinct_families_when_reachable(self) -> None:
+        """Criterion 1 (pair half): 2+ reachable families never repeat
+        across roles."""
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(len(roster.assignments), 2)
+        self.assertEqual(len(families), 2)
+        self.assertFalse(roster.degraded_independence)
+
+    def test_panel_roster_spans_three_distinct_families_when_reachable(self) -> None:
+        """Criterion 1 (panel half): 2+ (here 3) reachable families never
+        repeat across roles."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(len(roster.assignments), 3)
+        self.assertEqual(len(families), 3)
+        self.assertFalse(roster.degraded_independence)
+
+    def test_unreachable_preferred_family_substitutes_next_in_chain_not_degraded(
+        self,
+    ) -> None:
+        """Criterion 2: `critic_a`'s preferred family (codex-gpt, from
+        "Codex 5.6 Sol") is unreachable; the resolver must move to the next
+        family in `critic_a`'s own configured fallback chain rather than
+        immediately reusing the Planner's family."""
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude", "gemini")
+        )
+        critic_a = next(a for a in roster.assignments if a.role == "critic_a")
+        self.assertNotEqual(critic_a.family, "codex-gpt")
+        self.assertEqual(critic_a.family, "gemini")
+        self.assertFalse(roster.degraded_independence)
+
+    def test_single_reachable_family_forces_reuse_and_flags_degraded_for_pair(
+        self,
+    ) -> None:
+        """Criterion 3 (pair half): the fallback chain exhausted to one
+        remaining family forces same-family and sets the marker."""
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(families, {"claude"})
+        self.assertTrue(roster.degraded_independence)
+
+    def test_single_reachable_family_forces_reuse_and_flags_degraded_for_panel(
+        self,
+    ) -> None:
+        """Criterion 3 (panel half): same as above, for a three-role panel."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude")
+        )
+        families = {a.family for a in roster.assignments}
+        self.assertEqual(families, {"claude"})
+        self.assertEqual(len(roster.assignments), 3)
+        self.assertTrue(roster.degraded_independence)
+
+    def test_panel_with_two_reachable_families_reuses_one_and_flags_degraded(
+        self,
+    ) -> None:
+        """The ticket's own named ambiguity: a panel needs three distinct
+        families for full independence, but only two are reachable. This
+        module reads "a single family remains" (spec 0003's Implementation
+        Decisions) as "resolution was forced to reuse a family already
+        claimed within this roster" — see `resolve_roster`'s docstring for
+        the full reasoning — which is true here even though two distinct
+        families are reachable overall, so this must still degrade rather
+        than silently running a two-out-of-three-independent panel."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude", "codex-gpt")
+        )
+        families = [a.family for a in roster.assignments]
+        self.assertEqual(len(families), 3)
+        self.assertEqual(set(families), {"claude", "codex-gpt"})
+        self.assertTrue(roster.degraded_independence)
+
+    def test_normal_run_never_flags_degraded(self) -> None:
+        """Criterion 5: a normal (non-degraded) run never carries the marker."""
+        for topology in ("pair", "panel"):
+            with self.subTest(topology=topology):
+                roster = advisory_consultation.resolve_roster(
+                    topology,
+                    is_family_reachable=_reachable("claude", "codex-gpt", "gemini"),
+                )
+                self.assertFalse(roster.degraded_independence)
+
+    def test_model_for_raises_key_error_outside_the_topology(self) -> None:
+        roster = advisory_consultation.resolve_roster(
+            "pair", is_family_reachable=_reachable("claude", "codex-gpt")
+        )
+        with self.assertRaises(KeyError):
+            roster.model_for("critic_b")
+
+    def test_no_reachable_family_at_all_raises_roster_resolution_error(self) -> None:
+        with self.assertRaises(advisory_consultation.RosterResolutionError):
+            advisory_consultation.resolve_roster("pair", is_family_reachable=_reachable())
+
+    def test_unknown_topology_raises_value_error(self) -> None:
+        with self.assertRaises(ValueError):
+            advisory_consultation.resolve_roster(
+                "trio",  # type: ignore[arg-type]
+                is_family_reachable=_reachable("claude"),
+            )
+
+    def test_default_chains_match_pre_ticket_07_parameter_defaults(self) -> None:
+        """When everything is reachable, resolution reproduces exactly the
+        hardcoded defaults `run_advisory_consultation_debate` already
+        shipped before this ticket existed — this ticket adds a resolution
+        *path*, it does not change what "everything is up" already looked
+        like."""
+        roster = advisory_consultation.resolve_roster(
+            "panel", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
+        )
+        self.assertEqual(roster.model_for("planner"), "Claude Opus 5 (Thinking)")
+        self.assertEqual(roster.model_for("critic_a"), "Codex 5.6 Sol")
+        self.assertEqual(roster.model_for("critic_b"), "Gemini 3.6 Flash")
+
+    def test_fallback_chains_are_read_from_config_not_hardcoded(self) -> None:
+        """Drift guard mirroring `test_code_review_threshold_is_read_from_injected_config_not_hardcoded`'s
+        own style: pointing `config_path` at a file with a different chain
+        must change the resolver's answer, proving the chain is genuinely
+        read from config rather than merely referenced by key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "roster_topology": {
+                            "role_fallback_chains": {
+                                "planner": ["Qwen3-Coder-Next"],
+                                "critic_a": ["Gemma 4 E4B"],
+                                "critic_b": ["Claude Opus 5 (Thinking)"],
+                            }
+                        }
+                    }
+                )
+            )
+            roster = advisory_consultation.resolve_roster(
+                "pair",
+                is_family_reachable=_reachable("qwen", "gemma"),
+                config_path=config_path,
+            )
+        planner = next(a for a in roster.assignments if a.role == "planner")
+        critic_a = next(a for a in roster.assignments if a.role == "critic_a")
+        self.assertEqual(planner.model, "Qwen3-Coder-Next")
+        self.assertEqual(critic_a.model, "Gemma 4 E4B")
+
+    def test_missing_roster_topology_section_falls_back_to_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            config_path.write_text(json.dumps({}))
+            roster = advisory_consultation.resolve_roster(
+                "pair",
+                is_family_reachable=_reachable("claude", "codex-gpt"),
+                config_path=config_path,
+            )
+        self.assertEqual(roster.model_for("planner"), "Claude Opus 5 (Thinking)")
+        self.assertEqual(roster.model_for("critic_a"), "Codex 5.6 Sol")
+
+
+class AdvisoryRosterIntegrationTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 07: `reachability_check` wired
+    into `run_advisory_consultation_debate` as an opt-in roster-resolution
+    seam. Every pre-existing test in this file never mentions this
+    parameter, so it always defaults to `None` and continues to invoke
+    exactly the explicit/default models it always did — the entire
+    pre-existing 204-test suite, `AdvisoryConsultationTests` and
+    `AdvisoryPanelTopologyTests` above included, is this ticket's
+    regression guard that the opt-in changes nothing when a caller does not
+    ask for it.
+    """
+
+    def test_reachability_check_none_leaves_default_models_untouched(self) -> None:
+        """The opt-in contract's other half, explicit: omitting
+        `reachability_check` (its default, `None`) must invoke exactly the
+        models the caller passed, never a roster-resolved substitute, and
+        `degraded_independence` must stay `False`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+            )
+
+        self.assertEqual(result.planner_model, "Test Planner")
+        self.assertEqual(result.critic_model, "Test Critic")
+        self.assertFalse(result.degraded_independence)
+        called_models = {model for model, _e, _p in invoker.calls}
+        self.assertEqual(called_models, {"Test Planner", "Test Critic"})
+
+    def test_pair_roster_resolved_end_to_end_with_three_reachable_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": [plan],
+                    "Codex 5.6 Sol": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.planner_model, "Claude Opus 5 (Thinking)")
+        self.assertEqual(result.critic_model, "Codex 5.6 Sol")
+        self.assertFalse(result.degraded_independence)
+
+    def test_panel_roster_resolved_end_to_end_spans_three_distinct_families(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": [plan],
+                    "Codex 5.6 Sol": [_approve(plan, "Critic A: solid.")],
+                    "Gemini 3.6 Flash": [_approve(plan, "Critic B: solid.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(len(invoker.calls), 3)
+        called_families = {
+            advisory_consultation.classify_model_family(model)
+            for model, _e, _p in invoker.calls
+        }
+        self.assertEqual(len(called_families), 3)
+        self.assertFalse(result.degraded_independence)
+
+    def test_degraded_independence_surfaces_in_telemetry_record(self) -> None:
+        """Criterion 4 (telemetry half): the marker reaches the structured record."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude"),
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertTrue(result.degraded_independence)
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["degraded_independence"])
+
+    def test_degraded_independence_surfaces_in_transcript_text(self) -> None:
+        """Criterion 4 (transcript half): a test asserting on transcript
+        content finds the marker, not just the structured record."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude"),
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+
+    def test_normal_reachable_run_carries_no_degraded_marker_in_either_artifact(
+        self,
+    ) -> None:
+        """Criterion 5, end to end: a normal run through the public entry
+        point never carries the marker in either artifact."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": [plan],
+                    "Codex 5.6 Sol": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertFalse(result.degraded_independence)
+        self.assertNotIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertFalse(records[0]["degraded_independence"])
+
+    def test_roster_resolution_error_fails_closed_as_worker_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                _RecordingInvoker([]),
+                root_dir=root,
+                reachability_check=_reachable(),  # nothing reachable at all
+            )
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertFalse(result.consensus_reached)
+        self.assertFalse((root / "implementation_plan.md").exists())
 
 
 class AdvisoryOccasionParameterizationTests(unittest.TestCase):

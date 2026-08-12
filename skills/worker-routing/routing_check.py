@@ -203,8 +203,16 @@ TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 # predicates, not a worker role — its dict shape has no "patterns" key and
 # would silently contribute nothing to `load_patterns` even unlisted, but it
 # belongs here for the same documented reason "code_extensions" and
-# "safe_commands" do.
-NON_ROLE_CONFIG_KEYS = {"code_extensions", "safe_commands", "orchestrator", "critical_dialogue"}
+# "safe_commands" do. "roster_topology" (spec 0003 ticket 07) is the same
+# kind of namespace, consumed by `advisory_consultation.resolve_roster`'s
+# `_load_roster_fallback_chains`, not a worker role either.
+NON_ROLE_CONFIG_KEYS = {
+    "code_extensions",
+    "safe_commands",
+    "orchestrator",
+    "critical_dialogue",
+    "roster_topology",
+}
 
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s+")
 SCRIPT_WRAPPER_RE = re.compile(r"^script\s+(?:-\S+\s+)*\S+\s+")
