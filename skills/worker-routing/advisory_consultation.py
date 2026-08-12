@@ -63,7 +63,18 @@ InvokeWorker = Callable[[str, str, str], str]
 # attempts to review a real mission artifact at all — there is no Planner
 # proposal to agree or disagree about — so grouping it with the other four
 # would misstate what happened. See `CanaryFixture` and `is_canary_dialogue`
-# below for the full mechanism.
+# below for the full mechanism. "budget_skipped" (spec 0003 ticket 09) is a
+# seventh, again orthogonal case: like "sensitivity_halt", no Planner or
+# Critic is ever contacted -- but for an unrelated reason (the session's
+# dialogue budget is fully exhausted, not that the task text itself is
+# unsafe), and unlike "sensitivity_halt" nothing about `task_description` is
+# redacted, because there is nothing sensitive here to redact. It exists so
+# a caller whose session ran out of budget still receives a real
+# `AdvisoryDebateResult` -- transcript and telemetry record both written,
+# per this module's "every outcome gets both artifacts" invariant -- rather
+# than silently getting "no dialogue happened" with no trace. See
+# `resolve_degradation_rung` below for the pure decision this outcome is
+# reported for.
 AdvisoryOutcome = Literal[
     "consensus",
     "stalemate",
@@ -71,6 +82,7 @@ AdvisoryOutcome = Literal[
     "worker_error",
     "sensitivity_halt",
     "canary",
+    "budget_skipped",
 ]
 
 # The Critic's verdict line, once read, is one of these three states.
@@ -766,6 +778,226 @@ def is_canary_dialogue(
 CANARY_MARKER = "CANARY DIALOGUE"
 
 
+# Spec 0003 (CriticalDialogue) ticket 09: the per-session dialogue budget
+# and its ordered degradation ladder ("Budget" paragraph, Implementation
+# Decisions: "On exhaustion, an ordered degradation ladder applies: reduce
+# rounds, then cheapen the roster, then skip the dialogue entirely with a
+# report. Every rung taken emits a telemetry record -- degradation is never
+# silent.").
+#
+# **Unit of spend.** This module holds no session state -- same philosophy
+# ticket 07's `reachability_check` and ticket 08's `is_canary_dialogue`
+# already established (see their own comments: a scheduler or a budget
+# ledger belongs to whatever orchestrates a session, not to a module that
+# promises full offline, stateless exercisability). `session_spend_so_far`
+# (on `run_advisory_consultation_debate`, threaded to `resolve_degradation_rung`
+# below) is a plain caller-tracked integer counter: the number of
+# `run_advisory_consultation_debate` calls the current session has already
+# made *before* this one, not rounds, not tokens, not dollars. Counting
+# dialogues rather than rounds or a cost estimate is the simplest unit that
+# is still faithful to the spec's own phrase, "per-session dialogue
+# budget" -- a dialogue is the thing being budgeted, so a dialogue is what
+# is counted. A caller that also wants rounds or cost reflected in its
+# session-wide accounting is free to compute its own `session_spend_so_far`
+# from a richer formula (e.g. weighting a panel dialogue more than a pair
+# one) before passing it in; this module only consumes the final integer,
+# it does not prescribe how a caller arrives at it.
+#
+# **The ladder's thresholds.** `resolve_degradation_rung` reads exactly one
+# config number -- `dialogue_budget.session_dialogue_cap` (the "numeric cap"
+# the ticket calls for) -- and divides `session_spend_so_far` into four
+# bands, each exactly one cap's width wide: under one cap is rung 0 (no
+# degradation), one to two caps is rung 1 (reduce rounds), two to three caps
+# is rung 2 (cheapen roster/effort), three or more caps is rung 3 (skip
+# entirely). Multiples of the cap itself, rather than independently
+# configured per-rung thresholds, are deliberately chosen: they need no
+# extra config surface beyond the one number the ticket asks for, and they
+# read as a legible story -- crossing the budget once is a mild overrun
+# (reduce rounds), crossing it twice is a serious overrun (cheapen further),
+# crossing it three times over is exhausted (stop spending, report instead).
+# A `session_dialogue_cap` of zero degenerates cleanly to "always rung 3"
+# for any `session_spend_so_far >= 0` (every band's upper bound is also
+# zero, so every comparison falls through to the final `return 3`) -- a
+# session with no budget at all has no room for any dialogue, which is the
+# correct reading, not a special case this function needs to guard against.
+DegradationRung = Literal[0, 1, 2, 3]
+
+DEFAULT_SESSION_DIALOGUE_CAP = 10
+
+# **What each rung concretely does**, wired into `run_advisory_consultation_debate`:
+#
+# - Rung 1 reassigns the local `max_rounds` down to
+#   `_DEGRADED_ROUND_CAP` (below) -- a single round: either the Planner's
+#   first proposal earns the Critic's approval immediately, or the
+#   dialogue reports a stalemate on round 1 rather than paying for up to
+#   `MAX_DEBATE_ROUNDS` of back-and-forth. One round, not two, is chosen
+#   because it is the simplest, least ambiguous reduction: any cap above 1
+#   still buys another full revision exchange, which is not "reduced," it
+#   is merely "slightly cheaper," and the ticket's own language ("reduce
+#   rounds") does not ask for a slightly-cheaper dialogue, it asks for a
+#   cheaper ladder rung that is visibly, structurally different from an
+#   un-degraded run.
+# - Rung 2 additionally (rungs compound -- see below) reassigns
+#   `planner_effort`, `critic_effort`, `critic_a_effort`, and
+#   `critic_b_effort` down to `_DEGRADED_EFFORT`, AND reassigns
+#   `planner_model`/`critic_model`/`critic_a_model`/`critic_b_model` to the
+#   single model named by `_load_degraded_roster_model` (below) -- the
+#   ticket's own "What to build" prose is specific ("cheapen the roster
+#   (e.g. fall back toward lighter/local families)"), so effort alone
+#   under-delivers against it; a "roster" is model/family assignment
+#   everywhere else in this module (`resolve_roster`, ticket 07), and rung
+#   2 now actually touches that, not only effort. This is still a config
+#   read plus a substitution, not a new resolver: `resolve_roster` (ticket
+#   07) has no "prefer the cheapest reachable family" bias to opt into --
+#   it only ever tries to maximize *independence* across roles, never cost
+#   -- and building that bias into it would be new roster-resolution
+#   infrastructure this ticket does not need to invent. Reusing
+#   `routing-config.json`'s existing `light_doer` role block instead is the
+#   same "config-driven substitution" shape ticket 08 already uses for
+#   canary fixture substitution. Every role gets the *same* single cheap
+#   model at this rung, deliberately: preserving cross-family independence
+#   is `resolve_roster`'s job and is tracked separately
+#   (`degraded_independence`), not this rung's -- rung 2 exists to cut
+#   cost, and a shared cheap model does that without pretending to also
+#   preserve independence it was never asked to protect.
+# - Rung 3 ends the call entirely, before roster resolution, before a
+#   canary check, before any `invoke_worker` call -- see the
+#   `"budget_skipped"` outcome and `run_advisory_consultation_debate`'s own
+#   budget-ladder block.
+#
+# The three rungs compound rather than replace one another (rung 2 keeps
+# rung 1's round reduction as well as adding its own effort reduction): a
+# ladder is a progressively worsening state, not three mutually exclusive
+# single-feature toggles, and a caller deep enough into overspend to reach
+# rung 2 should not regain the round budget rung 1 already took away.
+_DEGRADED_ROUND_CAP = 1
+_DEGRADED_EFFORT = "low"
+
+
+def _load_dialogue_budget_config(config_path: Path) -> int:
+    """Read the session dialogue cap from `config_path`'s `dialogue_budget`
+    section, falling back to `DEFAULT_SESSION_DIALOGUE_CAP` when the section
+    (or its one key) is absent -- same pattern, including the no-try/except
+    contract, as `_load_canary_cadence_config` and `_load_roster_fallback_chains`
+    above: production always calls this with the default `_CONFIG_PATH`,
+    which is checked into the repo, so a missing/malformed `config_path` is
+    a genuine caller mistake left to raise loudly rather than be swallowed.
+    """
+    with open(config_path, "r", encoding="utf-8") as stream:
+        config = json.load(stream)
+    section = config.get("dialogue_budget", {})
+    return int(section.get("session_dialogue_cap", DEFAULT_SESSION_DIALOGUE_CAP))
+
+
+# Fallback for a config file missing the `light_doer` section (or its
+# `name` key) -- same role as this module's other `_DEFAULT_*` fallbacks
+# (`DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD`, `DEFAULT_ROSTER_FALLBACK_CHAINS`,
+# `DEFAULT_CANARY_DIALOGUES_PER_CANARY`), never what production actually
+# uses, since the checked-in `routing-config.json` supplies its own
+# `light_doer` block already. Matches that block's own first-listed
+# alternative today ("Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)").
+_DEFAULT_DEGRADED_ROSTER_MODEL = "Codex 5.6 Terra"
+
+
+def _load_degraded_roster_model(config_path: Path) -> str:
+    """Read the single model rung 2 substitutes for every role, drawn from
+    `config_path`'s existing `light_doer` role block rather than a new
+    config section this ticket would otherwise have to invent -- see the
+    "What each rung concretely does" module comment above `DegradationRung`
+    for why `light_doer` (not `sensitive_doer`) is the right block to reuse
+    here, and why one shared model for every role is the deliberate choice
+    rather than a shortcoming.
+
+    `light_doer.name` lists several interchangeable alternatives, e.g.
+    ``"Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)"`` -- the same
+    "ordered, first-is-primary" convention `DEFAULT_ROSTER_FALLBACK_CHAINS`
+    already establishes for its own tuples elsewhere in this module (see
+    that constant's comment: "Every chain's first entry is exactly the
+    parameter default ... already shipped"). This function reads that
+    first ``"/"``-delimited alternative, stripped, as the one concrete
+    model name a caller of `invoke_worker` actually needs -- not a new
+    parsing scheme, just that same "first is primary" reading applied to
+    a config field that was, until now, only ever consumed by
+    `routing_check.py` for pattern matching, never as a model name by this
+    module.
+
+    Falls back to `_DEFAULT_DEGRADED_ROSTER_MODEL` when the `light_doer`
+    section, its `name` key, or a non-empty first alternative is missing --
+    mirrors this module's other `_load_*` functions' no-try/except
+    contract for the file read itself: a missing/malformed `config_path`
+    still raises loudly, only a missing/malformed *value inside* a present
+    file falls back, exactly like `_load_roster_fallback_chains` treats a
+    missing role key.
+    """
+    with open(config_path, "r", encoding="utf-8") as stream:
+        config = json.load(stream)
+    role_block = config.get("light_doer", {})
+    name = role_block.get("name", _DEFAULT_DEGRADED_ROSTER_MODEL)
+    primary = name.split("/")[0].strip()
+    return primary or _DEFAULT_DEGRADED_ROSTER_MODEL
+
+
+def resolve_degradation_rung(
+    session_spend_so_far: int,
+    *,
+    config_path: Path = _CONFIG_PATH,
+) -> DegradationRung:
+    """Pure function: given how many dialogues this session has already run
+    (`session_spend_so_far`) and the configured per-session cap
+    (`dialogue_budget.session_dialogue_cap`, default `DEFAULT_SESSION_DIALOGUE_CAP`),
+    decide which degradation rung applies to the *next* dialogue.
+
+    See the module comment above `DegradationRung` for the full reasoning
+    behind the unit chosen for `session_spend_so_far` and the thresholds
+    below. In short: with `cap = dialogue_budget.session_dialogue_cap`,
+
+    - `session_spend_so_far < cap`            -> rung 0 (no degradation)
+    - `cap <= session_spend_so_far < 2 * cap`  -> rung 1 (reduce rounds)
+    - `2 * cap <= session_spend_so_far < 3 * cap` -> rung 2 (cheapen roster: model + effort)
+    - `session_spend_so_far >= 3 * cap`        -> rung 3 (skip entirely)
+
+    Every boundary is inclusive on its lower edge (`<=`/`>=`, matching
+    `is_canary_dialogue`'s identical "fires exactly at the boundary"
+    convention): a caller passing exactly `cap` already gets rung 1 on that
+    call, not the one after it.
+
+    This function is stateless and total exactly like `is_canary_dialogue`:
+    it holds no memory of past calls and never raises for any integer
+    `session_spend_so_far` (including negative values, which simply always
+    read as rung 0 -- a caller passing a negative spend is under budget by
+    construction). `config_path` is read fresh on every call rather than
+    cached at import time, so a caller (or a test) pointing this at a
+    different file always observes that file's current cap, which is the
+    only way to prove the cap is genuinely config-driven rather than a
+    Python-side literal that happens to match the spec's numbers today.
+    """
+    cap = _load_dialogue_budget_config(config_path)
+    if session_spend_so_far < cap:
+        return 0
+    if session_spend_so_far < 2 * cap:
+        return 1
+    if session_spend_so_far < 3 * cap:
+        return 2
+    return 3
+
+
+# Spec 0003 (CriticalDialogue) ticket 09: the literal substring
+# `_render_consultation_transcript` writes into a degraded dialogue's
+# transcript, and what a test greps for -- same role `DEGRADED_INDEPENDENCE_MARKER`
+# and `CANARY_MARKER` play for their own tickets. Only present when
+# `result.degradation_rung > 0`, never an always-rendered "rung 0" line, so
+# a normal, un-degraded run's transcript never contains this marker at all
+# -- the same "gate on the condition, don't render a falsy value" contract
+# `DEGRADED_INDEPENDENCE_MARKER` already established.
+BUDGET_DEGRADATION_MARKER = "BUDGET DEGRADATION"
+
+_DEGRADATION_RUNG_LABELS: dict[DegradationRung, str] = {
+    1: "reduce rounds",
+    2: "cheapen roster: model + effort",
+    3: "skip the dialogue entirely",
+}
+
+
 @dataclass(frozen=True)
 class AdvisoryDebateRound:
     """One Planner/Critic exchange: the proposal offered and the verdict(s) it drew.
@@ -889,6 +1121,22 @@ class AdvisoryDebateResult:
     a stale value from an unrelated canary run, because each call to
     `run_advisory_consultation_debate` builds exactly one
     `AdvisoryDebateResult` from scratch.
+
+    `degradation_rung` (spec 0003 ticket 09) is appended after
+    `canary_result`, last, by the identical append-only rule every field
+    above it already follows: every pre-ticket-09 construction of this
+    dataclass — in this module and in tests — that never mentions it keeps
+    meaning exactly what it meant before this field existed, defaulting to
+    `0`. Set to whatever `resolve_degradation_rung` decided for this call
+    (`0`-`3`), copied verbatim by `_result` from the enclosing function's
+    own `degradation_rung` local — see `run_advisory_consultation_debate`'s
+    budget-ladder block. `0` on every outcome that never reached the
+    budget check at all (`sensitivity_halt`, exactly like
+    `degraded_independence` staying `False` for that same outcome) as well
+    as on any ordinary, un-degraded call. Nonzero on every other outcome
+    when the caller's `session_spend_so_far` placed this call at rung 1 or
+    2 (the dialogue still ran, just degraded), and always `3` when
+    `outcome == "budget_skipped"` (the dialogue did not run at all).
     """
 
     rounds_run: int
@@ -902,6 +1150,7 @@ class AdvisoryDebateResult:
     occasion: Occasion = "ambiguity"
     degraded_independence: bool = False
     canary_result: CanaryResult | None = None
+    degradation_rung: DegradationRung = 0
 
     @property
     def consensus_reached(self) -> bool:
@@ -1622,6 +1871,29 @@ def _render_consultation_transcript(
                 "",
             ]
         )
+    # Spec 0003 (CriticalDialogue) ticket 09: only present when
+    # `result.degradation_rung > 0` — never an always-rendered "rung 0"
+    # line — gated the same way `DEGRADED_INDEPENDENCE_MARKER` and
+    # `CANARY_MARKER` are above, so an un-degraded run's transcript never
+    # contains `BUDGET_DEGRADATION_MARKER` at all. Shown for every degraded
+    # rung, not only the skip rung: a rung-1 or rung-2 dialogue still ran,
+    # but it ran under degradation, and this line is what makes that
+    # visible to a reader of the transcript, not only to a reader of the
+    # structured telemetry record.
+    if result.degradation_rung > 0:
+        lines.extend(
+            [
+                (
+                    f"**{BUDGET_DEGRADATION_MARKER}:** This session's dialogue "
+                    f"budget was exhausted, placing this dialogue at "
+                    f"degradation rung {result.degradation_rung} "
+                    f"({_DEGRADATION_RUNG_LABELS[result.degradation_rung]}). "
+                    "Degradation is never silent — see this dialogue's "
+                    "telemetry record's `degradation_rung` field."
+                ),
+                "",
+            ]
+        )
     lines.extend(
         [
             "## Task",
@@ -1630,7 +1902,14 @@ def _render_consultation_transcript(
             "",
         ]
     )
-    if not rounds:
+    if result.outcome == "budget_skipped":
+        lines.append(
+            "_No Planner or Critic was contacted for this dialogue: the "
+            "session's budget was fully exhausted before this call could "
+            "run. This report exists so the caller never silently receives "
+            '"no dialogue happened" with no trace._'
+        )
+    elif not rounds:
         lines.append("_No rounds were run._")
     for index, round_ in enumerate(rounds, start=1):
         # `critic_b_response is not None` is exactly `AdvisoryDebateRound`'s
@@ -1803,6 +2082,18 @@ class AdvisoryTelemetryRecord:
     canary-adjacent telemetry the spec's Telemetry paragraph also lists
     (e.g. which fixture id produced a given result) — this field is only
     the miss/catch signal itself.
+
+    `degradation_rung` (spec 0003 ticket 09) is appended after
+    `canary_result`, last, by the same append-only rule and for the same
+    reason: this ticket's own acceptance criterion ("Each rung transition
+    emits its own telemetry record distinguishable from a normal run")
+    needs exactly one thing on this record that a normal run's telemetry
+    never carries — a nonzero rung. Copied verbatim from
+    `result.degradation_rung`, the same "copy, never re-derive" contract
+    `degraded_independence` and `canary_result` already set; defaults to
+    `0`, so every pre-ticket-09 construction of this dataclass — in this
+    module and in tests — that never mentions it keeps meaning exactly what
+    it meant before this field existed.
     """
 
     timestamp: str
@@ -1814,6 +2105,7 @@ class AdvisoryTelemetryRecord:
     kind: str = "advisory_consultation"
     degraded_independence: bool = False
     canary_result: CanaryResult | None = None
+    degradation_rung: DegradationRung = 0
 
     def to_mapping(self) -> dict[str, object]:
         """The JSON-serialisable wire form `_write_telemetry_record` writes.
@@ -1849,6 +2141,7 @@ def _build_telemetry_record(
         critic_model=result.critic_model,
         degraded_independence=result.degraded_independence,
         canary_result=result.canary_result,
+        degradation_rung=result.degradation_rung,
     )
 
 
@@ -2006,6 +2299,8 @@ def run_advisory_consultation_debate(
     roster_config_path: Path = _CONFIG_PATH,
     is_canary: bool = False,
     canary_fixture: CanaryFixture | None = None,
+    session_spend_so_far: int = 0,
+    budget_config_path: Path = _CONFIG_PATH,
 ) -> AdvisoryDebateResult:
     """Run the Planner/Critic exchange, revising on objection, and report the outcome.
 
@@ -2190,6 +2485,51 @@ def run_advisory_consultation_debate(
     ``resolve_roster`` already sets equal to the resolved ``critic_a_model``
     in both topologies), not a hardcoded default.
 
+    ``session_spend_so_far`` (spec 0003 ticket 09) is the opt-in seam for
+    the per-session dialogue budget's degradation ladder: ``0`` by default,
+    which leaves every pre-ticket-09 call site's behaviour completely
+    unchanged, since ``resolve_degradation_rung(0, ...)`` always reads rung
+    0 for any positive configured cap. This module holds no session state
+    (same philosophy as ``reachability_check`` and ``is_canary``/
+    ``is_canary_dialogue`` above): the caller tracks how many dialogues its
+    own session has already run and passes that count in here, fresh, on
+    every call — see ``resolve_degradation_rung``'s own docstring for the
+    exact unit and thresholds. ``budget_config_path`` threads through to
+    ``resolve_degradation_rung`` unchanged, defaulting to this module's own
+    ``routing-config.json``, exactly like ``roster_config_path`` above.
+
+    The resolved rung is checked immediately after the sensitivity gate,
+    before roster resolution, before the canary branch, and before any
+    ``invoke_worker`` call: rung 3 (full exhaustion) returns a
+    ``"budget_skipped"`` result right there — no Planner or Critic is ever
+    contacted, and this holds even for a call that also set ``is_canary``.
+    A pre-existing ``implementation_plan.md`` under ``root_dir`` is removed
+    exactly as every other early exit already does, and the same
+    transcript/telemetry choke point (``_result``) still fires, so the
+    caller receives a real, inspectable result rather than silence. Rungs 1
+    and 2 instead degrade this call in place before it proceeds: rung 1
+    lowers the effective round cap to ``_DEGRADED_ROUND_CAP`` (reassigning
+    the local ``max_rounds``, so both pair and panel round loops obey it
+    automatically) immediately after the rung is resolved. Rung 2 lowers
+    both ``planner_effort``/``critic_effort``/``critic_a_effort``/
+    ``critic_b_effort`` to ``_DEGRADED_EFFORT`` AND reassigns
+    ``planner_model``/``critic_model``/``critic_a_model``/``critic_b_model``
+    to the single model ``_load_degraded_roster_model`` reads from
+    ``routing-config.json``'s ``light_doer`` role block — a genuine roster
+    change, not effort alone, per the ticket's own "fall back toward
+    lighter/local families" language. This override is applied *after* the
+    roster-resolution block below, deliberately, so it wins even when
+    ``reachability_check`` also resolved a roster for this call: budget
+    exhaustion is a stronger, later-stage concern than independence. The
+    two rung-2 effects (effort, model) and rung 1's round reduction all
+    compound rather than replace each other, so a rung-2 call also keeps
+    rung 1's reduced round cap. The resolved rung is carried on the
+    returned ``AdvisoryDebateResult`` as
+    ``degradation_rung`` (and on the telemetry record of the same name)
+    regardless of whether it ended up ``0``, so a caller — or an auditor
+    reading telemetry — can always tell whether *this* dialogue ran
+    degraded, never only infer it from the outcome value.
+
     Raises ``ValueError`` if ``max_rounds`` is not at least 1, or if
     ``occasion`` is not one of the four ``Occasion`` values: both are
     programming errors at the call site, not a genuine Planner-Critic
@@ -2231,6 +2571,16 @@ def run_advisory_consultation_debate(
     # all, and correctly reports no degradation for a dialogue that never
     # ran.
     roster_degraded_independence = False
+    # Spec 0003 (CriticalDialogue) ticket 09: set (if at all — to a nonzero
+    # rung) by the budget-ladder check below, which runs after the
+    # sensitivity gate and before this closure is ever invoked, for the
+    # identical reason `roster_degraded_independence` above is declared
+    # here rather than inline: the sensitivity-halt branch calls `_result`
+    # before the budget ladder ever runs, and must read a real `0` rather
+    # than raising `UnboundLocalError` — a halted task never reaches the
+    # budget check at all, and correctly reports no degradation for a
+    # dialogue that never ran.
+    degradation_rung: DegradationRung = 0
 
     rounds: list[AdvisoryDebateRound] = []
     previous_plan: str | None = None
@@ -2294,6 +2644,7 @@ def run_advisory_consultation_debate(
             error=error,
             degraded_independence=roster_degraded_independence,
             canary_result=canary_result,
+            degradation_rung=degradation_rung,
         )
 
         resolved_task_id = _resolve_task_id(task_description, task_id, outcome)
@@ -2335,6 +2686,46 @@ def run_advisory_consultation_debate(
             sensitivity_marker=marker,
         )
 
+    # Spec 0003 (CriticalDialogue) ticket 09: the per-session dialogue
+    # budget's degradation ladder. The rung is decided here, right after
+    # the sensitivity gate (a halted task never needs a budget decision)
+    # and before roster resolution, the canary branch, or any
+    # `invoke_worker` call: `resolve_degradation_rung` is pure and reads no
+    # session state of its own; `session_spend_so_far` is entirely
+    # caller-tracked, exactly like ticket 07's `reachability_check` and
+    # ticket 08's `is_canary_dialogue` seams — see this function's own
+    # docstring and `resolve_degradation_rung`'s for the full contract.
+    #
+    # Only rung 3 and rung 1 are actually applied here, though. Rung 3 must
+    # end the call before roster resolution, the canary branch, or any
+    # `invoke_worker` call ever run, so it is checked immediately below.
+    # Rung 1's round reduction has no roster dependency, so it is applied
+    # immediately too. Rung 2's model/effort cheapening is deliberately
+    # NOT applied here — see the block below the roster-resolution block
+    # further down for why it has to run after roster resolution instead.
+    degradation_rung = resolve_degradation_rung(
+        session_spend_so_far, config_path=budget_config_path
+    )
+    if degradation_rung == 3:
+        # Rung 3: full exhaustion. No Planner, no Critic, no roster
+        # resolution, no canary — the dialogue simply does not run this
+        # call. `_result` still fires (this is a normal `return` through
+        # the module's one choke point, not a shortcut around it), so the
+        # caller still gets a transcript and a telemetry record — see the
+        # `"budget_skipped"` outcome's own comment on `AdvisoryOutcome` for
+        # why that is exactly what "degradation is never silent" requires
+        # even at the ladder's harshest rung.
+        cleanup_error = _remove_stale_plan_artifact(plan_path)
+        return _result("budget_skipped", error=cleanup_error)
+    if degradation_rung >= 1:
+        # Rung 1 (reduce rounds): reassigned as a plain enclosing-scope
+        # local, exactly the mechanism ticket 07 already establishes below
+        # for `planner_model`/`critic_model` — every downstream read of
+        # `max_rounds` (the round loop's own `range(1, max_rounds + 1)`)
+        # picks up the reduction automatically, in both pair and panel
+        # mode, without either loop needing to know a budget ladder exists.
+        max_rounds = min(max_rounds, _DEGRADED_ROUND_CAP)
+
     # Spec 0003 (CriticalDialogue) ticket 07: opt-in roster resolution.
     # Placed after the sensitivity gate (a halted task never needs a
     # roster) and before any worker is contacted (a resolved roster must be
@@ -2364,6 +2755,35 @@ def run_advisory_consultation_debate(
             critic_b_model = roster.model_for("critic_b")
         result_critic_model = critic_a_model if panel_mode else critic_model
         roster_degraded_independence = roster.degraded_independence
+
+    # Spec 0003 (CriticalDialogue) ticket 09: rung 2's model/effort
+    # cheapening. Deliberately placed here, after roster resolution rather
+    # than alongside rung 1 above, so this override is what actually wins
+    # for every downstream `invoke_worker` call: a rung-2 dialogue is
+    # degraded because the session is out of budget, a stronger,
+    # later-stage concern than "which family gives the best independence,"
+    # so it takes priority over whatever `resolve_roster` just picked --
+    # exactly as it already takes priority over the caller's own explicit
+    # `planner_model`/`critic_model` arguments when `reachability_check` is
+    # not supplied at all. Compounds on rung 1's round reduction above
+    # rather than replacing it (see the module comment above
+    # `DegradationRung`). `result_critic_model` is recomputed the same way
+    # the roster-resolution block above computes it, so a panel run's
+    # reported critic model stays consistent with what this rung actually
+    # invokes.
+    if degradation_rung >= 2:
+        planner_effort = _DEGRADED_EFFORT
+        critic_effort = _DEGRADED_EFFORT
+        critic_a_effort = _DEGRADED_EFFORT
+        critic_b_effort = _DEGRADED_EFFORT
+
+        degraded_model = _load_degraded_roster_model(budget_config_path)
+        planner_model = degraded_model
+        critic_a_model = degraded_model
+        critic_model = degraded_model
+        if panel_mode:
+            critic_b_model = degraded_model
+        result_critic_model = critic_a_model if panel_mode else critic_model
 
     # Spec 0003 (CriticalDialogue) ticket 08: the seeded-flaw canary round.
     # Placed after the sensitivity gate and (if opted into) roster

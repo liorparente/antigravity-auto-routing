@@ -5295,5 +5295,549 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         self.assertNotEqual(canary_task_id, real_task_id)
 
 
+class DialogueBudgetLadderTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 09: `resolve_degradation_rung` is
+    a pure function over a caller-tracked session-spend counter and the
+    configured `dialogue_budget.session_dialogue_cap`, config-driven rather
+    than a hardcoded literal -- mirroring `is_canary_dialogue`'s identical
+    `_load_canary_cadence_config` pattern. Thresholds fall at multiples of
+    the cap: spend under 1x the cap is rung 0, 1x-2x is rung 1, 2x-3x is
+    rung 2, 3x and beyond is rung 3 -- see the module comment above
+    `DegradationRung` for the full reasoning.
+    """
+
+    def test_well_under_the_cap_is_rung_zero(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(0), 0)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap // 2), 0)
+
+    def test_fires_rung_one_exactly_at_the_cap_boundary(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap - 1), 0)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap), 1)
+
+    def test_rung_one_holds_up_to_but_not_including_twice_the_cap(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(2 * cap - 1), 1)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(2 * cap), 2)
+
+    def test_rung_two_holds_up_to_but_not_including_three_times_the_cap(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap - 1), 2)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap), 3)
+
+    def test_rung_three_holds_for_any_spend_at_or_beyond_three_times_the_cap(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap), 3)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(100 * cap), 3)
+
+    def test_negative_spend_is_always_rung_zero(self) -> None:
+        """A caller passing a negative spend is under budget by construction --
+        `resolve_degradation_rung` never raises for it (see its docstring)."""
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(-5), 0)
+
+    def test_cap_is_read_from_injected_config_not_hardcoded(self) -> None:
+        """Same proof style as
+        `CanaryCadencePredicateTests.test_dialogue_count_threshold_is_read_from_injected_config_not_hardcoded`:
+        inject two different configs and observe the rung answer flip for
+        the exact same spend, showing the cap is genuinely read from config
+        rather than merely referenced by key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            low_config = Path(tmp) / "low.json"
+            low_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 2}})
+            )
+            high_config = Path(tmp) / "high.json"
+            high_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 2000}})
+            )
+
+            rung_low = advisory_consultation.resolve_degradation_rung(
+                5, config_path=low_config
+            )
+            rung_high = advisory_consultation.resolve_degradation_rung(
+                5, config_path=high_config
+            )
+
+        self.assertEqual(rung_low, 2)  # 5 is >= 2*2 and < 3*2 -> rung 2
+        self.assertEqual(rung_high, 0)
+
+    def test_zero_cap_degenerates_to_always_rung_three(self) -> None:
+        """A session with no budget at all has no room for any dialogue --
+        see the module comment above `DegradationRung` for why this is the
+        correct reading rather than a special case the function must guard."""
+        with tempfile.TemporaryDirectory() as tmp:
+            zero_config = Path(tmp) / "zero.json"
+            zero_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 0}})
+            )
+            self.assertEqual(
+                advisory_consultation.resolve_degradation_rung(0, config_path=zero_config),
+                3,
+            )
+            self.assertEqual(
+                advisory_consultation.resolve_degradation_rung(5, config_path=zero_config),
+                3,
+            )
+
+
+class DegradedRosterModelTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 09 (revised): `_load_degraded_roster_model`
+    reads rung 2's substitute model from `routing-config.json`'s existing
+    `light_doer` role block -- `light_doer.name` lists several
+    interchangeable alternatives (e.g. "Codex 5.6 Terra / Luna / Gemini 3.6
+    Flash (Low)"), and this function reads the first one, the same
+    "first is primary" convention `DEFAULT_ROSTER_FALLBACK_CHAINS` already
+    establishes for its own ordered tuples.
+    """
+
+    def test_reads_the_first_alternative_from_light_doer_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"light_doer": {"name": "Model A / Model B / Model C"}})
+            )
+            self.assertEqual(
+                advisory_consultation._load_degraded_roster_model(config_path),
+                "Model A",
+            )
+
+    def test_falls_back_to_default_when_light_doer_section_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({}))
+            self.assertEqual(
+                advisory_consultation._load_degraded_roster_model(config_path),
+                advisory_consultation._DEFAULT_DEGRADED_ROSTER_MODEL,
+            )
+
+    def test_falls_back_to_default_when_the_first_alternative_is_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"light_doer": {"name": " / Model B"}})
+            )
+            self.assertEqual(
+                advisory_consultation._load_degraded_roster_model(config_path),
+                advisory_consultation._DEFAULT_DEGRADED_ROSTER_MODEL,
+            )
+
+    def test_checked_in_config_resolves_to_codex_terra(self) -> None:
+        """Pins the checked-in `routing-config.json`'s current
+        `light_doer.name` value so a future edit to that block is caught
+        here rather than silently changing what rung 2 substitutes."""
+        self.assertEqual(
+            advisory_consultation._load_degraded_roster_model(
+                advisory_consultation._CONFIG_PATH
+            ),
+            "Codex 5.6 Terra",
+        )
+
+
+class AdvisoryBudgetDegradationTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 09: `session_spend_so_far`/
+    `budget_config_path` wired into `run_advisory_consultation_debate`.
+    `session_spend_so_far` defaults to `0`, which always resolves to rung 0
+    for any positive configured cap, so every pre-existing test in this
+    file never mentions this parameter and continues to invoke exactly the
+    rounds/effort it always did -- the entire pre-existing suite is this
+    ticket's regression guard that the opt-in changes nothing when a caller
+    does not ask for it, mirroring ticket 07's and ticket 08's identical
+    regression argument for their own opt-in seams.
+
+    The checked-in `routing-config.json` sets `dialogue_budget.session_dialogue_cap`
+    to `10`, matching `DEFAULT_SESSION_DIALOGUE_CAP` exactly -- these tests
+    read `DEFAULT_SESSION_DIALOGUE_CAP` rather than hardcoding `10`, so they
+    stay correct even if that checked-in value and the default are ever
+    changed together.
+    """
+
+    def test_normal_run_carries_no_degradation_marker_and_reports_rung_zero(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", _approve("Planner's plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=0,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(result.degradation_rung, 0)
+        self.assertTrue(result.consensus_reached)
+        self.assertNotIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertEqual(records[0]["degradation_rung"], 0)
+
+    def test_sensitivity_halt_takes_priority_over_the_budget_ladder(self) -> None:
+        """The sensitivity gate 'still precedes everything' (spec 0003's own
+        phrase) -- a session deep into budget exhaustion must still halt on
+        sensitive task text before the budget ladder is ever consulted, and
+        report no degradation for a dialogue that never ran, exactly like
+        `AdvisoryRosterIntegrationTests` already proves for roster
+        resolution."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite using api_key=sk-abc123",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertEqual(result.degradation_rung, 0)
+        self.assertEqual(invoker.calls, [])
+
+    def test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls(
+        self,
+    ) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's second plan.",
+                    _revise("Still thin."),
+                    "Planner's third plan.",
+                    _revise("Not convinced."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                session_spend_so_far=cap,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertEqual(result.degradation_rung, 1)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertLess(result.rounds_run, 3)
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+
+    def test_rung_one_reduces_rounds_in_panel_topology_too(self) -> None:
+        """The round reduction is a plain `max_rounds` reassignment the
+        round loop already reads regardless of topology -- proves it holds
+        for the panel loop (spec 0003 ticket 05) as well as the pair loop."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": ["Planner's plan."],
+                    "Codex 5.6 Sol": [_revise("Critic A objects.")],
+                    "Gemini 3.6 Flash": [_revise("Critic B objects.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                max_rounds=3,
+                session_spend_so_far=cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 1)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(len(invoker.calls), 3)
+        self.assertEqual(result.outcome, "stalemate")
+
+    def test_rung_two_cheapens_effort_observable_in_invoker_calls(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                planner_effort="high",
+                critic_effort="high",
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        # Rungs compound: rung 2 still carries rung 1's reduced round cap.
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(len(invoker.calls), 2)
+        efforts = {effort for _model, effort, _prompt in invoker.calls}
+        self.assertEqual(efforts, {advisory_consultation._DEGRADED_EFFORT})
+        self.assertNotIn("high", efforts)
+
+    def test_rung_two_changes_both_effort_and_model_sent_to_invoke_worker(
+        self,
+    ) -> None:
+        """Ticket 09 (revised): the ticket's own 'What to build' prose is
+        specific -- rung 2 must 'cheapen the roster (e.g. fall back toward
+        lighter/local families)', not only lower effort. This proves the
+        `model` argument `invoke_worker` actually receives changes too, to
+        `_load_degraded_roster_model`'s substitute (drawn from
+        `routing-config.json`'s `light_doer` block), never the caller's own
+        explicit `planner_model`/`critic_model`."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        expected_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                planner_effort="high",
+                critic_effort="high",
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertNotEqual(expected_model, "Claude Opus 5 (Thinking)")
+        self.assertNotEqual(expected_model, "Codex 5.6 Sol")
+        self.assertEqual(len(invoker.calls), 2)
+        for model, effort, _prompt in invoker.calls:
+            self.assertEqual(model, expected_model)
+            self.assertEqual(effort, advisory_consultation._DEGRADED_EFFORT)
+        self.assertEqual(result.planner_model, expected_model)
+        self.assertEqual(result.critic_model, expected_model)
+
+    def test_rung_two_model_override_wins_over_an_already_resolved_roster(
+        self,
+    ) -> None:
+        """Rung 2's model substitution is applied AFTER roster resolution
+        specifically so it wins even when `reachability_check` also
+        resolved a roster for this call -- budget exhaustion is a
+        stronger, later-stage override than family independence. Proves
+        that every `invoke_worker` call carries the degraded model, not
+        whatever `resolve_roster` would otherwise have picked."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        expected_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        called_models = {model for model, _e, _p in invoker.calls}
+        self.assertEqual(called_models, {expected_model})
+        self.assertFalse(result.degraded_independence)
+        self.assertEqual(result.planner_model, expected_model)
+        self.assertEqual(result.critic_model, expected_model)
+
+    def test_rung_two_still_reaches_consensus_when_the_critic_approves_round_one(
+        self,
+    ) -> None:
+        """Degradation limits retries, it does not block a genuine consensus
+        that arrives on the first (and, at this rung, only) round."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=2 * cap,
+            )
+            written_plan = (root / "implementation_plan.md").read_text()
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(written_plan, plan)
+
+    def test_rung_three_skips_the_dialogue_entirely_with_zero_worker_calls(
+        self,
+    ) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertEqual(result.degradation_rung, 3)
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.final_plan, "")
+        self.assertFalse((root / "implementation_plan.md").exists())
+        self.assertIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertIn("Outcome:** budget_skipped", transcript)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "budget_skipped")
+        self.assertEqual(records[0]["degradation_rung"], 3)
+
+    def test_rung_three_removes_a_pre_existing_stale_plan_artifact(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan_path = root / "implementation_plan.md"
+            plan_path.write_text("stale plan from an earlier run")
+
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                _RecordingInvoker([]),
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+
+            self.assertFalse(plan_path.exists())
+        self.assertEqual(result.outcome, "budget_skipped")
+
+    def test_rung_three_preempts_an_is_canary_call_with_zero_invoker_calls(
+        self,
+    ) -> None:
+        """Design decision: a fully exhausted budget skips the dialogue
+        unconditionally, even for a call that also opted into `is_canary` --
+        a canary probe still contacts a real Critic, and rung 3 exists
+        specifically to guarantee zero worker contact this call. See this
+        ticket's report for why the two seams compose this way rather than
+        canaries bypassing the budget ladder."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                session_spend_so_far=3 * cap,
+            )
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertNotEqual(result.outcome, "canary")
+        self.assertIsNone(result.canary_result)
+        self.assertEqual(invoker.calls, [])
+
+    def test_budget_config_path_is_genuinely_injected_end_to_end(self) -> None:
+        """Same proof style as the roster/canary config-injection tests:
+        point `budget_config_path` at a small-cap config and observe the
+        end-to-end outcome flip to `budget_skipped` for a spend that the
+        checked-in `routing-config.json` (cap 10) would not skip at all."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            small_cap_config = Path(tmp) / "small_cap.json"
+            small_cap_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 1}})
+            )
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3,
+                budget_config_path=small_cap_config,
+            )
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertEqual(result.degradation_rung, 3)
+        self.assertEqual(invoker.calls, [])
+
+    def test_a_caller_walking_session_spend_through_the_ladder_sees_progressively_worse_rungs(
+        self,
+    ) -> None:
+        """Characterizes the caller-tracked pattern the ticket's 'A session
+        tracks cumulative dialogue spend against the configured budget'
+        criterion describes. This module holds no state of its own (see the
+        module comment above `DegradationRung`), so this test plays the
+        caller: it increments its own counter across successive calls and
+        observes the rung climb the ladder exactly as
+        `resolve_degradation_rung` documents, all the way to the rung-3
+        skip."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        spends_and_expected_rungs = [
+            (0, 0),
+            (cap - 1, 0),
+            (cap, 1),
+            (2 * cap - 1, 1),
+            (2 * cap, 2),
+            (3 * cap - 1, 2),
+            (3 * cap, 3),
+        ]
+        observed_rungs = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            for session_spend, _expected in spends_and_expected_rungs:
+                if session_spend < 3 * cap:
+                    plan = "Planner's plan."
+                    invoker: _RecordingInvoker = _RecordingInvoker(
+                        [plan, _approve(plan)]
+                    )
+                else:
+                    invoker = _RecordingInvoker([])
+                result = advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite",
+                    invoker,
+                    root_dir=root,
+                    session_spend_so_far=session_spend,
+                )
+                observed_rungs.append(result.degradation_rung)
+
+        self.assertEqual(
+            observed_rungs, [expected for _spend, expected in spends_and_expected_rungs]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
