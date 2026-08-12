@@ -1396,6 +1396,30 @@ def _revise(note: str) -> str:
     return f"{note}\nVERDICT: REVISE"
 
 
+def _approve_fixture(
+    fixture: advisory_consultation.CanaryFixture, note: str = "Looks solid."
+) -> str:
+    """Build a scripted Critic response that approves `fixture` under the
+    VerdictContract, for canary tests (spec 0003 ticket 08).
+
+    Unlike `_approve`, this quotes only `fixture.plan_text`'s first line
+    rather than the whole fixture text. `_approve`'s single-line
+    `QUOTE: "<artifact_text>"` construction relies on `artifact_text`
+    containing no newline of its own — true for every other artifact_text
+    in this file ("Planner's proposed plan.", etc.) but not for
+    `CANARY_FIXTURES`, whose entries are deliberately multi-line, realistic
+    plans. `_parse_critic_verdict` reads a QUOTE line per physical line
+    (`critic_response.splitlines()`), so embedding a real newline inside
+    the quoted text splits it across several lines, none of which end with
+    the closing `"` on the same line as the opening one — the quote never
+    verifies. A fixture's first line is still guaranteed to be a verbatim
+    substring of the whole `plan_text`, which is all the VerdictContract's
+    quote verification actually requires for `verified_quote_count >= 1`.
+    """
+    quotable_line = fixture.plan_text.splitlines()[0]
+    return f'{note}\nQUOTE: "{quotable_line}"\nVERDICT: APPROVE'
+
+
 def _reachable(*families: str) -> "advisory_consultation.IsFamilyReachable":
     """Build a scripted `is_family_reachable` fake for `resolve_roster` and
     `run_advisory_consultation_debate`'s `reachability_check` parameter
@@ -4839,6 +4863,436 @@ class Phase1CharacterizationTests(unittest.TestCase):
         self.assertEqual(result.stdout, self.golden["audit_output"]["stdout"])
         self.assertEqual(result.stderr, self.golden["audit_output"]["stderr"])
         self.assertEqual(result.returncode, self.golden["audit_output"]["returncode"])
+
+
+class CanaryCadencePredicateTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 08: `is_canary_dialogue` is a pure
+    function over an injected dialogue-count/clock pair, config-driven
+    (`canary_cadence.dialogues_per_canary` /
+    `canary_cadence.seconds_between_canaries`) rather than a hardcoded
+    literal — mirroring `needs_code_review_consultation`'s
+    `_load_code_review_risk_config` pattern. It fires "whichever comes
+    first": either boundary alone is sufficient.
+    """
+
+    def test_fires_exactly_at_the_dialogue_count_boundary(self) -> None:
+        threshold = advisory_consultation.DEFAULT_CANARY_DIALOGUES_PER_CANARY
+        self.assertFalse(
+            advisory_consultation.is_canary_dialogue(threshold - 1, 0.0)
+        )
+        self.assertTrue(advisory_consultation.is_canary_dialogue(threshold, 0.0))
+
+    def test_fires_exactly_at_the_weekly_time_boundary(self) -> None:
+        threshold = advisory_consultation.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES
+        self.assertFalse(
+            advisory_consultation.is_canary_dialogue(0, threshold - 1)
+        )
+        self.assertTrue(advisory_consultation.is_canary_dialogue(0, threshold))
+
+    def test_fires_when_both_boundaries_are_met(self) -> None:
+        self.assertTrue(
+            advisory_consultation.is_canary_dialogue(
+                advisory_consultation.DEFAULT_CANARY_DIALOGUES_PER_CANARY,
+                advisory_consultation.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES,
+            )
+        )
+
+    def test_does_not_fire_when_neither_boundary_is_met(self) -> None:
+        self.assertFalse(advisory_consultation.is_canary_dialogue(1, 1.0))
+        self.assertFalse(advisory_consultation.is_canary_dialogue(5, 12345.0))
+
+    def test_dialogue_count_threshold_is_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        """Same proof style as `test_code_review_threshold_is_read_from_injected_config_not_hardcoded`:
+        inject two different configs and observe the boolean answer flip for
+        the exact same input, showing the value is genuinely read from
+        config rather than merely referenced by key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            low_config = Path(tmp) / "low.json"
+            low_config.write_text(
+                json.dumps({"canary_cadence": {"dialogues_per_canary": 3}})
+            )
+            high_config = Path(tmp) / "high.json"
+            high_config.write_text(
+                json.dumps({"canary_cadence": {"dialogues_per_canary": 3000}})
+            )
+
+            fires_low = advisory_consultation.is_canary_dialogue(
+                5, 0.0, config_path=low_config
+            )
+            fires_high = advisory_consultation.is_canary_dialogue(
+                5, 0.0, config_path=high_config
+            )
+
+        self.assertTrue(fires_low)
+        self.assertFalse(fires_high)
+
+    def test_seconds_threshold_is_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            low_config = Path(tmp) / "low.json"
+            low_config.write_text(
+                json.dumps({"canary_cadence": {"seconds_between_canaries": 10}})
+            )
+            high_config = Path(tmp) / "high.json"
+            high_config.write_text(
+                json.dumps({"canary_cadence": {"seconds_between_canaries": 10_000_000}})
+            )
+
+            fires_low = advisory_consultation.is_canary_dialogue(
+                0, 100.0, config_path=low_config
+            )
+            fires_high = advisory_consultation.is_canary_dialogue(
+                0, 100.0, config_path=high_config
+            )
+
+        self.assertTrue(fires_low)
+        self.assertFalse(fires_high)
+
+
+class AdvisorySeededFlawCanaryTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 08: `is_canary`/`canary_fixture`
+    on `run_advisory_consultation_debate`. `is_canary` defaults to `False`
+    and every pre-existing test in this file never mentions it, so the
+    entire pre-existing suite is this ticket's regression guard that the
+    opt-in changes nothing when a caller does not ask for it — mirroring
+    ticket 07's identical `reachability_check` regression argument.
+    """
+
+    def test_canary_shows_the_critic_the_fixture_text_and_never_invokes_the_planner(
+        self,
+    ) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        invoker = _RecordingInvoker([_approve_fixture(fixture)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+            )
+
+        self.assertEqual(len(invoker.calls), 1)
+        called_model, _effort, prompt = invoker.calls[0]
+        self.assertEqual(called_model, "Test Critic")
+        self.assertNotEqual(called_model, "Test Planner")
+        self.assertIn(fixture.plan_text, prompt)
+        self.assertEqual(result.outcome, "canary")
+
+    def test_canary_approval_is_recorded_as_a_miss(self) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        invoker = _RecordingInvoker([_approve_fixture(fixture)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "miss")
+        self.assertFalse(result.consensus_reached)
+
+    def test_canary_objection_is_recorded_as_a_catch(self) -> None:
+        invoker = _RecordingInvoker(
+            [_revise("Missing lock around the write to the telemetry file.")]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "catch")
+        self.assertFalse(result.consensus_reached)
+
+    def test_canary_unparseable_verdict_is_also_recorded_as_a_catch(self) -> None:
+        """Per the ticket's own instructions: 'objecting (or any
+        not-approved outcome) -> catch' — an unparseable response is not an
+        approval, so it counts as a catch, not a third canary state."""
+        invoker = _RecordingInvoker(["This plan looks fine, I guess."])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "catch")
+
+    def test_canary_never_writes_implementation_plan_on_miss_or_catch(self) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        for critic_response, expected_canary_result in (
+            (_approve_fixture(fixture), "miss"),
+            (_revise("Objection."), "catch"),
+        ):
+            with self.subTest(expected_canary_result=expected_canary_result):
+                invoker = _RecordingInvoker([critic_response])
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        is_canary=True,
+                    )
+                    self.assertFalse((root / "implementation_plan.md").exists())
+                self.assertEqual(result.canary_result, expected_canary_result)
+
+    def test_canary_does_not_touch_a_pre_existing_real_plan_artifact(self) -> None:
+        """Isolation: a canary run must not affect a real mission's
+        consultation outcome. Run a real consensus dialogue first (which
+        writes `implementation_plan.md`), then run a canary against the
+        same root, and confirm the real plan file survives untouched — a
+        canary must neither write NOR delete a mission's plan artifact."""
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            real_plan = "The real mission's agreed plan."
+            real_invoker = _RecordingInvoker([real_plan, _approve(real_plan)])
+            real_result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", real_invoker, root_dir=root
+            )
+            self.assertTrue(real_result.consensus_reached)
+            plan_path = root / "implementation_plan.md"
+            self.assertEqual(plan_path.read_text(), real_plan)
+
+            canary_invoker = _RecordingInvoker([_approve_fixture(fixture)])
+            canary_result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the checkout rewrite",
+                canary_invoker,
+                root_dir=root,
+                is_canary=True,
+            )
+
+            self.assertEqual(canary_result.outcome, "canary")
+            self.assertEqual(plan_path.read_text(), real_plan)
+
+    def test_canary_worker_error_fails_closed_without_touching_the_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([RuntimeError("critic unreachable")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertIsNone(result.canary_result)
+
+    def test_canary_transcript_is_clearly_marked_and_not_read_as_a_normal_round(
+        self,
+    ) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_approve_fixture(fixture)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn(advisory_consultation.CANARY_MARKER, transcript)
+        self.assertIn(fixture.id, transcript)
+        self.assertIn("Outcome:** canary", transcript)
+        self.assertIn(fixture.plan_text, transcript)
+
+    def test_canary_telemetry_record_carries_the_canary_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_revise("Objection.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "canary")
+        self.assertEqual(records[0]["canary_result"], "catch")
+
+    def test_explicit_canary_fixture_overrides_the_library_default(self) -> None:
+        """Proves the fixture shown is genuinely injectable — the caller
+        can assert 'the Critic was shown THIS specific known-flawed text'
+        rather than merely 'some canary ran'."""
+        custom_fixture = advisory_consultation.CanaryFixture(
+            id="test-custom-fixture",
+            flaw_summary="A deliberately planted test-only flaw.",
+            plan_text="Custom fixture plan text unique to this test.",
+        )
+        invoker = _RecordingInvoker([_approve(custom_fixture.plan_text)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                canary_fixture=custom_fixture,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertEqual(result.canary_result, "miss")
+        self.assertIn(custom_fixture.plan_text, invoker.calls[0][2])
+        self.assertIn("test-custom-fixture", transcript)
+
+    def test_canary_still_respects_the_sensitivity_gate(self) -> None:
+        """A canary must not bypass the sensitivity halt: the task text
+        (not the fixture) still reaches the Critic prompt, so a sensitive
+        task must still halt before any worker is contacted."""
+        invoker = _RecordingInvoker([])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite using api_key=sk-abc123",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertEqual(invoker.calls, [])
+        self.assertIsNone(result.canary_result)
+
+    def test_canary_ignores_panel_topology_and_probes_a_single_critic(self) -> None:
+        """Design decision: canaries default to the narrower, pair-mode-only
+        scope regardless of what topology the occasion/complexity would
+        otherwise select — a canary always probes exactly one Critic
+        (`critic_model`/`critic_effort`), never both panel Critics. This
+        proves that even for an occasion/complexity combination that would
+        normally select the panel topology (`plan-review` + `complex`), a
+        canary run invokes only `critic_model`, never `critic_b_model`, and
+        reports `critic_model` (not `critic_a_model`) on the result."""
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        invoker = _RecordingInvoker([_approve_fixture(fixture)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                is_canary=True,
+                critic_model="Pair Critic",
+                critic_a_model="Panel Critic A",
+                critic_b_model="Panel Critic B",
+            )
+
+        self.assertEqual(len(invoker.calls), 1)
+        self.assertEqual(invoker.calls[0][0], "Pair Critic")
+        self.assertEqual(result.critic_model, "Pair Critic")
+        self.assertEqual(result.outcome, "canary")
+
+    def test_default_fixture_used_when_no_fixture_is_explicitly_supplied(self) -> None:
+        invoker = _RecordingInvoker(
+            [_approve_fixture(advisory_consultation.CANARY_FIXTURES[0])]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(len(invoker.calls), 1)
+        self.assertEqual(
+            invoker.calls[0][2].count(advisory_consultation.CANARY_FIXTURES[0].plan_text),
+            1,
+        )
+
+    def test_non_canary_dialogue_is_completely_unaffected_by_default(self) -> None:
+        """Regression test: omitting `is_canary` (its default, `False`)
+        must behave byte-for-byte as before this ticket — a real consensus
+        run still invokes the Planner, writes the plan, and reports
+        `canary_result=None`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertEqual(
+                (root / "implementation_plan.md").read_text(), "Planner's proposed plan."
+            )
+
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertTrue(result.consensus_reached)
+        self.assertNotEqual(result.outcome, "canary")
+        self.assertIsNone(result.canary_result)
+
+    def test_canary_task_id_never_collides_with_the_real_missions_task_id(
+        self,
+    ) -> None:
+        """A canary keeps the real `task_description` untouched (only the
+        Planner's plan is substituted for a fixture), so without a
+        dedicated fail-safe its default `task_id` would fall back to the
+        same digest-of-task-description a real, non-canary dialogue over
+        the identical task resolves to — silently colliding the canary's
+        miss/catch into that mission's real telemetry stream for any
+        consumer that groups or joins by `task_id` alone (spec 0004's
+        future LearningJournal/scoreboard, most notably). Proves the two
+        never collide: the real run's `task_id` is exactly the expected
+        digest, and the canary's `task_id` is neither that digest nor equal
+        to the real run's id."""
+        task_description = "Plan the auth rewrite"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            real_plan = "The real mission's agreed plan."
+            real_invoker = _RecordingInvoker([real_plan, _approve(real_plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                task_description, real_invoker, root_dir=root
+            )
+
+            canary_invoker = _RecordingInvoker([_revise("Objection.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                task_description, canary_invoker, root_dir=root, is_canary=True
+            )
+
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(len(records), 2)
+        real_task_id = records[0]["task_id"]
+        canary_task_id = records[1]["task_id"]
+        expected_real_digest = advisory_consultation._default_task_id(task_description)
+        self.assertEqual(real_task_id, expected_real_digest)
+        self.assertNotEqual(canary_task_id, expected_real_digest)
+        self.assertNotEqual(canary_task_id, real_task_id)
 
 
 if __name__ == "__main__":
