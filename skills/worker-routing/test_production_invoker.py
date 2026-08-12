@@ -12,6 +12,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock
 
+from test_routing import _approve
+
 MODULE_PATH = Path(__file__).with_name("production_invoker.py")
 SPEC = importlib.util.spec_from_file_location("production_invoker", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
@@ -107,7 +109,7 @@ class AdvisoryConsultationIntegrationTests(unittest.TestCase):
 
         def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
             calls.append((model, effort, prompt))
-            return "Planner plan" if len(calls) == 1 else "VERDICT: APPROVE"
+            return "Planner plan" if len(calls) == 1 else _approve("Planner plan")
 
         previous_module = sys.modules.get("production_invoker")
         production_module = types.ModuleType("production_invoker")

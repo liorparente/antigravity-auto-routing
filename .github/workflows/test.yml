@@ -21,11 +21,14 @@ jobs:
       - name: Run routing-check unit and integration tests
         run: python3 skills/worker-routing/test_routing.py -v
 
+      - name: Run production-invoker unit and integration tests
+        run: python3 skills/worker-routing/test_production_invoker.py -v
+
       - name: Lint with ruff
-        run: ruff check skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py skills/worker-routing/advisory_consultation.py
+        run: ruff check skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py skills/worker-routing/advisory_consultation.py skills/worker-routing/production_invoker.py skills/worker-routing/test_production_invoker.py
 
       - name: Type-check with mypy
-        run: mypy skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py skills/worker-routing/advisory_consultation.py
+        run: mypy skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py skills/worker-routing/advisory_consultation.py skills/worker-routing/production_invoker.py skills/worker-routing/test_production_invoker.py
 
       - name: Shellcheck installer and audit scripts
         run: shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh
