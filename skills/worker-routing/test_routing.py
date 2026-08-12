@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -3130,6 +3131,263 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         by_task_id = {record["task_id"]: record for record in records}
         self.assertEqual(by_task_id["advisory-1"]["kind"], "advisory_consultation")
         self.assertNotIn("kind", by_task_id["council-1"])
+
+
+class _BlockingThenScriptedInvoker:
+    """A fake `invoke_worker`: the FIRST call sets `called_event` and then
+    blocks on `release_event` until the test releases it; every call
+    (including that first one, once unblocked) pops its response off
+    `responses` exactly like `_RecordingInvoker` does.
+
+    Built for `AdvisoryBlockingStanceTests`'s non-blocking-dispatch proof:
+    blocking only the first call is sufficient to prove a whole consultation
+    cannot have completed yet (round 1 needs a Planner call before it can
+    even reach the Critic), while still letting the rest of the scripted
+    exchange run normally to completion once released — no test needs to
+    script a block on every call just to prove one debate never finished
+    early.
+    """
+
+    def __init__(self, responses: list[str | Exception], *, release_event: threading.Event, called_event: threading.Event) -> None:
+        self.responses: list[str | Exception] = list(responses)
+        self.release_event = release_event
+        self.called_event = called_event
+        self.calls: list[tuple[str, str, str]] = []
+
+    def __call__(self, model: str, effort: str, prompt: str) -> str:
+        self.calls.append((model, effort, prompt))
+        if len(self.calls) == 1:
+            self.called_event.set()
+            self.release_event.wait(timeout=5)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class AdvisoryBlockingStanceTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 04: "Plan-review and code-review
+    dialogues gate progress. Post-mortems run in the background and never
+    block; their occurrence and outcome are still recorded" (Implementation
+    Decisions, "Blocking stance").
+
+    Plan-review and code-review need no production code change — calling
+    `run_advisory_consultation_debate` synchronously already blocks the
+    caller, because it is an ordinary function call. The first test below is
+    a characterization test for that fact, pinned via call ordering so a
+    future change cannot silently make either occasion non-blocking without
+    a test noticing. The rest of this class exercises the one piece of new
+    production code this ticket does add: `dispatch_post_mortem_consultation`,
+    the background-thread wrapper that gives the post-mortem occasion its
+    non-blocking stance.
+    """
+
+    def test_plan_review_and_code_review_block_the_caller_until_the_debate_resolves(
+        self,
+    ) -> None:
+        """Criterion 1 and criterion 4 (call ordering as the observable
+        proof): for both occasions that must gate progress, every worker
+        call the fake records happens strictly between the call to
+        `run_advisory_consultation_debate` and the line after it — the
+        caller's next line of code provably does not run until the dialogue
+        result is available."""
+        for occasion in ("plan-review", "code-review"):
+            with self.subTest(occasion=occasion):
+                order: list[str] = []
+                scripted_responses = iter(["Planner's plan.", _approve("Planner's plan.")])
+
+                def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
+                    order.append("invoker_called")
+                    return next(scripted_responses)
+
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    order.append("before_call")
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Review the change",
+                        fake_invoke_worker,
+                        root_dir=root,
+                        occasion=occasion,
+                    )
+                    order.append("after_call")
+
+                self.assertEqual(
+                    order,
+                    ["before_call", "invoker_called", "invoker_called", "after_call"],
+                    "the caller's own code must not run between the dispatch and the "
+                    "dialogue's resolution for a blocking occasion",
+                )
+                self.assertEqual(result.outcome, "consensus")
+
+    def test_dispatch_post_mortem_consultation_returns_before_the_debate_completes(
+        self,
+    ) -> None:
+        """Criterion 2 and criterion 4: dispatching a post-mortem must hand
+        control back to the caller while the underlying debate is still
+        provably incomplete — proven here by blocking the fake worker on a
+        `threading.Event` the test controls and observing, immediately after
+        `dispatch_post_mortem_consultation` returns, that (a) the fake has
+        been entered (so the background thread genuinely started running
+        the real debate loop, not a no-op) and (b) no transcript exists yet
+        (so that debate cannot have reached its own choke point, which is
+        the only place either artifact gets written)."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            release_event = threading.Event()
+            called_event = threading.Event()
+            invoker = _BlockingThenScriptedInvoker(
+                ["Planner's lesson.", _approve("Planner's lesson.")],
+                release_event=release_event,
+                called_event=called_event,
+            )
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+            )
+
+            self.assertTrue(
+                called_event.wait(timeout=5), "background thread never invoked the worker"
+            )
+            self.assertFalse(
+                (root / AdvisoryTranscriptAndTelemetryTests.TRANSCRIPT_RELATIVE_PATH).exists(),
+                "transcript must not exist while the debate is still blocked — its "
+                "presence here would mean dispatch waited for the debate after all",
+            )
+            self.assertFalse(
+                (root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH).exists(),
+                "telemetry must not exist while the debate is still blocked",
+            )
+
+            release_event.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+    def test_dispatch_post_mortem_consultation_writes_transcript_and_telemetry_once_the_thread_completes(
+        self,
+    ) -> None:
+        """Criterion 3: once the background thread finishes, the post-mortem's
+        transcript and telemetry are discoverable at exactly the paths a
+        synchronous call would have used, with the same content a
+        synchronous call would have produced — "exactly as if it had
+        blocked" (ticket 04's own wording). Also confirms
+        `dispatch_post_mortem_consultation` genuinely runs the post-mortem
+        occasion (not e.g. the default "ambiguity") by checking the
+        recorded Planner prompt."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            release_event = threading.Event()
+            called_event = threading.Event()
+            invoker = _BlockingThenScriptedInvoker(
+                ["Planner's lesson.", _approve("Planner's lesson.")],
+                release_event=release_event,
+                called_event=called_event,
+            )
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+                task_id="post-mortem-ticket-04-demo",
+            )
+            called_event.wait(timeout=5)
+            release_event.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+            transcript = (
+                root / AdvisoryTranscriptAndTelemetryTests.TRANSCRIPT_RELATIVE_PATH
+            ).read_text()
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertIn("Outcome:** consensus", transcript)
+        self.assertIn("Planner's lesson.", transcript)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["task_id"], "post-mortem-ticket-04-demo")
+        self.assertEqual(records[0]["outcome"], "consensus")
+        self.assertIn("post-mortem", invoker.calls[0][2].lower())
+
+    def test_dispatch_post_mortem_consultation_records_unexpected_exceptions_instead_of_dropping_them(
+        self,
+    ) -> None:
+        """Standards-axis hardening: `run_advisory_consultation_debate`
+        already fails closed for every documented outcome (worker error,
+        stalemate, unparseable verdict, sensitivity halt) by writing a
+        transcript and telemetry record before returning. But if it — or a
+        future change to it — ever raised something outside those
+        documented paths, that exception would propagate through
+        `Thread.run()` and hit Python's default unhandled-exception-in-
+        thread behavior: printed once to stderr, then gone, with nothing
+        written and nothing the dispatching caller can observe. This test
+        forces exactly that by patching `run_advisory_consultation_debate`
+        itself to raise, then proves `_run_dispatched_post_mortem`'s
+        exception net still produces a discoverable transcript and
+        telemetry record rather than letting the bug vanish silently."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            advisory_consultation,
+            "run_advisory_consultation_debate",
+            side_effect=RuntimeError("unexpected bug: sentinel-oops"),
+        ):
+            root = Path(tmp)
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for a mystery failure",
+                _RecordingInvoker([]),
+                root_dir=root,
+                task_id="post-mortem-crash-demo",
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            transcript = (
+                root / AdvisoryTranscriptAndTelemetryTests.TRANSCRIPT_RELATIVE_PATH
+            ).read_text()
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertIn("sentinel-oops", transcript)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["task_id"], "post-mortem-crash-demo")
+        self.assertEqual(records[0]["outcome"], "worker_error")
+
+    def test_dispatch_post_mortem_consultation_rejects_bad_max_rounds_synchronously(
+        self,
+    ) -> None:
+        """Design decision this ticket resolved: `max_rounds` is validated
+        BEFORE the background thread is started, not inside it — a bad
+        value is a call-site programming error
+        (`run_advisory_consultation_debate` itself raises `ValueError` for
+        it), and letting that raise happen only inside a background thread
+        would turn it into a silent, uncaught thread exception instead of a
+        `ValueError` the caller can actually catch. Proven here by asserting
+        no thread is left running and the fake worker is never invoked."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            threads_before = threading.active_count()
+            invoker = _RecordingInvoker([])
+
+            with self.assertRaises(ValueError):
+                advisory_consultation.dispatch_post_mortem_consultation(
+                    "Post-mortem for a stalemate",
+                    invoker,
+                    root_dir=root,
+                    max_rounds=0,
+                )
+
+            self.assertEqual(threading.active_count(), threads_before)
+            self.assertEqual(invoker.calls, [])
 
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):

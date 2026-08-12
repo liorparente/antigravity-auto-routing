@@ -22,6 +22,7 @@ import os
 import re
 import secrets
 import tempfile
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -191,6 +192,19 @@ DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
     "acl",
     "permission",
 )
+
+# Spec 0003 (CriticalDialogue) ticket 04: named once and reused by both
+# `run_advisory_consultation_debate` and the crash-recovery path inside
+# `dispatch_post_mortem_consultation`'s thread target, rather than left as
+# two independently-typed literals. Before ticket 04 there was only ever one
+# writer of these two paths, so one inline literal each was fine; a second
+# writer (the crash-recovery path, which must reach the exact same files a
+# normal run would have, "exactly as if it had blocked") makes the
+# duplication a real drift risk instead of a hypothetical one — a future
+# edit to one inline literal and not the other would make the crash path
+# write to a location nothing ever reads.
+_TRANSCRIPT_RELATIVE_PATH = Path(".scratch") / "planning_debate.md"
+_TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
 
 
 @dataclass(frozen=True)
@@ -1176,8 +1190,8 @@ def run_advisory_consultation_debate(
     previous_plan: str | None = None
     previous_critique: str | None = None
     plan_path = root_dir / "implementation_plan.md"
-    transcript_path = root_dir / ".scratch" / "planning_debate.md"
-    telemetry_path = root_dir / ".ralph" / "routing_telemetry.jsonl"
+    transcript_path = root_dir / _TRANSCRIPT_RELATIVE_PATH
+    telemetry_path = root_dir / _TELEMETRY_RELATIVE_PATH
 
     def _result(
         outcome: AdvisoryOutcome,
@@ -1312,3 +1326,258 @@ def run_advisory_consultation_debate(
     cleanup_error = _remove_stale_plan_artifact(plan_path)
     stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
     return _result("stalemate", stalemate=stalemate, error=cleanup_error)
+
+
+def _run_dispatched_post_mortem(
+    task_description: str,
+    invoke_worker: InvokeWorker | None,
+    *,
+    root_dir: Path,
+    max_rounds: int,
+    planner_model: str,
+    critic_model: str,
+    planner_effort: str,
+    critic_effort: str,
+    task_id: str | None,
+) -> None:
+    """`dispatch_post_mortem_consultation`'s actual thread target.
+
+    `run_advisory_consultation_debate` already fails closed for every
+    documented outcome (a worker error, a stalemate, an unparseable verdict,
+    a sensitivity halt): each one reaches the function's own `_result`
+    choke point, which writes the transcript and telemetry record before
+    returning. Calling it from a background thread does not weaken any of
+    that — those writes happen exactly the same way regardless of which
+    thread is running the code.
+
+    What a background thread changes is the *unhandled* case: an exception
+    that is not one of those documented outcomes — a genuine bug, in this
+    function or a future change to it, of a kind `run_advisory_consultation_debate`
+    never anticipated catching. Raised from a synchronous call, that
+    exception propagates to the caller: loud, ugly, but visible — the
+    caller's process sees it. Raised inside a plain `threading.Thread`
+    target, it instead hits Python's default unhandled-exception-in-thread
+    behavior: printed once to stderr by `threading.excepthook` and then
+    gone, with no transcript, no telemetry record, and nothing the
+    dispatching caller can observe — a silent hole in exactly the kind of
+    record-keeping this whole ticket exists to guarantee. This wrapper's
+    only job is closing that hole: catch anything unexpected and record it
+    through the same transcript/telemetry primitives
+    `run_advisory_consultation_debate` itself uses (`_render_consultation_transcript`,
+    `_write_transcript`, `_build_telemetry_record`, `_write_telemetry_record`,
+    `_resolve_task_id` — same functions, same `_TRANSCRIPT_RELATIVE_PATH`/
+    `_TELEMETRY_RELATIVE_PATH` paths, not a parallel implementation of any
+    of them) rather than reinventing an error-reporting path for this one
+    caller.
+
+    The synthesized `AdvisoryDebateResult` this builds on an unexpected
+    exception reuses the existing `"worker_error"` outcome rather than
+    inventing a sixth `AdvisoryOutcome` value: `AdvisoryOutcome` is a closed
+    `Literal`, and every caller that branches on it today was written
+    against exactly five values, none of them "the dispatch mechanism
+    itself broke." `"worker_error"` is the closest existing meaning — "the
+    consultation could not be trusted to have run correctly" — and reusing
+    it keeps this a minimal recovery net, not new type-level surface area,
+    exactly as this ticket is scoped to be. `rounds_run=0` and
+    `final_plan=""` are honest here: unlike a genuine `worker_error` from
+    inside the round loop, this exception could have occurred before a
+    single round ran (e.g. while resolving the task id), so claiming any
+    rounds happened would overstate what is actually known. The `error`
+    field carries the exception's `str()`, prefixed to make this failure
+    mode distinguishable in a transcript from an ordinary `invoke_worker`
+    failure — never the exception object itself, so this function never
+    needs to reason about whether some future exception type's `__repr__`
+    could leak more than a plain message would (`except Exception`, not
+    `BaseException`, so `SystemExit`/`KeyboardInterrupt` still propagate —
+    the module's existing convention everywhere else it catches worker
+    failures).
+
+    One deliberate departure from `_render_consultation_transcript`'s normal
+    output: that renderer never includes `result.error` in the transcript
+    text, for any outcome, anywhere in this module — a synchronous caller
+    already has `result.error` on the object it was handed back, so writing
+    it to disk too would be redundant, and every existing test that reads a
+    `worker_error` transcript confirms only the outcome line is expected
+    there. This function has no such synchronous caller to fall back on —
+    dispatch discards the eventual `AdvisoryDebateResult` on purpose, so if
+    the crash detail is not written down here, it is gone the moment this
+    thread ends, sitting nowhere any operator could ever read it. So this
+    one crash-only transcript gets an appended section carrying
+    `crash_result.error` that `_render_consultation_transcript`'s own output
+    for every other outcome and every other call site still deliberately
+    omits.
+    """
+    try:
+        run_advisory_consultation_debate(
+            task_description,
+            invoke_worker,
+            root_dir=root_dir,
+            occasion="post-mortem",
+            max_rounds=max_rounds,
+            planner_model=planner_model,
+            critic_model=critic_model,
+            planner_effort=planner_effort,
+            critic_effort=critic_effort,
+            task_id=task_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - last-resort net for a dispatched thread; see docstring above.
+        crash_result = AdvisoryDebateResult(
+            rounds_run=0,
+            final_plan="",
+            outcome="worker_error",
+            occasion="post-mortem",
+            planner_model=planner_model,
+            critic_model=critic_model,
+            error=f"dispatch_post_mortem_consultation: unexpected exception: {exc}",
+        )
+        resolved_task_id = _resolve_task_id(task_description, task_id, "worker_error")
+        transcript = _render_consultation_transcript(task_description, crash_result)
+        transcript += (
+            "\n\n## Dispatch failure\n\n"
+            "This post-mortem's own dispatch mechanism raised an exception "
+            "outside `run_advisory_consultation_debate`'s documented failure "
+            f"paths:\n\n{crash_result.error}\n"
+        )
+        _write_transcript(root_dir / _TRANSCRIPT_RELATIVE_PATH, transcript)
+        record = _build_telemetry_record(crash_result, task_id=resolved_task_id)
+        _write_telemetry_record(root_dir / _TELEMETRY_RELATIVE_PATH, record)
+
+
+# Spec 0003 (CriticalDialogue) ticket 04: blocking stance per occasion. Plan
+# review and code review need no new code at all: calling
+# `run_advisory_consultation_debate` synchronously already blocks the
+# caller, because it is an ordinary Python function call — the caller's next
+# line simply does not execute until the round loop above returns. That is
+# spec 0003's "Plan-review and code-review dialogues gate progress"
+# (Implementation Decisions, "Blocking stance") in its entirety for those two
+# occasions: nothing to build, only to characterize with a test, so a future
+# change that accidentally makes either occasion non-blocking (e.g. by
+# routing it through the dispatcher below by mistake) gets caught. See
+# `AdvisoryBlockingStanceTests` in `test_routing.py`.
+#
+# Post-mortem needs the opposite stance: "Post-mortems run in the background
+# and never block; their occurrence and outcome are still recorded." Two
+# facts about this module made the mechanism choice easy. First, there is no
+# threading or asyncio precedent anywhere in this file or its siblings to
+# preserve or work around: `agent_council.py` uses `asyncio` internally, but
+# for something unrelated to this loop, and nothing in either module has
+# ever spawned a thread before this ticket. Second, there is today no
+# *production* caller of `run_advisory_consultation_debate` at all — every
+# call site is a test, confirmed by grep across the repo
+# (`test_routing.py` and `test_production_invoker.py`, both under
+# `skills/worker-routing/`) — so there is no existing production call-site
+# contract this dispatcher needs to slot into, only a future one to make
+# possible. Given both, `threading.Thread` is the smallest correct
+# mechanism: stdlib, no new dependency, and its target (`_run_dispatched_post_mortem`,
+# below) calls `run_advisory_consultation_debate` completely unmodified, so
+# every one of that function's existing side effects (the transcript, the
+# telemetry record, and — on consensus — the plan artifact) fires exactly as
+# documented, just from a background thread instead of the caller's own; the
+# wrapper adds only a last-resort exception net around that call (see
+# `_run_dispatched_post_mortem`'s own docstring), not any change to the
+# call itself. Nothing here is a job queue, a retry policy, or a supervisor:
+# one dispatch is one thread, and `dispatch_post_mortem_consultation`'s only
+# job is starting it and handing the caller its handle.
+#
+# That thread is started non-daemon (`daemon=False`, the `threading.Thread`
+# default — spelled out explicitly below rather than left implicit, because
+# getting this one flag wrong would quietly break the ticket's own
+# guarantee). A daemon thread is killed without any cleanup the instant the
+# interpreter has no non-daemon threads left to run — which, for a
+# short-lived CLI or mission runner, could easily be moments after
+# `dispatch_post_mortem_consultation` returns. A blocking call can *never*
+# have that failure mode: the process is physically inside the call and
+# cannot exit before the write happens. A daemon dispatch thread could —
+# the process exits, the debate is killed mid-round, and the ticket's
+# promise ("A post-mortem's eventual record ... is still written and
+# discoverable after the fact, exactly as if it had blocked") silently does
+# not hold. `daemon=False` instead makes the interpreter wait for this
+# thread before it can exit at all, which is what actually backs "the mission
+# path returns immediately, but the record still lands eventually" rather
+# than merely "the record lands eventually, unless the process happens to
+# exit first." This is not a new hang risk introduced by this ticket: each
+# `invoke_worker` call already carries its own bounded timeout
+# (`production_invoker.DEFAULT_TIMEOUT_SECONDS`, inherited from spec 0001's
+# per-round time limit), and `MAX_DEBATE_ROUNDS` bounds how many times that
+# timeout can be hit — so a non-daemon dispatch thread is bounded by the
+# same ceiling a synchronous call already was, not an unbounded one.
+def dispatch_post_mortem_consultation(
+    task_description: str,
+    invoke_worker: InvokeWorker | None = None,
+    *,
+    root_dir: Path,
+    max_rounds: int = MAX_DEBATE_ROUNDS,
+    planner_model: str = "Claude Opus 5 (Thinking)",
+    critic_model: str = "Codex 5.6 Sol",
+    planner_effort: str = "high",
+    critic_effort: str = "high",
+    task_id: str | None = None,
+) -> threading.Thread:
+    """Dispatch a post-mortem CriticalDialogue on a background thread and return immediately.
+
+    Mirrors `run_advisory_consultation_debate`'s parameter set exactly,
+    minus `occasion`: this function exists specifically to dispatch the
+    post-mortem occasion (its name says so), so `occasion` is hardcoded to
+    `"post-mortem"` in the call below rather than exposed as a knob — a
+    caller wanting a background dispatch of a different occasion is out of
+    this ticket's scope (spec 0003 only specifies post-mortem as
+    non-blocking) and would need its own function, not a parameter bolted
+    onto this one that could be misused to silently make a supposedly-
+    blocking occasion non-blocking.
+
+    Delegates to `run_advisory_consultation_debate` as the background
+    thread's target — via `_run_dispatched_post_mortem`, a thin wrapper
+    described below, but the call inside it is unmodified — so every
+    documented side effect (the transcript at
+    `root_dir / ".scratch" / "planning_debate.md"` and the telemetry record
+    at `root_dir / ".ralph" / "routing_telemetry.jsonl"`) still happens,
+    just after this function has already returned control to its caller.
+    The `AdvisoryDebateResult` that call eventually produces is not captured
+    or exposed here: nobody is waiting for it — that is the entire point of
+    "does not block" — and its outcome is fully recoverable from the
+    transcript and telemetry it writes once the thread completes.
+
+    `max_rounds` is validated synchronously, before the thread is even
+    started, exactly the same check `run_advisory_consultation_debate`
+    itself makes (raising `ValueError` for `< 1`). This is deliberate, not
+    redundant: a bad `max_rounds` is a call-site programming error, and if
+    it were left to surface only inside the background thread, it would
+    become an unhandled thread exception — printed to stderr by Python's
+    default thread excepthook, never raised back to the caller, and never
+    written to a transcript or telemetry record, since the function would
+    have failed before reaching its own choke point. That would hide exactly
+    the kind of mistake this module raises loudly for everywhere else. Every
+    other non-consensus outcome (a worker error, a stalemate, an
+    unparseable verdict, a sensitivity halt) is a legitimate dialogue
+    outcome rather than a programming error, so each is left to happen
+    inside the thread and be recorded by `run_advisory_consultation_debate`'s
+    own choke point exactly as it would be for a synchronous call.
+
+    Returns the already-started `threading.Thread` (`daemon=False` — see the
+    module comment above `dispatch_post_mortem_consultation` for why a
+    daemon thread here would risk the record never being written at all). A
+    caller does not need this handle to get the non-blocking guarantee; it
+    is returned so a test — or a caller that genuinely wants to wait, e.g.
+    at orderly shutdown — can `.join()` it deterministically instead of
+    polling the filesystem or sleeping.
+    """
+    if max_rounds < 1:
+        raise ValueError(f"max_rounds must be >= 1, got {max_rounds}")
+
+    thread = threading.Thread(
+        target=_run_dispatched_post_mortem,
+        args=(task_description, invoke_worker),
+        kwargs={
+            "root_dir": root_dir,
+            "max_rounds": max_rounds,
+            "planner_model": planner_model,
+            "critic_model": critic_model,
+            "planner_effort": planner_effort,
+            "critic_effort": critic_effort,
+            "task_id": task_id,
+        },
+        name="advisory-post-mortem-dispatch",
+        daemon=False,
+    )
+    thread.start()
+    return thread
