@@ -244,15 +244,39 @@ class AdvisoryResolutionOption:
 
 @dataclass(frozen=True)
 class AdvisoryStalemateReport:
-    """Both final positions of an unresolved consultation, plus the human's options.
+    """Every final position of an unresolved consultation, plus the human's options.
 
     Carries no winner: the consultation does not pick one, so this structure
     has no field capable of holding one.
+
+    Two voices in pair mode (spec 0001, unchanged): `planner_position` and
+    `critic_position` are the Planner's and the sole Critic's last
+    positions, and `critic_b_position` stays `None` — see the additive-field
+    note below.
+
+    Three voices in panel mode (spec 0003 ticket 06): `critic_b_position` is
+    populated with Critic B's own final position, kept completely separate
+    from `critic_position`, which in panel mode carries Critic A's final
+    position — the same "`critic_position` means Critic A in panel mode"
+    convention `AdvisoryDebateRound.critic_response` already established.
+    Never a folded/concatenated string of both Critics (that was ticket 05's
+    deliberately-temporary `_combine_panel_critic_feedback`, which this
+    report replaces for stalemate purposes): a human resolving a panel
+    stalemate reads each Critic's actual final words, not a summary this
+    module wrote of them.
+
+    `critic_b_position` is appended last with a `None` default so this stays
+    additive, not a reshape: every pre-ticket-06 construction of this
+    dataclass — in this module and in tests — that never mentions
+    `critic_b_position` keeps meaning exactly what it meant before this field
+    existed, and `_build_stalemate_report`'s existing two-argument pair-mode
+    call site needs no change at all.
     """
 
     planner_position: str
     critic_position: str
     options: tuple[AdvisoryResolutionOption, AdvisoryResolutionOption, AdvisoryResolutionOption]
+    critic_b_position: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1112,14 +1136,59 @@ def _write_telemetry_record(path: Path, record: AdvisoryTelemetryRecord) -> str 
 
 
 def _build_stalemate_report(
-    planner_position: str, critic_position: str
+    planner_position: str,
+    critic_position: str,
+    critic_b_position: str | None = None,
 ) -> AdvisoryStalemateReport:
+    """Build the report a caller receives when a consultation exhausts its
+    rounds without consensus.
+
+    `critic_b_position` is `None` for pair mode (every pre-ticket-06 call
+    site) and this function's pair-mode branch is byte-for-byte what it was
+    before this parameter existed — same two `AdvisoryResolutionOption`
+    labels, same `critic_position`-only content, same field values. Spec
+    0003 ticket 06: a caller now passing a non-`None` `critic_b_position`
+    (a panel stalemate) instead takes the three-voice branch, which reports
+    `critic_position` (Critic A's position) and `critic_b_position` (Critic
+    B's position) as their own separate `AdvisoryStalemateReport` fields —
+    never folded into one string — and rewords the second option's label
+    from singular "Critic" to plural "Critics'" so it reads correctly for
+    two reviewers. That option's `description` is the one place this
+    function still joins the two Critics' text: `AdvisoryResolutionOption`
+    has a single `description` field, so representing "approve the Critics'
+    architecture" as one string necessarily needs both voices in it; this is
+    a convenience summary for that one option only; it never replaces or
+    substitutes for the report's own `critic_position`/`critic_b_position`
+    fields, which stay separate and verbatim. Neither branch ever computes
+    or reports a winner — see `AdvisoryStalemateReport`'s docstring.
+    """
+    if critic_b_position is None:
+        return AdvisoryStalemateReport(
+            planner_position=planner_position,
+            critic_position=critic_position,
+            options=(
+                AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
+                AdvisoryResolutionOption(2, "Approve Critic Architecture", critic_position),
+                AdvisoryResolutionOption(
+                    3,
+                    "Escalate to Human Decision",
+                    "Halt execution and request user review",
+                ),
+            ),
+        )
+
+    combined_critics_description = (
+        f"Critic A:\n{critic_position}\n\nCritic B:\n{critic_b_position}"
+    )
     return AdvisoryStalemateReport(
         planner_position=planner_position,
         critic_position=critic_position,
+        critic_b_position=critic_b_position,
         options=(
             AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
-            AdvisoryResolutionOption(2, "Approve Critic Architecture", critic_position),
+            AdvisoryResolutionOption(
+                2, "Approve Critics' Architecture", combined_critics_description
+            ),
             AdvisoryResolutionOption(
                 3,
                 "Escalate to Human Decision",
@@ -1165,20 +1234,27 @@ def _is_panel_topology(occasion: Occasion, complexity: str) -> bool:
 
 def _combine_panel_critic_feedback(critic_a_response: str, critic_b_response: str) -> str:
     """Fold both Critics' responses into the single feedback string
-    `_build_planner_prompt`'s `critic_feedback` parameter — and, after the
-    round cap, `_build_stalemate_report`'s `critic_position` parameter —
-    already expect.
+    `_build_planner_prompt`'s `critic_feedback` parameter expects, for the
+    Planner's next revision round.
 
-    Both of those functions are one-critic shaped, and ticket 05 reuses both
-    completely unmodified rather than forking panel-only variants of either
-    (see the ticket's own instructions: extend the round loop, don't write a
-    parallel one). This is the seam that makes that reuse possible: collapse
-    two responses into the one string the existing single-critic-shaped
-    machinery already knows how to hold. It is deliberately not fancier than
-    a labeled concatenation — a real three-voice shape for the *stalemate
-    report* specifically is ticket 06's job, not this one's; see that
-    ticket's issue file for why the shape here should stay this simple for
-    now.
+    `_build_planner_prompt` is one-critic shaped, and ticket 05 reuses it
+    completely unmodified rather than forking a panel-only variant (see the
+    ticket's own instructions: extend the round loop, don't write a parallel
+    one). This is the seam that makes that reuse possible: collapse two
+    responses into the one string the existing single-critic-shaped
+    machinery already knows how to hold as revision context for the Planner.
+    It is deliberately not fancier than a labeled concatenation — nothing
+    about *this* feedback string needs the two voices kept separate, since
+    the Planner is meant to read and address both at once.
+
+    Ticket 05 also fed this same folded string into `_build_stalemate_report`
+    as a stand-in `critic_position` when a panel exhausted its rounds without
+    consensus; ticket 06 replaced that specific use with a proper three-voice
+    report (`_build_stalemate_report`'s `critic_b_position` parameter) that
+    keeps Critic A's and Critic B's final positions separate instead of
+    folding them — see `AdvisoryStalemateReport`'s docstring for why. This
+    function's only remaining caller is the per-round Planner-feedback path
+    below.
     """
     return f"Critic A:\n{critic_a_response}\n\nCritic B:\n{critic_b_response}"
 
@@ -1293,14 +1369,15 @@ def run_advisory_consultation_debate(
     consultation immediately, exactly as a single unparseable verdict does
     in pair mode; any other combination (a split verdict, or both Critics
     objecting) folds both responses into one feedback string
-    (``_combine_panel_critic_feedback``) and starts another round, up to the
-    same ``max_rounds`` cap pair mode obeys — panel mode adds no rounds of
-    its own. A panel that never reaches consensus by the cap produces a
-    stalemate report built by the same ``_build_stalemate_report`` pair mode
-    uses, with both Critics' last combined feedback standing in for the
-    single Critic's position; ticket 06 is what gives a panel stalemate
-    three properly separated voices; this function's stalemate shape for a
-    panel is deliberately no fancier than that until then.
+    (``_combine_panel_critic_feedback``) for the Planner's next revision
+    prompt and starts another round, up to the same ``max_rounds`` cap pair
+    mode obeys — panel mode adds no rounds of its own. A panel that never
+    reaches consensus by the cap produces a stalemate report built by the
+    same ``_build_stalemate_report`` pair mode uses, called with both
+    Critics' own last responses kept separate (spec 0003 ticket 06): the
+    report's ``critic_position`` carries Critic A's final position and its
+    ``critic_b_position`` carries Critic B's, never a folded combination of
+    the two — see ``AdvisoryStalemateReport``'s docstring.
 
     Raises ``ValueError`` if ``max_rounds`` is not at least 1, or if
     ``occasion`` is not one of the four ``Occasion`` values: both are
@@ -1337,6 +1414,18 @@ def run_advisory_consultation_debate(
     rounds: list[AdvisoryDebateRound] = []
     previous_plan: str | None = None
     previous_critique: str | None = None
+    # Panel mode only (spec 0003 ticket 06): each Critic's own last response,
+    # tracked separately from `previous_critique` above — which stays the
+    # *folded* string `_combine_panel_critic_feedback` builds for the
+    # Planner's next revision prompt, unchanged from ticket 05. These two
+    # carry the same information but serve different consumers: the folded
+    # string is what the Planner reads mid-loop, and these two separated
+    # strings are what a panel stalemate report reads at the cap, keeping
+    # Critic A's and Critic B's final positions distinct rather than
+    # re-parsing them back out of the fold. Both stay `None` in pair mode,
+    # where they are never read.
+    previous_critic_a_response: str | None = None
+    previous_critic_b_response: str | None = None
     plan_path = root_dir / "implementation_plan.md"
     transcript_path = root_dir / _TRANSCRIPT_RELATIVE_PATH
     telemetry_path = root_dir / _TELEMETRY_RELATIVE_PATH
@@ -1498,14 +1587,19 @@ def run_advisory_consultation_debate(
                 )
 
             # Any other combination — one approves and one objects, or both
-            # object — is not consensus and starts another round. Both
-            # responses fold into the single feedback string
-            # `_build_planner_prompt`/`_build_stalemate_report` expect, so
-            # both stay completely unmodified for panel mode.
+            # object — is not consensus and starts another round.
             previous_plan = planner_plan
+            # The folded string `_build_planner_prompt` expects for the
+            # Planner's next revision prompt — completely unmodified for
+            # panel mode, ticket 05's original reuse.
             previous_critique = _combine_panel_critic_feedback(
                 critic_a_response, critic_b_response
             )
+            # Each Critic's own last response, kept separate (ticket 06) so
+            # a stalemate report at the cap can carry three distinct voices
+            # instead of re-deriving them from the fold above.
+            previous_critic_a_response = critic_a_response
+            previous_critic_b_response = critic_b_response
             continue
 
         try:
@@ -1537,13 +1631,20 @@ def run_advisory_consultation_debate(
         previous_critique = critic_response
 
     cleanup_error = _remove_stale_plan_artifact(plan_path)
-    # Shared by both topologies: in panel mode `previous_critique` already
-    # holds `_combine_panel_critic_feedback`'s two-voice string, so this
-    # stalemate report's `critic_position` reads as both Critics' combined
-    # last feedback rather than needing a panel-specific branch here.
-    # Ticket 06 gives a panel stalemate three properly separated voices;
-    # this is deliberately the simplest report that stays truthful until then.
-    stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
+    # Spec 0003 ticket 06: a panel stalemate gets a three-voice report —
+    # Critic A's and Critic B's last responses stay separate fields, never
+    # folded into one string — via `_build_stalemate_report`'s
+    # `critic_b_position` parameter. Pair mode's call below is completely
+    # unchanged: two positional arguments, `critic_b_position` left at its
+    # `None` default, byte-for-byte the same report shape spec 0001 shipped.
+    if panel_mode:
+        stalemate = _build_stalemate_report(
+            previous_plan or "",
+            previous_critic_a_response or "",
+            previous_critic_b_response or "",
+        )
+    else:
+        stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
     return _result("stalemate", stalemate=stalemate, error=cleanup_error)
 
 

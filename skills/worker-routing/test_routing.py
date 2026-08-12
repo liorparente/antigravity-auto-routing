@@ -2688,6 +2688,224 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
         self.assertNotIn("Critic B", transcript)
 
 
+class AdvisoryPanelStalemateReportTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 06: a panel stalemate report must
+    carry three distinct final positions — the Planner's, Critic A's, and
+    Critic B's — rather than the single folded/combined string
+    `_combine_panel_critic_feedback` produced through ticket 05. Every test
+    here drives the loop through the same public
+    `run_advisory_consultation_debate` seam `AdvisoryPanelTopologyTests`
+    uses, with scripted Critic A/Critic B responses that are textually
+    different so a folded string and three separated fields are
+    distinguishable by inspection.
+    """
+
+    def test_split_verdict_at_cap_stalemate_carries_planner_and_both_critics_distinct_positions(
+        self,
+    ) -> None:
+        """Criterion 1: a split verdict (one Critic approves, one objects)
+        every round through the cap produces a stalemate report carrying the
+        Planner's final plan and both Critics' final positions, verbatim and
+        un-concatenated."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plans = [f"Planner's plan #{i}." for i in range(1, 4)]
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": plans,
+                    "Test Critic A": [
+                        _approve(plan, f"A approves plan #{i}.")
+                        for i, plan in enumerate(plans, start=1)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B still objects, round #{i}.") for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertIsNotNone(result.stalemate)
+        assert result.stalemate is not None
+        self.assertEqual(result.stalemate.planner_position, plans[-1])
+        self.assertIn("A approves plan #3.", result.stalemate.critic_position)
+        self.assertIsNotNone(result.stalemate.critic_b_position)
+        assert result.stalemate.critic_b_position is not None
+        self.assertIn(
+            "B still objects, round #3.", result.stalemate.critic_b_position
+        )
+        # Not folded: Critic A's text never leaks into Critic B's field or
+        # vice versa, unlike the ticket-05 `_combine_panel_critic_feedback`
+        # string this report replaces.
+        self.assertNotIn("B still objects", result.stalemate.critic_position)
+        self.assertNotIn("A approves", result.stalemate.critic_b_position)
+
+    def test_both_critics_reject_at_cap_stalemate_carries_planner_and_both_critics_distinct_positions(
+        self,
+    ) -> None:
+        """Criterion 2: both Critics rejecting every round through the cap
+        also produces a stalemate report with all three positions present
+        and distinguishable."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plans = [f"Planner's plan #{i}." for i in range(1, 4)]
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": plans,
+                    "Test Critic A": [
+                        _revise(f"A objects, round #{i}.") for i in range(1, 4)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B objects differently, round #{i}.")
+                        for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="code-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertIsNotNone(result.stalemate)
+        assert result.stalemate is not None
+        self.assertEqual(result.stalemate.planner_position, plans[-1])
+        self.assertIn("A objects, round #3.", result.stalemate.critic_position)
+        assert result.stalemate.critic_b_position is not None
+        self.assertIn(
+            "B objects differently, round #3.", result.stalemate.critic_b_position
+        )
+        self.assertNotIn("B objects differently", result.stalemate.critic_position)
+        self.assertNotIn("A objects,", result.stalemate.critic_b_position)
+
+    def test_panel_stalemate_resolution_options_remain_three_and_never_pick_a_winner(
+        self,
+    ) -> None:
+        """Criterion 3: the options stay exactly approve-Planner /
+        approve-Critic(s) / escalate-to-human in shape, and the report
+        carries no field capable of naming a winner."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plans = [f"Planner's plan #{i}." for i in range(1, 4)]
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": plans,
+                    "Test Critic A": [
+                        _revise(f"A objects, round #{i}.") for i in range(1, 4)
+                    ],
+                    "Test Critic B": [
+                        _revise(f"B objects, round #{i}.") for i in range(1, 4)
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        assert result.stalemate is not None
+        self.assertEqual(len(result.stalemate.options), 3)
+        self.assertEqual(
+            [option.id for option in result.stalemate.options], [1, 2, 3]
+        )
+        field_names = {field.name for field in dataclasses.fields(result.stalemate)}
+        self.assertEqual(
+            field_names,
+            {"planner_position", "critic_position", "options", "critic_b_position"},
+        )
+        option_field_names = {
+            field.name for field in dataclasses.fields(result.stalemate.options[0])
+        }
+        self.assertEqual(option_field_names, {"id", "label", "description"})
+
+    def test_unparseable_critic_in_panel_never_produces_a_stalemate_report(
+        self,
+    ) -> None:
+        """An unparseable verdict from either Critic halts the panel
+        immediately (ticket 05's behavior) rather than going through
+        `_build_stalemate_report` at all — confirmed unaffected by this
+        ticket's changes."""
+        plan = "Planner's plan."
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": ["no verdict line here"],
+                    "Test Critic B": [_approve(plan)],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+
+        self.assertEqual(result.outcome, "unparseable_verdict")
+        self.assertIsNone(result.stalemate)
+
+    def test_pair_mode_stalemate_report_leaves_critic_b_position_none(self) -> None:
+        """The additive-field guarantee, mirrored from
+        `AdvisoryDebateRound.critic_b_response`: a pair-mode stalemate's new
+        field is `None`, never populated by anything pair mode does. Pair
+        mode's own `test_stalemate_carries_both_final_positions_and_three_resolution_options`
+        (in `AdvisoryConsultationTests`) already pins the two-voice shape
+        byte-for-byte and is left completely unmodified by this ticket; this
+        test adds only the one new-field assertion that test predates."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's final plan.",
+                    _revise("Still not convinced."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, max_rounds=2
+            )
+
+        assert result.stalemate is not None
+        self.assertIsNone(result.stalemate.critic_b_position)
+
+
 class AdvisoryOccasionParameterizationTests(unittest.TestCase):
     """Spec 0003 (CriticalDialogue) ticket 01: the consultation loop becomes
     occasion-aware. `occasion` selects the mission prompt and is carried on
