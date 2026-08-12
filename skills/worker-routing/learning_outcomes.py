@@ -74,9 +74,18 @@ calls once the pick is made. It does not invent that caller.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import advisory_consultation
 import learning_journal
+
+if TYPE_CHECKING:
+    # Annotation-only under `from __future__ import annotations`:
+    # `record_stalemate_resolution` names two of this module's types in its
+    # signature and touches neither at runtime (`chosen not in
+    # report.options` and `chosen.id` are plain attribute access). Importing
+    # it for real would make every caller of `record_test_result` pay for
+    # `advisory_consultation` and the `production_invoker` chain behind it.
+    import advisory_consultation
 
 # Mirrors `advisory_consultation._build_stalemate_report`'s three options, in
 # order: (1) approve the Planner's architecture, (2) approve the Critic's,

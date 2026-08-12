@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import learning_journal
 
@@ -73,13 +75,45 @@ def _with_worker_mode_token(prompt: str) -> str:
     return f"{WORKER_MODE_TOKEN} {prompt}"
 
 
+def _validated_effort(effort: str) -> learning_journal.EffortLevel:
+    """Narrow ``effort`` to the one vocabulary this module accepts.
+
+    That vocabulary is `learning_journal.VALID_EFFORTS` — the same
+    `low|medium|high|ultra` the routing protocol's `[ROUTING:]` declarations
+    use and `routing_check.EFFORT_RE` audits — imported rather than
+    re-listed so the CLI, the audit, and the journal can never disagree
+    about what an effort level is.
+
+    Rejecting here rather than passing an arbitrary string through to
+    `codex -c model_reasoning_effort="..."` mirrors how an unknown *model*
+    is already rejected, and it is what makes
+    `make_journaled_invoke_worker`'s "exactly one record per invocation"
+    guarantee hold: an effort the journal cannot represent would otherwise
+    produce an invocation with no record at all. Failing closed before any
+    process is launched means there is no invocation to owe a record for.
+
+    The `cast` is the narrowing `Literal` membership cannot express to mypy;
+    the `in` test immediately above it is the real check, and
+    `WorkerExecutionRecord.__post_init__` re-runs it at construction.
+    """
+    if effort not in learning_journal.VALID_EFFORTS:
+        raise ValueError(
+            f"Unsupported worker effort: {effort!r} "
+            f"(expected one of {sorted(learning_journal.VALID_EFFORTS)})"
+        )
+    return cast("learning_journal.EffortLevel", effort)
+
+
 def build_worker_command(model: str, effort: str, prompt: str) -> list[str]:
     """Build the documented CLI argv for a routed worker.
 
-    Unknown models are rejected rather than guessed: launching an arbitrary
-    executable would violate the consultation's fail-closed contract.
+    Unknown models and unknown effort levels are rejected rather than
+    guessed: launching an arbitrary executable, or handing a provider a
+    reasoning-effort string it has never heard of, would both violate the
+    consultation's fail-closed contract.
     """
     routed_prompt = _with_worker_mode_token(prompt)
+    _validated_effort(effort)
     normalized_model = MODEL_ALIASES.get(model)
     if normalized_model is None:
         raise ValueError(f"Unsupported worker model: {model!r}")
@@ -179,15 +213,20 @@ def invoke_worker(
 #
 # No pricing source exists anywhere in this repo. The choice here is an
 # explicit, documented rate table keyed by the same normalized model id
-# `MODEL_ALIASES` resolves to, rather than either inventing a single
-# made-up-looking number or silently recording zero. Zero is the dangerous
-# default: it is a plausible-looking lie an operator has no reason to
-# question. These per-second rates are rough placeholders, not billing
-# data — replace the table wholesale the day a real pricing source exists;
-# until then it is the one place the estimate can be read, checked, or
-# corrected, and `test_routing.py`/`test_production_invoker.py` pin its
-# shape so a model added to `CODEX_MODELS`/`CLAUDE_MODELS`/`AGY_MODELS`
-# without a matching entry here is a test failure, not a silent gap.
+# `MODEL_ALIASES` resolves to, rather than inventing a single
+# made-up-looking number. These per-second rates are rough placeholders,
+# not billing data — replace the table wholesale the day a real pricing
+# source exists; until then it is the one place the estimate can be read,
+# checked, or corrected.
+#
+# The table must stay *total* over every model that can actually be
+# invoked. `test_production_invoker.py`'s
+# `test_rate_table_prices_every_invocable_model` asserts exactly that
+# against `MODEL_ALIASES`' values, so a model added to
+# `CODEX_MODELS`/`CLAUDE_MODELS`/`AGY_MODELS` without a matching entry here
+# is a test failure rather than a silent gap. That totality is what lets
+# `estimate_cost_usd` treat "no rate" as "no invocation" — see its
+# docstring.
 USD_PER_SECOND: dict[str, float] = {
     "claude-opus-5": 0.0150,
     "claude-sonnet-5": 0.0060,
@@ -202,15 +241,14 @@ USD_PER_SECOND: dict[str, float] = {
     "gemini-3.1-pro": 0.0060,
 }
 
-# The rate a model missing from `USD_PER_SECOND` is billed at. Deliberately
-# not 0.0 and deliberately far outside any real per-second rate: a missing
-# entry must read as "the rate table has a gap" in the weekly report, not as
-# "this call was free." A model can only reach this path if it is already a
-# member of `CODEX_MODELS`, `CLAUDE_MODELS`, or `AGY_MODELS` (an unknown
-# model to `MODEL_ALIASES` never invokes anything — see
-# `_resolve_model_id_and_family`), so hitting it is always a maintenance gap,
-# never a routine occurrence.
-_UNKNOWN_MODEL_RATE_USD_PER_SECOND = 9_999.0
+# The `model_id` a record carries when `MODEL_ALIASES` did not recognize the
+# caller's model at all. It is not a model name — no provider answers to it —
+# and that is the point: it is the record's own marker that the routed model
+# was never identified, and therefore that nothing about this call's cost is
+# known. `_validate_identifier` accepts it (no spaces, no parentheses) where
+# a caller-composed display name like "Claude Opus 5 (Thinking)" would be
+# rejected, which is why the raw string is never carried into the record.
+UNPRICED_MODEL_ID = "unrecognized-model"
 
 
 def estimate_cost_usd(model_id: str, duration_ms: int) -> float:
@@ -220,8 +258,37 @@ def estimate_cost_usd(model_id: str, duration_ms: int) -> float:
     time, not a real invoice. `WorkerExecutionRecord.cost_estimate_usd`'s own
     docstring says not to rename that field until a real billing source
     backs it — this function is the derivation that name promises.
+
+    **How a reader tells "we cannot price this" from "this was expensive."**
+    Not by the amount. `cost_estimate_usd` is one number in a field the
+    scoreboard averages as cost per completed task, so any in-band sentinel
+    amount is a number that silently becomes part of that average — a
+    previous version billed an unpriced model at 9,999 USD/second, which
+    turned a single 300-second call into a $2,999,700 entry indistinguishable
+    from a real estimate and capable of dominating a whole week's mean. The
+    marker is `model_id == UNPRICED_MODEL_ID` instead: a reader filters on
+    the field that actually says "unidentified model", and the amount stays
+    an amount.
+
+    That leaves `0.0` to mean what it truthfully means here. An unpriced id
+    is only ever `UNPRICED_MODEL_ID`, and reaching it means `MODEL_ALIASES`
+    rejected the model, which means `build_worker_command` raised before any
+    process was launched — no provider ran, so nothing was spent. Zero is the
+    measurement, not a default standing in for a missing one. What makes that
+    reasoning hold rather than merely sound plausible is the totality of
+    `USD_PER_SECOND` over every invocable model, which
+    `test_rate_table_prices_every_invocable_model` pins: no real model can
+    fall through to the no-rate branch at all.
+
+    Note the honest limit of that: a *priced* model can still estimate 0.0,
+    for a call whose measured duration rounds to zero milliseconds. That is
+    also a true statement about a call that took no measurable time, and it
+    is why the marker is `model_id` and not the amount — reading "unpriced"
+    off a zero would confuse the two, reading it off `model_id` cannot.
     """
-    rate = USD_PER_SECOND.get(model_id, _UNKNOWN_MODEL_RATE_USD_PER_SECOND)
+    rate = USD_PER_SECOND.get(model_id)
+    if rate is None:
+        return 0.0
     return round(rate * (duration_ms / 1000.0), 6)
 
 
@@ -231,13 +298,15 @@ def _resolve_model_id_and_family(model: str) -> tuple[str, str]:
     Reuses `MODEL_ALIASES` / `CODEX_MODELS` / `CLAUDE_MODELS` / `AGY_MODELS`
     rather than inventing a second mapping, per this module's own contract.
     A model `MODEL_ALIASES` would itself reject returns
-    ``("unrecognized-model", "unknown")`` — a caller-composed display name
-    may contain spaces or parentheses, which `learning_journal`'s identifier
+    ``(UNPRICED_MODEL_ID, "unknown")`` — a caller-composed display name may
+    contain spaces or parentheses, which `learning_journal`'s identifier
     validation rejects, so the raw string is never carried into the record.
+    That pair is also what tells a reader the record's cost is unknown; see
+    `estimate_cost_usd`.
     """
     normalized = MODEL_ALIASES.get(model)
     if normalized is None:
-        return "unrecognized-model", "unknown"
+        return UNPRICED_MODEL_ID, "unknown"
     if normalized in CLAUDE_MODELS:
         return normalized, "claude"
     if normalized in CODEX_MODELS:
@@ -247,6 +316,17 @@ def _resolve_model_id_and_family(model: str) -> tuple[str, str]:
     return normalized, "unknown"
 
 
+def report_journal_error_to_stderr(message: str) -> None:
+    """Default journal-failure sink: one line on stderr, and nothing else.
+
+    Deliberately the loudest thing available that cannot disturb the worker
+    call being observed. stderr rather than stdout because a routed worker's
+    stdout is the consultation's actual payload — a warning printed into it
+    would become part of a Planner's plan.
+    """
+    print(f"⚠️  {message}", file=sys.stderr)
+
+
 def make_journaled_invoke_worker(
     task: learning_journal.TaskLabel,
     *,
@@ -254,6 +334,7 @@ def make_journaled_invoke_worker(
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     runner: Runner = subprocess.run,
     clock: Callable[[], float] = time.monotonic,
+    report_journal_error: Callable[[str], None] = report_journal_error_to_stderr,
 ) -> Callable[[str, str, str], str]:
     """Build a ``(model, effort, prompt) -> str`` callable that journals every call.
 
@@ -269,23 +350,48 @@ def make_journaled_invoke_worker(
     this records that honestly rather than a value a future retry mechanism
     would imply.
 
-    Two failure modes stay strictly separate:
+    Three failure modes, three different handlings — this is the module's
+    half of the one contract `learning_journal`'s docstring states and
+    `routing_check._persist_compliance_record` and `learning_outcomes`
+    implement for the other two record families:
 
-    - `invoke_worker` raising is the worker's own outcome. It is journaled
-      as `success=False` and then re-raised unchanged, so the caller sees
-      exactly the exception it would have without instrumentation.
-    - Anything going wrong in the journaling itself — record construction
-      rejecting a value, or `append_journal_record` failing to write — is
-      swallowed here. A broken disk, or a caller-supplied `effort` that
-      does not fit the journal's enumerated vocabulary, must degrade the
-      learning loop, never the invocation it was merely observing. This is
-      deliberately broader than "write failures only": a validation error
-      raised while *building* the record is just as much "the journal's
-      problem" as an `OSError` while writing it, and neither may replace or
-      mask the worker's real result.
+    - `invoke_worker` raising is the worker's own outcome, not a journal
+      failure. It is journaled as `success=False` and then re-raised
+      unchanged, so the caller sees exactly the exception it would have
+      seen without instrumentation.
+    - A record that cannot be *built* is a call-site bug, and by the
+      journal's contract a call-site bug must be loud. Here it cannot be
+      loud by raising: the worker has already run by the time the record is
+      built, and raising would destroy a real result to report a
+      bookkeeping fault. So it is loud by being *reported* — through
+      `report_journal_error`, naming itself a call-site bug — which is the
+      one thing the previous `except Exception: pass` did not do. Silence
+      was the actual defect: the journal could go dark, or every record for
+      a whole run could be rejected, with nothing anywhere saying so.
+    - A record that cannot be *written* is the environment, and
+      `append_journal_record` already returns rather than raises for it.
+      That returned message was being discarded; it now goes to the same
+      sink.
+
+    Neither journal failure ever reaches the caller. `report_journal_error`
+    is the seam that makes them observable instead — tests inject a
+    collector, production gets one stderr line per failure — and a sink that
+    raises would defeat the whole guarantee, so a caller supplying one owns
+    keeping it total.
+
+    `effort` is the one journal-facing value validated *before* the
+    invocation rather than after it. An effort outside the journal's
+    vocabulary cannot be represented in a record at all, so validating it
+    afterwards would leave exactly the hole this docstring's first sentence
+    denies: an invocation that happened and journaled nothing. Rejected up
+    front, there is no invocation, and "exactly one record per invocation"
+    stays true rather than nearly true. `build_worker_command` rejects the
+    same value identically for callers that skip this wrapper.
     """
 
     def _journaled_invoke_worker(model: str, effort: str, prompt: str) -> str:
+        journal_effort = _validated_effort(effort)
+
         start = clock()
         error: Exception | None = None
         output = ""
@@ -303,13 +409,22 @@ def make_journaled_invoke_worker(
                 cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
                 success=error is None,
                 retry_count=0,
-                effort=effort,  # type: ignore[arg-type]
+                effort=journal_effort,
                 model_id=model_id,
                 model_family=model_family,
             )
-            learning_journal.append_journal_record(record, root_dir=root_dir)
-        except Exception:  # noqa: BLE001, S110 - journaling must never break the observed invocation.
-            pass
+        except Exception as exc:  # noqa: BLE001 - reported, never raised: see this factory's docstring.
+            report_journal_error(
+                f"learning journal record for a {model!r} invocation could not "
+                f"be built (call-site bug, the invocation itself was "
+                f"unaffected): {exc}"
+            )
+        else:
+            write_error = learning_journal.append_journal_record(
+                record, root_dir=root_dir
+            )
+            if write_error is not None:
+                report_journal_error(write_error)
 
         if error is not None:
             raise error
@@ -321,10 +436,12 @@ def make_journaled_invoke_worker(
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "MODEL_ALIASES",
+    "UNPRICED_MODEL_ID",
     "USD_PER_SECOND",
     "WORKER_MODE_TOKEN",
     "build_worker_command",
     "estimate_cost_usd",
     "invoke_worker",
     "make_journaled_invoke_worker",
+    "report_journal_error_to_stderr",
 ]

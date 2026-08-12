@@ -51,6 +51,20 @@ Two deliberately different failure modes live here:
   `advisory_consultation._write_telemetry_record`. A broken disk must never
   take down the operation the journal was merely observing.
 
+**What "loud" means for a writer that is observing something else.** Two of
+this module's three writers do not exist to journal: they exist to run a
+worker (`production_invoker.make_journaled_invoke_worker`) or to audit a
+session (`routing_check._persist_compliance_record`), and journal as a side
+effect. For them, raising on a malformed record would break the very
+operation the journal is not permitted to affect — so they catch it and
+**report** it instead, through a returned message or an injected sink. That
+is a different mechanism from raising, not a weaker rule: the requirement is
+that a call-site bug is never silent, and silence — an `except Exception:
+pass` that discards even `append_journal_record`'s returned message — is the
+one handling no writer here may choose. A writer that a caller invokes
+*directly* to record something (`learning_outcomes`) has no such conflict
+and lets the `ValueError` propagate, which is this contract's plain form.
+
 Callers inject `root_dir` and every path is derived from it, so the journal
 is fully exercisable offline against a temporary directory. That injected
 root is this module's only seam; the spec's other two (the worker callable
@@ -545,6 +559,25 @@ class TaskLabel:
         This signature is lock 1 of the two described on the class: the
         absence of a tag argument is what makes "a halted task carries no tag"
         unexpressible rather than merely discouraged.
+
+        **It has no production caller today, and that is a fact about the
+        record families, not an omission to be fixed by wiring one.** A
+        sensitivity halt returns from `run_advisory_consultation_debate`
+        before any worker is contacted, so there is no invocation for a
+        `WorkerExecutionRecord` to describe; it produces no ground truth, so
+        there is no `OutcomeRecord`; it runs no round, so there is no
+        `DialogueQualityRecord`; and `ComplianceRecord` is session-scoped and
+        carries no `TaskLabel` at all. None of the four families this module
+        defines is reachable on a halt, so no caller can exist yet without
+        first fabricating a record about work that never ran — which is
+        exactly what the halt boundary forbids.
+
+        The first caller therefore arrives with the first family that *is*
+        reachable on a halt, and it must be built by whichever ticket adds
+        that family, not retrofitted here. Until then this constructor's job
+        is lock 1: it exists so that the rule holds for that future writer
+        the day it appears, rather than depending on its author remembering
+        it. `test_routing.py` exercises it directly for the same reason.
         """
         return cls(task_id=task_id, sensitivity_halted=True)
 
@@ -961,11 +994,26 @@ def extract_issue_codes(messages: Iterable[str]) -> tuple[str, ...]:
     """Reduce audit messages to their distinct issue codes, sorted.
 
     The documented boundary where content becomes a statistic. A caller holds
-    `AuditReport.violation_details` — step indices paired with messages built
-    from log excerpts — and needs the *codes* for `ComplianceRecord`. Passing
-    the messages through this function is what guarantees only codes come out:
-    it matches the leading token against `ISSUE_CODE_RE` and discards
-    everything else, including any message that carries no code at all.
+    the audit's issue messages — built from log excerpts — and needs the
+    *codes* for `ComplianceRecord`. Passing the messages through this function
+    is what guarantees only codes come out: it matches a leading token against
+    `ISSUE_CODE_RE` and discards everything else, including any message that
+    carries no code at all.
+
+    **Both message shapes the audit actually produces are accepted, and that
+    is part of the contract rather than an accident.** `routing_check`
+    builds some issues bare (`"DEC-04 missing --model ..."`, straight from
+    `_analyze_step`) and others prefixed with their step
+    (`"Step 7: DEC-03 invalid routing declaration"`, from
+    `RoutingAuditEngine._structural_issues`). So the code is looked for at
+    the front of the message first, and only then after a leading `"Step N:
+    "`-style prefix. Checking past the prefix is what a message like
+    `"LOG-01 unknown write tool: apply_unreviewed_patch"` needs — its own
+    embedded colon would otherwise hide the code — and checking the front
+    first is what keeps a caller from having to synthesize a prefix it does
+    not have just to satisfy this function's parsing. `_persist_compliance_record`
+    used to do exactly that, which made a string format an unwritten contract
+    between two modules; neither shape is privileged now.
 
     Multiplicity is deliberately dropped. `ComplianceRecord.violation_count`
     already carries volume; this carries *which rules* were broken, and a set
@@ -976,7 +1024,9 @@ def extract_issue_codes(messages: Iterable[str]) -> tuple[str, ...]:
     """
     codes = set()
     for message in messages:
-        head = message.split(":", 1)[-1].strip().split(" ", 1)[0]
-        if ISSUE_CODE_RE.fullmatch(head):
-            codes.add(head)
+        for candidate in (message, message.split(":", 1)[-1]):
+            head = candidate.strip().split(" ", 1)[0]
+            if ISSUE_CODE_RE.fullmatch(head):
+                codes.add(head)
+                break
     return tuple(sorted(codes))

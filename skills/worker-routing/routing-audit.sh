@@ -11,17 +11,28 @@
 # The resolved conversation id (given or scanned) is also passed to
 # routing_check.py as --session-id, so it can persist the verdict as a
 # ComplianceRecord (spec 0004 ticket 15) keyed on the same id this script
-# already resolved — never a synthetic one. The journal destination for
-# that record is passed alongside it as --root-dir: it defaults to this
-# script's own repository (a fixed walk up from SCRIPT_DIR, since this
-# script always lives at skills/worker-routing/ inside the repo it audits),
-# and can be redirected independently by setting LEARNING_JOURNAL_ROOT.
-# routing_check.py never invents a destination of its own — see its
-# --root-dir docs. This must stay the repository, never $HOME: every other
-# writer in this loop (learning_journal's own callers, AgentCouncil's
-# routing_telemetry.jsonl) is repo-scoped, and a ComplianceRecord that
-# landed anywhere else would split the journal in two — one file the
-# ticket-16 scoreboard reads, one it doesn't.
+# already resolved — never a synthetic one.
+#
+# The journal destination for that record is passed alongside it as
+# --root-dir, and it is deliberately NOT derived from where this script
+# lives. install.sh copies this file to five directories, two of them under
+# $HOME ($HOME/.gemini/config/skills/worker-routing and
+# $HOME/.codex/skills/worker-routing); a walk up from SCRIPT_DIR resolves to
+# the repository only in a dev checkout and to $HOME/.gemini/config in an
+# installed copy, which would put compliance records in a second journal
+# while worker-execution and outcome records went on landing in the audited
+# repository's .ralph/. One journal beside the routing telemetry is the
+# invariant, so the destination comes from the repository the audit is being
+# *run in* — the same place every other writer in this loop gets its root,
+# and the same place .ralph/routing_telemetry.jsonl already is — with
+# LEARNING_JOURNAL_ROOT as the explicit override.
+#
+# If neither yields a root (a project that is not a git repository, or this
+# script invoked from outside one), --root-dir is omitted entirely and
+# routing_check.py persists nothing. That is the documented handling of "no
+# destination was resolved": the audit still runs and still prints and exits
+# exactly as before. routing_check.py never invents a destination of its own
+# — see its --root-dir docs — and neither does this script.
 #
 # Exit codes (relayed directly from routing_check.py):
 #   0   Audit ran, no violations (and, with --strict, no warnings).
@@ -34,10 +45,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BRAIN_DIR="$HOME/.gemini/antigravity/brain"
-JOURNAL_ROOT="${LEARNING_JOURNAL_ROOT:-$REPO_ROOT}"
 PY_CHECK="$SCRIPT_DIR/routing_check.py"
+
+JOURNAL_ROOT="${LEARNING_JOURNAL_ROOT:-}"
+if [ -z "$JOURNAL_ROOT" ]; then
+    JOURNAL_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || JOURNAL_ROOT=""
+fi
 
 STRICT_FLAG=""
 CONV_ID=""
@@ -82,7 +96,11 @@ PY_ARGS=()
 if [ -n "$STRICT_FLAG" ]; then
     PY_ARGS+=(--strict)
 fi
-PY_ARGS+=(--session-id "$CONV_ID" --root-dir "$JOURNAL_ROOT" "$LOG_FILE")
+PY_ARGS+=(--session-id "$CONV_ID")
+if [ -n "$JOURNAL_ROOT" ]; then
+    PY_ARGS+=(--root-dir "$JOURNAL_ROOT")
+fi
+PY_ARGS+=("$LOG_FILE")
 
 set +e
 python3 "$PY_CHECK" "${PY_ARGS[@]}"

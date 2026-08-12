@@ -3822,6 +3822,23 @@ class LearningJournalTests(unittest.TestCase):
 
     # --- the CI contract ---
 
+    @staticmethod
+    def _workflow_list(workflow: str, name: str) -> list[str]:
+        """The paths under one `NAME: >-` block scalar in the workflow env."""
+        lines = workflow.splitlines()
+        start = next(
+            index
+            for index, line in enumerate(lines)
+            if line.strip().startswith(f"{name}:")
+        )
+        listed = []
+        for line in lines[start + 1 :]:
+            stripped = line.strip()
+            if not stripped.startswith("skills/"):
+                break
+            listed.append(stripped)
+        return listed
+
     def test_ci_lints_and_type_checks_one_single_sourced_module_list(self) -> None:
         """The ruff and mypy steps carried identical hand-maintained module
         lists, so every new module had to be added twice — and a module added
@@ -3830,11 +3847,7 @@ class LearningJournalTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
             encoding="utf-8"
         )
-        listed = [
-            line.strip()
-            for line in workflow.splitlines()
-            if line.strip().startswith("skills/") and line.strip().endswith(".py")
-        ]
+        listed = self._workflow_list(workflow, "PYTHON_MODULES")
 
         self.assertIn("skills/worker-routing/learning_journal.py", listed)
         self.assertEqual(
@@ -3865,6 +3878,45 @@ class LearningJournalTests(unittest.TestCase):
                     "a check step naming a module directly has stopped sharing "
                     "the single-sourced list",
                 )
+
+    def test_ci_runs_every_test_file_it_checks(self) -> None:
+        """Being linted and type-checked is not being run.
+
+        `test_production_invoker.py` was in `PYTHON_MODULES` from the day it
+        was written, so ruff and mypy both saw it and CI stayed green — while
+        not one of its tests ever executed, because the only test-running step
+        named `test_routing.py` directly. This asserts the property that gap
+        violated: every `test_*.py` the workflow checks is also a file the
+        workflow executes, and the executing step reads its list from the
+        environment rather than naming a file inline.
+        """
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
+        )
+        checked = self._workflow_list(workflow, "PYTHON_MODULES")
+        executed = self._workflow_list(workflow, "PYTHON_TESTS")
+
+        checked_tests = {
+            path for path in checked if Path(path).name.startswith("test_")
+        }
+        self.assertTrue(checked_tests, "no test files are checked at all")
+        self.assertEqual(
+            checked_tests,
+            set(executed),
+            "a test file CI checks but never runs is a suite that cannot fail",
+        )
+        for path in executed:
+            with self.subTest(path=path):
+                self.assertTrue(
+                    (REPO_ROOT / path).is_file(),
+                    f"{path} is run by CI but does not exist",
+                )
+
+        self.assertIn(
+            "$PYTHON_TESTS",
+            workflow,
+            "the test-running step no longer reads the single-sourced list",
+        )
 
 
 production_invoker_spec = importlib.util.spec_from_file_location(
@@ -4220,21 +4272,29 @@ class OutcomeRecordingTests(unittest.TestCase):
 class PersistComplianceRecordTests(unittest.TestCase):
     """Unit-level coverage of `routing_check._persist_compliance_record`.
 
-    Exercised directly against hand-built `compute_metrics`-shaped dicts
-    rather than through a parsed log fixture: no fixture on disk today
-    drives a full `[ROUTING: worker — complexity: ... — effort: ...]`
-    declaration through a DEC-01 drift, and hand-authoring one as raw log
-    text is exactly the kind of escaping-fragile fixture the rest of this
-    file avoids by constructing `Step`/metrics objects directly (see
-    `RoutingAuditEngineTests`). What matters here — that a real, non-empty
-    `metrics["violation_details"]` reduces to the right `issue_codes` — does
-    not need a parser in the loop at all.
+    Exercised directly against hand-built `AuditReport`s rather than through
+    a parsed log fixture: no fixture on disk today drives a full
+    `[ROUTING: worker — complexity: ... — effort: ...]` declaration through a
+    DEC-01 drift, and hand-authoring one as raw log text is exactly the kind
+    of escaping-fragile fixture the rest of this file avoids by constructing
+    `Step`/`AuditReport` objects directly (see `RoutingAuditEngineTests`).
+    What matters here — that a real, non-empty set of audit issues reduces to
+    the right `issue_codes` — does not need a parser in the loop at all.
+
+    `_report` builds the real frozen dataclass, not a dict shaped like one:
+    the whole point of the signature this function now takes is that a caller
+    cannot hand it a mapping with a mistyped key and have it look correct
+    until runtime.
     """
 
     JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
 
+    # No return annotation: `routing_check` is loaded by path, so mypy sees a
+    # bare `ModuleType` and cannot resolve `routing_check.AuditReport` as a
+    # name. Every other test in this file that touches these modules relies on
+    # the same inference.
     @staticmethod
-    def _metrics(**overrides: object) -> dict:
+    def _report(**overrides: object):
         base: dict = {
             "total_writes": 2,
             "code_writes": 1,
@@ -4245,9 +4305,10 @@ class PersistComplianceRecordTests(unittest.TestCase):
             "declaration_drift": [],
             "violation_details": [],
             "calibration_markers": 0,
+            "exit_code": 0,
         }
         base.update(overrides)
-        return base
+        return routing_check.AuditReport(**base)
 
     def test_clean_metrics_persist_a_clean_verdict_not_nothing(self) -> None:
         """User story 4 / the trendline-has-no-silent-gaps criterion: a
@@ -4257,7 +4318,7 @@ class PersistComplianceRecordTests(unittest.TestCase):
             root = Path(tmp)
 
             error = routing_check._persist_compliance_record(
-                self._metrics(), 0, session_id="sess-clean", root_dir=root
+                self._report(), session_id="sess-clean", root_dir=root
             )
 
             self.assertIsNone(error)
@@ -4276,24 +4337,27 @@ class PersistComplianceRecordTests(unittest.TestCase):
             self.assertEqual(record["code_write_count"], 1)
 
     def test_violating_metrics_persist_violation_count_and_issue_codes(self) -> None:
-        """`extract_issue_codes` needs its documented `"Step N: "`-prefixed
-        input (see `test_extract_issue_codes_keeps_the_codes_and_drops_the_message_text`)
-        to survive a message like LOG-01's that embeds a second colon of its
-        own; this pins that `_persist_compliance_record` supplies that
-        prefix rather than passing `violation_details` messages through raw."""
-        metrics = self._metrics(
+        """Codes survive both message shapes the audit produces — a bare
+        `"DEC-01 ..."` and a LOG-01 message with a colon of its own — with no
+        caller-synthesized `"Step N: "` prefix in between, and the message
+        text itself still never reaches the record."""
+        report = self._report(
             violations=[(1, ["src/app.py"]), (2, [])],
-            declaration_drift=[(1, ["DEC-01 declaration worker/model drift"])],
+            declaration_drift=[
+                (1, ["DEC-01 declaration worker/model drift"]),
+                (2, ["LOG-01 unknown write tool: apply_unreviewed_patch"]),
+            ],
             violation_details=[
                 (1, ["DEC-01 declaration worker/model drift"]),
                 (2, ["LOG-01 unknown write tool: apply_unreviewed_patch"]),
             ],
+            exit_code=1,
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
             error = routing_check._persist_compliance_record(
-                metrics, 2, session_id="sess-violating", root_dir=root
+                report, session_id="sess-violating", root_dir=root
             )
 
             self.assertIsNone(error)
@@ -4303,6 +4367,46 @@ class PersistComplianceRecordTests(unittest.TestCase):
             for leaked in ("apply_unreviewed_patch", "app.py"):
                 self.assertNotIn(leaked, json.dumps(record))
 
+    def test_drift_on_a_non_violating_step_still_reaches_the_record(self) -> None:
+        """The trendline's whole subject is discipline drift, and a DEC-01 on
+        a step that did not also trip a violation is drift. Sourcing the codes
+        from `violation_details` dropped exactly those, so a session could
+        carry declaration drift and persist `issue_codes=()`."""
+        report = self._report(
+            violations=[],
+            declaration_drift=[(3, ["DEC-02 declaration effort drift"])],
+            violation_details=[],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            error = routing_check._persist_compliance_record(
+                report, session_id="sess-drift-only", root_dir=root
+            )
+
+            self.assertIsNone(error)
+            record = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)[0]
+            self.assertEqual(record["violation_count"], 0)
+            self.assertEqual(record["issue_codes"], ["DEC-02"])
+            self.assertEqual(record["declaration_drift_count"], 1)
+
+    def test_warning_codes_reach_the_record(self) -> None:
+        """A `--strict` run that fails on warnings alone used to persist
+        `violation_count=0, issue_codes=()` — a record no reader could tell
+        apart from a genuinely clean session."""
+        report = self._report(warning_codes=("WARN-01",), exit_code=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            error = routing_check._persist_compliance_record(
+                report, session_id="sess-warned", root_dir=root
+            )
+
+            self.assertIsNone(error)
+            record = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)[0]
+            self.assertEqual(record["violation_count"], 0)
+            self.assertEqual(record["issue_codes"], ["WARN-01"])
+
     def test_no_session_id_persists_nothing(self) -> None:
         """The documented handling of 'no id available': an explicit skip,
         never a fabricated placeholder id."""
@@ -4310,7 +4414,7 @@ class PersistComplianceRecordTests(unittest.TestCase):
             root = Path(tmp)
 
             error = routing_check._persist_compliance_record(
-                self._metrics(), 0, session_id=None, root_dir=root
+                self._report(), session_id=None, root_dir=root
             )
 
             self.assertIsNone(error)
@@ -4326,8 +4430,7 @@ class PersistComplianceRecordTests(unittest.TestCase):
             root = Path(tmp)
 
             error = routing_check._persist_compliance_record(
-                self._metrics(),
-                0,
+                self._report(),
                 session_id="not a valid identifier",
                 root_dir=root,
             )
@@ -4344,7 +4447,7 @@ class PersistComplianceRecordTests(unittest.TestCase):
             (root / ".ralph").write_text("not a directory")
 
             error = routing_check._persist_compliance_record(
-                self._metrics(), 0, session_id="sess-write-failure", root_dir=root
+                self._report(), session_id="sess-write-failure", root_dir=root
             )
 
             self.assertIsNotNone(error)
@@ -4563,18 +4666,18 @@ class JournalUnificationTests(unittest.TestCase):
             root = Path(tmp)
 
             compliance_error = routing_check._persist_compliance_record(
-                {
-                    "total_writes": 2,
-                    "code_writes": 1,
-                    "routing_declarations": 1,
-                    "worker_calls": 1,
-                    "code_write_files": ["src/app.py"],
-                    "violations": [],
-                    "declaration_drift": [],
-                    "violation_details": [],
-                    "calibration_markers": 0,
-                },
-                0,
+                routing_check.AuditReport(
+                    total_writes=2,
+                    code_writes=1,
+                    routing_declarations=1,
+                    worker_calls=1,
+                    violations=[],
+                    declaration_drift=[],
+                    violation_details=[],
+                    calibration_markers=0,
+                    code_write_files=["src/app.py"],
+                    exit_code=0,
+                ),
                 session_id="sess-unification",
                 root_dir=root,
             )
@@ -4594,6 +4697,424 @@ class JournalUnificationTests(unittest.TestCase):
         self.assertIsNone(outcome_error)
         self.assertEqual(len(records), 2)
         self.assertEqual({record["kind"] for record in records}, {"compliance", "outcome"})
+
+    def test_an_installed_audit_writes_into_the_audited_repositorys_journal(self) -> None:
+        """The same invariant, under the layout that actually broke it.
+
+        The test above injects `root_dir` directly, so it holds no matter
+        where `routing-audit.sh` thinks the repository is — which is why it
+        passed while every installed copy of the script was resolving
+        `$HOME/.gemini/config` as the journal root and splitting the stream in
+        two. This one installs for real, runs the *installed* audit from
+        inside a separate audited repository with no `LEARNING_JOURNAL_ROOT`
+        override, and asserts the compliance record lands in that
+        repository's journal — the same file an `OutcomeRecord` written by
+        the loop's other production entry point lands in — and that nothing
+        at all is written under the install prefix.
+        """
+        with _InstalledHarness() as harness:
+            audit = harness.run_installed_audit(cwd=harness.project)
+            self.assertEqual(audit.returncode, 0, audit.stdout + audit.stderr)
+
+            outcome_error = learning_outcomes.record_test_result(
+                "task-installed-unification", passed=True, root_dir=harness.project
+            )
+
+            journal_files = sorted(harness.project.rglob("*.jsonl"))
+            stray = [
+                path
+                for path in harness.home.rglob("*.jsonl")
+                if "antigravity" not in path.parts
+            ]
+            self.assertEqual(
+                stray,
+                [],
+                f"the install prefix must hold no journal at all, found {stray}",
+            )
+            self.assertEqual(
+                [path.name for path in journal_files],
+                ["learning_journal.jsonl"],
+                f"expected one shared journal in the audited repo, found {journal_files}",
+            )
+            records = _read_jsonl(journal_files[0])
+
+        self.assertIsNone(outcome_error)
+        self.assertEqual({record["kind"] for record in records}, {"compliance", "outcome"})
+        compliance = next(
+            record for record in records if record["kind"] == "compliance"
+        )
+        self.assertEqual(compliance["session_id"], harness.conv_id)
+
+
+class _InstalledHarness:
+    """A real `install.sh` run into a throwaway `$HOME` plus a separate
+    audited git repository — the two-directory shape no dev-checkout test has.
+
+    Every defect this class exists to catch shares one cause: in a checkout,
+    the skill directory, the repository being audited, and the process's
+    working directory are all the same tree, so a module resolved from the
+    wrong one of the three still resolves. Installing separates them.
+    """
+
+    def __init__(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        base = Path(self._tmp.name).resolve()
+        self.home = base / "home"
+        self.project = base / "project"
+        self.home.mkdir()
+        self.project.mkdir()
+        self.installed_dir = (
+            self.home / ".gemini" / "config" / "skills" / "worker-routing"
+        )
+        self.conv_id = f"installed-harness-{os.getpid()}"
+
+    def __enter__(self) -> _InstalledHarness:  # noqa: PYI034 - `typing.Self` would need a new import at the top of this file, which every concurrent branch would then conflict on; this helper is private and never subclassed.
+        subprocess.run(
+            ["git", "init", "-q"], cwd=self.project, check=True, capture_output=True
+        )
+        install = subprocess.run(
+            ["bash", str(INSTALL_SH), str(self.project)],
+            capture_output=True,
+            check=False,
+            text=True,
+            env=self.env(),
+        )
+        assert install.returncode == 0, install.stdout + install.stderr
+
+        log_dir = (
+            self.home
+            / ".gemini"
+            / "antigravity"
+            / "brain"
+            / self.conv_id
+            / ".system_generated"
+            / "logs"
+        )
+        log_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy(FIXTURES_DIR / "clean_log.txt", log_dir / "overview.txt")
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._tmp.cleanup()
+
+    def env(self, **overrides: str) -> dict[str, str]:
+        """The child environment: a sandboxed `$HOME`, and deliberately no
+        `LEARNING_JOURNAL_ROOT` — resolving the journal root without one is
+        the whole subject."""
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env.pop("LEARNING_JOURNAL_ROOT", None)
+        env.update(overrides)
+        return env
+
+    def run_installed_audit(
+        self, *args: str, cwd: Path, **env_overrides: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(self.installed_dir / "routing-audit.sh"), *args, self.conv_id],
+            capture_output=True,
+            check=False,
+            text=True,
+            cwd=cwd,
+            env=self.env(**env_overrides),
+        )
+
+    def run_installed_python(
+        self, program: str, *args: str
+    ) -> subprocess.CompletedProcess[str]:
+        """Run `program` with the installed skill directory as `sys.path[0]`.
+
+        `-c` rather than a script file so `sys.path[0]` is the working
+        directory — which is what makes this an honest test of the installed
+        copy: the modules it imports are the installed ones, not this
+        checkout's.
+        """
+        return subprocess.run(
+            [sys.executable, "-c", program, *args],
+            capture_output=True,
+            check=False,
+            text=True,
+            cwd=self.installed_dir,
+            env=self.env(),
+        )
+
+
+class ManagedFileClosureTests(unittest.TestCase):
+    """`install.sh`'s `MANAGED_FILES` must be closed under sibling imports.
+
+    A managed module importing an unmanaged sibling is the one defect class
+    that is invisible in a checkout by construction: every module sits in one
+    directory there, so every import resolves regardless of what the
+    installer copies. On an installed harness the same import raises
+    `ModuleNotFoundError` — and `advisory_consultation` catches exactly that
+    when it lazily imports `production_invoker`, so the symptom was not a
+    crash but *every* production consultation returning `worker_error` before
+    a worker ever ran.
+
+    `learning_journal.py` and `learning_outcomes.py` were both missing from
+    the list. Adding them fixes today; this test is what makes the next
+    module's omission a failing test instead of a silently broken install,
+    which matters more than either individual fix.
+    """
+
+    @staticmethod
+    def _bash_array(script: Path, name: str) -> list[str]:
+        text = script.read_text(encoding="utf-8")
+        match = re.search(rf"^{name}=\(([^)]*)\)", text, re.MULTILINE)
+        assert match is not None, f"{name} not found in {script}"
+        return match.group(1).split()
+
+    def _managed(self) -> list[str]:
+        return self._bash_array(INSTALL_SH, "MANAGED_FILES")
+
+    @staticmethod
+    def _sibling_imports(module_path: Path) -> set[str]:
+        """Every top-level module name `module_path` imports that is a sibling
+        `.py` file in the skill directory.
+
+        Read from the AST rather than by importing, so a module is inspected
+        without being executed, and so imports inside functions
+        (`routing_check._persist_compliance_record`'s deliberately local
+        `import learning_journal`) and under `if TYPE_CHECKING`
+        (`learning_outcomes`' `advisory_consultation`) are found too — a
+        lazily-imported sibling is exactly as absent on an installed harness
+        as an eagerly-imported one.
+        """
+        import ast
+
+        siblings = {path.stem for path in SKILL_DIR.glob("*.py")}
+        tree = ast.parse(module_path.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module] if node.module and node.level == 0 else []
+            else:
+                continue
+            imported.update(
+                name.split(".")[0]
+                for name in names
+                if name.split(".")[0] in siblings
+            )
+        return imported
+
+    def test_every_module_a_managed_file_imports_is_itself_managed(self) -> None:
+        managed = self._managed()
+        managed_modules = {name for name in managed if name.endswith(".py")}
+        self.assertTrue(managed_modules, "no Python modules are managed at all")
+
+        for name in sorted(managed_modules):
+            module_path = SKILL_DIR / name
+            with self.subTest(module=name):
+                self.assertTrue(module_path.is_file(), f"{name} is managed but absent")
+                for imported in sorted(self._sibling_imports(module_path)):
+                    self.assertIn(
+                        f"{imported}.py",
+                        managed_modules,
+                        f"{name} imports the sibling module {imported!r}, which "
+                        f"install.sh does not propagate — on an installed "
+                        f"harness that import raises ModuleNotFoundError",
+                    )
+
+    def test_uninstall_removes_every_file_install_manages(self) -> None:
+        """The mirror image, and the same drift in the other direction: a
+        module added to `MANAGED_FILES` and forgotten in `uninstall.sh` is
+        left behind on every uninstall, where a stale copy goes on being
+        imported by whatever else remains."""
+        removed = set(self._bash_array(UNINSTALL_SH, "INSTALLED_FILES"))
+
+        for name in self._managed():
+            with self.subTest(managed_file=name):
+                self.assertIn(
+                    name,
+                    removed,
+                    f"install.sh installs {name} but uninstall.sh never removes it",
+                )
+
+    def test_an_installed_harness_can_import_the_production_path(self) -> None:
+        """The failure itself, reproduced end to end.
+
+        Before `MANAGED_FILES` was fixed this exited non-zero with
+        `ModuleNotFoundError: No module named 'learning_journal'`, raised from
+        `production_invoker`'s module-level import — the import
+        `advisory_consultation` performs the moment a caller does not inject
+        its own worker.
+        """
+        with _InstalledHarness() as harness:
+            result = harness.run_installed_python(
+                "import advisory_consultation, learning_outcomes, "
+                "production_invoker, routing_check\n"
+                "print('imports ok')"
+            )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("imports ok", result.stdout)
+
+    def test_an_installed_consultation_runs_and_journals(self) -> None:
+        """One step past importing: the production path a real consultation
+        takes, from an installed copy, ending in a journal record.
+
+        `production_invoker.invoke_worker` is replaced inside the child so no
+        worker CLI is launched; everything else — the lazy import, the
+        journaling factory, the record, the write — is the installed code
+        running for real.
+        """
+        program = (
+            "import sys\n"
+            "from pathlib import Path\n"
+            "import advisory_consultation, production_invoker\n"
+            "replies = iter(['Planner plan.', 'VERDICT: APPROVE\\nLooks solid.'])\n"
+            "production_invoker.invoke_worker = (\n"
+            "    lambda model, effort, prompt, **kwargs: next(replies)\n"
+            ")\n"
+            "result = advisory_consultation.run_advisory_consultation_debate(\n"
+            "    'Plan the auth rewrite', root_dir=Path(sys.argv[1]),\n"
+            "    task_id='installed-consultation-1',\n"
+            ")\n"
+            "print(result.outcome)\n"
+            "print(result.error)\n"
+        )
+        with _InstalledHarness() as harness:
+            result = harness.run_installed_python(program, str(harness.project))
+            journal = harness.project / ".ralph" / "learning_journal.jsonl"
+            records = _read_jsonl(journal) if journal.exists() else []
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[0], "consensus")
+        self.assertEqual(result.stdout.splitlines()[1], "None")
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertEqual(record["kind"], "worker_execution")
+            self.assertEqual(record["task_id"], "installed-consultation-1")
+            self.assertTrue(record["success"])
+
+
+class InstalledAuditJournalRootTests(unittest.TestCase):
+    """Where an installed `routing-audit.sh` gets its journal root.
+
+    Not from `SCRIPT_DIR`: `install.sh` copies the script to five
+    directories, two under `$HOME`, so a fixed walk up from it resolves to
+    the repository only in a dev checkout. The root comes from the repository
+    the audit is *run in* — the same tree `.ralph/routing_telemetry.jsonl`
+    already lives in — with `LEARNING_JOURNAL_ROOT` as the explicit override
+    and no fallback beyond those two.
+    """
+
+    def test_installed_audit_journals_into_the_repository_it_is_run_in(self) -> None:
+        with _InstalledHarness() as harness:
+            result = harness.run_installed_audit(cwd=harness.project)
+            journal = harness.project / ".ralph" / "learning_journal.jsonl"
+            records = _read_jsonl(journal) if journal.exists() else []
+            install_prefix_journal = (
+                harness.home / ".gemini" / "config" / ".ralph" / "learning_journal.jsonl"
+            )
+            leaked = install_prefix_journal.exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(leaked, "the journal followed the script instead of the repo")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["kind"], "compliance")
+        self.assertEqual(records[0]["session_id"], harness.conv_id)
+
+    def test_learning_journal_root_still_overrides_the_repository(self) -> None:
+        """The override is what makes a non-git project, or a deliberately
+        separate journal location, expressible at all — so it must keep
+        winning over the resolved repository, not merely fill in for it."""
+        with _InstalledHarness() as harness:
+            elsewhere = harness.project.parent / "elsewhere"
+            elsewhere.mkdir()
+
+            result = harness.run_installed_audit(
+                cwd=harness.project, LEARNING_JOURNAL_ROOT=str(elsewhere)
+            )
+            redirected = _read_jsonl(elsewhere / ".ralph" / "learning_journal.jsonl")
+            in_repo = (harness.project / ".ralph" / "learning_journal.jsonl").exists()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(in_repo)
+        self.assertEqual(len(redirected), 1)
+        self.assertEqual(redirected[0]["session_id"], harness.conv_id)
+
+    def test_no_resolvable_root_skips_persistence_without_inventing_one(self) -> None:
+        """Run from outside any repository and with no override, there is no
+        destination — and "no destination" means nothing is written, not that
+        the process's working directory is promoted into one. The audit still
+        runs, still prints, and still relays its own exit code."""
+        with _InstalledHarness() as harness:
+            outside = harness.project.parent / "not-a-repo"
+            outside.mkdir()
+
+            result = harness.run_installed_audit(cwd=outside)
+            stray = sorted(harness.home.rglob("learning_journal.jsonl"))
+            stray += sorted(outside.rglob("learning_journal.jsonl"))
+            stray += sorted(harness.project.rglob("learning_journal.jsonl"))
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No violations detected", result.stdout)
+        self.assertEqual(stray, [], f"a destination was invented: {stray}")
+
+
+class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
+    """Ticket 13's rule, applied to the setup step and not only the write.
+
+    `_resolve_task_id` returns a caller-supplied `task_id` verbatim and
+    unvalidated, while `TaskLabel.for_task` rejects anything off
+    `TASK_ID_RE`. Both used to sit inside one `try` whose `except` returned
+    `worker_error`, so a caller-supplied id with a space in it failed the
+    entire consultation before a worker was contacted — instrumentation
+    aborting the thing it exists to measure.
+    """
+
+    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
+
+    # Unannotated return for the reason `PersistComplianceRecordTests._report`
+    # gives: `advisory_consultation.AdvisoryDebateResult` is not a name mypy
+    # can resolve through a path-loaded module.
+    def _run(self, task_id: str, root: Path):
+        with mock.patch.object(
+            production_invoker,
+            "invoke_worker",
+            side_effect=["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."],
+        ):
+            return advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", root_dir=root, task_id=task_id
+            )
+
+    def test_a_task_id_the_journal_rejects_does_not_fail_the_consultation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._run("not a valid task id", root)
+            journal_written = (root / self.JOURNAL_RELATIVE_PATH).exists()
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(result.final_plan, "Planner's proposed plan.")
+        self.assertFalse(journal_written, "an unjournalable id journaled anyway")
+
+    def test_the_wiring_failure_is_reported_on_the_result_not_swallowed(self) -> None:
+        """Degrading silently would be its own defect: the run is genuinely
+        unmeasured, and `_fold_error` is this module's named mechanism for
+        saying so without displacing the real outcome."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run("not a valid task id", Path(tmp))
+
+        assert result.error is not None
+        self.assertIn("journaling disabled", result.error)
+        self.assertEqual(result.outcome, "consensus")
+
+    def test_a_valid_task_id_still_journals_normally(self) -> None:
+        """The guard must not have turned journaling into a no-op."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._run("task-still-journaled-1", root)
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertIsNone(result.error)
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertEqual(record["task_id"], "task-still-journaled-1")
+            self.assertEqual(record["kind"], "worker_execution")
 
 
 if __name__ == "__main__":

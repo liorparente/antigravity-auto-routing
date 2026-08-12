@@ -54,6 +54,17 @@ still count and correlate distinct halts without recovering anything about what 
 random default only ever applies when no caller id was given, which is what makes the trade-off
 acceptable in practice.
 
+### TaskLabel
+The pair a [[LearningJournal]] record hangs on: a [[TaskIdentity]] plus, optionally, a coarse
+task-type tag such as "bugfix" or "refactor". A dedicated type rather than two loose fields on each
+record, because the rule worth enforcing is a rule about the pair — a sensitivity-halted task carries
+no tag of any kind, since a tag is derived from task text and a tag plus a timestamp is a
+confirmation oracle over guessable work. That rule has two independent locks: the halted constructor
+takes no tag argument, so there is no parameter through which one could be supplied, and construction
+itself rejects a label that is both halted and tagged, so bypassing the constructors fails too. A
+halted label's `task_id` must be the identity the halt already resolved — random, never a digest —
+which the journal cannot verify and the caller therefore owns. Spec 0004.
+
 ### AllowedDirectAction
 An action the orchestrator performs itself rather than routing to a worker. The set is closed and enumerated: everything outside it is a routing violation. Membership is decided by whether a worker *can* do the work, not by whether the orchestrator finds it convenient — version control is a member because worker sandboxes cannot perform it at all.
 

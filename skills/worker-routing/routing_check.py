@@ -22,10 +22,14 @@ Modes:
                           writes beside it — so that ID resolves to a single
                           shared journal, not a second one only this record
                           kind writes to. routing-audit.sh resolves this to
-                          its own repository (never `$HOME`) and passes it;
-                          omit it and nothing is persisted — the process's
-                          own working directory is never used as an implicit
-                          destination (see `_persist_compliance_record`).
+                          the repository the audit is being run in (never
+                          `$HOME`, and never a path derived from where the
+                          script itself was installed — see its comments) and
+                          passes it; omit it and nothing is persisted, which
+                          is exactly what routing-audit.sh does when it can
+                          resolve no repository. The process's own working
+                          directory is never promoted into a destination on
+                          this side (see `_persist_compliance_record`).
   <log_file>              Full audit: parses the log, computes every routing
                           metric strictly within each conversation step's own
                           boundaries, prints a human-readable report to
@@ -91,6 +95,7 @@ Exit codes:
 from __future__ import annotations
 
 import fcntl
+import itertools
 import json
 import re
 import shlex
@@ -187,6 +192,19 @@ class AuditResult:
 
 @dataclass(frozen=True)
 class AuditReport:
+    """One audit run's complete verdict — the concept every consumer takes.
+
+    `warning_codes` is the only field that is not a raw `compute_metrics`
+    output. The two warnings this audit can raise (`WARN-01`, `WARN-02`) are
+    rendered as prose by `run_audit` and as `AuditIssue` messages by
+    `RoutingAuditEngine.audit`, so before this field existed the *code* for
+    a warning existed nowhere a caller could read — which is how a
+    `--strict` run that failed on warnings alone persisted a compliance
+    record indistinguishable from a clean session's. Carried as bare codes
+    rather than messages because that is all any consumer of this field
+    needs and all `ComplianceRecord` may hold.
+    """
+
     total_writes: int
     code_writes: int
     routing_declarations: int
@@ -197,6 +215,7 @@ class AuditReport:
     calibration_markers: int
     code_write_files: list[str]
     exit_code: int
+    warning_codes: tuple[str, ...] = ()
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -880,6 +899,54 @@ def compute_metrics(
     }
 
 
+def _has_violation(metrics: dict[str, Any]) -> bool:
+    """Whether this run's metrics constitute a violation.
+
+    Extracted so `run_audit` and `audit_log` state the rule once instead of
+    twice. Both computed it identically before; the duplication is what let
+    the warning *codes* exist in one and not the other.
+    """
+    return (metrics["code_writes"] > 0 and metrics["worker_calls"] == 0) or bool(
+        metrics["violations"]
+    )
+
+
+def _warning_code(metrics: dict[str, Any], violation: bool) -> str | None:
+    """The one warning code this run raises, or `None`.
+
+    At most one: `WARN-01` takes precedence over `WARN-02` (the printed
+    report has always used an `if`/`elif` chain, and `RoutingAuditEngine`
+    the same), and a violation suppresses both — an unrouted edit is not
+    also reported as "some edits may not have been properly routed."
+    """
+    if violation:
+        return None
+    if metrics["code_writes"] > metrics["worker_calls"]:
+        return "WARN-01"
+    if metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0:
+        return "WARN-02"
+    return None
+
+
+def _build_audit_report(
+    metrics: dict[str, Any], *, exit_code: int, warning_code: str | None
+) -> AuditReport:
+    """Assemble the `AuditReport` for one run's metrics and resolved verdict."""
+    return AuditReport(
+        total_writes=metrics["total_writes"],
+        code_writes=metrics["code_writes"],
+        routing_declarations=metrics["routing_declarations"],
+        worker_calls=metrics["worker_calls"],
+        violations=metrics["violations"],
+        declaration_drift=metrics["declaration_drift"],
+        violation_details=metrics["violation_details"],
+        calibration_markers=metrics["calibration_markers"],
+        code_write_files=metrics["code_write_files"],
+        exit_code=exit_code,
+        warning_codes=() if warning_code is None else (warning_code,),
+    )
+
+
 class LogParserAdapter:
     """Base interface for parsing conversation log steps."""
 
@@ -1183,36 +1250,18 @@ class RoutingAuditEngine:
         evaluator = PolicyEvaluator(legacy_config, security_ctx=self.security_ctx)
         metrics = evaluator.evaluate(steps)
 
-        violation_count = len(metrics["violations"])
-        violation = (
-            metrics["code_writes"] > 0 and metrics["worker_calls"] == 0
-        ) or violation_count > 0
-        warning = (
-            metrics["code_writes"] > metrics["worker_calls"] and not violation
-        ) or (
-            metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0 and not violation
-        )
+        violation = _has_violation(metrics)
+        warning_code = _warning_code(metrics, violation)
+        exit_code = 1 if violation or (strict and warning_code is not None) else 0
 
-        exit_code = 1 if violation or (strict and warning) else 0
-
-        return AuditReport(
-            total_writes=metrics["total_writes"],
-            code_writes=metrics["code_writes"],
-            routing_declarations=metrics["routing_declarations"],
-            worker_calls=metrics["worker_calls"],
-            violations=metrics["violations"],
-            declaration_drift=metrics["declaration_drift"],
-            violation_details=metrics["violation_details"],
-            calibration_markers=metrics["calibration_markers"],
-            code_write_files=metrics["code_write_files"],
-            exit_code=exit_code,
+        return _build_audit_report(
+            metrics, exit_code=exit_code, warning_code=warning_code
         )
 
 
 
 def _persist_compliance_record(
-    metrics: dict[str, Any],
-    violation_count: int,
+    report: AuditReport,
     *,
     session_id: str | None,
     root_dir: str | Path | None,
@@ -1246,42 +1295,63 @@ def _persist_compliance_record(
     `LearningJournalTests` block runs — well after this module is first
     exec'd. Importing here, at call time, means either loading path works:
     the CLI's own `sys.path[0]` when run as a script, or the test's
-    pre-registered module when run in-process.
+    pre-registered module when run in-process. It is imported *inside* the
+    `try` on purpose: an installation missing `learning_journal.py` must
+    degrade to a reported persistence failure like any other, never a
+    traceback out of `run_audit` that truncates the audit's stdout and
+    abandons its 0/1/2 exit contract. `ManagedFileClosureTests` is what
+    stops that installation from existing in the first place; this is the
+    second lock.
 
-    Messages in `metrics["violation_details"]` carry no `"Step N: "` prefix
-    of their own (see `_analyze_step`); `extract_issue_codes` is documented
-    and tested against messages that do carry one (`test_routing.py`'s
-    `test_extract_issue_codes_keeps_the_codes_and_drops_the_message_text`),
-    because some issue strings (LOG-01's) embed a second colon of their own
-    and `extract_issue_codes` only ever looks past the *first* colon. This
-    function adds that prefix so a code trailing a second colon is not
-    silently dropped.
+    **Every issue code the audit computed reaches the record, not just the
+    violating ones.** `report.declaration_drift` carries each step's issues
+    whether or not that step also tripped a violation, so DEC-01..05 and
+    LOG-01 on an otherwise-passing step are trended rather than dropped;
+    `report.warning_codes` carries WARN-01/WARN-02, which `run_audit`
+    renders as prose and would otherwise never reach a record at all — the
+    case where a `--strict` run fails on warnings alone and persists a
+    verdict indistinguishable from a clean session. `report.violations`
+    still supplies the count; it is `declaration_drift` that supplies the
+    codes, and the two are deliberately different sets.
+
+    Messages go to `extract_issue_codes` exactly as `_analyze_step` and
+    `RoutingAuditEngine` built them — unprefixed. That function reads a
+    leading code directly and only falls back to looking past a `"Step N: "`
+    prefix, so no caller has to know its parsing rule (see its docstring).
+    This function previously synthesized such a prefix purely to satisfy
+    that rule, which made a cross-module string format an unwritten
+    contract between two files.
     """
     if session_id is None or root_dir is None:
         return None
 
-    import learning_journal
-
     resolved_root = Path(root_dir)
     try:
+        import learning_journal
+
         issue_codes = learning_journal.extract_issue_codes(
-            f"Step {step_index}: {message}"
-            for step_index, messages in metrics["violation_details"]
-            for message in messages
+            itertools.chain(
+                (
+                    message
+                    for _step_index, messages in report.declaration_drift
+                    for message in messages
+                ),
+                report.warning_codes,
+            )
         )
         record = learning_journal.ComplianceRecord(
             session_id=session_id,
-            total_writes=metrics["total_writes"],
-            code_writes=metrics["code_writes"],
-            routing_declarations=metrics["routing_declarations"],
-            worker_calls=metrics["worker_calls"],
-            violation_count=violation_count,
-            declaration_drift_count=len(metrics["declaration_drift"]),
-            calibration_markers=metrics["calibration_markers"],
-            code_write_count=len(metrics["code_write_files"]),
+            total_writes=report.total_writes,
+            code_writes=report.code_writes,
+            routing_declarations=report.routing_declarations,
+            worker_calls=report.worker_calls,
+            violation_count=len(report.violations),
+            declaration_drift_count=len(report.declaration_drift),
+            calibration_markers=report.calibration_markers,
+            code_write_count=len(report.code_write_files),
             issue_codes=issue_codes,
         )
-    except ValueError as exc:
+    except (ImportError, ValueError) as exc:
         return f"failed to build compliance record: {exc}"
     return learning_journal.append_journal_record(record, root_dir=resolved_root)
 
@@ -1370,13 +1440,24 @@ def run_audit(
 
     violation_count = len(metrics["violations"])
 
+    # The verdict is resolved here, before anything is printed, so the record
+    # this run persists and the report it prints are the same verdict rather
+    # than two independent readings of the same metrics. The printing below
+    # renders `violation` and `warning_code`; it no longer recomputes them.
+    violation = _has_violation(metrics)
+    warning_code = _warning_code(metrics, violation)
+    exit_code = 1 if violation or (strict and warning_code is not None) else 0
+    report = _build_audit_report(
+        metrics, exit_code=exit_code, warning_code=warning_code
+    )
+
     # Persisted only once the audit has actually produced a verdict — never
     # for the exit-2 paths above, where there is no trustworthy metric to
     # record. A write failure is reported to stderr, matching how a
     # per-violation detail line is already reported below; it never changes
     # `violation_count` or anything printed to stdout.
     persist_error = _persist_compliance_record(
-        metrics, violation_count, session_id=session_id, root_dir=root_dir
+        report, session_id=session_id, root_dir=root_dir
     )
     if persist_error:
         print(f"⚠️  {persist_error}", file=sys.stderr)
@@ -1389,12 +1470,9 @@ def run_audit(
     print(f"  {'Unrouted code edit violations:':<33} {violation_count}")
     print()
 
-    violation = False
-
     if metrics["code_writes"] > 0 and metrics["worker_calls"] == 0:
         print(f"🔴 VIOLATION: {metrics['code_writes']} source code edits with 0 worker calls.")
         print("   Antigravity executed code changes directly without routing.")
-        violation = True
 
     if violation_count > 0:
         print(f"🔴 VIOLATION: Unrouted code edit detected in {violation_count} step(s).")
@@ -1405,23 +1483,19 @@ def run_audit(
                 f"  ⚠️  Step {step_index}: unrouted code edit detected ({files})",
                 file=sys.stderr,
             )
-        violation = True
 
-    warning = False
-    if metrics["code_writes"] > metrics["worker_calls"] and not violation:
+    if warning_code == "WARN-01":
         print(
             "🟡 WARNING: More code edits "
             f"({metrics['code_writes']}) than worker calls "
             f"({metrics['worker_calls']})."
         )
         print("   Some edits may not have been properly routed.")
-        warning = True
-    elif metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0 and not violation:
+    elif warning_code == "WARN-02":
         print(
             "🟡 WARNING: No [ROUTING:] declarations found, but "
             f"{metrics['total_writes']} file writes occurred."
         )
-        warning = True
     elif not violation:
         print("✅ No violations detected.")
 
@@ -1431,11 +1505,7 @@ def run_audit(
     for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"{count:>7} {name}")
 
-    if violation:
-        return 1
-    if strict and warning:
-        return 1
-    return 0
+    return report.exit_code
 
 
 def main() -> None:
