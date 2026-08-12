@@ -8,6 +8,21 @@
 #   --strict   Relayed to routing_check.py: also fail (exit 1) on warnings,
 #              not just violations.
 #
+# The resolved conversation id (given or scanned) is also passed to
+# routing_check.py as --session-id, so it can persist the verdict as a
+# ComplianceRecord (spec 0004 ticket 15) keyed on the same id this script
+# already resolved — never a synthetic one. The journal destination for
+# that record is passed alongside it as --root-dir: it defaults to this
+# script's own repository (a fixed walk up from SCRIPT_DIR, since this
+# script always lives at skills/worker-routing/ inside the repo it audits),
+# and can be redirected independently by setting LEARNING_JOURNAL_ROOT.
+# routing_check.py never invents a destination of its own — see its
+# --root-dir docs. This must stay the repository, never $HOME: every other
+# writer in this loop (learning_journal's own callers, AgentCouncil's
+# routing_telemetry.jsonl) is repo-scoped, and a ComplianceRecord that
+# landed anywhere else would split the journal in two — one file the
+# ticket-16 scoreboard reads, one it doesn't.
+#
 # Exit codes (relayed directly from routing_check.py):
 #   0   Audit ran, no violations (and, with --strict, no warnings).
 #   1   Audit ran, violations found (or, with --strict, warnings found).
@@ -19,7 +34,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BRAIN_DIR="$HOME/.gemini/antigravity/brain"
+JOURNAL_ROOT="${LEARNING_JOURNAL_ROOT:-$REPO_ROOT}"
 PY_CHECK="$SCRIPT_DIR/routing_check.py"
 
 STRICT_FLAG=""
@@ -61,12 +78,14 @@ echo "🔍 Auditing conversation: $CONV_ID"
 echo "   Log file: $LOG_FILE"
 echo "---"
 
-set +e
+PY_ARGS=()
 if [ -n "$STRICT_FLAG" ]; then
-    python3 "$PY_CHECK" --strict "$LOG_FILE"
-else
-    python3 "$PY_CHECK" "$LOG_FILE"
+    PY_ARGS+=(--strict)
 fi
+PY_ARGS+=(--session-id "$CONV_ID" --root-dir "$JOURNAL_ROOT" "$LOG_FILE")
+
+set +e
+python3 "$PY_CHECK" "${PY_ARGS[@]}"
 STATUS=$?
 set -e
 

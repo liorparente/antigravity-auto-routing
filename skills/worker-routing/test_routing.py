@@ -391,6 +391,7 @@ class RoutingAuditIntegrationTests(unittest.TestCase):
     def _run_audit(self, *args: str) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env["HOME"] = str(self.home_dir)
+        env["LEARNING_JOURNAL_ROOT"] = str(self.home_dir)
         return subprocess.run(
             ["bash", str(ROUTING_AUDIT), *args, self.conv_id],
             capture_output=True,
@@ -4210,6 +4211,389 @@ class OutcomeRecordingTests(unittest.TestCase):
         self.assertEqual(kinds_by_task["outcome"]["task_id"], "task-join-1")
         self.assertEqual(kinds_by_task["outcome"]["signal"], "tests")
         self.assertEqual(kinds_by_task["outcome"]["verdict"], "pass")
+
+
+# Ticket 15 — the post-session audit verdict, persisted instead of printed and
+# lost. Appended here, at the end of the file, per this ticket's instructions:
+# this file is edited concurrently on other branches, so an insertion
+# anywhere but the end is a merge conflict for everyone.
+class PersistComplianceRecordTests(unittest.TestCase):
+    """Unit-level coverage of `routing_check._persist_compliance_record`.
+
+    Exercised directly against hand-built `compute_metrics`-shaped dicts
+    rather than through a parsed log fixture: no fixture on disk today
+    drives a full `[ROUTING: worker — complexity: ... — effort: ...]`
+    declaration through a DEC-01 drift, and hand-authoring one as raw log
+    text is exactly the kind of escaping-fragile fixture the rest of this
+    file avoids by constructing `Step`/metrics objects directly (see
+    `RoutingAuditEngineTests`). What matters here — that a real, non-empty
+    `metrics["violation_details"]` reduces to the right `issue_codes` — does
+    not need a parser in the loop at all.
+    """
+
+    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
+
+    @staticmethod
+    def _metrics(**overrides: object) -> dict:
+        base: dict = {
+            "total_writes": 2,
+            "code_writes": 1,
+            "routing_declarations": 1,
+            "worker_calls": 1,
+            "code_write_files": ["src/app.py"],
+            "violations": [],
+            "declaration_drift": [],
+            "violation_details": [],
+            "calibration_markers": 0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_clean_metrics_persist_a_clean_verdict_not_nothing(self) -> None:
+        """User story 4 / the trendline-has-no-silent-gaps criterion: a
+        session with zero violations still writes a record, with an empty
+        `issue_codes` tuple rather than no record at all."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            error = routing_check._persist_compliance_record(
+                self._metrics(), 0, session_id="sess-clean", root_dir=root
+            )
+
+            self.assertIsNone(error)
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record["kind"], "compliance")
+            self.assertEqual(record["session_id"], "sess-clean")
+            self.assertEqual(record["violation_count"], 0)
+            self.assertEqual(record["issue_codes"], [])
+            self.assertEqual(record["total_writes"], 2)
+            self.assertEqual(record["code_writes"], 1)
+            self.assertEqual(record["routing_declarations"], 1)
+            self.assertEqual(record["worker_calls"], 1)
+            self.assertEqual(record["declaration_drift_count"], 0)
+            self.assertEqual(record["code_write_count"], 1)
+
+    def test_violating_metrics_persist_violation_count_and_issue_codes(self) -> None:
+        """`extract_issue_codes` needs its documented `"Step N: "`-prefixed
+        input (see `test_extract_issue_codes_keeps_the_codes_and_drops_the_message_text`)
+        to survive a message like LOG-01's that embeds a second colon of its
+        own; this pins that `_persist_compliance_record` supplies that
+        prefix rather than passing `violation_details` messages through raw."""
+        metrics = self._metrics(
+            violations=[(1, ["src/app.py"]), (2, [])],
+            declaration_drift=[(1, ["DEC-01 declaration worker/model drift"])],
+            violation_details=[
+                (1, ["DEC-01 declaration worker/model drift"]),
+                (2, ["LOG-01 unknown write tool: apply_unreviewed_patch"]),
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            error = routing_check._persist_compliance_record(
+                metrics, 2, session_id="sess-violating", root_dir=root
+            )
+
+            self.assertIsNone(error)
+            record = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)[0]
+            self.assertEqual(record["violation_count"], 2)
+            self.assertEqual(sorted(record["issue_codes"]), ["DEC-01", "LOG-01"])
+            for leaked in ("apply_unreviewed_patch", "app.py"):
+                self.assertNotIn(leaked, json.dumps(record))
+
+    def test_no_session_id_persists_nothing(self) -> None:
+        """The documented handling of 'no id available': an explicit skip,
+        never a fabricated placeholder id."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            error = routing_check._persist_compliance_record(
+                self._metrics(), 0, session_id=None, root_dir=root
+            )
+
+            self.assertIsNone(error)
+            self.assertFalse((root / self.JOURNAL_RELATIVE_PATH).exists())
+
+    def test_malformed_session_id_is_reported_not_raised(self) -> None:
+        """A `session_id` that fails `ComplianceRecord`'s own validation is a
+        call-site bug by `learning_journal`'s own contract, but from
+        `run_audit`'s point of view it must degrade exactly like a broken
+        disk: reported back as a string, never an exception the audit run
+        has to survive."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            error = routing_check._persist_compliance_record(
+                self._metrics(),
+                0,
+                session_id="not a valid identifier",
+                root_dir=root,
+            )
+
+            self.assertIsNotNone(error)
+            assert error is not None
+            self.assertIn("compliance record", error.lower())
+            self.assertFalse((root / self.JOURNAL_RELATIVE_PATH).exists())
+
+    def test_write_failure_is_reported_not_raised(self) -> None:
+        """Matches tickets 13 and 14's contract for a broken `.ralph`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".ralph").write_text("not a directory")
+
+            error = routing_check._persist_compliance_record(
+                self._metrics(), 0, session_id="sess-write-failure", root_dir=root
+            )
+
+            self.assertIsNotNone(error)
+            assert error is not None
+            self.assertIn("learning journal", error.lower())
+
+
+class RoutingCheckCliCompliancePersistenceTests(unittest.TestCase):
+    """CLI-boundary coverage: `routing_check.py --session-id ID <log_file>`.
+
+    Every subprocess here passes `--root-dir` pointing at a throwaway
+    temporary directory — `root_dir` has no implicit default (see
+    `_persist_compliance_record`), so this is what keeps persistence off the
+    real repository, exactly as `RoutingAuditIntegrationTests` does via
+    `LEARNING_JOURNAL_ROOT` instead (that class never inspects journal
+    content, so an env var suffices there).
+    """
+
+    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
+
+    def _run(self, cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(ROUTING_CHECK), "--root-dir", str(cwd), *args],
+            capture_output=True,
+            check=False,
+            text=True,
+            cwd=str(cwd),
+        )
+
+    def test_clean_log_with_session_id_appends_one_clean_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._run(
+                root, "--session-id", "sess-cli-clean", str(FIXTURES_DIR / "clean_log.txt")
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["session_id"], "sess-cli-clean")
+            self.assertEqual(records[0]["violation_count"], 0)
+
+    def test_violating_log_with_session_id_appends_one_record_with_violations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._run(
+                root,
+                "--session-id",
+                "sess-cli-violating",
+                str(FIXTURES_DIR / "unrouted_mutation_log.txt"),
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["session_id"], "sess-cli-violating")
+            self.assertEqual(records[0]["violation_count"], 2)
+
+    def test_no_session_id_never_creates_the_ralph_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = self._run(root, str(FIXTURES_DIR / "clean_log.txt"))
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((root / ".ralph").exists())
+
+    def test_no_root_dir_never_writes_beneath_cwd_even_with_a_session_id(self) -> None:
+        """Regression guard for the original defect: omitting `--root-dir`
+        must skip persistence, never fall back to writing beneath whatever
+        directory the process happens to be running in — even though a
+        `--session-id` was given and would otherwise trigger a write."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROUTING_CHECK),
+                    "--session-id",
+                    "sess-no-root-dir",
+                    str(FIXTURES_DIR / "clean_log.txt"),
+                ],
+                capture_output=True,
+                check=False,
+                text=True,
+                cwd=str(root),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse((root / ".ralph").exists())
+
+    def test_stdout_and_exit_code_are_identical_with_and_without_session_id(self) -> None:
+        """The hard constraint: gaining a persistence destination must not
+        change the audit's existing stdout/exit-code contract at all."""
+        with tempfile.TemporaryDirectory() as tmp_a, tempfile.TemporaryDirectory() as tmp_b:
+            without_session = self._run(Path(tmp_a), str(FIXTURES_DIR / "clean_log.txt"))
+            with_session = self._run(
+                Path(tmp_b), "--session-id", "sess-parity", str(FIXTURES_DIR / "clean_log.txt")
+            )
+
+            self.assertEqual(without_session.returncode, with_session.returncode)
+            self.assertEqual(without_session.stdout, with_session.stdout)
+
+    def test_journal_write_failure_never_changes_exit_code_or_stdout(self) -> None:
+        """Pins the exit-code/stdout contract across persistence succeeding
+        (`healthy_root`) and failing (`blocked_root`, whose `.ralph` is a
+        plain file) for the same log — the write failure is reported to
+        stderr (matching tickets 13/14) but never touches stdout or the
+        returncode."""
+        with tempfile.TemporaryDirectory() as healthy_root, tempfile.TemporaryDirectory() as blocked_root:
+            (Path(blocked_root) / ".ralph").write_text("not a directory")
+
+            healthy = self._run(
+                Path(healthy_root),
+                "--session-id",
+                "sess-healthy",
+                str(FIXTURES_DIR / "clean_log.txt"),
+            )
+            blocked = self._run(
+                Path(blocked_root),
+                "--session-id",
+                "sess-blocked",
+                str(FIXTURES_DIR / "clean_log.txt"),
+            )
+
+            self.assertEqual(healthy.returncode, blocked.returncode)
+            self.assertEqual(healthy.stdout, blocked.stdout)
+            self.assertTrue(
+                (Path(healthy_root) / self.JOURNAL_RELATIVE_PATH).exists()
+            )
+            self.assertIn("failed to write learning journal record", blocked.stderr)
+
+    def test_session_id_missing_a_value_fails_closed_with_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._run(
+                Path(tmp), str(FIXTURES_DIR / "clean_log.txt"), "--session-id"
+            )
+            self.assertEqual(result.returncode, 2)
+
+
+class RoutingAuditShWiresConversationIdToComplianceRecordTests(unittest.TestCase):
+    """End-to-end: `routing-audit.sh` resolves a conversation id and this
+    ticket's job is to thread it through as `--session-id`, not invent a
+    fresh one. Mirrors `RoutingAuditIntegrationTests`' `$HOME` sandboxing,
+    plus a distinct `LEARNING_JOURNAL_ROOT` override — kept separate from
+    `home_dir` on purpose, so this also pins that the override actually
+    redirects the journal rather than merely coinciding with `$HOME`."""
+
+    def setUp(self) -> None:
+        self.tmp_dir = tempfile.TemporaryDirectory()
+        self.home_dir = Path(self.tmp_dir.name) / "home"
+        self.root_dir = Path(self.tmp_dir.name) / "root"
+        self.home_dir.mkdir()
+        self.root_dir.mkdir()
+        self.brain_dir = self.home_dir / ".gemini" / "antigravity" / "brain"
+        self.conv_id = f"routing-audit-compliance-test-{os.getpid()}"
+        self.conv_dir = self.brain_dir / self.conv_id
+        self.log_dir = self.conv_dir / ".system_generated" / "logs"
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        self.tmp_dir.cleanup()
+
+    def _run_audit(self, *args: str) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env["HOME"] = str(self.home_dir)
+        env["LEARNING_JOURNAL_ROOT"] = str(self.root_dir)
+        return subprocess.run(
+            ["bash", str(ROUTING_AUDIT), *args, self.conv_id],
+            capture_output=True,
+            check=False,
+            text=True,
+            env=env,
+        )
+
+    def test_wrapper_persists_a_record_keyed_on_the_real_conversation_id(self) -> None:
+        shutil.copy(FIXTURES_DIR / "clean_log.txt", self.log_dir / "overview.txt")
+
+        result = self._run_audit()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = _read_jsonl(self.root_dir / ".ralph" / "learning_journal.jsonl")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["session_id"], self.conv_id)
+
+    def test_wrapper_persists_on_violation_too(self) -> None:
+        shutil.copy(FIXTURES_DIR / "direct_then_code_log.txt", self.log_dir / "overview.txt")
+
+        result = self._run_audit()
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        records = _read_jsonl(self.root_dir / ".ralph" / "learning_journal.jsonl")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["session_id"], self.conv_id)
+        self.assertGreater(records[0]["violation_count"], 0)
+
+
+class JournalUnificationTests(unittest.TestCase):
+    """Pins the invariant `routing-audit.sh`'s `JOURNAL_ROOT` default was
+    fixed to uphold: every record family in this loop writes to *one*
+    journal, beside the routing telemetry, inside the repository — never a
+    second file only one writer knows about.
+
+    Deliberately does not assert a hardcoded path string: a compliance
+    writer and a differently-invented location could both contain
+    `learning_journal.jsonl` and still be two separate files. This writes a
+    `ComplianceRecord` and an `OutcomeRecord` — genuinely different families,
+    reached through their real production entry points — to the same
+    injected root and asserts they land in the same single file on disk. A
+    future record family (ticket 17, 19, 21, ...) that resolves its own
+    destination instead of going through `learning_journal.journal_path`
+    would fail this test by producing a second file.
+    """
+
+    def test_compliance_and_outcome_records_share_one_journal_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            compliance_error = routing_check._persist_compliance_record(
+                {
+                    "total_writes": 2,
+                    "code_writes": 1,
+                    "routing_declarations": 1,
+                    "worker_calls": 1,
+                    "code_write_files": ["src/app.py"],
+                    "violations": [],
+                    "declaration_drift": [],
+                    "violation_details": [],
+                    "calibration_markers": 0,
+                },
+                0,
+                session_id="sess-unification",
+                root_dir=root,
+            )
+            outcome_error = learning_outcomes.record_test_result(
+                "task-unification-1", passed=True, root_dir=root
+            )
+
+            journal_files = sorted(root.rglob("*.jsonl"))
+            self.assertEqual(
+                len(journal_files),
+                1,
+                f"expected one shared journal file, found {journal_files}",
+            )
+            records = _read_jsonl(journal_files[0])
+
+        self.assertIsNone(compliance_error)
+        self.assertIsNone(outcome_error)
+        self.assertEqual(len(records), 2)
+        self.assertEqual({record["kind"] for record in records}, {"compliance", "outcome"})
 
 
 if __name__ == "__main__":
