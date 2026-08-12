@@ -65,13 +65,13 @@ InvokeWorker = Callable[[str, str, str], str]
 # would misstate what happened. See `CanaryFixture` and `is_canary_dialogue`
 # below for the full mechanism. "budget_skipped" (spec 0003 ticket 09) is a
 # seventh, again orthogonal case: like "sensitivity_halt", no Planner or
-# Critic is ever contacted -- but for an unrelated reason (the session's
+# Critic is ever contacted — but for an unrelated reason (the session's
 # dialogue budget is fully exhausted, not that the task text itself is
 # unsafe), and unlike "sensitivity_halt" nothing about `task_description` is
 # redacted, because there is nothing sensitive here to redact. It exists so
 # a caller whose session ran out of budget still receives a real
-# `AdvisoryDebateResult` -- transcript and telemetry record both written,
-# per this module's "every outcome gets both artifacts" invariant -- rather
+# `AdvisoryDebateResult` — transcript and telemetry record both written,
+# per this module's "every outcome gets both artifacts" invariant — rather
 # than silently getting "no dialogue happened" with no trace. See
 # `resolve_degradation_rung` below for the pure decision this outcome is
 # reported for.
@@ -95,7 +95,7 @@ AdvisoryOutcome = Literal[
 CriticVerdict = Literal["approved", "revise", "unparseable"]
 
 # Spec 0003 (CriticalDialogue) ticket 02: the VerdictContract's textual
-# shape. Nothing in the spec pins the literal syntax below -- that choice
+# shape. Nothing in the spec pins the literal syntax below — that choice
 # belongs to this ticket, and it is load-bearing for every later ticket that
 # reads a Critic response (panel topology, canaries, telemetry), so it is
 # documented once, here, rather than re-derived from `_parse_critic_verdict`
@@ -103,7 +103,7 @@ CriticVerdict = Literal["approved", "revise", "unparseable"]
 #
 # A Critic response must contain, in order:
 #
-#   1. Free-text rationale -- any prose, any number of lines, no marker.
+#   1. Free-text rationale — any prose, any number of lines, no marker.
 #   2. Zero or more "engagement units", each occupying exactly one line,
 #      interleaved with rationale text in any order, but all of them before
 #      the verdict line:
@@ -113,11 +113,11 @@ CriticVerdict = Literal["approved", "revise", "unparseable"]
 #          if present (the quote marks are a convention for the Critic to
 #          follow, not something the parser requires). What remains is
 #          checked for verbatim (byte-for-byte) containment in the artifact
-#          text `_parse_critic_verdict` is given -- the Planner's plan on
+#          text `_parse_critic_verdict` is given — the Planner's plan on
 #          today's occasion, a diff or a lesson on later ones. A quote that
 #          fails this check is silently dropped: it does not count toward
 #          `verified_quote_count`, and it does NOT by itself make the
-#          response unparseable -- see `_parse_critic_verdict`.
+#          response unparseable — see `_parse_critic_verdict`.
 #        - An OBJECTION line: stripped text matching `^\d+\.\s+\S`, e.g.
 #          `1. The rollback plan omits a database migration step.` Numbers
 #          need not be sequential or unique; every matching line counts as
@@ -131,14 +131,14 @@ CriticVerdict = Literal["approved", "revise", "unparseable"]
 #      `_is_tolerant_revise` always has.
 #
 # An APPROVE verdict line is only ever read as "approved" when
-# `verified_quote_count >= 1` for that response -- `objection_count` is
+# `verified_quote_count >= 1` for that response — `objection_count` is
 # tallied alongside it but never substitutes for a verified quote. This is
 # deliberately asymmetric, not `verified_quote_count + objection_count >=
 # 1`: a quote is mechanically checked, byte-for-byte, against the artifact
 # text, so it is evidence the Critic actually engaged with something real;
 # an objection is free text with no verification at all, so any number of
 # objections backed by zero verified quotes is exactly as untrustworthy as
-# zero engagement -- a Critic could fabricate ten numbered objections about
+# zero engagement — a Critic could fabricate ten numbered objections about
 # a plan it never read. A bare or fabricated APPROVE (zero verified quotes,
 # regardless of objection_count) parses as "unparseable" instead (see
 # `_parse_critic_verdict`). REVISE carries no such requirement: it is read
@@ -782,10 +782,10 @@ CANARY_MARKER = "CANARY DIALOGUE"
 # and its ordered degradation ladder ("Budget" paragraph, Implementation
 # Decisions: "On exhaustion, an ordered degradation ladder applies: reduce
 # rounds, then cheapen the roster, then skip the dialogue entirely with a
-# report. Every rung taken emits a telemetry record -- degradation is never
+# report. Every rung taken emits a telemetry record — degradation is never
 # silent.").
 #
-# **Unit of spend.** This module holds no session state -- same philosophy
+# **Unit of spend.** This module holds no session state — same philosophy
 # ticket 07's `reachability_check` and ticket 08's `is_canary_dialogue`
 # already established (see their own comments: a scheduler or a budget
 # ledger belongs to whatever orchestrates a session, not to a module that
@@ -796,7 +796,7 @@ CANARY_MARKER = "CANARY DIALOGUE"
 # made *before* this one, not rounds, not tokens, not dollars. Counting
 # dialogues rather than rounds or a cost estimate is the simplest unit that
 # is still faithful to the spec's own phrase, "per-session dialogue
-# budget" -- a dialogue is the thing being budgeted, so a dialogue is what
+# budget" — a dialogue is the thing being budgeted, so a dialogue is what
 # is counted. A caller that also wants rounds or cost reflected in its
 # session-wide accounting is free to compute its own `session_spend_so_far`
 # from a richer formula (e.g. weighting a panel dialogue more than a pair
@@ -804,20 +804,20 @@ CANARY_MARKER = "CANARY DIALOGUE"
 # it does not prescribe how a caller arrives at it.
 #
 # **The ladder's thresholds.** `resolve_degradation_rung` reads exactly one
-# config number -- `dialogue_budget.session_dialogue_cap` (the "numeric cap"
-# the ticket calls for) -- and divides `session_spend_so_far` into four
+# config number — `dialogue_budget.session_dialogue_cap` (the "numeric cap"
+# the ticket calls for) — and divides `session_spend_so_far` into four
 # bands, each exactly one cap's width wide: under one cap is rung 0 (no
 # degradation), one to two caps is rung 1 (reduce rounds), two to three caps
 # is rung 2 (cheapen roster/effort), three or more caps is rung 3 (skip
 # entirely). Multiples of the cap itself, rather than independently
 # configured per-rung thresholds, are deliberately chosen: they need no
 # extra config surface beyond the one number the ticket asks for, and they
-# read as a legible story -- crossing the budget once is a mild overrun
+# read as a legible story — crossing the budget once is a mild overrun
 # (reduce rounds), crossing it twice is a serious overrun (cheapen further),
 # crossing it three times over is exhausted (stop spending, report instead).
 # A `session_dialogue_cap` of zero degenerates cleanly to "always rung 3"
 # for any `session_spend_so_far >= 0` (every band's upper bound is also
-# zero, so every comparison falls through to the final `return 3`) -- a
+# zero, so every comparison falls through to the final `return 3`) — a
 # session with no budget at all has no room for any dialogue, which is the
 # correct reading, not a special case this function needs to guard against.
 DegradationRung = Literal[0, 1, 2, 3]
@@ -827,7 +827,7 @@ DEFAULT_SESSION_DIALOGUE_CAP = 10
 # **What each rung concretely does**, wired into `run_advisory_consultation_debate`:
 #
 # - Rung 1 reassigns the local `max_rounds` down to
-#   `_DEGRADED_ROUND_CAP` (below) -- a single round: either the Planner's
+#   `_DEGRADED_ROUND_CAP` (below) — a single round: either the Planner's
 #   first proposal earns the Critic's approval immediately, or the
 #   dialogue reports a stalemate on round 1 rather than paying for up to
 #   `MAX_DEBATE_ROUNDS` of back-and-forth. One round, not two, is chosen
@@ -837,20 +837,20 @@ DEFAULT_SESSION_DIALOGUE_CAP = 10
 #   rounds") does not ask for a slightly-cheaper dialogue, it asks for a
 #   cheaper ladder rung that is visibly, structurally different from an
 #   un-degraded run.
-# - Rung 2 additionally (rungs compound -- see below) reassigns
+# - Rung 2 additionally (rungs compound — see below) reassigns
 #   `planner_effort`, `critic_effort`, `critic_a_effort`, and
 #   `critic_b_effort` down to `_DEGRADED_EFFORT`, AND reassigns
 #   `planner_model`/`critic_model`/`critic_a_model`/`critic_b_model` to the
-#   single model named by `_load_degraded_roster_model` (below) -- the
+#   single model named by `_load_degraded_roster_model` (below) — the
 #   ticket's own "What to build" prose is specific ("cheapen the roster
 #   (e.g. fall back toward lighter/local families)"), so effort alone
 #   under-delivers against it; a "roster" is model/family assignment
 #   everywhere else in this module (`resolve_roster`, ticket 07), and rung
 #   2 now actually touches that, not only effort. This is still a config
 #   read plus a substitution, not a new resolver: `resolve_roster` (ticket
-#   07) has no "prefer the cheapest reachable family" bias to opt into --
+#   07) has no "prefer the cheapest reachable family" bias to opt into —
 #   it only ever tries to maximize *independence* across roles, never cost
-#   -- and building that bias into it would be new roster-resolution
+#   — and building that bias into it would be new roster-resolution
 #   infrastructure this ticket does not need to invent. Reusing
 #   `routing-config.json`'s existing `light_doer` role block instead is the
 #   same "config-driven substitution" shape ticket 08 already uses for
@@ -870,7 +870,7 @@ DEFAULT_SESSION_DIALOGUE_CAP = 10
 #   dialogues too, not only the roster resolver's own degraded
 #   assignments.
 # - Rung 3 ends the call entirely, before roster resolution, before a
-#   canary check, before any `invoke_worker` call -- see the
+#   canary check, before any `invoke_worker` call — see the
 #   `"budget_skipped"` outcome and `run_advisory_consultation_debate`'s own
 #   budget-ladder block.
 #
@@ -886,7 +886,7 @@ _DEGRADED_EFFORT = "low"
 def _load_dialogue_budget_config(config_path: Path) -> int:
     """Read the session dialogue cap from `config_path`'s `dialogue_budget`
     section, falling back to `DEFAULT_SESSION_DIALOGUE_CAP` when the section
-    (or its one key) is absent -- same pattern, including the no-try/except
+    (or its one key) is absent — same pattern, including the no-try/except
     contract, as `_load_canary_cadence_config` and `_load_roster_fallback_chains`
     above: production always calls this with the default `_CONFIG_PATH`,
     which is checked into the repo, so a missing/malformed `config_path` is
@@ -899,7 +899,7 @@ def _load_dialogue_budget_config(config_path: Path) -> int:
 
 
 # Fallback for a config file missing the `light_doer` section (or its
-# `name` key) -- same role as this module's other `_DEFAULT_*` fallbacks
+# `name` key) — same role as this module's other `_DEFAULT_*` fallbacks
 # (`DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD`, `DEFAULT_ROSTER_FALLBACK_CHAINS`,
 # `DEFAULT_CANARY_DIALOGUES_PER_CANARY`), never what production actually
 # uses, since the checked-in `routing-config.json` supplies its own
@@ -911,27 +911,27 @@ _DEFAULT_DEGRADED_ROSTER_MODEL = "Codex 5.6 Terra"
 def _load_degraded_roster_model(config_path: Path) -> str:
     """Read the single model rung 2 substitutes for every role, drawn from
     `config_path`'s existing `light_doer` role block rather than a new
-    config section this ticket would otherwise have to invent -- see the
+    config section this ticket would otherwise have to invent — see the
     "What each rung concretely does" module comment above `DegradationRung`
     for why `light_doer` (not `sensitive_doer`) is the right block to reuse
     here, and why one shared model for every role is the deliberate choice
     rather than a shortcoming.
 
     `light_doer.name` lists several interchangeable alternatives, e.g.
-    ``"Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)"`` -- the same
+    ``"Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)"`` — the same
     "ordered, first-is-primary" convention `DEFAULT_ROSTER_FALLBACK_CHAINS`
     already establishes for its own tuples elsewhere in this module (see
     that constant's comment: "Every chain's first entry is exactly the
     parameter default ... already shipped"). This function reads that
     first ``"/"``-delimited alternative, stripped, as the one concrete
-    model name a caller of `invoke_worker` actually needs -- not a new
+    model name a caller of `invoke_worker` actually needs — not a new
     parsing scheme, just that same "first is primary" reading applied to
     a config field that was, until now, only ever consumed by
     `routing_check.py` for pattern matching, never as a model name by this
     module.
 
     Falls back to `_DEFAULT_DEGRADED_ROSTER_MODEL` when the `light_doer`
-    section, its `name` key, or a non-empty first alternative is missing --
+    section, its `name` key, or a non-empty first alternative is missing —
     mirrors this module's other `_load_*` functions' no-try/except
     contract for the file read itself: a missing/malformed `config_path`
     still raises loudly, only a missing/malformed *value inside* a present
@@ -973,7 +973,7 @@ def resolve_degradation_rung(
     This function is stateless and total exactly like `is_canary_dialogue`:
     it holds no memory of past calls and never raises for any integer
     `session_spend_so_far` (including negative values, which simply always
-    read as rung 0 -- a caller passing a negative spend is under budget by
+    read as rung 0 — a caller passing a negative spend is under budget by
     construction). `config_path` is read fresh on every call rather than
     cached at import time, so a caller (or a test) pointing this at a
     different file always observes that file's current cap, which is the
@@ -992,11 +992,11 @@ def resolve_degradation_rung(
 
 # Spec 0003 (CriticalDialogue) ticket 09: the literal substring
 # `_render_consultation_transcript` writes into a degraded dialogue's
-# transcript, and what a test greps for -- same role `DEGRADED_INDEPENDENCE_MARKER`
+# transcript, and what a test greps for — same role `DEGRADED_INDEPENDENCE_MARKER`
 # and `CANARY_MARKER` play for their own tickets. Only present when
 # `result.degradation_rung > 0`, never an always-rendered "rung 0" line, so
 # a normal, un-degraded run's transcript never contains this marker at all
-# -- the same "gate on the condition, don't render a falsy value" contract
+# — the same "gate on the condition, don't render a falsy value" contract
 # `DEGRADED_INDEPENDENCE_MARKER` already established.
 BUDGET_DEGRADATION_MARKER = "BUDGET DEGRADATION"
 
@@ -2129,9 +2129,14 @@ class AdvisoryTelemetryRecord:
     mapping — the dataclass is what carries the field contract; `to_mapping`
     is just its JSON-serialisable wire form for `_append_jsonl_locked`.
     Carries only the derived/supplied task identity — never task text or a
-    matched secret value — alongside rounds run, outcome, and both model
-    names, so an auditor can tell which decisions were genuinely deliberated
-    without the log becoming a second place secrets can leak from.
+    matched secret value — alongside the run's shape and outcome: a
+    timestamp, rounds run, outcome, both model names, the
+    record-discriminating `kind`, and the per-ticket extensions each
+    documented in its own paragraph below (`degraded_independence`,
+    `canary_result`, `degradation_rung`, `occasion`, `topology`,
+    `round_verdicts`), so an auditor can tell which decisions were genuinely
+    deliberated without the log becoming a second place secrets can leak
+    from.
 
     `kind` is the field that makes Spec 0001 US 12 joinable: both
     `AgentCouncil` and this module append to the same
@@ -2262,11 +2267,13 @@ def _build_telemetry_record(
     """Build the one telemetry record a consultation emits.
 
     Takes the already-built `result` rather than its individual fields, for
-    the same reason `_render_consultation_transcript` does: `rounds_run`,
-    `outcome`, `planner_model`, and `critic_model` are the result's own
-    field set. `task_id` is passed separately because it genuinely isn't —
-    the result carries no task identity, by design (see `AdvisoryDebateResult`
-    and `_resolve_task_id`).
+    the same reason `_render_consultation_transcript` does: all ten copied
+    fields — `rounds_run`, `outcome`, `planner_model`, `critic_model`,
+    `degraded_independence`, `canary_result`, `degradation_rung`,
+    `occasion`, `topology`, and `round_verdicts` — are the result's own
+    field set, copied verbatim, never re-derived. `task_id` is passed
+    separately because it genuinely isn't — the result carries no task
+    identity, by design (see `AdvisoryDebateResult` and `_resolve_task_id`).
     """
     return AdvisoryTelemetryRecord(
         timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -2474,25 +2481,57 @@ def run_advisory_consultation_debate(
       ``BaseException``, so Ctrl-C still propagates) and its message is
       carried on the result.
 
-    A pre-existing ``implementation_plan.md`` under ``root_dir`` from an
-    earlier run is removed on every one of these four exits, so the
-    artifact on disk is never staler than the result describing it.
+    Two further endings are deliberately not listed among those four,
+    because each is an orthogonal case, not another flavor of "no
+    consensus" (see ``AdvisoryOutcome``'s own comment for the taxonomy):
 
-    Every one of the six outcomes — including consensus — writes a fresh,
+    - Canary: ``is_canary=True`` runs a seeded-flaw measurement probe of
+      the Critic — there is no Planner proposal to agree or disagree
+      about, so the outcome is always ``"canary"``. Documented in full at
+      the ``is_canary`` paragraph below.
+    - Budget skipped: the session's dialogue budget is fully exhausted
+      (rung 3), so no Planner or Critic is contacted at all and the
+      outcome is ``"budget_skipped"``. Documented in full at the
+      ``session_spend_so_far`` paragraph below.
+
+    A pre-existing ``implementation_plan.md`` under ``root_dir`` from an
+    earlier run is removed on a ``budget_skipped`` exit and on every one
+    of the four no-consensus exits above, with one exception: a
+    ``worker_error`` that arises inside a canary run removes nothing,
+    because a canary must neither create nor delete that artifact (see
+    ``is_canary`` below). Everywhere else, the artifact on disk is never
+    staler than the result describing it.
+
+    Every one of the seven outcomes — including consensus — writes a fresh,
     human-readable transcript to ``root_dir / ".scratch" / "planning_debate.md"``
     (never appended, so a stale transcript can't survive) and emits exactly
     one structured telemetry record to
     ``root_dir / ".ralph" / "routing_telemetry.jsonl"``. On a
     ``sensitivity_halt`` the transcript carries only the matched marker
     constant, never the task text; every other outcome's transcript carries
-    the full task description and each round's Planner/Critic exchange. The
-    telemetry record never carries task text or a matched secret value on
-    any path — only ``task_id``, rounds run, outcome, and both model names.
+    the full task description, plus each round's Planner/Critic exchange
+    for every round that ran. A ``budget_skipped`` run has no rounds, so
+    its transcript instead carries an explanatory note that no Planner or
+    Critic was contacted; a ``canary`` run's single transcript round shows
+    the fixture's flawed plan text under a fixture-labeled header rather
+    than a Planner exchange — no Planner was invoked — alongside a
+    ``CANARY_MARKER`` note naming the fixture and its seeded flaw (see
+    ``_render_consultation_transcript`` for both). The telemetry record
+    never carries task text or a matched secret value on any path — its
+    complete field set is ``timestamp``, ``task_id``, ``rounds_run``,
+    ``outcome``, ``planner_model``, ``critic_model``, ``kind``,
+    ``degraded_independence``, ``canary_result``, ``degradation_rung``,
+    ``occasion``, ``topology``, and ``round_verdicts`` (verdict labels and
+    engagement-unit counts only, never plan or critique prose) — see
+    ``AdvisoryTelemetryRecord`` for each field's own contract.
     ``task_id`` is the ``task_id`` keyword argument when supplied; otherwise
     it defaults to a truncated SHA-256 digest of ``task_description`` for
-    every outcome except ``sensitivity_halt``, and to a random identity,
-    unrelated to the task text, for that one outcome (a digest is itself a
-    confirmation oracle over guessable task text — see ``_resolve_task_id``).
+    every outcome except ``sensitivity_halt`` and ``canary``, and to a
+    random identity, unrelated to the task text, for those two — for two
+    distinct reasons: a digest is itself a confirmation oracle over
+    guessable task text, and a canary keeps the real task text, so its
+    digest would collide with the real mission's own ``task_id`` (see
+    ``_resolve_task_id``).
     On a halt the same resolved id appears on both the transcript and the
     telemetry record, so the two stay correlated for an auditor even though
     neither carries the task text. A failure writing either artifact is
@@ -2787,11 +2826,16 @@ def run_advisory_consultation_debate(
 
         Writing the transcript and telemetry record here — rather than at
         each call site — makes "every exit path gets both artifacts" a
-        structural guarantee instead of six remembered writes. Task identity
+        structural guarantee instead of sixteen remembered writes: one per
+        ``return _result(...)`` site, spread across all seven outcomes, and
+        a count that only grows as later tickets add exits. Task identity
         is resolved here too, per outcome, rather than once up front: the
-        `sensitivity_halt` default (a random id) must never be the same code
-        path as every other outcome's default (a digest of the task text) —
-        see `_resolve_task_id`. Because this closure runs at most once per
+        `sensitivity_halt` and `canary` defaults (a random id apiece) must
+        never be the same code path as every other outcome's default (a
+        digest of the task text) — see `_resolve_task_id` for the two
+        distinct reasons the digest is ruled out for each: a confirmation
+        oracle over guessable task text for a halt, a `task_id` collision
+        with the real mission for a canary. Because this closure runs at most once per
         call to `run_advisory_consultation_debate` (every branch below
         returns immediately through it), resolving per-call here is exactly
         as "once" as resolving up front would have been.
@@ -2936,7 +2980,7 @@ def run_advisory_consultation_debate(
     # for every downstream `invoke_worker` call: a rung-2 dialogue is
     # degraded because the session is out of budget, a stronger,
     # later-stage concern than "which family gives the best independence,"
-    # so it takes priority over whatever `resolve_roster` just picked --
+    # so it takes priority over whatever `resolve_roster` just picked —
     # exactly as it already takes priority over the caller's own explicit
     # `planner_model`/`critic_model` arguments when `reachability_check` is
     # not supplied at all. Compounds on rung 1's round reduction above
@@ -3217,7 +3261,9 @@ def _run_dispatched_post_mortem(
 
     `run_advisory_consultation_debate` already fails closed for every
     documented outcome (a worker error, a stalemate, an unparseable verdict,
-    a sensitivity halt): each one reaches the function's own `_result`
+    a sensitivity halt — and a `budget_skipped`, which this wrapper's own
+    `session_spend_so_far` parameter can produce): each one reaches the
+    function's own `_result`
     choke point, which writes the transcript and telemetry record before
     returning. Calling it from a background thread does not weaken any of
     that — those writes happen exactly the same way regardless of which
@@ -3245,9 +3291,9 @@ def _run_dispatched_post_mortem(
 
     The synthesized `AdvisoryDebateResult` this builds on an unexpected
     exception reuses the existing `"worker_error"` outcome rather than
-    inventing a seventh `AdvisoryOutcome` value: `AdvisoryOutcome` is a closed
+    inventing an eighth `AdvisoryOutcome` value: `AdvisoryOutcome` is a closed
     `Literal`, and every caller that branches on it today was written
-    against exactly six values, none of them "the dispatch mechanism
+    against exactly seven values, none of them "the dispatch mechanism
     itself broke." `"worker_error"` is the closest existing meaning — "the
     consultation could not be trusted to have run correctly" — and reusing
     it keeps this a minimal recovery net, not new type-level surface area,
