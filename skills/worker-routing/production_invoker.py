@@ -17,6 +17,7 @@ function's docstring for the journaling contract.
 from __future__ import annotations
 
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -328,9 +329,11 @@ def report_journal_error_to_stderr(message: str) -> None:
 
 
 def make_journaled_invoke_worker(
-    task: learning_journal.TaskLabel,
+    task_id: str,
     *,
     root_dir: Path,
+    task_type: learning_journal.TaskType | None = None,
+    run_id: str | None = None,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
     runner: Runner = subprocess.run,
     clock: Callable[[], float] = time.monotonic,
@@ -339,16 +342,51 @@ def make_journaled_invoke_worker(
     """Build a ``(model, effort, prompt) -> str`` callable that journals every call.
 
     This is the seam `AdvisoryConsultation` depends on — nothing about its
-    shape changes — with the journal's context (`task`, `root_dir`) closed
+    shape changes — with the journal's context (`task_id`, `root_dir`) closed
     over rather than threaded through it, because neither fits the
     three-argument contract. Each call to the returned callable appends
     exactly one `WorkerExecutionRecord` to the journal under `root_dir`,
     whether the underlying `invoke_worker` succeeds, exits non-zero, or
     times out.
 
-    Retry count is always 0: `invoke_worker` performs no retries today, and
-    this records that honestly rather than a value a future retry mechanism
-    would imply.
+    **A `task_id`, not a built `TaskLabel`, and that is a rule rather than a
+    convenience.** `learning_outcomes.record_*` already took the id, with a
+    documented argument for why (a caller far from the schema should not have
+    to import `learning_journal` to record something about work it just did).
+    This factory demanded the label, which made that argument false for
+    exactly one caller: `advisory_consultation` grew an
+    `import learning_journal` solely to build a label to hand back. The id is
+    the boundary type for every entry point into this loop; `TaskLabel` is
+    the journal's internal invariant-carrier and is built here, one line
+    below, by the code that owns the schema. `task_type` rides along as the
+    optional tag `TaskLabel.for_task` itself takes, so the coarse tag stays
+    reachable from production rather than becoming a field only tests can
+    set.
+
+    An unjournalable `task_id` therefore raises **here**, at wiring time,
+    before any worker runs — not once per invocation afterwards.
+    `advisory_consultation` already wraps this call in the try that degrades
+    to "journaling disabled for this run", so a bad id costs the run its
+    instrumentation and nothing else. `TaskLabel.for_halted_task` has no
+    counterpart parameter on purpose: a sensitivity halt returns before any
+    worker is contacted, so no invocation of a halted task exists to journal
+    (see that constructor's own docstring).
+
+    `run_id` defaults to a fresh random identity per factory call, which is
+    the honest granularity: one factory instance is built per consultation,
+    so "this factory's records" and "this run's records" are the same set.
+    Two consultations of the same task share a `task_id` — it is a stable
+    digest of the task text — and would otherwise be indistinguishable in the
+    journal, summing their costs as one run and making rework invisible. A
+    caller that already has a run identity (a future orchestrator correlating
+    a dialogue, its invocations, and its outcome) passes it instead.
+
+    Retry count is always 0, and stays a different question from rework:
+    `invoke_worker` performs no retries today, so no invocation is ever
+    attempt two of *itself*, and this records that honestly rather than a
+    value a future retry mechanism would imply. A second consultation of the
+    same task is not a retry — it is a second run, which is what `run_id`
+    counts.
 
     Three failure modes, three different handlings — this is the module's
     half of the one contract `learning_journal`'s docstring states and
@@ -388,6 +426,8 @@ def make_journaled_invoke_worker(
     stays true rather than nearly true. `build_worker_command` rejects the
     same value identically for callers that skip this wrapper.
     """
+    task = learning_journal.TaskLabel.for_task(task_id, task_type=task_type)
+    journal_run_id = run_id if run_id is not None else secrets.token_hex(8)
 
     def _journaled_invoke_worker(model: str, effort: str, prompt: str) -> str:
         journal_effort = _validated_effort(effort)
@@ -412,6 +452,7 @@ def make_journaled_invoke_worker(
                 effort=journal_effort,
                 model_id=model_id,
                 model_family=model_family,
+                run_id=journal_run_id,
             )
         except Exception as exc:  # noqa: BLE001 - reported, never raised: see this factory's docstring.
             report_journal_error(

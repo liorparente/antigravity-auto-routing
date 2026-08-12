@@ -2,22 +2,42 @@
 """Outcome recording: the seam where a decision's ground truth gets journaled.
 
 `learning_journal.OutcomeRecord` already exists — schema, validation, and the
-`(signal, verdict)` pairing are all settled there. What is missing is the
-public surface a caller far from that schema actually calls: a test runner
-reading its own exit code, a reviewer stating a verdict, a human settling a
-stalemate. None of those callers should have to import `learning_journal`,
-build a `TaskLabel`, or know what an `OutcomeRecord` looks like. This module
-is that surface: four small functions, one per ground truth, each taking the
-`task_id` of the decision being graded and the plain fact that became known
-about it.
+`(ground_truth, verdict)` pairing are all settled there. What is missing is
+the public surface a caller far from that schema actually calls: a test
+runner reading its own exit code, a reviewer stating a verdict, a human
+settling a stalemate. None of those callers should have to import
+`learning_journal`, build a `TaskLabel`, or know what an `OutcomeRecord`
+looks like. This module is that surface: four small functions, one per ground
+truth, each taking the `task_id` of the decision being graded and the plain
+fact that became known about it.
+
+**An id is the boundary type here, and everywhere else this loop is called
+from.** `production_invoker.make_journaled_invoke_worker` takes a `task_id`
+too, for the same reason and by the same rule: a `TaskLabel` is the journal's
+internal invariant-carrier — the thing that makes "a halted task carries no
+tag" unexpressible — and it is built at the seam, by the code that owns the
+schema, never assembled by a caller who came for something else. The two
+surfaces disagreed for one ticket (this one took an id, the factory demanded
+a built label), which is precisely why `advisory_consultation` had grown an
+`import learning_journal` it did not otherwise need. Any future entry point
+added to this loop takes the id.
 
 **One function per truth, not one function with a mode flag.** The four
 truths become known at different times, from different callers, carrying
 different plain facts (`passed`, `approved`, `accepted`, a chosen option) —
-a single `record_outcome(signal, verdict, ...)` entry point would just move
-`learning_journal`'s enum-pairing problem one layer up and hand every caller
-a `verdict` vocabulary to get right by hand instead of a boolean or an
+a single `record_outcome(ground_truth, verdict, ...)` entry point would just
+move `learning_journal`'s enum-pairing problem one layer up and hand every
+caller a `verdict` vocabulary to get right by hand instead of a boolean or an
 object they already have.
+
+**`run_id` is optional and never invented.** An outcome that names a run
+grades that run; one that does not grades the task as a whole, and both are
+honest answers a caller may have. What is not honest is a fabricated run
+identity — it would attach a real verdict to an arbitrary attempt, which is
+strictly worse than attaching it to the task — so these functions pass
+`None` straight through rather than defaulting. This is the same rule that
+governs `task_id` two paragraphs down, applied to the other identifier:
+nothing here invents an identity it was not given.
 
 **No caller ever gets a synthetic `task_id`.** `advisory_consultation`'s
 `_resolve_task_id` invents one when a *decision* needs an identity and the
@@ -102,8 +122,9 @@ _STALEMATE_VERDICT_BY_OPTION_ID: dict[int, learning_journal.OutcomeVerdict] = {
 def _record(
     task_id: str,
     *,
-    signal: learning_journal.OutcomeSignal,
+    ground_truth: learning_journal.GroundTruth,
     verdict: learning_journal.OutcomeVerdict,
+    run_id: str | None,
     root_dir: Path,
 ) -> str | None:
     """Build and append one `OutcomeRecord`. The one path every truth below shares.
@@ -114,35 +135,48 @@ def _record(
     """
     record = learning_journal.OutcomeRecord(
         task=learning_journal.TaskLabel.for_task(task_id),
-        signal=signal,
+        ground_truth=ground_truth,
         verdict=verdict,
+        run_id=run_id,
     )
     return learning_journal.append_journal_record(record, root_dir=root_dir)
 
 
-def record_test_result(task_id: str, *, passed: bool, root_dir: Path) -> str | None:
+def record_test_result(
+    task_id: str, *, passed: bool, root_dir: Path, run_id: str | None = None
+) -> str | None:
     """Record whether the tests a decision produced passed or failed."""
     return _record(
-        task_id, signal="tests", verdict="pass" if passed else "fail", root_dir=root_dir
-    )
-
-
-def record_review_verdict(task_id: str, *, approved: bool, root_dir: Path) -> str | None:
-    """Record a review's verdict on the decision it graded."""
-    return _record(
         task_id,
-        signal="review",
-        verdict="approved" if approved else "rejected",
+        ground_truth="tests",
+        verdict="pass" if passed else "fail",
+        run_id=run_id,
         root_dir=root_dir,
     )
 
 
-def record_plan_outcome(task_id: str, *, accepted: bool, root_dir: Path) -> str | None:
+def record_review_verdict(
+    task_id: str, *, approved: bool, root_dir: Path, run_id: str | None = None
+) -> str | None:
+    """Record a review's verdict on the decision it graded."""
+    return _record(
+        task_id,
+        ground_truth="review",
+        verdict="approved" if approved else "rejected",
+        run_id=run_id,
+        root_dir=root_dir,
+    )
+
+
+def record_plan_outcome(
+    task_id: str, *, accepted: bool, root_dir: Path, run_id: str | None = None
+) -> str | None:
     """Record whether a plan a decision produced was accepted or rejected."""
     return _record(
         task_id,
-        signal="plan",
+        ground_truth="plan",
         verdict="accepted" if accepted else "rejected",
+        run_id=run_id,
         root_dir=root_dir,
     )
 
@@ -153,6 +187,7 @@ def record_stalemate_resolution(
     chosen: advisory_consultation.AdvisoryResolutionOption,
     *,
     root_dir: Path,
+    run_id: str | None = None,
 ) -> str | None:
     """Record which of a stalemate's three options the human picked.
 
@@ -176,7 +211,11 @@ def record_stalemate_resolution(
             "verdict mapping in _STALEMATE_VERDICT_BY_OPTION_ID"
         )
     return _record(
-        task_id, signal="stalemate_resolution", verdict=verdict, root_dir=root_dir
+        task_id,
+        ground_truth="stalemate_resolution",
+        verdict=verdict,
+        run_id=run_id,
+        root_dir=root_dir,
     )
 
 

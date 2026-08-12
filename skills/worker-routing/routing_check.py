@@ -11,6 +11,13 @@ Modes:
                           (routing-audit.sh passes the conversation id it
                           already resolved). Omit it and nothing is
                           persisted — no placeholder id is ever fabricated.
+                          An ID the journal's identifier pattern cannot hold
+                          verbatim is recorded under a digest of itself, with
+                          a note on stderr, rather than dropped; see
+                          `_journalable_session_id`. One record is written per
+                          audit *run*, so a re-audit of one session appends a
+                          second — `learning_journal.ComplianceRecord` states
+                          how a per-session consumer reduces them.
                           See `_persist_compliance_record` and `run_audit`
                           for what is recorded and where that call lives.
   --root-dir PATH         Where the journal beneath `PATH` (see
@@ -95,11 +102,14 @@ Exit codes:
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import itertools
 import json
 import re
+import secrets
 import shlex
 import sys
+import time
 import traceback
 from collections import Counter
 from collections.abc import Sequence
@@ -1260,19 +1270,109 @@ class RoutingAuditEngine:
 
 
 
+def _journal_identifier_re() -> re.Pattern[str]:
+    """The journal's identifier pattern, resolved at call time.
+
+    Imported lazily and by name for exactly the reason
+    `_persist_compliance_record` documents at length: `learning_journal` is a
+    sibling loaded by path, and this module must keep working — degrading to
+    a reported persistence failure — on an installation that lacks it. A
+    module-level `from learning_journal import TASK_ID_RE` would turn that
+    into an ImportError at load time and take the whole audit down with it.
+
+    Falls back to a character-for-character copy if the import fails, so the
+    normalization decision below is still made correctly on the way to a
+    failure `_persist_compliance_record` reports anyway. `test_routing.py`
+    pins the two patterns identical, so the copy cannot drift.
+    """
+    try:
+        import learning_journal
+    except ImportError:
+        return re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    return learning_journal.TASK_ID_RE
+
+
+def _journalable_session_id(session_id: str) -> tuple[str, str | None]:
+    """Return `(id the journal can hold, note if it had to be derived)`.
+
+    `routing-audit.sh` resolves its conversation id from a directory name
+    under `$HOME/.gemini/antigravity/brain` or from a positional argument,
+    and bounds neither. `learning_journal.TASK_ID_RE` bounds both — no
+    spaces, no leading punctuation, 128 characters — so an ordinary
+    conversation name like `fix login 500` cannot be journaled verbatim.
+
+    The previous handling of that was to let record construction raise, which
+    `_persist_compliance_record` reported and dropped. Dropping is the worst
+    of the options: an audit is not re-run, so that session's verdict was
+    gone permanently, and the trendline lost it with no gap where it had
+    been. So an id that cannot be represented is *derived* instead — a
+    truncated SHA-256 of the original, prefixed to read as what it is. Two
+    audits of the same conversation derive the same id, so the session stays
+    one session and `ComplianceRecord`'s per-session reduction still works.
+
+    This is `advisory_consultation._default_task_id`'s precedent, applied to
+    the other identifier: a digest, never the text it came from. The halt
+    exception that governs *task* text does not reach here — a conversation's
+    directory name is not halted task text, and no redaction boundary
+    promises anything about it — but the digest is one-way regardless, so a
+    conversation named after something sensitive still contributes a verdict
+    without contributing its name.
+
+    Idempotent by construction: the derived form matches `TASK_ID_RE`, so
+    applying this twice is applying it once. That is what lets `run_audit`
+    call it to *report* the substitution while `_persist_compliance_record`
+    calls it again to guarantee it, with no coordination between them.
+
+    The note is the second half of "not silent": a caller that prints it
+    leaves the mapping from conversation name to journaled id recoverable
+    from the audit's own output, rather than only from re-deriving the digest
+    by hand.
+    """
+    if _journal_identifier_re().fullmatch(session_id):
+        return session_id, None
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    derived = f"session-{digest}"
+    return derived, (
+        f"session id is not journalable verbatim; recorded as {derived!r} "
+        "(a digest of it) so the verdict is not lost"
+    )
+
+
+def _session_last_activity(log_file: str | Path) -> str | None:
+    """When the audited log was last written, in the journal's wire format.
+
+    The closest observable this process can reach to "when the session
+    happened", as distinct from when the audit ran — see
+    `learning_journal.ComplianceRecord`, which explains why a trendline
+    plotted on the latter collapses whenever a backlog is audited in one
+    sitting.
+
+    Returns `None` rather than a substitute if the log cannot be stat'd. A
+    missing value is a record the trendline skips; a wrong one is a point it
+    plots in the wrong place.
+    """
+    try:
+        modified = Path(log_file).stat().st_mtime
+    except OSError:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(modified))
+
+
 def _persist_compliance_record(
     report: AuditReport,
     *,
     session_id: str | None,
-    root_dir: str | Path | None,
+    root_dir: Path | None,
+    session_last_activity: str | None = None,
 ) -> str | None:
     """Append one `learning_journal.ComplianceRecord` for this audit run.
 
     Best-effort and silent on the happy path: returns `None` on success (or
     when there is nothing to persist), an error string on failure, and never
     raises. Two independent failure modes are folded into that one string —
-    a malformed `session_id` failing at record construction, and a broken
-    disk failing at `append_journal_record` — because from `run_audit`'s
+    a record that cannot be *built* (a value `ComplianceRecord` refuses, or
+    `learning_journal` missing from an installation), and a broken disk
+    failing at `append_journal_record` — because from `run_audit`'s
     point of view they are the same fact: the session that produced this
     verdict must not be blocked or altered by either one (matching tickets
     13 and 14's "reported, not raised" contract for journal failures).
@@ -1321,11 +1421,28 @@ def _persist_compliance_record(
     This function previously synthesized such a prefix purely to satisfy
     that rule, which made a cross-module string format an unwritten
     contract between two files.
+
+    **One record per call, and a call is one audit run.** Nothing here
+    deduplicates against records already in the journal, and nothing should:
+    two audits of one conversation are two events, and the second is usually
+    the one that matters (a `--strict` re-run, or an end-of-session check
+    after a mid-session one). The `run_id` stamped below is what lets a
+    consumer tell those two events apart from one event written twice; the
+    reduction rule that turns N run-records into one session verdict is
+    stated in full on `learning_journal.ComplianceRecord`, which is where
+    spec 0004 ticket 16's scoreboard should read it.
+
+    `session_id` is normalized through `_journalable_session_id` rather than
+    passed through, so a conversation whose name the journal's identifier
+    pattern cannot hold contributes a derived-id record instead of nothing at
+    all. That call is idempotent, so `run_audit` normalizing first (to report
+    the substitution) and this function normalizing again (to guarantee it
+    for every caller, including direct ones) agree by construction.
     """
     if session_id is None or root_dir is None:
         return None
 
-    resolved_root = Path(root_dir)
+    journalable_session_id, _note = _journalable_session_id(session_id)
     try:
         import learning_journal
 
@@ -1340,7 +1457,7 @@ def _persist_compliance_record(
             )
         )
         record = learning_journal.ComplianceRecord(
-            session_id=session_id,
+            session_id=journalable_session_id,
             total_writes=report.total_writes,
             code_writes=report.code_writes,
             routing_declarations=report.routing_declarations,
@@ -1350,10 +1467,12 @@ def _persist_compliance_record(
             calibration_markers=report.calibration_markers,
             code_write_count=len(report.code_write_files),
             issue_codes=issue_codes,
+            run_id=secrets.token_hex(8),
+            session_last_activity=session_last_activity,
         )
     except (ImportError, ValueError) as exc:
         return f"failed to build compliance record: {exc}"
-    return learning_journal.append_journal_record(record, root_dir=resolved_root)
+    return learning_journal.append_journal_record(record, root_dir=root_dir)
 
 
 def run_audit(
@@ -1363,7 +1482,7 @@ def run_audit(
     strict: bool = False,
     *,
     session_id: str | None = None,
-    root_dir: str | Path | None = None,
+    root_dir: Path | None = None,
 ) -> int:
     """Run the full audit and print its report — the CLI's actual entry point.
 
@@ -1456,8 +1575,22 @@ def run_audit(
     # record. A write failure is reported to stderr, matching how a
     # per-violation detail line is already reported below; it never changes
     # `violation_count` or anything printed to stdout.
+    #
+    # The id is normalized here as well as inside `_persist_compliance_record`
+    # — the call is idempotent — purely so the substitution can be *reported*.
+    # A conversation whose name the journal cannot hold verbatim is now
+    # recorded under a digest rather than dropped, and an operator who is
+    # never told that has to re-derive the digest by hand to find the session
+    # again.
+    if session_id is not None and root_dir is not None:
+        _, id_note = _journalable_session_id(session_id)
+        if id_note:
+            print(f"⚠️  {id_note}", file=sys.stderr)
     persist_error = _persist_compliance_record(
-        report, session_id=session_id, root_dir=root_dir
+        report,
+        session_id=session_id,
+        root_dir=root_dir,
+        session_last_activity=_session_last_activity(log_file),
     )
     if persist_error:
         print(f"⚠️  {persist_error}", file=sys.stderr)
@@ -1536,13 +1669,19 @@ def main() -> None:
     # than this module inventing one. Absent entirely, `root_dir` stays
     # `None` and `_persist_compliance_record` persists nothing — never a
     # `Path.cwd()` fallback (see that function's docstring for why).
-    root_dir: str | None = None
+    #
+    # Converted to a `Path` here, at the one boundary where it genuinely is a
+    # string: `argv` is text. Everything inward of this line — `run_audit`,
+    # `_persist_compliance_record`, `learning_journal.journal_path` and
+    # `append_journal_record` — takes `Path`, so a journal destination has one
+    # type across the whole loop rather than being re-decided per function.
+    root_dir: Path | None = None
     if "--root-dir" in sys.argv:
         index = sys.argv.index("--root-dir")
         if index + 1 >= len(sys.argv):
             print("--root-dir requires a value", file=sys.stderr)
             sys.exit(2)
-        root_dir = sys.argv[index + 1]
+        root_dir = Path(sys.argv[index + 1])
         del sys.argv[index : index + 2]
 
     try:

@@ -126,7 +126,7 @@ class AdvisoryConsultationIntegrationTests(unittest.TestCase):
             calls.append((model, effort, prompt))
             return "Planner plan" if len(calls) == 1 else "VERDICT: APPROVE"
 
-        def fake_make_journaled_invoke_worker(task: object, *, root_dir: Path) -> object:
+        def fake_make_journaled_invoke_worker(task_id: str, *, root_dir: Path) -> object:
             # This test's own subject is "the production default is reached
             # and used end-to-end" — journaling itself is covered directly by
             # JournaledInvokeWorkerTests below, so the fake factory here just
@@ -229,25 +229,28 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
     way; the wrapping is purely a side effect — exactly one
     `WorkerExecutionRecord` per call, `success` matching what actually
     happened.
+
+    The factory takes a `task_id` — not a built `TaskLabel` — for the reason
+    its docstring gives: an id is the boundary type for every entry point into
+    this loop, and the label is built at the seam by the code that owns the
+    schema. These tests hand it ids for that reason, and the `_task` helper
+    that used to build a label for each of them is gone with the argument it
+    served.
     """
-
-    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
-
-    def _task(self, task_id: str = "task-1") -> object:
-        return learning_journal.TaskLabel.for_task(task_id, task_type="feature")
 
     def test_success_appends_one_record_with_full_fields(self) -> None:
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                self._task("task-success"),
+                "task-success",
                 root_dir=root,
+                task_type="feature",
                 runner=runner,
                 clock=_FakeClock([100.0, 101.5]),
             )
             output = journaled("claude-sonnet-5", "high", "Implement it")
-            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertEqual(output, "worker output")
         self.assertEqual(len(records), 1)
@@ -265,6 +268,10 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         self.assertEqual(record["effort"], "high")
         self.assertEqual(record["model_id"], "claude-sonnet-5")
         self.assertEqual(record["model_family"], "claude")
+        self.assertTrue(
+            learning_journal.TASK_ID_RE.fullmatch(record["run_id"]),
+            "a generated run identity must satisfy the journal's own pattern",
+        )
 
     def test_nonzero_exit_appends_one_failed_record_and_reraises(self) -> None:
         runner = Mock(
@@ -273,14 +280,14 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                self._task("task-nonzero"),
+                "task-nonzero",
                 root_dir=root,
                 runner=runner,
                 clock=_FakeClock([10.0, 10.25]),
             )
             with self.assertRaisesRegex(RuntimeError, "exit code 17"):
                 journaled("gpt-5.6-sol", "medium", "Do work")
-            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertEqual(len(records), 1)
         record = records[0]
@@ -298,14 +305,14 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                self._task("task-timeout"),
+                "task-timeout",
                 root_dir=root,
                 runner=runner,
                 clock=_FakeClock([0.0, 30.0]),
             )
             with self.assertRaisesRegex(RuntimeError, "timed out"):
                 journaled("agy", "high", "Research")
-            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertEqual(len(records), 1)
         record = records[0]
@@ -325,7 +332,7 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
             # matter what record it's asked to write.
             (root / ".ralph").write_text("not a directory")
             journaled = production_invoker.make_journaled_invoke_worker(
-                self._task("task-unwritable"),
+                "task-unwritable",
                 root_dir=root,
                 runner=runner,
                 report_journal_error=reported.append,
@@ -349,7 +356,7 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".ralph").write_text("not a directory")
             journaled = production_invoker.make_journaled_invoke_worker(
-                self._task("task-unwritable-failure"),
+                "task-unwritable-failure",
                 root_dir=root,
                 runner=runner,
                 report_journal_error=reported.append,
@@ -360,6 +367,27 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
 
         self.assertEqual(len(reported), 1)
 
+    def test_an_unjournalable_task_id_is_refused_at_wiring_time(self) -> None:
+        """The factory takes an id, so the id is checked once, where the label
+        is built, before any worker runs — rather than once per invocation
+        afterwards. `advisory_consultation` wraps this call in the try that
+        degrades to "journaling disabled for this run", so a bad id costs the
+        run its instrumentation and nothing else.
+        """
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaises(ValueError):
+                production_invoker.make_journaled_invoke_worker(
+                    "fix the login 500 for the ACME account",
+                    root_dir=root,
+                    runner=runner,
+                )
+
+            runner.assert_not_called()
+            self.assertFalse(learning_journal.journal_path(root).exists())
+
     def test_a_record_that_cannot_be_built_is_reported_not_silent(self) -> None:
         """A malformed record is a call-site bug, and by `learning_journal`'s
         contract a call-site bug must be loud. It cannot be loud by raising
@@ -367,23 +395,29 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         result to report a bookkeeping fault — so it is loud by being
         reported. Silence was the defect: `except Exception: pass` made a
         `WorkerExecutionRecord` bug undetectable in production.
+
+        Reached through an unjournalable `run_id`, which is now the field this
+        factory accepts without checking it at wiring time — `task_id` is
+        checked there (see the test above), while a caller-supplied `run_id`
+        is carried straight into each record. That asymmetry is what makes
+        this contract still reachable, and the outcome is the one it
+        promises: the worker's real output survives, nothing is journaled, and
+        the failure is named rather than swallowed.
         """
         reported: list[str] = []
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                # Not a `TaskLabel` at all, so `_validate_task_label` rejects
-                # the record at construction — the same shape of failure a
-                # future field-level bug would take.
-                "task-not-a-label",  # type: ignore[arg-type]
+                "task-bad-run-id",
                 root_dir=root,
+                run_id="run one, or perhaps two",
                 runner=runner,
                 report_journal_error=reported.append,
             )
 
             output = journaled("claude-opus-5", "ultra", "Plan")
-            journal_written = (root / self.JOURNAL_RELATIVE_PATH).exists()
+            journal_written = learning_journal.journal_path(root).exists()
 
         self.assertEqual(output, "worker output")
         self.assertFalse(journal_written)
@@ -412,13 +446,13 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                self._task("task-bad-effort"), root_dir=root, runner=runner
+                "task-bad-effort", root_dir=root, runner=runner
             )
 
             with self.assertRaisesRegex(ValueError, "Unsupported worker effort"):
                 journaled("claude-opus-5", "exhaustive", "Plan")
 
-            journal_written = (root / self.JOURNAL_RELATIVE_PATH).exists()
+            journal_written = learning_journal.journal_path(root).exists()
 
         runner.assert_not_called()
         self.assertFalse(journal_written)
@@ -432,10 +466,10 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
                     return_value=subprocess.CompletedProcess([], 0, "ok", "")
                 )
                 journaled = production_invoker.make_journaled_invoke_worker(
-                    self._task(), root_dir=root, runner=runner
+                    "task-1", root_dir=root, runner=runner
                 )
                 journaled("claude-opus-5", effort, "Plan")
-                records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+                records = _read_jsonl(learning_journal.journal_path(root))
 
                 self.assertEqual(len(records), 1)
                 self.assertEqual(records[0]["effort"], effort)
@@ -447,12 +481,54 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                self._task(), root_dir=root, runner=runner
+                "task-1", root_dir=root, runner=runner
             )
             journaled("claude-fable-5", "low", "Draft")
-            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertEqual(records[0]["retry_count"], 0)
+
+    def test_a_run_identity_is_per_factory_and_fresh_per_factory(self) -> None:
+        """The granularity the default is chosen for: one factory is built per
+        consultation, so a factory's records are a run's records. Every call
+        through one factory shares its identity; a second factory over the
+        same `task_id` gets its own, which is what makes a repeat of that task
+        countable as rework rather than invisible inside one summed identity.
+
+        `retry_count` stays 0 through all of it: no invocation is ever attempt
+        two *of itself*, which is the different question it answers.
+        """
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "ok", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = production_invoker.make_journaled_invoke_worker(
+                "task-repeated", root_dir=root, runner=runner
+            )
+            first("claude-fable-5", "low", "Draft")
+            first("claude-fable-5", "low", "Draft again")
+            production_invoker.make_journaled_invoke_worker(
+                "task-repeated", root_dir=root, runner=runner
+            )("claude-fable-5", "low", "Draft once more")
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(len(records), 3)
+        self.assertEqual({record["task_id"] for record in records}, {"task-repeated"})
+        self.assertEqual(records[0]["run_id"], records[1]["run_id"])
+        self.assertNotEqual(records[1]["run_id"], records[2]["run_id"])
+        self.assertEqual({record["retry_count"] for record in records}, {0})
+
+    def test_a_caller_supplied_run_id_is_carried_rather_than_replaced(self) -> None:
+        """The generated identity is a default, not a policy: a caller that
+        already has a run identity passes it and the record carries it."""
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "ok", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            production_invoker.make_journaled_invoke_worker(
+                "task-1", root_dir=root, run_id="run-orchestrated-7", runner=runner
+            )("claude-fable-5", "low", "Draft")
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(records[0]["run_id"], "run-orchestrated-7")
 
 
 class CostEstimateTests(unittest.TestCase):
@@ -470,8 +546,6 @@ class CostEstimateTests(unittest.TestCase):
 
     The distinction now lives in `model_id`, and the amount stays an amount.
     """
-
-    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
 
     def test_rate_table_prices_every_invocable_model(self) -> None:
         """The totality `estimate_cost_usd`'s reasoning depends on: if every
@@ -532,7 +606,7 @@ class CostEstimateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                learning_journal.TaskLabel.for_task("task-unknown-model"),
+                "task-unknown-model",
                 root_dir=root,
                 runner=runner,
                 clock=_FakeClock([0.0, 300.0]),
@@ -541,7 +615,7 @@ class CostEstimateTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported worker model"):
                 journaled("acme-model-9", "high", "Plan")
 
-            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            records = _read_jsonl(learning_journal.journal_path(root))
 
         runner.assert_not_called()
         self.assertEqual(len(records), 1)

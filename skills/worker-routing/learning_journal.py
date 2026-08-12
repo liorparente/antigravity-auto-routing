@@ -17,7 +17,18 @@ So this module writes its own file, and records correlate across the two
 streams on **TaskIdentity** (`task_id`) instead — that join is the whole
 reason `task_id` here is validated against the exact pattern
 `agent_council.TASK_ID_RE` accepts, and against nothing else (see
-`TASK_ID_RE` and `_validate_task_id`).
+`TASK_ID_RE` and `_validate_carried_identifier`).
+
+**Two identifier vocabularies, and a record is keyed on both.**
+`task_id` names *what* was worked on and is deliberately stable across
+repeats of the same task (`advisory_consultation._default_task_id` digests
+the task text). `run_id` names *which attempt* a record belongs to, and is
+fresh per execution. Without the second, two runs of one task collapse into
+one identity: their costs sum as if one run, and an outcome grading the
+second joins the first as well — rework, the very thing the spec's
+efficiency metric asks for, becomes unobservable. Every family carries
+`run_id` optionally; see `_validate_run_id` for what a consumer may and may
+not conclude from its absence.
 
 **Content-freedom is structural, not editorial.** There is no free-text field
 anywhere in this module, and no field a caller can fill with free text.
@@ -105,9 +116,12 @@ JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
 # neither can match.
 #
 # "Exactly" also means *no additional gate on a task_id* — see
-# `_validate_task_id`. This pattern is the whole of the contract for that one
-# field, because it is the whole of the contract `agent_council._task_id`
-# applies before writing the same id to `.ralph/routing_telemetry.jsonl`.
+# `_validate_carried_identifier`. This pattern is the whole of the contract
+# for that field, because it is the whole of the contract
+# `agent_council._task_id` applies before writing the same id to
+# `.ralph/routing_telemetry.jsonl`. The same pattern, and the same "no
+# additional gate", governs every other identifier this module *receives*
+# rather than composes — `session_id`, `run_id`.
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 # The wire timestamp format `agent_council.log_routing_telemetry` and
@@ -142,13 +156,22 @@ _TOKEN_SEPARATOR_RE = re.compile(r"[^A-Za-z0-9]+")
 # id format `agent_council._task_id` generates — and every record whose
 # identifier merely resembled a credential would be silently refused.
 #
-# Which fields face this gate is itself a decision (see `_validate_task_id`
-# for the other half): the *descriptor* identifiers a caller composes here —
-# `model_id`, `model_family`, `session_id` — do, and within those the check
-# stays knowingly over-broad, since a caller renames a descriptor in seconds
-# while a credential written into a stream a learner later mines cannot be
-# un-leaked. A `task_id` does not: it arrives already accepted by, and
-# already written to, the audited telemetry stream.
+# Which fields face this gate is itself a decision, and the line is
+# *composed descriptor* vs *carried identifier*, not "string that looks like
+# an identifier" (see `_validate_carried_identifier` for the other half).
+# Only `model_id` and `model_family` face it: a caller builds those two out of
+# its own vocabulary, so the check stays knowingly over-broad there, since a
+# caller renames a descriptor in seconds while a credential written into a
+# stream a learner later mines cannot be un-leaked. `task_id`, `session_id`,
+# and `run_id` do not face it. Each names a thing that already exists and was
+# already named elsewhere — a task the audited telemetry stream has accepted,
+# a conversation directory, an execution — so refusing one here un-names
+# nothing and only drops the record.
+#
+# That distinction was learned the expensive way twice. `task_id` was gated by
+# reflex and fixed; `session_id` sat behind the same gate unnoticed until a
+# second review, which is why the rule is now stated as a rule about *where a
+# string came from* rather than a list of field names to check against.
 SENSITIVITY_MARKERS = (
     "AGY_CALIBRATION_SECRET",
     "api_key",
@@ -182,11 +205,20 @@ TASK_TYPE_TAGS: frozenset[str] = frozenset(get_args(TaskType))
 EffortLevel = Literal["low", "medium", "high", "ultra"]
 VALID_EFFORTS: frozenset[str] = frozenset(get_args(EffortLevel))
 
-# Which ground truth an outcome record grades. Kept as four distinct signals
+# Which ground truth an outcome record grades. Kept as four distinct kinds
 # rather than one "result" field because they become known at different times,
 # from different graders, and a learner that cannot tell a failing test from a
 # rejected plan cannot tell a bad worker from a bad plan.
-OutcomeSignal = Literal["tests", "review", "plan", "stalemate_resolution"]
+#
+# Named `GroundTruth`, not `OutcomeSignal`, because CONTEXT.md — the glossary
+# this codebase is driven by, and the authority when the two disagree —
+# already spends "signal family" on the journal's four *record* families
+# (worker execution, ground-truth outcomes, dialogue quality, protocol
+# compliance). One word at two granularities in a glossary-driven codebase is
+# a reader's trap: "signal" would mean the outcome family in CONTEXT.md and a
+# subdivision *inside* that one family here. The prose in this module already
+# called these four "ground truth" throughout; the type now agrees with it.
+GroundTruth = Literal["tests", "review", "plan", "stalemate_resolution"]
 
 OutcomeVerdict = Literal[
     "pass",
@@ -199,16 +231,16 @@ OutcomeVerdict = Literal[
     "human",
 ]
 
-# Which verdicts each signal may carry. A flat verdict vocabulary would let
-# `("tests", "planner")` be constructed — a record that reads as if a test run
-# picked a stalemate winner. Pairing the vocabularies to their signals is what
-# makes that unconstructible.
+# Which verdicts each ground truth may carry. A flat verdict vocabulary would
+# let `("tests", "planner")` be constructed — a record that reads as if a test
+# run picked a stalemate winner. Pairing the vocabularies to their ground
+# truths is what makes that unconstructible.
 #
 # The `stalemate_resolution` verdicts are exactly
 # `advisory_consultation._build_stalemate_report`'s three options, in order:
 # approve the Planner's architecture, approve the Critic's, escalate to a
 # human. Keep them aligned; a fourth option there needs a fourth verdict here.
-OUTCOME_VERDICTS: Mapping[OutcomeSignal, frozenset[str]] = {
+OUTCOME_VERDICTS: Mapping[GroundTruth, frozenset[str]] = {
     "tests": frozenset({"pass", "fail"}),
     "review": frozenset({"approved", "rejected"}),
     "plan": frozenset({"accepted", "rejected"}),
@@ -264,8 +296,8 @@ def _identifier_sensitivity_marker(value: str) -> str | None:
     passes because its tokens are `task` and `1`.
 
     Which fields this gate runs on is a separate question with its own
-    answer: the descriptors a caller composes, never `task_id` — see
-    `_validate_identifier` and `_validate_task_id`.
+    answer: the descriptors a caller composes, never an identifier it carried
+    in — see `_validate_identifier` and `_validate_carried_identifier`.
 
     Returns the marker constant itself, never the value it matched against.
     `_validate_identifier` puts the return value in an exception message, and
@@ -318,18 +350,27 @@ def _require_str(value: object, field_name: str) -> str:
     return value
 
 
-def _validate_task_id(value: object, field_name: str) -> None:
-    """Accept exactly what `agent_council` accepts as a task id — no more, no less.
+def _validate_carried_identifier(value: object, field_name: str) -> None:
+    """Shape gate and nothing else — for an identifier this module *receives*.
+
+    The validator for `task_id`, `session_id`, and `run_id`: three names for
+    things that already existed and were already named somewhere else. A
+    `task_id` was accepted by `agent_council._task_id` (whose only check is
+    this same pattern) and written to the audited
+    `.ralph/routing_telemetry.jsonl` stream before this module saw it. A
+    `session_id` is a conversation's directory name, resolved by
+    `routing-audit.sh` from `$HOME/.gemini/antigravity/brain` or handed to it
+    as an argument. A `run_id` names one execution that has already happened.
 
     **Deliberately not `_validate_identifier`: no sensitivity-marker gate.**
-    A `task_id` is not caller prose that this module gets to adjudicate. It is
-    an identifier the system already accepted (`agent_council._task_id`, whose
-    only check is this same pattern) and already wrote to the audited
-    `.ralph/routing_telemetry.jsonl` stream. Re-adjudicating it here cannot
-    un-write it from there; all it can do is refuse the journal record and
-    silently break the cross-stream join for exactly the tasks whose names
-    touch security vocabulary — `secret-rotation`, `api-key-migration` — which
-    are the tasks whose routing quality is most worth learning from.
+    None of the three is caller prose that this module gets to adjudicate, and
+    re-adjudicating a name cannot un-name the thing. All refusing one can do
+    is drop the journal record — for exactly the tasks and sessions whose
+    names touch security vocabulary (`secret-rotation`, `api-key-migration`,
+    a conversation about rotating a credential), which are the ones whose
+    routing quality and protocol discipline are most worth learning from. The
+    record is the only casualty, and it is a permanent one: nothing re-audits
+    a session whose verdict was refused.
 
     The invariant, pinned by a test that drives the council's own id
     validation rather than a literal: any task id that can appear in the
@@ -337,8 +378,11 @@ def _validate_task_id(value: object, field_name: str) -> None:
 
     The shape gate stays, because it is the council's own contract: prose has
     spaces and paths have slashes, so a task description still cannot be
-    smuggled in through this field. The marker gate remains on the descriptor
-    identifiers a caller composes here — see `_validate_identifier`.
+    smuggled in through any of these fields. A caller holding an identifier
+    that cannot satisfy it owns deriving one that can — see
+    `routing_check._journalable_session_id`, which digests rather than drops.
+    The marker gate remains on the descriptors a caller composes here; see
+    `_validate_identifier`.
     """
     text = _require_str(value, field_name)
     if not TASK_ID_RE.fullmatch(text):
@@ -348,12 +392,29 @@ def _validate_task_id(value: object, field_name: str) -> None:
         )
 
 
+def _validate_run_id(value: object, field_name: str) -> None:
+    """Validate an optional `run_id`, whose absence is a statement of its own.
+
+    `None` means "this record names no particular run", not "run 0" and not
+    "unknown run". A consumer counting rework (distinct runs per `task_id`)
+    must therefore treat records without a `run_id` as uncountable rather
+    than as one shared run — lumping them together would report a task
+    retried five times as retried once. Every writer in this repository
+    supplies one; the field is optional so that a future writer with no
+    honest run identity says so instead of inventing one.
+    """
+    if value is None:
+        return
+    _validate_carried_identifier(value, field_name)
+
+
 def _validate_identifier(value: object, field_name: str) -> None:
     """Reject any string that is not a bare, secret-free identifier.
 
-    The gate for the identifiers a caller *composes* for a record — `model_id`,
-    `model_family`, `session_id` — as opposed to the one it carries over from
-    the audited stream (`_validate_task_id`). Two checks, and both matter:
+    The gate for the identifiers a caller *composes* for a record — `model_id`
+    and `model_family` — as opposed to the ones it carries over from
+    somewhere that already named them (`_validate_carried_identifier`). Two
+    checks, and both matter:
 
     - `TASK_ID_RE`: no spaces, no slashes, no punctuation beyond `_.-`. A task
       description, a prompt, a log excerpt, and a file path all fail on shape
@@ -409,11 +470,17 @@ def _echoable(value: object) -> str:
     return "<redacted: not an identifier>"
 
 
-def _validate_timestamp(value: object) -> None:
-    text = _require_str(value, "timestamp")
+def _validate_timestamp(value: object, field_name: str = "timestamp") -> None:
+    """Every wire timestamp, whichever field carries it.
+
+    `field_name` is a parameter because more than one field is a timestamp
+    now (`ComplianceRecord.session_last_activity`), and a rejection naming
+    the wrong field sends a reader to the wrong line.
+    """
+    text = _require_str(value, field_name)
     if not TIMESTAMP_RE.fullmatch(text):
         raise ValueError(
-            f"timestamp must match {TIMESTAMP_RE.pattern}, got {_echoable(text)}"
+            f"{field_name} must match {TIMESTAMP_RE.pattern}, got {_echoable(text)}"
         )
 
 
@@ -527,8 +594,8 @@ class TaskLabel:
     joinable to the halt's telemetry record.
 
     `task_id` is checked against `agent_council`'s contract and nothing
-    further — see `_validate_task_id` for why the journal must not add a gate
-    of its own to an id the audited stream has already accepted.
+    further — see `_validate_carried_identifier` for why the journal must not
+    add a gate of its own to an id the audited stream has already accepted.
     """
 
     task_id: str
@@ -536,7 +603,7 @@ class TaskLabel:
     sensitivity_halted: bool = False
 
     def __post_init__(self) -> None:
-        _validate_task_id(self.task_id, "task_id")
+        _validate_carried_identifier(self.task_id, "task_id")
         _validate_flag(self.sensitivity_halted, "sensitivity_halted")
         if self.sensitivity_halted and self.task_type is not None:
             raise ValueError(
@@ -634,10 +701,16 @@ def _wire_form(record: Any) -> dict[str, object]:
     dataclass being frozen) no assignment through which to name a record
     family after the task it describes. Field order is irrelevant;
     `_append_jsonl_locked` writes with `sort_keys=True`.
+
+    An absent optional field emits **no key** rather than `null`, following
+    `TaskLabel.to_mapping`'s reasoning: `"run_id": null` is a per-record
+    assertion about a run, while absence is the weaker and truer claim that
+    this record names none. It also keeps a reducer's test the plain
+    `"run_id" in record`.
     """
     mapping: dict[str, object] = dataclasses.asdict(record)
     mapping["kind"] = record.KIND
-    return mapping
+    return {key: value for key, value in mapping.items() if value is not None}
 
 
 def _flatten(record: Any, task: TaskLabel) -> dict[str, object]:
@@ -670,6 +743,26 @@ class WorkerExecutionRecord:
     caller will actually have. Do not rename it to `cost_usd` later without a
     real billing source behind it — the honesty of that name is what stops
     the weekly report from presenting a guess as an invoice.
+
+    **`run_id` is what makes rework countable, and it is not `retry_count`.**
+    The spec asks efficiency for "escalation rate, rework counts, cost per
+    completed task". `task_id` alone cannot answer any of the three across
+    repeats: it is a stable digest of the task text
+    (`advisory_consultation._default_task_id`), deliberately identical for
+    two consultations of the same task, so their invocations pile into one
+    identity — cost sums as though one run happened, and the second run's
+    rework reads as the first run's. `run_id` separates them:
+
+    - rework on a task = distinct `run_id`s carrying that `task_id`, minus one
+    - cost per completed task = sum over all of them (unchanged, and now
+      knowingly a sum over runs rather than an accident)
+    - cost per run = sum within one `run_id`
+
+    `retry_count` answers a different question and honestly stays `0`:
+    `invoke_worker` retries nothing, so no invocation here is ever attempt
+    two *of itself*. A second consultation of the same task is not a retry of
+    the first — different prompts, different rounds, its own invocations —
+    which is why it needed a new field rather than a repurposed one.
     """
 
     KIND: ClassVar[str] = "worker_execution"
@@ -682,10 +775,12 @@ class WorkerExecutionRecord:
     effort: EffortLevel
     model_id: str
     model_family: str
+    run_id: str | None = None
     timestamp: str = field(default_factory=_utc_timestamp)
 
     def __post_init__(self) -> None:
         _validate_task_label(self.task, "task")
+        _validate_run_id(self.run_id, "run_id")
         _validate_count(self.duration_ms, "duration_ms")
         _validate_amount(self.cost_estimate_usd, "cost_estimate_usd")
         _validate_flag(self.success, "success")
@@ -710,22 +805,36 @@ class OutcomeRecord:
     scoreboard reads one task_id and finds the decision in the telemetry
     stream and its result here.
 
-    `signal` and `verdict` are validated as a pair against `OUTCOME_VERDICTS`,
-    so a verdict belonging to another signal cannot be attached.
+    `ground_truth` and `verdict` are validated as a pair against
+    `OUTCOME_VERDICTS`, so a verdict belonging to another ground truth cannot
+    be attached.
+
+    **`run_id` narrows what this record grades, and its absence widens it.**
+    With one, the record grades that run of the task; without one, it grades
+    the task as a whole. Both are legitimate: a test runner reading its own
+    exit code usually knows which run it just graded, while a reviewer
+    approving "the ACME fix" may only mean the task. What is illegitimate is
+    inventing one — a fabricated `run_id` attaches a real verdict to an
+    arbitrary run, which is worse than attaching it to the task, so
+    `learning_outcomes` leaves it out rather than guessing (see that module).
     """
 
     KIND: ClassVar[str] = "outcome"
 
     task: TaskLabel
-    signal: OutcomeSignal
+    ground_truth: GroundTruth
     verdict: OutcomeVerdict
+    run_id: str | None = None
     timestamp: str = field(default_factory=_utc_timestamp)
 
     def __post_init__(self) -> None:
         _validate_task_label(self.task, "task")
-        _validate_choice(self.signal, frozenset(OUTCOME_VERDICTS), "signal")
+        _validate_run_id(self.run_id, "run_id")
+        _validate_choice(self.ground_truth, frozenset(OUTCOME_VERDICTS), "ground_truth")
         _validate_choice(
-            self.verdict, OUTCOME_VERDICTS[self.signal], f"verdict for signal '{self.signal}'"
+            self.verdict,
+            OUTCOME_VERDICTS[self.ground_truth],
+            f"verdict for ground_truth '{self.ground_truth}'",
         )
         _validate_timestamp(self.timestamp)
 
@@ -819,6 +928,7 @@ class DialogueQualityRecord:
     canaries_caught: int = 0
     degraded: bool = False
     independent: bool = True
+    run_id: str | None = None
     timestamp: str = field(default_factory=_utc_timestamp)
 
     @property
@@ -828,6 +938,7 @@ class DialogueQualityRecord:
 
     def __post_init__(self) -> None:
         _validate_task_label(self.task, "task")
+        _validate_run_id(self.run_id, "run_id")
         _validate_choice(self.occasion, DIALOGUE_OCCASIONS, "occasion")
         _validate_choice(self.topology, DIALOGUE_TOPOLOGIES, "topology")
         _validate_rounds(self.rounds, "rounds")
@@ -877,6 +988,34 @@ class ComplianceRecord:
     for anyone with access to them. A future maintainer wanting richer
     compliance analytics should add more *codes* or more *counts*, never the
     messages or the paths.
+
+    **One record per audit RUN, not per session — read this before reducing
+    them.** Nothing stops a session being audited more than once:
+    `routing-audit.sh` with no argument audits the most recent conversation,
+    so a plain run followed by a `--strict` run, or a mid-session check
+    followed by an end-of-session one, appends two records under one
+    `session_id`. That is deliberate — a re-audit is a real event, and
+    discarding it would lose the fact that a verdict changed — but it means a
+    consumer asking a *per-session* question (spec 0004 ticket 16's "protocol
+    violation rate per session" is exactly one) must reduce first, or it
+    counts that session as many.
+
+    The reduction contract, in full:
+
+    - Group by `session_id`. Within a group, **the last record wins**: the
+      journal is append-only, so file order is audit order and the final
+      record for a session is its most recent verdict. `timestamp` agrees but
+      is second-resolution and can tie; file order cannot.
+    - `run_id` tells two audits apart from one audit written twice. Same
+      `session_id`, different `run_id` — two audits, one session, verdict =
+      the later. Same `session_id` *and* same `run_id` — one audit whose line
+      got duplicated; dedupe it rather than reading a re-audit into it.
+    - `timestamp` is when the **audit ran**, never when the session happened.
+      Auditing a backlog of ten conversations in one afternoon stamps all ten
+      minutes apart, so a discipline trendline plotted against `timestamp`
+      collapses into a single point that describes the operator's afternoon
+      rather than any session. Plot against `session_last_activity`, and skip
+      a record that has none rather than substituting `timestamp` for it.
     """
 
     KIND: ClassVar[str] = "compliance"
@@ -891,10 +1030,27 @@ class ComplianceRecord:
     calibration_markers: int
     code_write_count: int
     issue_codes: tuple[str, ...] = ()
+    run_id: str | None = None
+    # When the audited session demonstrably last had activity, in wire form.
+    # `routing_check` derives it from the audited log's mtime — the only
+    # observable this stream can reach that is about the session rather than
+    # about the audit of it. Optional rather than assumed because of two
+    # honest limits: a log that was copied, restored, or `touch`ed carries
+    # that moment instead, and a log that cannot be stat'd yields nothing at
+    # all, which is recorded as nothing rather than as a guess.
+    session_last_activity: str | None = None
     timestamp: str = field(default_factory=_utc_timestamp)
 
     def __post_init__(self) -> None:
-        _validate_identifier(self.session_id, "session_id")
+        # `_validate_carried_identifier`, never `_validate_identifier`: a
+        # session id is a conversation's directory name, not a descriptor
+        # this module's caller composed — so a conversation named
+        # `secret-rotation` must be able to have its verdict recorded. See
+        # that validator for the full argument.
+        _validate_carried_identifier(self.session_id, "session_id")
+        _validate_run_id(self.run_id, "run_id")
+        if self.session_last_activity is not None:
+            _validate_timestamp(self.session_last_activity, "session_last_activity")
         for name in (
             "total_writes",
             "code_writes",
@@ -923,7 +1079,7 @@ class ComplianceRecord:
 # with a `to_mapping` method would have been the flexible choice and is
 # exactly wrong here: any dict-shaped object could then satisfy it, and "no
 # bare mappings as contracts" is the property this stream depends on. A caller
-# who wants a fifth signal family adds it here, in a reviewed change, with its
+# who wants a fifth record family adds it here, in a reviewed change, with its
 # own validated schema.
 JournalRecord = (
     WorkerExecutionRecord | OutcomeRecord | DialogueQualityRecord | ComplianceRecord

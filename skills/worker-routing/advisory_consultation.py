@@ -758,8 +758,6 @@ def run_advisory_consultation_debate(
 
         invoke_worker = production_invoker.invoke_worker
         try:
-            import learning_journal
-
             # Any non-`sensitivity_halt` outcome resolves the same task_id
             # (see `_resolve_task_id`); the sensitivity gate above already
             # ruled that outcome out for this call, so resolving here is
@@ -768,7 +766,7 @@ def run_advisory_consultation_debate(
             # this run's telemetry record stay correlated by TaskIdentity.
             journaled_task_id = _resolve_task_id(task_description, task_id, "consensus")
             invoke_worker = production_invoker.make_journaled_invoke_worker(
-                learning_journal.TaskLabel.for_task(journaled_task_id), root_dir=root_dir
+                journaled_task_id, root_dir=root_dir
             )
         except Exception as exc:  # noqa: BLE001 - instrumentation never aborts what it observes.
             journal_wiring_error = (
