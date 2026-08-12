@@ -2300,6 +2300,265 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
         self.assertEqual(result.occasion, "ambiguity")
 
 
+class AdvisoryAmbiguityTriggerUnchangedTests(unittest.TestCase):
+    """Spec 0003 ticket 03 requires `needs_advisory_consultation` — the sole
+    trigger predicate spec 0001 shipped — to be left completely untouched by
+    this ticket's new occasion predicates. No test in the pre-existing suite
+    exercised it directly (confirmed by searching this file before ticket 03
+    started), so there was no pre-existing coverage to preserve unchanged;
+    this class is new characterization coverage that pins today's behavior
+    so a future change to this function is forced to notice it broke the
+    ambiguity occasion, exactly as if the coverage had always been here.
+    """
+
+    def test_ambiguous_complexity_always_needs_consultation(self) -> None:
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("ambiguous"))
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("Ambiguous", 1.0))
+
+    def test_low_confidence_needs_consultation_regardless_of_complexity(self) -> None:
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("trivial", 0.5))
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("complex", 0.69))
+
+    def test_high_confidence_non_ambiguous_complexity_does_not_need_consultation(self) -> None:
+        self.assertFalse(advisory_consultation.needs_advisory_consultation("medium", 0.9))
+        self.assertFalse(advisory_consultation.needs_advisory_consultation("complex"))
+
+    def test_confidence_boundary_is_exclusive_at_0_7(self) -> None:
+        self.assertFalse(advisory_consultation.needs_advisory_consultation("simple", 0.7))
+        self.assertTrue(advisory_consultation.needs_advisory_consultation("simple", 0.6999))
+
+
+class AdvisoryTriggerWiringTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 03: the three new occasion trigger
+    predicates — `needs_plan_review_consultation`, `needs_code_review_consultation`,
+    and `needs_post_mortem_consultation`. Each is a standalone function, not a
+    generalization of `needs_advisory_consultation` (see
+    `AdvisoryAmbiguityTriggerUnchangedTests` above for proof that one is
+    untouched). These are pure predicates over signals a caller already has
+    in hand — no worker is invoked, no artifact is written — so every test
+    here calls the function directly with no debate loop, no injected root
+    directory, and no fake invoker.
+    """
+
+    # -- plan-review ---------------------------------------------------
+
+    def test_plan_review_fires_at_medium_and_complex(self) -> None:
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation("medium"))
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation("complex"))
+        # Case/whitespace tolerance mirrors `needs_advisory_consultation`'s
+        # own `.lower().strip()` normalization, not a coincidence — both
+        # predicates read the same caller-supplied complexity string.
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation(" Medium "))
+        self.assertTrue(advisory_consultation.needs_plan_review_consultation("COMPLEX"))
+
+    def test_plan_review_does_not_fire_at_simple_or_trivial(self) -> None:
+        self.assertFalse(advisory_consultation.needs_plan_review_consultation("simple"))
+        self.assertFalse(advisory_consultation.needs_plan_review_consultation("trivial"))
+
+    # -- code-review -----------------------------------------------------
+
+    def test_code_review_fires_at_medium_and_complex_with_zero_risk_signals(self) -> None:
+        self.assertTrue(advisory_consultation.needs_code_review_consultation("medium"))
+        self.assertTrue(advisory_consultation.needs_code_review_consultation("complex"))
+
+    def test_code_review_does_not_fire_at_trivial_or_simple_with_no_risk_signal(self) -> None:
+        self.assertFalse(advisory_consultation.needs_code_review_consultation("trivial"))
+        self.assertFalse(advisory_consultation.needs_code_review_consultation("simple"))
+
+    def test_code_review_fires_at_trivial_when_tests_are_failing(self) -> None:
+        self.assertTrue(
+            advisory_consultation.needs_code_review_consultation(
+                "trivial", tests_failing=True
+            )
+        )
+
+    def test_code_review_fires_at_simple_when_diff_exceeds_configured_threshold(
+        self,
+    ) -> None:
+        # Uses the real routing-config.json threshold (300 lines) as the
+        # boundary: one line under does not fire, one line over does. This
+        # is deliberately over the *real* config, not an injected one — see
+        # the config-injection test below for proof the value is genuinely
+        # read from config rather than a Python-side literal that happens to
+        # match it today.
+        self.assertFalse(
+            advisory_consultation.needs_code_review_consultation(
+                "simple", diff_line_count=300
+            )
+        )
+        self.assertTrue(
+            advisory_consultation.needs_code_review_consultation(
+                "simple", diff_line_count=301
+            )
+        )
+
+    def test_code_review_fires_at_trivial_when_a_changed_path_is_security_sensitive(
+        self,
+    ) -> None:
+        self.assertTrue(
+            advisory_consultation.needs_code_review_consultation(
+                "trivial", changed_paths=["src/auth/login.py"]
+            )
+        )
+
+    def test_code_review_does_not_fire_at_trivial_for_an_ordinary_changed_path(
+        self,
+    ) -> None:
+        self.assertFalse(
+            advisory_consultation.needs_code_review_consultation(
+                "trivial", changed_paths=["src/widgets/button.py"]
+            )
+        )
+
+    def test_code_review_threshold_is_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        """Proves the diff-size threshold is genuinely read from config —
+        not merely referenced by key — by injecting two different config
+        files and observing the trigger's boolean answer flip for the exact
+        same `diff_line_count` input."""
+        with tempfile.TemporaryDirectory() as tmp:
+            low_threshold_config = Path(tmp) / "low.json"
+            low_threshold_config.write_text(
+                json.dumps({"critical_dialogue": {"code_review_diff_line_threshold": 5}})
+            )
+            high_threshold_config = Path(tmp) / "high.json"
+            high_threshold_config.write_text(
+                json.dumps(
+                    {"critical_dialogue": {"code_review_diff_line_threshold": 5000}}
+                )
+            )
+
+            fires_low = advisory_consultation.needs_code_review_consultation(
+                "trivial", diff_line_count=10, config_path=low_threshold_config
+            )
+            fires_high = advisory_consultation.needs_code_review_consultation(
+                "trivial", diff_line_count=10, config_path=high_threshold_config
+            )
+
+        self.assertTrue(fires_low)
+        self.assertFalse(fires_high)
+
+    def test_code_review_security_paths_are_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        """Same proof as the threshold test above, for
+        `security_sensitive_path_patterns`: a pattern present only in the
+        injected config fires, and a real-config pattern absent from the
+        injected config does not."""
+        with tempfile.TemporaryDirectory() as tmp:
+            custom_config = Path(tmp) / "custom.json"
+            custom_config.write_text(
+                json.dumps(
+                    {
+                        "critical_dialogue": {
+                            "security_sensitive_path_patterns": ["quux_only_here"]
+                        }
+                    }
+                )
+            )
+
+            fires_on_custom_pattern = advisory_consultation.needs_code_review_consultation(
+                "trivial",
+                changed_paths=["src/quux_only_here/module.py"],
+                config_path=custom_config,
+            )
+            does_not_fire_on_real_config_pattern = (
+                advisory_consultation.needs_code_review_consultation(
+                    "trivial",
+                    changed_paths=["src/auth/login.py"],
+                    config_path=custom_config,
+                )
+            )
+
+        self.assertTrue(fires_on_custom_pattern)
+        self.assertFalse(does_not_fire_on_real_config_pattern)
+
+    # -- post-mortem -------------------------------------------------------
+
+    def test_post_mortem_does_not_fire_with_no_signal(self) -> None:
+        self.assertFalse(advisory_consultation.needs_post_mortem_consultation())
+
+    def test_post_mortem_fires_on_failure(self) -> None:
+        self.assertTrue(advisory_consultation.needs_post_mortem_consultation(failed=True))
+
+    def test_post_mortem_fires_on_two_failure_escalation(self) -> None:
+        # Tracks `advisory_consultation.ESCALATION_FAILURE_THRESHOLD`, the
+        # same named constant `agent_council.escalate_routing_effort` uses
+        # for "2+ failed worker attempts" — see
+        # `test_escalation_failure_threshold_matches_agent_council_constant`
+        # below for the drift guard between the two modules' copies of it.
+        threshold = advisory_consultation.ESCALATION_FAILURE_THRESHOLD
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                consecutive_failures=threshold - 1
+            )
+        )
+        self.assertTrue(
+            advisory_consultation.needs_post_mortem_consultation(
+                consecutive_failures=threshold
+            )
+        )
+        self.assertTrue(
+            advisory_consultation.needs_post_mortem_consultation(
+                consecutive_failures=threshold + 1
+            )
+        )
+
+    def test_escalation_failure_threshold_matches_agent_council_constant(self) -> None:
+        """Drift guard for the deliberate duplication: `advisory_consultation`
+        does not import `agent_council` (see the comment on
+        `ESCALATION_FAILURE_THRESHOLD`), so this test is what keeps the two
+        modules' copies of the protocol's 2-failure escalation threshold
+        from silently diverging — mirrors
+        `test_sensitivity_markers_are_a_superset_of_agent_council_patterns`'s
+        role for `SENSITIVITY_MARKERS`/`SENSITIVE_PATTERNS`."""
+        self.assertEqual(
+            advisory_consultation.ESCALATION_FAILURE_THRESHOLD,
+            agent_council.ESCALATION_FAILURE_THRESHOLD,
+        )
+
+    def test_post_mortem_fires_on_a_stalemate_from_any_non_post_mortem_occasion(
+        self,
+    ) -> None:
+        for occasion in ("ambiguity", "plan-review", "code-review"):
+            with self.subTest(occasion=occasion):
+                self.assertTrue(
+                    advisory_consultation.needs_post_mortem_consultation(
+                        occasion=occasion, stalemate_occurred=True
+                    )
+                )
+
+    def test_post_mortem_stalemate_does_not_recursively_trigger_another_post_mortem(
+        self,
+    ) -> None:
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                occasion="post-mortem", stalemate_occurred=True
+            )
+        )
+
+    def test_post_mortem_occasion_never_fires_on_any_signal_not_just_stalemate(
+        self,
+    ) -> None:
+        """The recursion guard is a blanket "a post-mortem's own outcome
+        must NOT recursively trigger another post-mortem" (spec 0003 ticket
+        03), not narrowly scoped to the stalemate example the ticket
+        happens to spell out — a post-mortem dialogue that itself failed, or
+        that is somehow read as its own second consecutive failure, must not
+        chain into a further post-mortem either."""
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                occasion="post-mortem", failed=True
+            )
+        )
+        self.assertFalse(
+            advisory_consultation.needs_post_mortem_consultation(
+                occasion="post-mortem", consecutive_failures=5
+            )
+        )
+
+
 class AdvisorySensitivityGateTests(unittest.TestCase):
     """A sensitive task must never reach a cloud Planner or Critic.
 

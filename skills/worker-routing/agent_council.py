@@ -29,6 +29,19 @@ from typing import Any
 CACHE_TTL_SECONDS = 24 * 60 * 60
 CACHE_VERSION = 2
 MAX_DEBATE_ROUNDS = 3
+# The protocol's 2-failure escalation rule: `escalate_routing_effort` below
+# treats `attempts < ESCALATION_FAILURE_THRESHOLD` as "not yet escalated"
+# and anything at or past it as "escalate". `advisory_consultation.py`'s
+# `needs_post_mortem_consultation` (spec 0003 ticket 03) mirrors this exact
+# constant under the same name rather than importing it — importing
+# `agent_council` from `advisory_consultation` would pull `urllib.request`
+# and `asyncio` into a module whose docstring promises none, and both files
+# are loaded by path rather than as an installed package (see the identical
+# `SENSITIVE_PATTERNS`/`SENSITIVITY_MARKERS` precedent below). The two
+# constants are kept from drifting apart by
+# `test_escalation_failure_threshold_matches_agent_council_constant` in
+# `test_routing.py`, not by a shared import.
+ESCALATION_FAILURE_THRESHOLD = 2
 PROTOCOL_VERSION = "3.5"
 VALID_COMPLEXITIES = frozenset({"trivial", "simple", "medium", "complex"})
 VALID_EFFORTS = frozenset({"low", "medium", "high", "ultra"})
@@ -190,7 +203,7 @@ def escalate_routing_effort(
     attempts: int = 1,
 ) -> tuple[str, str]:
     """Escalate reasoning effort and model tier after 2+ failed worker attempts."""
-    if attempts < 2:
+    if attempts < ESCALATION_FAILURE_THRESHOLD:
         worker = (
             "codex_terra"
             if complexity in ("trivial", "simple")

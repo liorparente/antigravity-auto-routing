@@ -40,6 +40,22 @@
     "Claude Opus 5 (Thinking)",
     "GPT-OSS 120B (Medium)"
   ],
+  "critical_dialogue": {
+    "code_review_diff_line_threshold": 300,
+    "security_sensitive_path_patterns": [
+      "auth",
+      "credential",
+      "secret",
+      ".env",
+      "password",
+      "token",
+      "/keys/",
+      "security",
+      "iam",
+      "acl",
+      "permission"
+    ]
+  },
   "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"],
   "safe_commands": [
     "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",

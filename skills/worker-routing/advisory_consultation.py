@@ -23,12 +23,24 @@ import re
 import secrets
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 MAX_DEBATE_ROUNDS = 3
+
+# Mirrors `agent_council.ESCALATION_FAILURE_THRESHOLD` rather than importing
+# it — same reasoning as `SENSITIVITY_MARKERS` below (importing
+# `agent_council` would pull `urllib.request`/`asyncio` into this module,
+# and both files are loaded by path, not as a package). This is the
+# protocol's 2-failure escalation rule: `agent_council.escalate_routing_effort`
+# treats `attempts >= ESCALATION_FAILURE_THRESHOLD` as "escalate", and
+# `needs_post_mortem_consultation` below fires its own escalation trigger at
+# the same threshold, because it exists specifically to track that same
+# protocol rule. `test_escalation_failure_threshold_matches_agent_council_constant`
+# in `test_routing.py` keeps the two values from silently drifting apart.
+ESCALATION_FAILURE_THRESHOLD = 2
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 
@@ -144,6 +156,42 @@ SENSITIVITY_MARKERS = (
     "[SENSITIVE]",
 )
 
+# Spec 0003 (CriticalDialogue) ticket 03: the code-review occasion's risk
+# signals — an oversized diff or a security-sensitive changed path — must be
+# "read from config, not hardcoded literals in the Python source" per the
+# ticket's acceptance criteria. `_CONFIG_PATH` is this module's own
+# `routing-config.json`, mirroring `routing_check.CONFIG_PATH`'s
+# `SCRIPT_DIR / "routing-config.json"` pattern; it is not imported from
+# `routing_check` for the same reason `SENSITIVITY_MARKERS` above duplicates
+# rather than imports `agent_council.SENSITIVE_PATTERNS` — these files are
+# loaded by path, not as a package. `needs_code_review_consultation` accepts
+# `config_path` as a keyword argument specifically so a caller (a test, or a
+# future ticket) can point it at a different file and observe the trigger's
+# answer change, which is the only way to prove a value is genuinely read
+# from config rather than merely referenced by key.
+#
+# The two `DEFAULT_*` constants below are a fallback for a config file that
+# is missing the `critical_dialogue` section (or one of its two keys) —
+# mirroring `routing_check.load_code_extensions`'s identical
+# `config.get("code_extensions", DEFAULT_CODE_EXTENSIONS)` pattern — never
+# the value actually used when `routing-config.json` supplies its own
+# `critical_dialogue` section, which it does as of this ticket.
+_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
+DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD = 300
+DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
+    "auth",
+    "credential",
+    "secret",
+    ".env",
+    "password",
+    "token",
+    "/keys/",
+    "security",
+    "iam",
+    "acl",
+    "permission",
+)
+
 
 @dataclass(frozen=True)
 class AdvisoryDebateRound:
@@ -221,6 +269,150 @@ def needs_advisory_consultation(complexity: str, confidence: float = 1.0) -> boo
     if normalized == "ambiguous":
         return True
     return confidence < 0.7
+
+
+# Spec 0003 (CriticalDialogue) ticket 03: the three sibling trigger
+# predicates for the occasions `needs_advisory_consultation` above does not
+# cover. Each is deliberately its own function rather than a branch bolted
+# onto `needs_advisory_consultation` — that function is spec 0001's single
+# predicate for the "ambiguity" occasion alone, and ticket 03's acceptance
+# criteria require it to stay completely untouched (see
+# `AdvisoryAmbiguityTriggerUnchangedTests` in the test suite for the
+# characterization coverage that pins this).
+#
+# All three are pure predicates over caller-supplied signals: none of them
+# invoke a worker, write an artifact, or otherwise reach outside the
+# process. Deciding *whether* a dialogue should run is this ticket's job;
+# deciding whether that dialogue blocks the caller (ticket 04) and what
+# topology it runs under (ticket 05) are later tickets' work, wired at the
+# call site, not inside these predicates.
+
+
+def needs_plan_review_consultation(complexity: str) -> bool:
+    """Plan-review occasion trigger: fires for Medium and Complex complexity,
+    never for Simple or Trivial (spec 0003's Triggers paragraph: "Plan
+    review: complexity >= Medium").
+
+    Normalizes with the same `.lower().strip()` `needs_advisory_consultation`
+    uses, because both predicates read the same caller-supplied complexity
+    string — that is convergent reuse of a normalization idiom, not a
+    dependency between the two functions.
+    """
+    normalized = complexity.lower().strip()
+    return normalized in ("medium", "complex")
+
+
+def _load_code_review_risk_config(config_path: Path) -> tuple[int, tuple[str, ...]]:
+    """Read the code-review occasion's two risk-signal settings from
+    `config_path`'s `critical_dialogue` section, falling back to this
+    module's `DEFAULT_*` constants for whichever key (or the whole section)
+    is absent — see the comment above `_CONFIG_PATH` for why a fallback
+    exists at all and why it is never what production actually uses.
+
+    Raises whatever `open`/`json.load` raises for a missing or malformed
+    file: mirrors `routing_check.load_config`'s no-try/except contract
+    rather than silently swallowing a bad `config_path`, which would hide a
+    real caller mistake (production always calls this with the default
+    `_CONFIG_PATH`, which is checked into the repo).
+    """
+    with open(config_path, "r", encoding="utf-8") as stream:
+        config = json.load(stream)
+    section = config.get("critical_dialogue", {})
+    threshold = section.get(
+        "code_review_diff_line_threshold", DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD
+    )
+    patterns = section.get(
+        "security_sensitive_path_patterns",
+        list(DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS),
+    )
+    return int(threshold), tuple(patterns)
+
+
+def needs_code_review_consultation(
+    complexity: str,
+    *,
+    tests_failing: bool = False,
+    diff_line_count: int = 0,
+    changed_paths: Sequence[str] = (),
+    config_path: Path = _CONFIG_PATH,
+) -> bool:
+    """Code-review occasion trigger (spec 0003's Triggers paragraph: "Code
+    review: complexity >= Medium always, plus risk signals at any tier").
+
+    Medium/Complex complexity fires unconditionally, exactly like
+    `needs_plan_review_consultation` — checked first so a Medium+ task never
+    pays for a config read it does not need. Below that, three independent
+    risk signals each fire it on their own at any complexity tier,
+    including Trivial: failing tests, a diff whose `diff_line_count`
+    *exceeds* (strictly greater than, not equal to) the configured
+    threshold, or any `changed_paths` entry matching a configured
+    security-sensitive pattern (case-insensitive substring match, the same
+    style `_detect_sensitivity_marker` above already uses for
+    `SENSITIVITY_MARKERS`). The threshold and patterns are read from
+    `config_path` via `_load_code_review_risk_config` on every call rather
+    than cached at import time, so a caller (or a test) pointing this at a
+    different file always observes that file's current values.
+    """
+    normalized = complexity.lower().strip()
+    if normalized in ("medium", "complex"):
+        return True
+    if tests_failing:
+        return True
+    threshold, patterns = _load_code_review_risk_config(config_path)
+    if diff_line_count > threshold:
+        return True
+    lowered_patterns = [pattern.lower() for pattern in patterns]
+    for changed_path in changed_paths:
+        lowered_path = changed_path.lower()
+        if any(pattern in lowered_path for pattern in lowered_patterns):
+            return True
+    return False
+
+
+def needs_post_mortem_consultation(
+    *,
+    occasion: Occasion | None = None,
+    failed: bool = False,
+    consecutive_failures: int = 0,
+    stalemate_occurred: bool = False,
+) -> bool:
+    """Post-mortem occasion trigger (spec 0003's Triggers paragraph:
+    "Post-mortem: every failure, escalation (the protocol's 2-failure
+    rule), and stalemate").
+
+    `occasion` identifies which occasion's outcome is being evaluated for a
+    possible post-mortem — the occasion of the task or dialogue that
+    failed, escalated, or stalemated. When `occasion == "post-mortem"`,
+    this function always returns `False`, regardless of the other three
+    arguments: ticket 03's acceptance criteria state the recursion-guard
+    rule generally ("a post-mortem's own outcome must NOT recursively
+    trigger another post-mortem") before giving a stalemate as the concrete
+    example ("if a post-mortem dialogue itself stalemates, that must not
+    spawn a further post-mortem"), so the guard here covers every signal a
+    post-mortem's own outcome could carry, not only `stalemate_occurred`.
+    Every other occasion (or `None`, when the caller has no occasion to
+    report — e.g. a plain task-execution failure that never reached a
+    dialogue at all) is eligible for all three triggers below.
+
+    `consecutive_failures >= ESCALATION_FAILURE_THRESHOLD` tracks the same
+    protocol rule `agent_council.escalate_routing_effort` already encodes as
+    `attempts >= ESCALATION_FAILURE_THRESHOLD` (its own docstring: "Escalate
+    reasoning effort and model tier after 2+ failed worker attempts")
+    rather than inventing a new threshold or a new piece of session state.
+    The two constants are separately defined — see the comment above
+    `ESCALATION_FAILURE_THRESHOLD` for why this module cannot simply import
+    `agent_council`'s — and kept in sync by a test rather than a shared
+    import.
+    """
+    if occasion == "post-mortem":
+        return False
+    if failed:
+        return True
+    if consecutive_failures >= ESCALATION_FAILURE_THRESHOLD:
+        return True
+    if stalemate_occurred:
+        return True
+    return False
 
 
 def _atomic_text_write(path: Path, content: str) -> None:

@@ -198,8 +198,13 @@ ROUTING_LABEL_RE = re.compile(
 TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 
 # Non-role keys that may appear at the top level of routing-config.json
-# alongside the worker-role dicts.
-NON_ROLE_CONFIG_KEYS = {"code_extensions", "safe_commands", "orchestrator"}
+# alongside the worker-role dicts. "critical_dialogue" (spec 0003 ticket 03)
+# is a config namespace consumed by advisory_consultation.py's trigger
+# predicates, not a worker role — its dict shape has no "patterns" key and
+# would silently contribute nothing to `load_patterns` even unlisted, but it
+# belongs here for the same documented reason "code_extensions" and
+# "safe_commands" do.
+NON_ROLE_CONFIG_KEYS = {"code_extensions", "safe_commands", "orchestrator", "critical_dialogue"}
 
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s+")
 SCRIPT_WRAPPER_RE = re.compile(r"^script\s+(?:-\S+\s+)*\S+\s+")
