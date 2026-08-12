@@ -730,11 +730,22 @@ def run_advisory_consultation_debate(
 
     if invoke_worker is None:
         try:
-            from production_invoker import invoke_worker as production_invoke_worker
+            import learning_journal
+            import production_invoker
+
+            # Any non-`sensitivity_halt` outcome resolves the same task_id
+            # (see `_resolve_task_id`); the sensitivity gate above already
+            # ruled that outcome out for this call, so resolving here is
+            # exactly the id `_result` will resolve again for whichever
+            # outcome this run actually reaches — the journal record and
+            # this run's telemetry record stay correlated by TaskIdentity.
+            journaled_task_id = _resolve_task_id(task_description, task_id, "consensus")
+            invoke_worker = production_invoker.make_journaled_invoke_worker(
+                learning_journal.TaskLabel.for_task(journaled_task_id), root_dir=root_dir
+            )
         except Exception as exc:  # noqa: BLE001 - a production worker failure fails closed.
             cleanup_error = _remove_stale_plan_artifact(plan_path)
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
-        invoke_worker = production_invoke_worker
 
     for _round_number in range(1, max_rounds + 1):
         planner_prompt = _build_planner_prompt(

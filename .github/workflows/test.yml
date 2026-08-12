@@ -19,6 +19,8 @@ jobs:
         skills/worker-routing/agent_council.py
         skills/worker-routing/advisory_consultation.py
         skills/worker-routing/learning_journal.py
+        skills/worker-routing/production_invoker.py
+        skills/worker-routing/test_production_invoker.py
     steps:
       - uses: actions/checkout@v4
 

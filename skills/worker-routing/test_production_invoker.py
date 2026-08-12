@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -13,10 +14,24 @@ from pathlib import Path
 from unittest.mock import Mock
 
 MODULE_PATH = Path(__file__).with_name("production_invoker.py")
+LEARNING_JOURNAL_PATH = Path(__file__).with_name("learning_journal.py")
+
+learning_journal_spec = importlib.util.spec_from_file_location(
+    "learning_journal", LEARNING_JOURNAL_PATH
+)
+assert learning_journal_spec is not None and learning_journal_spec.loader is not None
+learning_journal = importlib.util.module_from_spec(learning_journal_spec)
+sys.modules["learning_journal"] = learning_journal
+learning_journal_spec.loader.exec_module(learning_journal)
+
 SPEC = importlib.util.spec_from_file_location("production_invoker", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 production_invoker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(production_invoker)
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 class BuildWorkerCommandTests(unittest.TestCase):
@@ -109,9 +124,20 @@ class AdvisoryConsultationIntegrationTests(unittest.TestCase):
             calls.append((model, effort, prompt))
             return "Planner plan" if len(calls) == 1 else "VERDICT: APPROVE"
 
+        def fake_make_journaled_invoke_worker(task: object, *, root_dir: Path) -> object:
+            # This test's own subject is "the production default is reached
+            # and used end-to-end" — journaling itself is covered directly by
+            # JournaledInvokeWorkerTests below, so the fake factory here just
+            # hands back the unwrapped fake rather than re-implementing
+            # instrumentation.
+            return fake_invoke_worker
+
         previous_module = sys.modules.get("production_invoker")
         production_module = types.ModuleType("production_invoker")
         production_module.invoke_worker = fake_invoke_worker  # type: ignore[attr-defined]
+        production_module.make_journaled_invoke_worker = (  # type: ignore[attr-defined]
+            fake_make_journaled_invoke_worker
+        )
         sys.modules["production_invoker"] = production_module
         try:
             with tempfile.TemporaryDirectory() as tmp:
@@ -181,6 +207,155 @@ class InvokeWorkerTests(unittest.TestCase):
             RuntimeError, r"timed out.*partial stdout.*timeout stderr"
         ):
             production_invoker.invoke_worker("agy", "high", "Research", runner=runner)
+
+
+class _FakeClock:
+    """A scripted monotonic clock: pops one value per call."""
+
+    def __init__(self, times: list[float]) -> None:
+        self._times = list(times)
+
+    def __call__(self) -> float:
+        return self._times.pop(0)
+
+
+class JournaledInvokeWorkerTests(unittest.TestCase):
+    """`make_journaled_invoke_worker` wraps `invoke_worker` from the outside.
+
+    Its own signature never changes (still `(model, effort, prompt) -> str`),
+    and the worker's result or exception reaches the caller unchanged either
+    way; the wrapping is purely a side effect — exactly one
+    `WorkerExecutionRecord` per call, `success` matching what actually
+    happened.
+    """
+
+    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
+
+    def _task(self, task_id: str = "task-1") -> object:
+        return learning_journal.TaskLabel.for_task(task_id, task_type="feature")
+
+    def test_success_appends_one_record_with_full_fields(self) -> None:
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journaled = production_invoker.make_journaled_invoke_worker(
+                self._task("task-success"),
+                root_dir=root,
+                runner=runner,
+                clock=_FakeClock([100.0, 101.5]),
+            )
+            output = journaled("claude-sonnet-5", "high", "Implement it")
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertEqual(output, "worker output")
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["kind"], "worker_execution")
+        self.assertEqual(record["task_id"], "task-success")
+        self.assertEqual(record["task_type"], "feature")
+        self.assertEqual(record["duration_ms"], 1500)
+        self.assertEqual(
+            record["cost_estimate_usd"],
+            production_invoker.estimate_cost_usd("claude-sonnet-5", 1500),
+        )
+        self.assertTrue(record["success"])
+        self.assertEqual(record["retry_count"], 0)
+        self.assertEqual(record["effort"], "high")
+        self.assertEqual(record["model_id"], "claude-sonnet-5")
+        self.assertEqual(record["model_family"], "claude")
+
+    def test_nonzero_exit_appends_one_failed_record_and_reraises(self) -> None:
+        runner = Mock(
+            return_value=subprocess.CompletedProcess([], 17, "partial stdout", "failure stderr")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journaled = production_invoker.make_journaled_invoke_worker(
+                self._task("task-nonzero"),
+                root_dir=root,
+                runner=runner,
+                clock=_FakeClock([10.0, 10.25]),
+            )
+            with self.assertRaisesRegex(RuntimeError, "exit code 17"):
+                journaled("gpt-5.6-sol", "medium", "Do work")
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["task_id"], "task-nonzero")
+        self.assertFalse(record["success"])
+        self.assertEqual(record["duration_ms"], 250)
+        self.assertEqual(record["model_id"], "gpt-5.6-sol")
+        self.assertEqual(record["model_family"], "codex")
+
+    def test_timeout_appends_one_failed_record_and_reraises(self) -> None:
+        timeout = subprocess.TimeoutExpired(
+            ["agy"], 30, output="partial stdout", stderr="timeout stderr"
+        )
+        runner = Mock(side_effect=timeout)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journaled = production_invoker.make_journaled_invoke_worker(
+                self._task("task-timeout"),
+                root_dir=root,
+                runner=runner,
+                clock=_FakeClock([0.0, 30.0]),
+            )
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                journaled("agy", "high", "Research")
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["task_id"], "task-timeout")
+        self.assertFalse(record["success"])
+        self.assertEqual(record["duration_ms"], 30000)
+        self.assertEqual(record["model_id"], "agy")
+        self.assertEqual(record["model_family"], "agy")
+
+    def test_journal_write_failure_never_breaks_the_observed_invocation(self) -> None:
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # `.ralph` is a plain file, not a directory: `append_journal_record`'s
+            # `mkdir(parents=True, exist_ok=True)` fails with an `OSError` no
+            # matter what record it's asked to write.
+            (root / ".ralph").write_text("not a directory")
+            journaled = production_invoker.make_journaled_invoke_worker(
+                self._task("task-unwritable"), root_dir=root, runner=runner
+            )
+
+            output = journaled("claude-opus-5", "ultra", "Plan")
+
+        self.assertEqual(output, "worker output")
+
+    def test_journal_write_failure_never_breaks_a_worker_exception_either(self) -> None:
+        runner = Mock(
+            return_value=subprocess.CompletedProcess([], 3, "partial stdout", "failure stderr")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".ralph").write_text("not a directory")
+            journaled = production_invoker.make_journaled_invoke_worker(
+                self._task("task-unwritable-failure"), root_dir=root, runner=runner
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "exit code 3"):
+                journaled("claude-opus-5", "ultra", "Plan")
+
+    def test_retry_count_is_always_zero(self) -> None:
+        """`invoke_worker` performs no retries; the record says so honestly
+        rather than a value a future retry mechanism would imply."""
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "ok", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journaled = production_invoker.make_journaled_invoke_worker(
+                self._task(), root_dir=root, runner=runner
+            )
+            journaled("claude-fable-5", "low", "Draft")
+            records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertEqual(records[0]["retry_count"], 0)
 
 
 if __name__ == "__main__":

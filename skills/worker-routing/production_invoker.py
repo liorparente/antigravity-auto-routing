@@ -5,12 +5,24 @@ The consultation loop accepts an injected ``(model, effort, prompt) -> str``
 callable so it remains fully testable offline.  This module provides the
 production adapter: it resolves a provider-specific argv list and launches it
 without a shell or interactive stdin.
+
+``make_journaled_invoke_worker`` is the instrumentation this module adds for
+spec 0004: ``invoke_worker`` itself stays untouched (its signature is the
+seam ``AdvisoryConsultation`` depends on, and it has no ``root_dir`` or task
+identity to journal with), and the factory wraps it from the outside instead,
+closing over the journal's context and handing back a plain ``(model,
+effort, prompt) -> str`` callable that fits the same seam. See that
+function's docstring for the journaling contract.
 """
 from __future__ import annotations
 
 import os
 import subprocess
+import time
 from collections.abc import Callable
+from pathlib import Path
+
+import learning_journal
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 DEFAULT_TIMEOUT_SECONDS = 300.0
@@ -163,10 +175,156 @@ def invoke_worker(
     return _diagnostic_text(result.stdout)
 
 
+# --- worker-execution journaling (spec 0004) ---------------------------------
+#
+# No pricing source exists anywhere in this repo. The choice here is an
+# explicit, documented rate table keyed by the same normalized model id
+# `MODEL_ALIASES` resolves to, rather than either inventing a single
+# made-up-looking number or silently recording zero. Zero is the dangerous
+# default: it is a plausible-looking lie an operator has no reason to
+# question. These per-second rates are rough placeholders, not billing
+# data — replace the table wholesale the day a real pricing source exists;
+# until then it is the one place the estimate can be read, checked, or
+# corrected, and `test_routing.py`/`test_production_invoker.py` pin its
+# shape so a model added to `CODEX_MODELS`/`CLAUDE_MODELS`/`AGY_MODELS`
+# without a matching entry here is a test failure, not a silent gap.
+USD_PER_SECOND: dict[str, float] = {
+    "claude-opus-5": 0.0150,
+    "claude-sonnet-5": 0.0060,
+    "claude-fable-5": 0.0020,
+    "gpt-5.6-sol": 0.0120,
+    "gpt-5.6-terra": 0.0060,
+    "gpt-5.6-luna": 0.0020,
+    "gpt-oss-120b": 0.0010,
+    "agy": 0.0040,
+    "gemini-3.6-flash": 0.0010,
+    "gemini-3.5-flash": 0.0010,
+    "gemini-3.1-pro": 0.0060,
+}
+
+# The rate a model missing from `USD_PER_SECOND` is billed at. Deliberately
+# not 0.0 and deliberately far outside any real per-second rate: a missing
+# entry must read as "the rate table has a gap" in the weekly report, not as
+# "this call was free." A model can only reach this path if it is already a
+# member of `CODEX_MODELS`, `CLAUDE_MODELS`, or `AGY_MODELS` (an unknown
+# model to `MODEL_ALIASES` never invokes anything — see
+# `_resolve_model_id_and_family`), so hitting it is always a maintenance gap,
+# never a routine occurrence.
+_UNKNOWN_MODEL_RATE_USD_PER_SECOND = 9_999.0
+
+
+def estimate_cost_usd(model_id: str, duration_ms: int) -> float:
+    """A named derivation over ``(model_id, duration_ms)``, never a guess.
+
+    Named ``estimate`` because that is what it honestly is: rate times wall
+    time, not a real invoice. `WorkerExecutionRecord.cost_estimate_usd`'s own
+    docstring says not to rename that field until a real billing source
+    backs it — this function is the derivation that name promises.
+    """
+    rate = USD_PER_SECOND.get(model_id, _UNKNOWN_MODEL_RATE_USD_PER_SECOND)
+    return round(rate * (duration_ms / 1000.0), 6)
+
+
+def _resolve_model_id_and_family(model: str) -> tuple[str, str]:
+    """Normalize ``model`` and classify it by the partitions ``invoke_worker`` uses.
+
+    Reuses `MODEL_ALIASES` / `CODEX_MODELS` / `CLAUDE_MODELS` / `AGY_MODELS`
+    rather than inventing a second mapping, per this module's own contract.
+    A model `MODEL_ALIASES` would itself reject returns
+    ``("unrecognized-model", "unknown")`` — a caller-composed display name
+    may contain spaces or parentheses, which `learning_journal`'s identifier
+    validation rejects, so the raw string is never carried into the record.
+    """
+    normalized = MODEL_ALIASES.get(model)
+    if normalized is None:
+        return "unrecognized-model", "unknown"
+    if normalized in CLAUDE_MODELS:
+        return normalized, "claude"
+    if normalized in CODEX_MODELS:
+        return normalized, "codex"
+    if normalized in AGY_MODELS:
+        return normalized, "agy"
+    return normalized, "unknown"
+
+
+def make_journaled_invoke_worker(
+    task: learning_journal.TaskLabel,
+    *,
+    root_dir: Path,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    runner: Runner = subprocess.run,
+    clock: Callable[[], float] = time.monotonic,
+) -> Callable[[str, str, str], str]:
+    """Build a ``(model, effort, prompt) -> str`` callable that journals every call.
+
+    This is the seam `AdvisoryConsultation` depends on — nothing about its
+    shape changes — with the journal's context (`task`, `root_dir`) closed
+    over rather than threaded through it, because neither fits the
+    three-argument contract. Each call to the returned callable appends
+    exactly one `WorkerExecutionRecord` to the journal under `root_dir`,
+    whether the underlying `invoke_worker` succeeds, exits non-zero, or
+    times out.
+
+    Retry count is always 0: `invoke_worker` performs no retries today, and
+    this records that honestly rather than a value a future retry mechanism
+    would imply.
+
+    Two failure modes stay strictly separate:
+
+    - `invoke_worker` raising is the worker's own outcome. It is journaled
+      as `success=False` and then re-raised unchanged, so the caller sees
+      exactly the exception it would have without instrumentation.
+    - Anything going wrong in the journaling itself — record construction
+      rejecting a value, or `append_journal_record` failing to write — is
+      swallowed here. A broken disk, or a caller-supplied `effort` that
+      does not fit the journal's enumerated vocabulary, must degrade the
+      learning loop, never the invocation it was merely observing. This is
+      deliberately broader than "write failures only": a validation error
+      raised while *building* the record is just as much "the journal's
+      problem" as an `OSError` while writing it, and neither may replace or
+      mask the worker's real result.
+    """
+
+    def _journaled_invoke_worker(model: str, effort: str, prompt: str) -> str:
+        start = clock()
+        error: Exception | None = None
+        output = ""
+        try:
+            output = invoke_worker(model, effort, prompt, timeout=timeout, runner=runner)
+        except Exception as exc:  # noqa: BLE001 - re-raised unchanged below; only journaled here.
+            error = exc
+        duration_ms = max(0, round((clock() - start) * 1000))
+
+        try:
+            model_id, model_family = _resolve_model_id_and_family(model)
+            record = learning_journal.WorkerExecutionRecord(
+                task=task,
+                duration_ms=duration_ms,
+                cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
+                success=error is None,
+                retry_count=0,
+                effort=effort,  # type: ignore[arg-type]
+                model_id=model_id,
+                model_family=model_family,
+            )
+            learning_journal.append_journal_record(record, root_dir=root_dir)
+        except Exception:  # noqa: BLE001, S110 - journaling must never break the observed invocation.
+            pass
+
+        if error is not None:
+            raise error
+        return output
+
+    return _journaled_invoke_worker
+
+
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
     "MODEL_ALIASES",
+    "USD_PER_SECOND",
     "WORKER_MODE_TOKEN",
     "build_worker_command",
+    "estimate_cost_usd",
     "invoke_worker",
+    "make_journaled_invoke_worker",
 ]

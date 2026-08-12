@@ -3866,5 +3866,128 @@ class LearningJournalTests(unittest.TestCase):
                 )
 
 
+production_invoker_spec = importlib.util.spec_from_file_location(
+    "production_invoker", SKILL_DIR / "production_invoker.py"
+)
+assert production_invoker_spec is not None and production_invoker_spec.loader is not None
+production_invoker = importlib.util.module_from_spec(production_invoker_spec)
+sys.modules["production_invoker"] = production_invoker
+production_invoker_spec.loader.exec_module(production_invoker)
+
+
+class WorkerExecutionJournalingTests(unittest.TestCase):
+    """Ticket 13: every worker invocation the production path makes leaves a
+    `WorkerExecutionRecord` behind, correlated to its consultation by
+    TaskIdentity — and never for a test's own injected fake, which the
+    consultation's `(model, effort, prompt) -> str` seam still accepts
+    unchanged. Success/failure field coverage (non-zero exit, timeout,
+    journal-write failure) lives in `test_production_invoker.py`'s
+    `JournaledInvokeWorkerTests`, at the level the factory itself is
+    exercised; these tests cover the seam this ticket adds on top of it —
+    the consultation's own integration with `make_journaled_invoke_worker`.
+    """
+
+    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
+    TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
+
+    def test_injecting_a_plain_fake_writes_nothing_to_the_journal(self) -> None:
+        """The consultation's seam is unchanged: a caller-supplied fake
+        `invoke_worker` bypasses instrumentation entirely, exactly as it did
+        before this ticket."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertFalse((root / self.JOURNAL_RELATIVE_PATH).exists())
+
+    def test_journaled_invocations_correlate_to_the_consultation_by_task_id(self) -> None:
+        """Wrapping a caller-supplied callable through
+        `make_journaled_invoke_worker` and handing the result to the
+        consultation as `invoke_worker` — the shape the production default
+        takes internally — must leave the journal's records and the
+        telemetry stream's record joinable on the same `task_id`, with the
+        per-call model identity resolved correctly for two different
+        provider families."""
+        runner = mock.Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "Planner's proposed plan.", ""),
+                subprocess.CompletedProcess([], 0, "VERDICT: APPROVE\nLooks solid.", ""),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            journaled_invoker = production_invoker.make_journaled_invoke_worker(
+                learning_journal.TaskLabel.for_task("task-correlated-1", task_type="feature"),
+                root_dir=root,
+                runner=runner,
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                journaled_invoker,
+                root_dir=root,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                task_id="task-correlated-1",
+            )
+            journal_records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+            telemetry_records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertTrue(result.consensus_reached)
+
+        self.assertEqual(len(journal_records), 2)
+        for record in journal_records:
+            self.assertEqual(record["task_id"], "task-correlated-1")
+            self.assertEqual(record["kind"], "worker_execution")
+            self.assertTrue(record["success"])
+        self.assertEqual(journal_records[0]["model_id"], "claude-opus-5")
+        self.assertEqual(journal_records[0]["model_family"], "claude")
+        self.assertEqual(journal_records[1]["model_id"], "gpt-5.6-sol")
+        self.assertEqual(journal_records[1]["model_family"], "codex")
+
+        self.assertEqual(len(telemetry_records), 1)
+        self.assertEqual(telemetry_records[0]["task_id"], "task-correlated-1")
+
+    def test_production_default_path_reaches_the_real_journaling_factory(self) -> None:
+        """`run_advisory_consultation_debate` with no `invoke_worker`
+        supplied reaches `production_invoker.make_journaled_invoke_worker`
+        through its own lazy import — the real factory, not a test double.
+        `production_invoker.invoke_worker` itself is patched so no real
+        worker CLI is ever launched; everything below that (task resolution,
+        the factory, the journal write) runs for real."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            production_invoker,
+            "invoke_worker",
+            side_effect=["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."],
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                root_dir=root,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                task_id="task-default-path-1",
+            )
+            journal_records = _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(len(journal_records), 2)
+        for record in journal_records:
+            self.assertEqual(record["task_id"], "task-default-path-1")
+            self.assertEqual(record["kind"], "worker_execution")
+            self.assertTrue(record["success"])
+
+
 if __name__ == "__main__":
     unittest.main()
