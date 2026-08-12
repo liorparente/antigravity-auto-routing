@@ -122,9 +122,18 @@ class AdvisoryConsultationIntegrationTests(unittest.TestCase):
 
         calls: list[tuple[str, str, str]] = []
 
+        # The Critic reply satisfies spec 0003's VerdictContract: rationale,
+        # one quote verifiable against the Planner's plan (the whole of it,
+        # trivially contained in itself), then the verdict line last. A bare
+        # "VERDICT: APPROVE" parses as `unparseable` by design — an approval
+        # backed by no engagement is the rubber-stamp the contract exists to
+        # refuse — and would never reach the consensus this test asserts.
+        planner_plan = "Planner plan"
+        critic_response = f'Looks solid.\nQUOTE: "{planner_plan}"\nVERDICT: APPROVE'
+
         def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
             calls.append((model, effort, prompt))
-            return "Planner plan" if len(calls) == 1 else "VERDICT: APPROVE"
+            return planner_plan if len(calls) == 1 else critic_response
 
         def fake_make_journaled_invoke_worker(task_id: str, *, root_dir: Path) -> object:
             # This test's own subject is "the production default is reached

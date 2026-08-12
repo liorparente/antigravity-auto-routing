@@ -834,9 +834,10 @@ def needs_post_mortem_consultation(
         return True
     if consecutive_failures >= ESCALATION_FAILURE_THRESHOLD:
         return True
-    if stalemate_occurred:
-        return True
-    return False
+    # The last trigger returns its own flag rather than adding a fourth
+    # `if ...: return True` rung: `stalemate_occurred` is already a bool, so
+    # the rung and the fallthrough would say the same thing twice.
+    return stalemate_occurred
 
 
 def _atomic_text_write(path: Path, content: str) -> None:

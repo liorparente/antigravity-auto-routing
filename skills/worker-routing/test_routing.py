@@ -22,6 +22,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -1348,7 +1349,13 @@ class _RoleKeyedInvoker:
     scripted.
     """
 
-    def __init__(self, responses: dict[str, list[str | Exception]]) -> None:
+    def __init__(self, responses: Mapping[str, Sequence[str | Exception]]) -> None:
+        # `Mapping[str, Sequence[...]]` rather than `dict[str, list[...]]`:
+        # every call site below builds its per-role queues as plain
+        # `list[str]`, and `list` is invariant, so a `list[str | Exception]`
+        # parameter rejects them. The queues are copied into this fake's own
+        # mutable lists on the next line anyway, so the wider read-only type
+        # is what this constructor actually needs.
         self.responses: dict[str, list[str | Exception]] = {
             model: list(queue) for model, queue in responses.items()
         }
@@ -1397,7 +1404,7 @@ def _revise(note: str) -> str:
     return f"{note}\nVERDICT: REVISE"
 
 
-def _reachable(*families: str) -> "advisory_consultation.IsFamilyReachable":
+def _reachable(*families: str) -> Callable[[str], bool]:
     """Build a scripted `is_family_reachable` fake for `resolve_roster` and
     `run_advisory_consultation_debate`'s `reachability_check` parameter
     (spec 0003 ticket 07): reachable for exactly the named families,
@@ -1408,6 +1415,11 @@ def _reachable(*families: str) -> "advisory_consultation.IsFamilyReachable":
     offline with a fake, exactly like `invoke_worker` is injected today").
     `_reachable()` with no arguments is the "nothing is up" fake used to
     exercise `RosterResolutionError`.
+
+    The return type spells out `Callable[[str], bool]` — the definition of
+    `advisory_consultation.IsFamilyReachable` — instead of naming that alias:
+    this file loads `advisory_consultation` through `importlib` at runtime, so
+    a type checker cannot resolve an attribute of it in an annotation.
     """
     allowed = set(families)
     return lambda family: family in allowed
@@ -4371,14 +4383,29 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
         `run_advisory_consultation_debate` and the line after it — the
         caller's next line of code provably does not run until the dialogue
         result is available."""
+
+        def _ordering_invoker(
+            order: list[str], scripted: Iterator[str]
+        ) -> Callable[[str, str, str], str]:
+            """Build the fake outside the loop below so its closure captures
+            this function's parameters rather than the loop's own rebound
+            variables — a closure over a loop variable is called correctly
+            here (synchronously, within the same iteration) but is the shape
+            that silently breaks the moment such a fake outlives its
+            iteration, which is why ruff's B023 refuses it."""
+
+            def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
+                order.append("invoker_called")
+                return next(scripted)
+
+            return fake_invoke_worker
+
         for occasion in ("plan-review", "code-review"):
             with self.subTest(occasion=occasion):
                 order: list[str] = []
-                scripted_responses = iter(["Planner's plan.", _approve("Planner's plan.")])
-
-                def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
-                    order.append("invoker_called")
-                    return next(scripted_responses)
+                fake_invoke_worker = _ordering_invoker(
+                    order, iter(["Planner's plan.", _approve("Planner's plan.")])
+                )
 
                 with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
                     os.environ, {}, clear=True
@@ -5302,7 +5329,7 @@ class LearningJournalTests(unittest.TestCase):
                 root / self.TELEMETRY_RELATIVE_PATH,
             )
 
-            invoker = _RecordingInvoker(["Plan.", "VERDICT: APPROVE\nGood."])
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.", "Good.")])
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, task_id="shared-task"
             )
@@ -5389,7 +5416,7 @@ class LearningJournalTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            invoker = _RecordingInvoker(["Plan.", "VERDICT: APPROVE\nGood."])
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.", "Good.")])
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
@@ -6206,7 +6233,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -6226,7 +6253,9 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         runner = mock.Mock(
             side_effect=[
                 subprocess.CompletedProcess([], 0, "Planner's proposed plan.", ""),
-                subprocess.CompletedProcess([], 0, "VERDICT: APPROVE\nLooks solid.", ""),
+                subprocess.CompletedProcess(
+                    [], 0, _approve("Planner's proposed plan."), ""
+                ),
             ]
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -6284,7 +6313,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
                 side_effect=[
                     subprocess.CompletedProcess([], 0, "Planner's proposed plan.", ""),
                     subprocess.CompletedProcess(
-                        [], 0, "VERDICT: APPROVE\nLooks solid.", ""
+                        [], 0, _approve("Planner's proposed plan."), ""
                     ),
                 ]
             )
@@ -6418,7 +6447,10 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         ), mock.patch.object(
             production_invoker,
             "invoke_worker",
-            side_effect=["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."],
+            side_effect=[
+                "Planner's proposed plan.",
+                _approve("Planner's proposed plan."),
+            ],
         ):
             root = Path(tmp)
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -6513,11 +6545,11 @@ class OutcomeRecordingTests(unittest.TestCase):
         invoker = _RecordingInvoker(
             [
                 "Planner's first plan.",
-                "VERDICT: REVISE\nNeeds more detail.",
+                _revise("Needs more detail."),
                 "Planner's second plan.",
-                "VERDICT: REVISE\nStill thin.",
+                _revise("Still thin."),
                 "Planner's third plan.",
-                "VERDICT: REVISE\nNot convinced.",
+                _revise("Not convinced."),
             ]
         )
         return advisory_consultation.run_advisory_consultation_debate(
@@ -7650,11 +7682,18 @@ class ManagedFileClosureTests(unittest.TestCase):
         journaling factory, the record, the write — is the installed code
         running for real.
         """
+        # The Critic reply is built by `_approve` here in the parent and
+        # `repr`'d into the child's source, rather than written out as a
+        # literal inside it: the VerdictContract's exact text stays
+        # single-sourced from the helper every other test uses, so a future
+        # change to the contract cannot leave this one child program behind
+        # scripting a shape the installed parser no longer accepts.
+        plan = "Planner plan."
         program = (
             "import sys\n"
             "from pathlib import Path\n"
             "import advisory_consultation, production_invoker\n"
-            "replies = iter(['Planner plan.', 'VERDICT: APPROVE\\nLooks solid.'])\n"
+            f"replies = iter([{plan!r}, {_approve(plan)!r}])\n"
             "production_invoker.invoke_worker = (\n"
             "    lambda model, effort, prompt, **kwargs: next(replies)\n"
             ")\n"
@@ -7763,7 +7802,10 @@ class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
         with mock.patch.object(
             production_invoker,
             "invoke_worker",
-            side_effect=["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."],
+            side_effect=[
+                "Planner's proposed plan.",
+                _approve("Planner's proposed plan."),
+            ],
         ):
             return advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", root_dir=root, task_id=task_id
