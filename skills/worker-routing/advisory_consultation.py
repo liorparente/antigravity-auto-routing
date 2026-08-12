@@ -1137,6 +1137,37 @@ class AdvisoryDebateResult:
     when the caller's `session_spend_so_far` placed this call at rung 1 or
     2 (the dialogue still ran, just degraded), and always `3` when
     `outcome == "budget_skipped"` (the dialogue did not run at all).
+
+    `topology` (spec 0003 ticket 10) is appended after `degradation_rung`,
+    last, by the identical append-only rule every field above it already
+    follows: every pre-ticket-10 construction of this dataclass — in this
+    module and in tests — that never mentions it keeps meaning exactly what
+    it meant before this field existed, defaulting to `"pair"`, spec 0001's
+    sole topology. Set from the same `panel_mode` local
+    `run_advisory_consultation_debate` already computes via
+    `_is_panel_topology(occasion, complexity)` (ticket 05) — never
+    re-derived here, just reported — except on a canary run, where it is
+    reassigned to `"pair"` regardless of `panel_mode`, mirroring
+    `result_critic_model`'s identical canary reassignment immediately above
+    it in that function: a canary always probes exactly one Critic (ticket
+    08), so its result must never claim the panel topology it never
+    actually ran under. This is resolved unconditionally, before the
+    sensitivity gate, the budget check, or any worker is ever contacted, so
+    every outcome — including `sensitivity_halt` and `budget_skipped` —
+    carries a genuine topology, never a stale or absent one.
+
+    `round_verdicts` (spec 0003 ticket 10) is appended last, by the
+    identical rule: defaults to `()`, an empty tuple, for every
+    pre-ticket-10 construction. Populated with one `AdvisoryRoundVerdict`
+    per entry already appended to `rounds` above — same length, same order,
+    appended at the same call site in the round loop, immediately after
+    `_parse_critic_verdict` is called for that round, so the two sequences
+    can never drift out of sync. A canary's single fixture-probe round
+    (ticket 08) gets exactly one entry too, `critic_b=None`, kept parallel
+    with the one entry `rounds` already carries for it. Every outcome that
+    never appends to `rounds` at all (`sensitivity_halt`, `budget_skipped`,
+    or a `worker_error` before any round completed) carries `()` here too,
+    for the same reason.
     """
 
     rounds_run: int
@@ -1151,6 +1182,8 @@ class AdvisoryDebateResult:
     degraded_independence: bool = False
     canary_result: CanaryResult | None = None
     degradation_rung: DegradationRung = 0
+    topology: RosterTopology = "pair"
+    round_verdicts: tuple[AdvisoryRoundVerdict, ...] = ()
 
     @property
     def consensus_reached(self) -> bool:
@@ -1556,6 +1589,52 @@ class VerdictContractResult:
     verdict: CriticVerdict
     verified_quote_count: int
     objection_count: int
+
+
+@dataclass(frozen=True)
+class AdvisoryRoundVerdict:
+    """One round's parsed Critic verdict(s) plus their engagement-unit
+    counts (spec 0003 ticket 10).
+
+    `run_advisory_consultation_debate`'s round loop already computes a
+    `VerdictContractResult` per Critic per round via `_parse_critic_verdict`
+    — to decide consensus/continue/unparseable — and previously discarded it
+    once that decision was made. This dataclass is what retains it instead,
+    one instance per round, so the same already-derived verdict+counts data
+    can reach `AdvisoryDebateResult.round_verdicts` and, from there,
+    `AdvisoryTelemetryRecord.round_verdicts`, for spec 0004's future
+    LearningJournal to read.
+
+    `critic_a` is the sole Critic's verdict in pair mode, and Critic A's
+    verdict in panel mode — the identical "`critic_a` means the pair's sole
+    Critic" convention `RosterRole` and `AdvisoryDebateRound.critic_response`
+    already established. `critic_b` stays `None` for every pair-mode round
+    (including a canary's single-Critic probe — ticket 08's fixture round
+    never invokes a second Critic, regardless of which topology the
+    occasion/complexity combination would otherwise select) and is
+    populated only for a panel-mode round, where it carries Critic B's own
+    independently parsed verdict — never folded together with `critic_a`
+    into one shared tally, so a caller can always tell the two Critics'
+    engagement apart.
+
+    Deliberately a `VerdictContractResult` field on each side, not a
+    hand-copied subset of its three fields: `VerdictContractResult` already
+    *is* exactly "a verdict plus its engagement-unit counts" (see its own
+    docstring), so wrapping it here — rather than re-declaring
+    `verdict`/`verified_quote_count`/`objection_count` a second time — keeps
+    this module's one existing representation of that shape as the only
+    one, with no risk of the two silently drifting apart.
+
+    Carries no plan or critique text on either side, only what
+    `_parse_critic_verdict` already derived and summarized from it — a
+    verdict label and two integers. That is what makes this data safe to
+    cross the telemetry redaction boundary (see `AdvisoryTelemetryRecord`):
+    it is derived-then-summarized data, never the raw Planner/Critic prose
+    it was derived from, and never the task description either.
+    """
+
+    critic_a: VerdictContractResult
+    critic_b: VerdictContractResult | None = None
 
 
 def _split_off_verdict_line(critic_response: str) -> tuple[str | None, list[str]]:
@@ -2094,6 +2173,51 @@ class AdvisoryTelemetryRecord:
     `0`, so every pre-ticket-09 construction of this dataclass — in this
     module and in tests — that never mentions it keeps meaning exactly what
     it meant before this field existed.
+
+    `occasion`, `topology`, and `round_verdicts` (spec 0003 ticket 10) close
+    out the telemetry-extension scope every field above already anticipated.
+    All three are appended last, by the identical append-only rule, and all
+    three are copied verbatim from `AdvisoryDebateResult`'s own
+    same-named fields by `_build_telemetry_record` — never re-derived here,
+    the same "copy, never re-derive" contract `degraded_independence`,
+    `canary_result`, and `degradation_rung` already set.
+
+    `occasion` defaults to `"ambiguity"`, mirroring
+    `AdvisoryDebateResult.occasion`'s own default (ticket 01) — it was
+    carried on the result from ticket 01 onward but never reached this
+    record until now.
+
+    `topology` defaults to `"pair"`, mirroring
+    `AdvisoryDebateResult.topology`'s own default — see that field's
+    docstring for the canary reassignment rule this record inherits
+    verbatim by copying it.
+
+    `round_verdicts` defaults to `()`, mirroring
+    `AdvisoryDebateResult.round_verdicts`'s own default and its
+    parallel-with-`rounds` invariant — see that field's docstring. Each
+    element is an `AdvisoryRoundVerdict`, itself wrapping one or two
+    `VerdictContractResult`s (a verdict label plus two integers); no plan
+    or critique prose and no task text ever appears in any element, which
+    is what keeps this field inside the same redaction boundary this
+    record's own opening paragraph already documents — see also
+    `AdvisoryTelemetryExtensionsTests.test_round_verdicts_carry_no_substring_of_a_distinctive_task_description`
+    in `test_routing.py`, ticket 10's redaction proof for this field
+    specifically.
+
+    WARNING for any future telemetry consumer aggregating `round_verdicts`
+    across records (spec 0004's LearningJournal/scoreboard, most likely):
+    a canary run's `round_verdicts` entry is structurally indistinguishable
+    from a real dialogue's — same `AdvisoryRoundVerdict` shape, same
+    `VerdictContractResult` fields, no marker of its own. `outcome` on this
+    same record is the only discriminator; a consumer MUST filter on
+    `outcome != "canary"` before aggregating or scoring this field, or a
+    canary's forced verdict silently blends into real-mission statistics.
+    This is the identical risk shape `_resolve_task_id` already had to
+    close for `task_id` (spec 0003 ticket 08: a canary keeps the real
+    `task_description`, so a naive digest default would collide with a
+    real mission's own `task_id` in any store keyed by it) — same
+    "a canary run never feeds a real mission's outcome" invariant, same
+    kind of silent-blend failure mode, just on a different field.
     """
 
     timestamp: str
@@ -2106,6 +2230,9 @@ class AdvisoryTelemetryRecord:
     degraded_independence: bool = False
     canary_result: CanaryResult | None = None
     degradation_rung: DegradationRung = 0
+    occasion: Occasion = "ambiguity"
+    topology: RosterTopology = "pair"
+    round_verdicts: tuple[AdvisoryRoundVerdict, ...] = ()
 
     def to_mapping(self) -> dict[str, object]:
         """The JSON-serialisable wire form `_write_telemetry_record` writes.
@@ -2142,6 +2269,9 @@ def _build_telemetry_record(
         degraded_independence=result.degraded_independence,
         canary_result=result.canary_result,
         degradation_rung=result.degradation_rung,
+        occasion=result.occasion,
+        topology=result.topology,
+        round_verdicts=result.round_verdicts,
     )
 
 
@@ -2561,6 +2691,22 @@ def run_advisory_consultation_debate(
     # not this one's — see this ticket's report for why that line is drawn
     # here.
     result_critic_model = critic_a_model if panel_mode else critic_model
+    # Spec 0003 (CriticalDialogue) ticket 10: the topology the result and
+    # telemetry record actually report — set once, here, from the same
+    # `panel_mode` local `result_critic_model` above already reads, so the
+    # two stay consistent by construction rather than by convention. The
+    # sole exception is the canary block below, which reassigns this to
+    # `"pair"` exactly where it reassigns `result_critic_model` to
+    # `critic_model`, and for the identical reason: a canary probes exactly
+    # one Critic regardless of what `panel_mode` computed, so its reported
+    # topology must never claim "panel" for a run that never actually
+    # invoked a second Critic. Unlike `result_critic_model`, roster
+    # resolution (ticket 07) and the rung-2 budget override (ticket 09)
+    # never reassign this: both change *which* model(s) are invoked, never
+    # *how many* Critics the round loop addresses, so `panel_mode` — and
+    # therefore this — stays correct through both of those blocks
+    # unmodified.
+    result_topology: RosterTopology = "panel" if panel_mode else "pair"
     # Spec 0003 (CriticalDialogue) ticket 07: set (if at all) only by the
     # roster-resolution block below, which runs after the sensitivity gate
     # and before this closure is ever invoked — see that block's own
@@ -2583,6 +2729,13 @@ def run_advisory_consultation_debate(
     degradation_rung: DegradationRung = 0
 
     rounds: list[AdvisoryDebateRound] = []
+    # Spec 0003 (CriticalDialogue) ticket 10: kept parallel with `rounds`
+    # above — one `AdvisoryRoundVerdict` appended at the identical call site
+    # every `rounds.append(...)` above already has, immediately after
+    # `_parse_critic_verdict` is called for that round, so the two
+    # sequences can never drift out of sync (same length, same order, every
+    # outcome). See `AdvisoryDebateResult.round_verdicts`'s docstring.
+    round_verdicts: list[AdvisoryRoundVerdict] = []
     previous_plan: str | None = None
     previous_critique: str | None = None
     # Panel mode only (spec 0003 ticket 06): each Critic's own last response,
@@ -2645,6 +2798,8 @@ def run_advisory_consultation_debate(
             degraded_independence=roster_degraded_independence,
             canary_result=canary_result,
             degradation_rung=degradation_rung,
+            topology=result_topology,
+            round_verdicts=tuple(round_verdicts),
         )
 
         resolved_task_id = _resolve_task_id(task_description, task_id, outcome)
@@ -2812,6 +2967,13 @@ def run_advisory_consultation_debate(
     if is_canary:
         fixture = canary_fixture if canary_fixture is not None else CANARY_FIXTURES[0]
         result_critic_model = critic_model
+        # Spec 0003 ticket 10: the identical reassignment, for the identical
+        # reason, as `result_critic_model` immediately above — see this
+        # block's own comment. A canary never invokes a second Critic, so
+        # its reported topology must always be "pair", even when
+        # `occasion`/`complexity` would otherwise select the panel
+        # topology.
+        result_topology = "pair"
 
         if invoke_worker is None:
             try:
@@ -2840,6 +3002,10 @@ def run_advisory_consultation_debate(
             "miss" if canary_verdict.verdict == "approved" else "catch"
         )
         rounds.append(AdvisoryDebateRound(fixture.plan_text, canary_critic_response))
+        # Spec 0003 ticket 10: kept parallel with the `rounds.append` just
+        # above, `critic_b=None` since a canary never invokes a second
+        # Critic — see `AdvisoryDebateResult.round_verdicts`'s docstring.
+        round_verdicts.append(AdvisoryRoundVerdict(critic_a=canary_verdict))
         return _result(
             "canary",
             canary_result=canary_verdict_result,
@@ -2902,6 +3068,11 @@ def run_advisory_consultation_debate(
             # reviewed artifact `planner_plan` — never against each other.
             verdict_a = _parse_critic_verdict(critic_a_response, planner_plan)
             verdict_b = _parse_critic_verdict(critic_b_response, planner_plan)
+            # Spec 0003 ticket 10: kept parallel with the `rounds.append`
+            # just above — both Critics' verdicts retained together, in one
+            # entry, rather than as two separately-indexed lists that could
+            # drift out of sync. See `AdvisoryRoundVerdict`'s docstring.
+            round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_a, critic_b=verdict_b))
 
             # An unparseable verdict from either Critic ends the panel
             # immediately, exactly as pair mode's single unparseable verdict
@@ -2952,6 +3123,10 @@ def run_advisory_consultation_debate(
         # what the Critic was shown as "Planner's plan" in `critic_prompt`
         # above, never against the task description or anything else.
         verdict_result = _parse_critic_verdict(critic_response, planner_plan)
+        # Spec 0003 ticket 10: kept parallel with the `rounds.append` just
+        # above, `critic_b=None` since this is a pair-mode round. See
+        # `AdvisoryDebateResult.round_verdicts`'s docstring.
+        round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_result))
 
         if verdict_result.verdict == "approved":
             write_error: str | None = None

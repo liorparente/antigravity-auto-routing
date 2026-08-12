@@ -5839,5 +5839,327 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         )
 
 
+class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 10: `AdvisoryTelemetryRecord`
+    gains occasion, topology, per-round verdict sequence, and per-round
+    engagement-unit counts — the fields tickets 01/05 already put on
+    `AdvisoryDebateResult` (occasion, topology) or already compute and
+    discard mid-loop (`_parse_critic_verdict`'s `VerdictContractResult`
+    per round), now retained and threaded through to the telemetry record.
+    Every pre-ticket-10 telemetry test in `AdvisoryTranscriptAndTelemetryTests`,
+    `AdvisorySeededFlawCanaryTests`, and `AdvisoryBudgetDegradationTests`
+    keeps passing unmodified — this class only adds coverage, per the
+    append-only convention every prior ticket in this module already set.
+    """
+
+    TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
+
+    def test_pair_mode_telemetry_carries_occasion_and_pair_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.topology, "pair")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["occasion"], "plan-review")
+        self.assertEqual(records[0]["topology"], "pair")
+
+    def test_panel_mode_telemetry_carries_occasion_and_panel_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's proposed plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan, "Critic A: solid.")],
+                    "Test Critic B": [_approve(plan, "Critic B: solid.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.topology, "panel")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["occasion"], "plan-review")
+        self.assertEqual(records[0]["topology"], "panel")
+
+    def test_pair_mode_two_round_telemetry_carries_a_two_element_round_sequence(
+        self,
+    ) -> None:
+        """A two-round pair consultation's telemetry carries exactly two
+        per-round entries, each holding one verdict plus its own engagement
+        counts — never a single flattened tally across both rounds."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "Planner's first plan."
+            second_plan = "Planner's revised plan."
+            invoker = _RecordingInvoker(
+                [
+                    first_plan,
+                    _revise("Needs more detail."),
+                    second_plan,
+                    _approve(second_plan, "Good now."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.rounds_run, 2)
+        self.assertEqual(len(result.round_verdicts), 2)
+
+        round_verdicts = records[0]["round_verdicts"]
+        self.assertEqual(len(round_verdicts), 2)
+
+        first_round, second_round = round_verdicts
+        self.assertEqual(first_round["critic_a"]["verdict"], "revise")
+        self.assertEqual(first_round["critic_a"]["verified_quote_count"], 0)
+        self.assertEqual(first_round["critic_a"]["objection_count"], 0)
+        self.assertIsNone(first_round["critic_b"])
+
+        self.assertEqual(second_round["critic_a"]["verdict"], "approved")
+        self.assertEqual(second_round["critic_a"]["verified_quote_count"], 1)
+        self.assertEqual(second_round["critic_a"]["objection_count"], 0)
+        self.assertIsNone(second_round["critic_b"])
+
+    def test_panel_mode_round_telemetry_carries_both_critics_distinguishably(
+        self,
+    ) -> None:
+        """A panel round's per-round element holds BOTH Critics' verdicts and
+        counts, and the two are distinguishable from one another — not
+        folded into one shared tally."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "Planner's first plan."
+            second_plan = "Planner's revised plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [first_plan, second_plan],
+                    "Test Critic A": [
+                        _approve(first_plan, "A: fine as-is."),
+                        _approve(second_plan, "A: still fine."),
+                    ],
+                    "Test Critic B": [
+                        _revise("B: needs a rollback plan."),
+                        _approve(second_plan, "B: rollback addressed."),
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.rounds_run, 2)
+        round_verdicts = records[0]["round_verdicts"]
+        self.assertEqual(len(round_verdicts), 2)
+
+        first_round, second_round = round_verdicts
+        self.assertEqual(first_round["critic_a"]["verdict"], "approved")
+        self.assertEqual(first_round["critic_a"]["verified_quote_count"], 1)
+        self.assertEqual(first_round["critic_b"]["verdict"], "revise")
+        self.assertEqual(first_round["critic_b"]["verified_quote_count"], 0)
+        self.assertNotEqual(
+            first_round["critic_a"]["verdict"], first_round["critic_b"]["verdict"]
+        )
+
+        self.assertEqual(second_round["critic_a"]["verdict"], "approved")
+        self.assertEqual(second_round["critic_b"]["verdict"], "approved")
+
+    def test_canary_round_verdicts_carries_the_single_critic_verdict_and_pair_topology(
+        self,
+    ) -> None:
+        """A canary probes exactly one Critic (ticket 08) and never runs a
+        real Planner round. Its `round_verdicts` still carries that one
+        Critic's verdict+counts (critic_b stays None, same pair-mode shape a
+        real pair round uses) and `topology` reports "pair" — never "panel"
+        — even under an occasion/complexity combination that would
+        otherwise select a panel, because a canary genuinely never invokes a
+        second Critic. `canary_result` (ticket 08) remains the authoritative
+        miss/catch summary; `round_verdicts` is the same generic verdict
+        data every other outcome carries, not a competing signal."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_revise("Objection.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                is_canary=True,
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "catch")
+        self.assertEqual(result.topology, "pair")
+        self.assertEqual(len(result.round_verdicts), 1)
+
+        record = records[0]
+        self.assertEqual(record["topology"], "pair")
+        self.assertEqual(record["canary_result"], "catch")
+        self.assertEqual(len(record["round_verdicts"]), 1)
+        self.assertEqual(record["round_verdicts"][0]["critic_a"]["verdict"], "revise")
+        self.assertIsNone(record["round_verdicts"][0]["critic_b"])
+
+    def test_stalemate_and_worker_error_and_sensitivity_halt_still_carry_topology(
+        self,
+    ) -> None:
+        """Every outcome — not just consensus/canary — carries a topology,
+        since `_is_panel_topology` is resolved unconditionally at the top of
+        the function, before the sensitivity gate, the budget check, or any
+        worker is ever contacted."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            halt_result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the rollout, password=hunter2",
+                _RecordingInvoker([]),
+                root_dir=root,
+            )
+
+        self.assertEqual(halt_result.outcome, "sensitivity_halt")
+        self.assertEqual(halt_result.topology, "pair")
+        self.assertEqual(halt_result.round_verdicts, ())
+
+    def test_pre_ticket_10_direct_construction_still_defaults_correctly(self) -> None:
+        """Mirrors `test_occasion_field_defaults_to_ambiguity_on_direct_construction`:
+        a pre-ticket-10 direct `AdvisoryDebateResult(...)`/`AdvisoryTelemetryRecord(...)`
+        construction that never mentions `topology` or `round_verdicts` must
+        keep meaning exactly what it meant before those fields existed."""
+        result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=1, final_plan="A plan.", outcome="consensus"
+        )
+        self.assertEqual(result.topology, "pair")
+        self.assertEqual(result.round_verdicts, ())
+
+        record = advisory_consultation.AdvisoryTelemetryRecord(
+            timestamp="2026-01-01T00:00:00Z",
+            task_id="abc123",
+            rounds_run=1,
+            outcome="consensus",
+            planner_model="Test Planner",
+            critic_model="Test Critic",
+        )
+        self.assertEqual(record.occasion, "ambiguity")
+        self.assertEqual(record.topology, "pair")
+        self.assertEqual(record.round_verdicts, ())
+
+    def test_round_verdicts_carry_no_substring_of_a_distinctive_task_description(
+        self,
+    ) -> None:
+        """Redaction test (ticket 10's own acceptance criterion): the
+        per-round telemetry data is verdicts and engagement-unit counts
+        only — never plan/critique prose, and never the task text or a
+        substring of it. A distinctive task description makes an accidental
+        leak (of the task text, or of the Planner/Critic prose that
+        discusses it) trivially detectable rather than coincidentally
+        matching short common words."""
+        distinctive_task = (
+            "Plan the ZEBRA-QUASAR-77 migration for the northwind-prod cluster"
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "First plan mentioning ZEBRA-QUASAR-77 explicitly."
+            second_plan = "Second plan, still about ZEBRA-QUASAR-77."
+            invoker = _RecordingInvoker(
+                [
+                    first_plan,
+                    _revise("ZEBRA-QUASAR-77 needs a rollback section."),
+                    second_plan,
+                    _approve(second_plan, "ZEBRA-QUASAR-77 rollback looks good now."),
+                ]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                distinctive_task, invoker, root_dir=root
+            )
+            telemetry_text = (root / self.TELEMETRY_RELATIVE_PATH).read_text()
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        round_verdicts_json = json.dumps(records[0]["round_verdicts"])
+        for leak in (distinctive_task, "ZEBRA-QUASAR-77", "rollback"):
+            self.assertNotIn(leak, round_verdicts_json)
+        # And the belt-and-suspenders whole-record check every other
+        # redaction test in this file uses (see
+        # `test_redaction_boundary_secret_reaches_neither_artifact`).
+        self.assertNotIn(distinctive_task, telemetry_text)
+        self.assertNotIn("ZEBRA-QUASAR-77", telemetry_text)
+
+    def test_existing_spec_0001_telemetry_fields_are_unchanged(self) -> None:
+        """Acceptance criterion: existing spec-0001 telemetry fields and
+        their tests are unchanged. Same assertions as
+        `test_telemetry_record_carries_task_identity_rounds_outcome_and_models`,
+        re-run here as a ticket-10 characterization pin."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's revised plan.",
+                    _approve("Planner's revised plan.", "Good now."),
+                ]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+                task_id="ticket-10-demo",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["task_id"], "ticket-10-demo")
+        self.assertEqual(record["rounds_run"], 2)
+        self.assertEqual(record["outcome"], "consensus")
+        self.assertEqual(record["planner_model"], "Test Planner")
+        self.assertEqual(record["critic_model"], "Test Critic")
+        self.assertIn("timestamp", record)
+
+
 if __name__ == "__main__":
     unittest.main()
