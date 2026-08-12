@@ -27,10 +27,11 @@ consensus the consultation exists to prevent.
 
 ### ConsultationTranscript
 The human-readable record an [[AdvisoryConsultation]] writes fresh (never appended) on every one of
-its five outcomes. For four of them it carries the full task text and every round's Planner/Critic
-exchange — that is the entire point of a transcript. On a `sensitivity_halt` it instead carries only
-the matched sensitivity marker and the halt's [[TaskIdentity]]: repeating the task text here would
-defeat the halt the transcript exists to report.
+its seven outcomes. For six of them it carries the full task text and every round's Planner/Critic
+exchange that actually ran — that is the entire point of a transcript (a `budget_skipped` run has no
+rounds to show; its transcript reports the skip itself). On a `sensitivity_halt` it instead carries
+only the matched sensitivity marker and the halt's [[TaskIdentity]]: repeating the task text here
+would defeat the halt the transcript exists to report.
 
 ### AdvisoryTelemetryRecord
 One structured JSON record appended to the shared `.ralph/routing_telemetry.jsonl` stream — emitted
