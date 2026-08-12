@@ -2820,5 +2820,1051 @@ class Phase1CharacterizationTests(unittest.TestCase):
         self.assertEqual(result.returncode, self.golden["audit_output"]["returncode"])
 
 
+# Spec 0004 ticket 12 — the LearningJournal. Loaded here rather than beside
+# the loaders at the top of this file so the ticket's additions are one
+# contiguous, append-only block: this file is edited concurrently on other
+# branches, and an insertion at the top is a merge conflict for everyone.
+learning_journal_spec = importlib.util.spec_from_file_location(
+    "learning_journal", SKILL_DIR / "learning_journal.py"
+)
+assert learning_journal_spec is not None and learning_journal_spec.loader is not None
+learning_journal = importlib.util.module_from_spec(learning_journal_spec)
+sys.modules["learning_journal"] = learning_journal
+learning_journal_spec.loader.exec_module(learning_journal)
+
+
+class LearningJournalTests(unittest.TestCase):
+    """The journal records what happened without ever recording what it was about.
+
+    Two properties carry this ticket, and both are asserted here as
+    observable facts rather than trusted as conventions: every record lands
+    in a stream separate from the audited routing telemetry yet joinable to
+    it on TaskIdentity, and a record carrying task text, a path, or a matched
+    secret cannot be constructed at all.
+    """
+
+    JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
+    TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
+
+    FIXED_TIMESTAMP = "2026-08-12T09:30:00Z"
+
+    def _worker_execution_record(self, **overrides: object) -> object:
+        fields: dict[str, object] = {
+            "task": learning_journal.TaskLabel.for_task("task-1", task_type="bugfix"),
+            "duration_ms": 4200,
+            "cost_estimate_usd": 0.0125,
+            "success": True,
+            "retry_count": 1,
+            "effort": "high",
+            "model_id": "claude-opus-5",
+            "model_family": "claude",
+            "timestamp": self.FIXED_TIMESTAMP,
+        }
+        fields.update(overrides)
+        return learning_journal.WorkerExecutionRecord(**fields)  # type: ignore[arg-type]
+
+    def _outcome_record(self, **overrides: object) -> object:
+        fields: dict[str, object] = {
+            "task": learning_journal.TaskLabel.for_task("graded-decision-1"),
+            "signal": "tests",
+            "verdict": "pass",
+            "timestamp": self.FIXED_TIMESTAMP,
+        }
+        fields.update(overrides)
+        return learning_journal.OutcomeRecord(**fields)  # type: ignore[arg-type]
+
+    def _dialogue_quality_record(self, **overrides: object) -> object:
+        fields: dict[str, object] = {
+            "task": learning_journal.TaskLabel.for_task("task-1"),
+            "occasion": "plan_review",
+            "topology": "panel",
+            "rounds": (
+                learning_journal.DialogueRound("revise", 4),
+                learning_journal.DialogueRound("approved", 2),
+            ),
+            "canaries_planted": 2,
+            "canaries_caught": 1,
+            "degraded": False,
+            "independent": True,
+            "timestamp": self.FIXED_TIMESTAMP,
+        }
+        fields.update(overrides)
+        return learning_journal.DialogueQualityRecord(**fields)  # type: ignore[arg-type]
+
+    def _task_label(self, **overrides: object) -> object:
+        """A `TaskLabel` built through its raw constructor.
+
+        The classmethods are the production path; this one reaches fields
+        (`sensitivity_halted`) that they deliberately do not expose, which is
+        what a field-by-field attack has to do.
+        """
+        fields: dict[str, object] = {"task_id": "task-1"}
+        fields.update(overrides)
+        return learning_journal.TaskLabel(**fields)  # type: ignore[arg-type]
+
+    def _compliance_record(self, **overrides: object) -> object:
+        fields: dict[str, object] = {
+            "session_id": "session-2026-08-12",
+            "total_writes": 12,
+            "code_writes": 5,
+            "routing_declarations": 9,
+            "worker_calls": 7,
+            "violation_count": 2,
+            "declaration_drift_count": 1,
+            "calibration_markers": 3,
+            "code_write_count": 5,
+            "issue_codes": ("DEC-01", "LOG-01"),
+            "timestamp": self.FIXED_TIMESTAMP,
+        }
+        fields.update(overrides)
+        return learning_journal.ComplianceRecord(**fields)  # type: ignore[arg-type]
+
+    def _write_and_read(self, records: list[object]) -> list[dict]:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for record in records:
+                self.assertIsNone(
+                    learning_journal.append_journal_record(record, root_dir=root)
+                )
+            return _read_jsonl(root / self.JOURNAL_RELATIVE_PATH)
+
+    # --- one test per record family: the schema each one lands with ---
+
+    def test_worker_execution_record_lands_with_its_schema(self) -> None:
+        record = self._write_and_read([self._worker_execution_record()])[0]
+
+        self.assertEqual(
+            set(record),
+            {
+                "kind",
+                "task_id",
+                "task_type",
+                "sensitivity_halted",
+                "duration_ms",
+                "cost_estimate_usd",
+                "success",
+                "retry_count",
+                "effort",
+                "model_id",
+                "model_family",
+                "timestamp",
+            },
+        )
+        self.assertEqual(record["kind"], "worker_execution")
+        self.assertEqual(record["task_id"], "task-1")
+        self.assertEqual(record["task_type"], "bugfix")
+        self.assertFalse(record["sensitivity_halted"])
+        self.assertEqual(record["duration_ms"], 4200)
+        self.assertEqual(record["cost_estimate_usd"], 0.0125)
+        self.assertTrue(record["success"])
+        self.assertEqual(record["retry_count"], 1)
+        self.assertEqual(record["effort"], "high")
+        self.assertEqual(record["model_id"], "claude-opus-5")
+        self.assertEqual(record["model_family"], "claude")
+        self.assertEqual(record["timestamp"], self.FIXED_TIMESTAMP)
+
+    def test_outcome_record_lands_with_its_schema_for_every_ground_truth(self) -> None:
+        """All four truths the spec names — tests, review, plan acceptance, and
+        the human's stalemate choice — are the same family, discriminated by
+        `signal`, each carrying the identity of the decision it grades."""
+        cases = [
+            ("tests", "fail"),
+            ("review", "approved"),
+            ("plan", "rejected"),
+            ("stalemate_resolution", "human"),
+        ]
+        for signal, verdict in cases:
+            with self.subTest(signal=signal):
+                record = self._write_and_read(
+                    [
+                        learning_journal.OutcomeRecord(
+                            task=learning_journal.TaskLabel.for_task("graded-decision-1"),
+                            signal=signal,  # type: ignore[arg-type]
+                            verdict=verdict,  # type: ignore[arg-type]
+                            timestamp=self.FIXED_TIMESTAMP,
+                        )
+                    ]
+                )[0]
+
+                self.assertEqual(
+                    set(record),
+                    {
+                        "kind",
+                        "task_id",
+                        "sensitivity_halted",
+                        "signal",
+                        "verdict",
+                        "timestamp",
+                    },
+                )
+                self.assertEqual(record["kind"], "outcome")
+                self.assertEqual(record["task_id"], "graded-decision-1")
+                self.assertEqual(record["signal"], signal)
+                self.assertEqual(record["verdict"], verdict)
+
+    def test_a_verdict_from_another_signals_vocabulary_is_rejected(self) -> None:
+        """A flat verdict vocabulary would let a test run "pick the Planner"."""
+        for signal, verdict in (
+            ("tests", "planner"),
+            ("review", "pass"),
+            ("plan", "approved"),
+            ("stalemate_resolution", "fail"),
+        ):
+            with self.subTest(signal=signal, verdict=verdict), self.assertRaises(
+                ValueError
+            ):
+                learning_journal.OutcomeRecord(
+                    task=learning_journal.TaskLabel.for_task("task-1"),
+                    signal=signal,  # type: ignore[arg-type]
+                    verdict=verdict,  # type: ignore[arg-type]
+                )
+
+    def test_dialogue_quality_record_lands_with_its_schema(self) -> None:
+        record = self._write_and_read([self._dialogue_quality_record()])[0]
+
+        self.assertEqual(
+            set(record),
+            {
+                "kind",
+                "task_id",
+                "sensitivity_halted",
+                "occasion",
+                "topology",
+                "rounds_run",
+                "rounds",
+                "canaries_planted",
+                "canaries_caught",
+                "degraded",
+                "independent",
+                "timestamp",
+            },
+        )
+        self.assertEqual(record["kind"], "dialogue_quality")
+        self.assertEqual(record["occasion"], "plan_review")
+        self.assertEqual(record["topology"], "panel")
+        self.assertEqual(record["rounds_run"], 2)
+        self.assertEqual(
+            record["rounds"],
+            [
+                {"verdict": "revise", "engagement_count": 4},
+                {"verdict": "approved", "engagement_count": 2},
+            ],
+        )
+        self.assertEqual(record["canaries_planted"], 2)
+        self.assertEqual(record["canaries_caught"], 1)
+        self.assertFalse(record["degraded"])
+        self.assertTrue(record["independent"])
+
+    def test_compliance_record_lands_with_its_schema(self) -> None:
+        record = self._write_and_read([self._compliance_record()])[0]
+
+        self.assertEqual(
+            set(record),
+            {
+                "kind",
+                "session_id",
+                "total_writes",
+                "code_writes",
+                "routing_declarations",
+                "worker_calls",
+                "violation_count",
+                "declaration_drift_count",
+                "calibration_markers",
+                "code_write_count",
+                "issue_codes",
+                "timestamp",
+            },
+        )
+        self.assertEqual(record["kind"], "compliance")
+        self.assertEqual(record["session_id"], "session-2026-08-12")
+        self.assertEqual(record["violation_count"], 2)
+        self.assertEqual(record["issue_codes"], ["DEC-01", "LOG-01"])
+        self.assertNotIn(
+            "task_id",
+            record,
+            "the audit grades a session, not a task: inventing a task identity "
+            "for it would fabricate a join that does not exist",
+        )
+
+    def test_all_four_families_are_distinguishable_by_kind(self) -> None:
+        records = self._write_and_read(
+            [
+                self._worker_execution_record(),
+                learning_journal.OutcomeRecord(
+                    task=learning_journal.TaskLabel.for_task("task-1"),
+                    signal="tests",
+                    verdict="pass",
+                ),
+                self._dialogue_quality_record(),
+                self._compliance_record(),
+            ]
+        )
+
+        self.assertEqual(
+            [record["kind"] for record in records],
+            ["worker_execution", "outcome", "dialogue_quality", "compliance"],
+        )
+
+    # --- the stream itself ---
+
+    def test_journal_stream_is_separate_from_the_audited_telemetry_stream(self) -> None:
+        """Ticket 12's first constraint: the audited record contract stays
+        frozen, which it cannot do if the learning schema shares its file."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            self.assertNotEqual(
+                learning_journal.journal_path(root),
+                root / self.TELEMETRY_RELATIVE_PATH,
+            )
+
+            invoker = _RecordingInvoker(["Plan.", "VERDICT: APPROVE\nGood."])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, task_id="shared-task"
+            )
+            telemetry_before = (root / self.TELEMETRY_RELATIVE_PATH).read_bytes()
+
+            learning_journal.append_journal_record(
+                self._worker_execution_record(
+                    task=learning_journal.TaskLabel.for_task("shared-task")
+                ),
+                root_dir=root,
+            )
+
+            self.assertEqual(
+                (root / self.TELEMETRY_RELATIVE_PATH).read_bytes(),
+                telemetry_before,
+                "writing the journal must not touch the audited stream",
+            )
+            self.assertEqual(len(_read_jsonl(learning_journal.journal_path(root))), 1)
+
+    def test_records_are_appended_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for index in range(3):
+                learning_journal.append_journal_record(
+                    self._worker_execution_record(
+                        task=learning_journal.TaskLabel.for_task(f"task-{index}")
+                    ),
+                    root_dir=root,
+                )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(
+            [record["task_id"] for record in records], ["task-0", "task-1", "task-2"]
+        )
+
+    def test_journal_lands_under_the_injected_root_and_the_real_repo_is_untouched(
+        self,
+    ) -> None:
+        repo_journal = REPO_ROOT / self.JOURNAL_RELATIVE_PATH
+        before = (
+            (repo_journal.read_bytes(), repo_journal.stat().st_mtime)
+            if repo_journal.exists()
+            else None
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_journal.append_journal_record(
+                self._compliance_record(), root_dir=root
+            )
+            self.assertTrue(learning_journal.journal_path(root).exists())
+
+        after = (
+            (repo_journal.read_bytes(), repo_journal.stat().st_mtime)
+            if repo_journal.exists()
+            else None
+        )
+        self.assertEqual(before, after)
+
+    def test_write_failure_is_reported_to_the_caller_and_never_raised(self) -> None:
+        """The journal observes work it must never be able to break: an
+        unwritable `.ralph` degrades the learning loop, it does not fail the
+        invocation being recorded. Same contract as
+        `advisory_consultation._write_telemetry_record`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".ralph").write_text("not a directory")
+
+            error = learning_journal.append_journal_record(
+                self._worker_execution_record(), root_dir=root
+            )
+
+            self.assertIsNotNone(error)
+            assert error is not None
+            self.assertIn("learning journal", error.lower())
+            self.assertIn(str(learning_journal.journal_path(root)), error)
+            self.assertFalse(learning_journal.journal_path(root).is_file())
+
+    def test_journal_and_routing_telemetry_join_on_task_identity(self) -> None:
+        """User story 2: "what we decided" checked against "were we right".
+        The consultation's decision lands in the audited stream and its
+        execution and result land in the journal; one `task_id` reads both."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Plan.", "VERDICT: APPROVE\nGood."])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="join-task-1",
+            )
+            learning_journal.append_journal_record(
+                self._worker_execution_record(
+                    task=learning_journal.TaskLabel.for_task(
+                        "join-task-1", task_type="refactor"
+                    )
+                ),
+                root_dir=root,
+            )
+            learning_journal.append_journal_record(
+                learning_journal.OutcomeRecord(
+                    task=learning_journal.TaskLabel.for_task("join-task-1"),
+                    signal="tests",
+                    verdict="pass",
+                ),
+                root_dir=root,
+            )
+            telemetry = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+            journal = _read_jsonl(learning_journal.journal_path(root))
+
+        decisions = [r for r in telemetry if r["task_id"] == "join-task-1"]
+        graded = [r for r in journal if r["task_id"] == "join-task-1"]
+
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["outcome"], "consensus")
+        self.assertEqual(
+            {record["kind"] for record in graded}, {"worker_execution", "outcome"}
+        )
+        self.assertEqual(
+            next(r for r in graded if r["kind"] == "outcome")["verdict"], "pass"
+        )
+
+    # --- content-freedom, enforced by construction ---
+
+    def test_task_text_and_prompt_text_are_rejected_by_construction(self) -> None:
+        """The shape gate: prose has spaces, paths have slashes, and neither
+        can match the identifier pattern. No regex scan of a free-text field
+        is involved, because there is no free-text field."""
+        unjournalable = (
+            "Plan the auth rewrite for the ACME account",
+            "[WORKER-MODE: AGY-NESTED-EXEC]\nYou are the Planner",
+            "src/routing/handler.py",
+            "fix the login 500",
+            "",
+        )
+        for value in unjournalable:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    learning_journal.TaskLabel.for_task(value)
+                with self.assertRaises(ValueError):
+                    self._worker_execution_record(model_id=value)
+                with self.assertRaises(ValueError):
+                    self._compliance_record(session_id=value)
+
+    def test_a_matched_secret_value_is_rejected_in_every_descriptor_field(self) -> None:
+        """The second gate: `sk-live-...` is shaped exactly like a valid
+        identifier, so shape alone would pass it. The marker check is what
+        does not — and the rejection may name the marker constant it matched
+        (as `advisory_consultation` does) but never the secret around it.
+
+        The gate covers the identifiers a caller *composes* for a record.
+        `task_id` is deliberately not among them: it arrives already accepted
+        by `agent_council` and already written to the audited telemetry
+        stream, so refusing it here cannot un-write it and can only break the
+        cross-stream join — see `_validate_task_id` and
+        `test_every_task_id_the_council_accepts_is_journal_writable`.
+        """
+        secrets_that_look_like_ids = (
+            ("sk-live-9f3c1d7b", "9f3c1d7b"),
+            ("model-api_key-9f3c1d", "9f3c1d"),
+            ("session-password-hunter2", "hunter2"),
+            ("AGY_CALIBRATION_SECRET-a1b2", "a1b2"),
+        )
+        for value, secret_material in secrets_that_look_like_ids:
+            with self.subTest(value=value):
+                for build in (
+                    lambda v=value: self._worker_execution_record(model_id=v),
+                    lambda v=value: self._worker_execution_record(model_family=v),
+                    lambda v=value: self._compliance_record(session_id=v),
+                ):
+                    with self.assertRaises(ValueError) as caught:
+                        build()
+                    self.assertNotIn(
+                        secret_material,
+                        str(caught.exception),
+                        "the rejection must not repeat the secret it rejected",
+                    )
+
+    def test_the_marker_gate_still_accepts_the_councils_own_task_id_format(self) -> None:
+        """Regression guard for the bug that a substring marker scan causes:
+        "task-1" contains "sk-", so a substring check refuses `task-<digest>`
+        — exactly what `agent_council._task_id` generates when no id is
+        supplied — and every unnamed task falls out of the journal. See
+        `learning_journal._identifier_sensitivity_marker`."""
+        council_default = agent_council.AgentCouncil._task_id(
+            "Refactor routing checks", "simple", "medium", None
+        )
+        self.assertTrue(council_default.startswith("task-"))
+
+        for identifier in (council_default, "task-1", "task-42", "risk-review-1"):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(
+                    learning_journal.TaskLabel.for_task(identifier).task_id, identifier
+                )
+
+    def test_a_rejection_message_never_echoes_content_back(self) -> None:
+        """The last way out: an error path. A caller who puts task text in an
+        enumerated field must not see it reflected into whatever log catches
+        the exception — while a plain typo stays diagnosable."""
+        with self.assertRaises(ValueError) as caught:
+            self._worker_execution_record(
+                effort="rewrite the auth flow for the ACME account"
+            )
+        self.assertNotIn("ACME", str(caught.exception))
+        self.assertIn("redacted", str(caught.exception))
+
+        with self.assertRaises(ValueError) as typo:
+            self._worker_execution_record(effort="turbo")
+        self.assertIn(
+            "turbo",
+            str(typo.exception),
+            "an identifier-shaped, marker-free value stays visible: 'turbo' is "
+            "one keystroke from 'ultra' and redacting it helps nobody",
+        )
+
+    def test_a_task_type_tag_must_come_from_the_enumerated_vocabulary(self) -> None:
+        """A coarse tag is permitted; a description is not, and the difference
+        is enforced by the vocabulary rather than by a reviewer's judgement."""
+        self.assertIn("bugfix", learning_journal.TASK_TYPE_TAGS)
+        self.assertIn("refactor", learning_journal.TASK_TYPE_TAGS)
+
+        for tag in ("login-500-for-acme", "bugfix in the auth module", "BUGFIX"):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                learning_journal.TaskLabel.for_task("task-1", task_type=tag)  # type: ignore[arg-type]
+
+    def test_audit_messages_and_file_paths_never_reach_a_compliance_record(self) -> None:
+        """The compliance family's deliberate loss: codes are kept, the
+        messages and paths that carry session content are not."""
+        for code in (
+            "DEC-01 unrouted code edit in src/billing/charge.py",
+            "src/billing/charge.py",
+            "unrouted code edit",
+        ):
+            with self.subTest(code=code), self.assertRaises(ValueError):
+                self._compliance_record(issue_codes=(code,))
+
+    def test_extract_issue_codes_keeps_the_codes_and_drops_the_message_text(
+        self,
+    ) -> None:
+        messages = [
+            "Step 3: DEC-01 unrouted code edit in src/billing/charge.py",
+            "Step 3: LOG-01 unknown write tool apply_unreviewed_patch",
+            "Step 7: DEC-01 unrouted code edit in src/billing/refund.py",
+            "no code in this message at all",
+        ]
+
+        codes = learning_journal.extract_issue_codes(messages)
+
+        self.assertEqual(codes, ("DEC-01", "LOG-01"))
+        joined = " ".join(codes)
+        for leaked in ("charge.py", "refund.py", "apply_unreviewed_patch", "unrouted"):
+            self.assertNotIn(leaked, joined)
+
+    # --- the halted-task rule ---
+
+    def test_the_halted_label_constructor_has_no_tag_parameter_at_all(self) -> None:
+        """Lock 1: a tag is not merely rejected on a halted task, there is no
+        argument through which one could be offered."""
+        import inspect
+
+        parameters = inspect.signature(
+            learning_journal.TaskLabel.for_halted_task
+        ).parameters
+
+        self.assertEqual(set(parameters), {"task_id"})
+        self.assertIn(
+            "task_type",
+            inspect.signature(learning_journal.TaskLabel.for_task).parameters,
+            "the normal-task constructor is the one that may take a tag",
+        )
+
+    def test_a_halted_label_carrying_a_tag_cannot_be_constructed_at_all(self) -> None:
+        """Lock 2: bypassing the constructors does not bypass the rule."""
+        with self.assertRaises(ValueError):
+            learning_journal.TaskLabel(
+                task_id="halt-1", task_type="bugfix", sensitivity_halted=True
+            )
+
+        halted = learning_journal.TaskLabel.for_halted_task("halt-1")
+        with self.assertRaises(ValueError):
+            dataclasses.replace(halted, task_type="bugfix")
+
+    def test_a_halted_task_record_carries_no_task_type_key_whatsoever(self) -> None:
+        """Absence, not `"task_type": null` — see `TaskLabel.to_mapping`. The
+        halt flag still lands, so an auditor can tell "halted, therefore
+        untaggable" from "untagged by choice"."""
+        halted, normal = self._write_and_read(
+            [
+                self._worker_execution_record(
+                    task=learning_journal.TaskLabel.for_halted_task("a1b2c3d4e5f6")
+                ),
+                self._worker_execution_record(
+                    task=learning_journal.TaskLabel.for_task("task-1")
+                ),
+            ]
+        )
+
+        self.assertNotIn("task_type", halted)
+        self.assertTrue(halted["sensitivity_halted"])
+        self.assertEqual(halted["task_id"], "a1b2c3d4e5f6")
+        self.assertNotIn("task_type", normal)
+        self.assertFalse(normal["sensitivity_halted"])
+
+    # --- structural invariants and drift guards ---
+
+    def test_rounds_run_is_derived_from_the_round_sequence(self) -> None:
+        """Mirrors `AdvisoryDebateResult.consensus_reached`: a record cannot
+        claim a round count its own round sequence does not back."""
+        record = self._dialogue_quality_record(
+            rounds=(
+                learning_journal.DialogueRound("revise", 3),
+                learning_journal.DialogueRound("revise", 2),
+                learning_journal.DialogueRound("unparseable", 0),
+            )
+        )
+
+        self.assertEqual(record.rounds_run, 3)  # type: ignore[attr-defined]
+        self.assertNotIn(
+            "rounds_run",
+            {f.name for f in dataclasses.fields(record)},  # type: ignore[arg-type]
+            "rounds_run must stay derived, never an independently settable field",
+        )
+
+    def test_impossible_records_are_rejected_by_construction(self) -> None:
+        with self.assertRaises(ValueError):
+            self._worker_execution_record(duration_ms=-1)
+        with self.assertRaises(ValueError):
+            self._worker_execution_record(retry_count=-1)
+        with self.assertRaises(ValueError):
+            self._worker_execution_record(cost_estimate_usd=-0.01)
+        with self.assertRaises(ValueError):
+            self._worker_execution_record(effort="turbo")
+        with self.assertRaises(ValueError):
+            self._worker_execution_record(timestamp="12 August 2026")
+        with self.assertRaises(ValueError):
+            self._dialogue_quality_record(occasion="chat")
+        with self.assertRaises(ValueError):
+            self._dialogue_quality_record(topology="solo")
+        with self.assertRaises(ValueError):
+            self._dialogue_quality_record(
+                rounds=(learning_journal.DialogueRound("approved", 1), "shrug")
+            )
+        with self.assertRaises(ValueError):
+            learning_journal.DialogueRound("shrug", 1)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            learning_journal.DialogueRound("approved", -1)
+        with self.assertRaises(ValueError):
+            self._dialogue_quality_record(canaries_planted=1, canaries_caught=2)
+        with self.assertRaises(ValueError):
+            self._compliance_record(violation_count=-1)
+
+    def test_task_id_pattern_matches_agent_council_exactly(self) -> None:
+        """Drift guard for the deliberate duplication (see `TASK_ID_RE`). A
+        narrower pattern here silently drops council task_ids from the
+        journal and breaks the cross-stream join; a wider one lets prose in."""
+        self.assertEqual(
+            learning_journal.TASK_ID_RE.pattern, agent_council.TASK_ID_RE.pattern
+        )
+
+    def test_effort_vocabulary_matches_agent_council(self) -> None:
+        self.assertEqual(learning_journal.VALID_EFFORTS, agent_council.VALID_EFFORTS)
+
+    def test_sensitivity_markers_are_a_superset_of_agent_council_patterns(self) -> None:
+        """Same drift guard the advisory module carries, for the same reason:
+        neither module imports `agent_council`, so only a test keeps the three
+        marker lists from diverging."""
+        journal_markers = {marker.lower() for marker in learning_journal.SENSITIVITY_MARKERS}
+        council_patterns = {pattern.lower() for pattern in agent_council.SENSITIVE_PATTERNS}
+        advisory_markers = {
+            marker.lower() for marker in advisory_consultation.SENSITIVITY_MARKERS
+        }
+        self.assertTrue(council_patterns.issubset(journal_markers))
+        self.assertTrue(advisory_markers.issubset(journal_markers))
+
+    def test_append_jsonl_locked_matches_agent_council_byte_for_byte(self) -> None:
+        """The journal is a second reader's problem as much as a writer's: an
+        auditor already parses `sort_keys`-ordered, newline-terminated JSONL,
+        and this stream must encode identically. Proves nothing about the
+        lock semantics — a byte comparison cannot observe `fcntl.flock`."""
+        record = {"b": 2, "a": 1, "kind": "worker_execution"}
+        with tempfile.TemporaryDirectory() as tmp:
+            journal_written = Path(tmp) / "journal.jsonl"
+            council_written = Path(tmp) / "council.jsonl"
+            learning_journal._append_jsonl_locked(journal_written, record)
+            agent_council.append_jsonl_locked(council_written, record)
+            self.assertEqual(
+                journal_written.read_bytes(), council_written.read_bytes()
+            )
+
+    # --- content-freedom, field by field ---
+    #
+    # The tests above attack the fields whose validation is visible in the
+    # signature — the enumerated ones and the identifier-shaped ones. These
+    # attack the rest: `kind`, the booleans, the numbers, and `task` itself.
+    # A field annotated `bool` or `Literal` is not a validated field, because
+    # those annotations are gone by the time a value from a parsed log
+    # arrives; "content-freedom is structural" is a claim about *every* field
+    # or it is not structural at all.
+
+    def test_no_field_of_any_record_accepts_free_text(self) -> None:
+        """The general form of the rule, driven off `dataclasses.fields` so
+        that a field added to any record later is attacked the day it is
+        added rather than the day someone remembers to extend a list here."""
+        task_text = "Prompt: reset the ACME account password"
+        builders = (
+            self._task_label,
+            self._worker_execution_record,
+            self._outcome_record,
+            self._dialogue_quality_record,
+            self._compliance_record,
+        )
+        for build in builders:
+            record = build()
+            field_names = [
+                f.name for f in dataclasses.fields(record)  # type: ignore[arg-type]
+            ]
+            self.assertTrue(field_names)
+            for name in field_names:
+                with self.subTest(record=type(record).__name__, field=name):
+                    with self.assertRaises(ValueError) as caught:
+                        build(**{name: task_text})
+                    self.assertNotIn(
+                        "ACME",
+                        str(caught.exception),
+                        "a rejection must not echo the text it rejected",
+                    )
+
+    def test_kind_is_a_family_constant_no_caller_can_set(self) -> None:
+        """`kind` names the record family, so it is not caller input at all.
+        As a field with a default it was a free string field like any other:
+        `kind="Prompt: reset the ACME password"` constructed and serialized.
+        Now it is a class constant with no constructor parameter behind it —
+        the lock `TaskLabel.for_halted_task` uses for its absent tag
+        argument, applied to a field that had no business existing."""
+        families = (
+            ("worker_execution", self._worker_execution_record),
+            ("outcome", self._outcome_record),
+            ("dialogue_quality", self._dialogue_quality_record),
+            ("compliance", self._compliance_record),
+        )
+        for expected_kind, build in families:
+            with self.subTest(kind=expected_kind):
+                record = build()
+
+                self.assertNotIn(
+                    "kind",
+                    {f.name for f in dataclasses.fields(record)},  # type: ignore[arg-type]
+                    "kind must not be a field: a field is settable",
+                )
+                self.assertEqual(record.KIND, expected_kind)  # type: ignore[attr-defined]
+                self.assertEqual(
+                    self._write_and_read([record])[0]["kind"],
+                    expected_kind,
+                    "the wire form still carries the discriminator a reader joins on",
+                )
+                with self.assertRaises(TypeError):
+                    build(kind="Prompt: reset the ACME account password")
+                with self.assertRaises(TypeError):
+                    dataclasses.replace(  # type: ignore[type-var]
+                        record, kind="Prompt: reset the ACME account password"
+                    )
+
+    def test_boolean_fields_hold_booleans_and_nothing_else(self) -> None:
+        """`success="task text leaks here"` used to construct, serialize, and
+        read back as a truthy value — a free string field wearing a `bool`
+        annotation. `1` and `0` are refused too: they are what a sloppy JSON
+        round-trip produces, and a count is not an answer to "did it work"."""
+        attacks = (
+            (self._worker_execution_record, "success"),
+            (self._dialogue_quality_record, "degraded"),
+            (self._dialogue_quality_record, "independent"),
+            (self._task_label, "sensitivity_halted"),
+        )
+        for build, name in attacks:
+            for value in ("task text leaks here", 1, 0, None, "true"):
+                with self.subTest(field=name, value=value):
+                    with self.assertRaises(ValueError) as caught:
+                        build(**{name: value})
+                    self.assertNotIn("leaks", str(caught.exception))
+
+        written = self._write_and_read(
+            [self._worker_execution_record(success=False)]
+        )[0]
+        self.assertIs(written["success"], False)
+
+    def test_numeric_fields_reject_non_numbers_and_non_finite_amounts(self) -> None:
+        """A count field takes an integer, not a duration written out in
+        words. `NaN` and `Infinity` are refused on top of that because
+        `json.dumps` emits them literally and neither is JSON: one non-finite
+        cost would make that line unparseable for the reader this stream
+        exists to feed."""
+        for value in ("4200 ms on the ACME login", None, True, 4.2):
+            with self.subTest(field="duration_ms", value=value), self.assertRaises(
+                ValueError
+            ):
+                self._worker_execution_record(duration_ms=value)
+        for value in ("about a dollar", None, True, float("nan"), float("inf")):
+            with self.subTest(
+                field="cost_estimate_usd", value=value
+            ), self.assertRaises(ValueError):
+                self._worker_execution_record(cost_estimate_usd=value)
+        with self.assertRaises(ValueError):
+            self._compliance_record(total_writes="12 writes to src/billing")
+        with self.assertRaises(ValueError):
+            self._dialogue_quality_record(canaries_planted=True)
+        with self.assertRaises(ValueError):
+            learning_journal.DialogueRound("approved", "four objections")
+
+        priced = self._write_and_read(
+            [self._worker_execution_record(cost_estimate_usd=1)]
+        )[0]
+        self.assertEqual(priced["cost_estimate_usd"], 1)
+
+    def test_a_record_carries_a_real_task_label_or_none_at_all(self) -> None:
+        """The widest hole of the set: `task: TaskLabel` is an annotation, so
+        every check `TaskLabel.__post_init__` performs was skippable by simply
+        not building one — `task="fix the login 500 for the ACME account"`
+        constructed, and only failed later, at serialization."""
+        for build in (
+            self._worker_execution_record,
+            self._outcome_record,
+            self._dialogue_quality_record,
+        ):
+            for value in (
+                "fix the login 500 for the ACME account",
+                {"task_id": "task-1"},
+                None,
+            ):
+                with self.subTest(
+                    record=type(build()).__name__, value=value
+                ), self.assertRaises(ValueError):
+                    build(task=value)
+
+    # --- the task-id contract: what the council accepts, the journal writes ---
+
+    def test_every_task_id_the_council_accepts_is_journal_writable(self) -> None:
+        """The cross-stream join's precondition, pinned against the council's
+        own validator rather than a hand-written list, so the two cannot
+        drift apart.
+
+        `secret-rotation` is the case that regressed: the marker gate applied
+        to `task_id` refused it, while `agent_council` accepts it and writes
+        it to `.ralph/routing_telemetry.jsonl`. The journal then held no
+        record for that task at all — the join failing silently for exactly
+        the tasks whose names touch security vocabulary. A `task_id` is an
+        identifier the system already accepted, not task text, and the
+        journal is not the place to re-adjudicate it."""
+        council_default = agent_council.AgentCouncil._task_id(
+            "Refactor routing checks", "simple", "medium", None
+        )
+        candidates = (
+            "secret-rotation",
+            "api_key-migration",
+            "password-reset-flow",
+            "sk-live-rotation",
+            "AGY_CALIBRATION_SECRET-rotation",
+            "task-1",
+            council_default,
+            "Plan the auth rewrite",
+            "src/routing/handler.py",
+            "",
+        )
+        for candidate in candidates:
+            with self.subTest(task_id=candidate):
+                try:
+                    accepted: str | None = agent_council.AgentCouncil._task_id(
+                        "any task", "simple", "medium", candidate
+                    )
+                except ValueError:
+                    accepted = None
+
+                if accepted is None:
+                    with self.assertRaises(ValueError):
+                        learning_journal.TaskLabel.for_task(candidate)
+                    continue
+                self.assertEqual(
+                    learning_journal.TaskLabel.for_task(accepted).task_id, accepted
+                )
+                self.assertEqual(
+                    learning_journal.TaskLabel.for_halted_task(accepted).task_id,
+                    accepted,
+                )
+
+    def test_a_task_id_from_the_telemetry_stream_joins_the_journal(self) -> None:
+        """The invariant in its literal form: an id that reached
+        `.ralph/routing_telemetry.jsonl` is journalable. Driven through the
+        council's own writer, so the id under test is one the audited stream
+        genuinely produced rather than one this test asserted was valid."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            telemetry_file = root / self.TELEMETRY_RELATIVE_PATH
+            agent_council.log_routing_telemetry(
+                "secret-rotation",
+                "simple",
+                "codex",
+                "routine rotation work",
+                log_file=telemetry_file,
+            )
+            written_id = _read_jsonl(telemetry_file)[0]["task_id"]
+
+            error = learning_journal.append_journal_record(
+                self._worker_execution_record(
+                    task=learning_journal.TaskLabel.for_task(written_id)
+                ),
+                root_dir=root,
+            )
+            journal = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertIsNone(error)
+        self.assertEqual(written_id, "secret-rotation")
+        self.assertEqual([record["task_id"] for record in journal], [written_id])
+
+    def test_the_marker_gate_matches_whole_tokens_never_substrings(self) -> None:
+        """The gate that remains, on the identifiers a caller composes. Its
+        token-boundary rule is the guard from the same past bug as
+        `test_the_marker_gate_still_accepts_the_councils_own_task_id_format`,
+        asserted here on the gate itself so it stays covered even though
+        `task_id` no longer passes through it."""
+        marker_of = learning_journal._identifier_sensitivity_marker
+
+        self.assertIsNone(marker_of("task-1"))
+        self.assertIsNone(marker_of("risk-review-1"))
+        self.assertEqual(marker_of("sk-live-9f3c1d7b"), "sk-")
+        self.assertEqual(marker_of("model-api_key-1"), "api_key")
+
+        with self.assertRaises(ValueError):
+            self._worker_execution_record(model_id="sk-live-9f3c1d7b")
+        journaled = self._write_and_read(
+            [self._worker_execution_record(model_id="task-1")]
+        )[0]
+        self.assertEqual(
+            journaled["model_id"],
+            "task-1",
+            "an identifier that merely contains a marker's letters is not a "
+            "credential, and refusing it would drop honest records",
+        )
+
+    # --- one type per round, not two arrays ---
+
+    def test_a_round_pairs_its_verdict_with_its_own_engagement_count(self) -> None:
+        """`round_verdicts` and `engagement_counts` were two synchronized
+        tuples kept honest by a manual equal-length check. A `DialogueRound`
+        per round — the shape `AdvisoryDebateRound` already sets in this repo
+        — makes a mismatch unexpressible, so the check has nothing left to
+        guard and is gone."""
+        record = self._dialogue_quality_record(
+            rounds=(
+                learning_journal.DialogueRound("revise", 3),
+                learning_journal.DialogueRound("approved", 1),
+            )
+        )
+        field_names = {
+            f.name for f in dataclasses.fields(record)  # type: ignore[arg-type]
+        }
+
+        self.assertIn("rounds", field_names)
+        self.assertNotIn("round_verdicts", field_names)
+        self.assertNotIn("engagement_counts", field_names)
+        self.assertEqual(record.rounds[1].verdict, "approved")  # type: ignore[attr-defined]
+        self.assertEqual(record.rounds[1].engagement_count, 1)  # type: ignore[attr-defined]
+
+        for impossible in (
+            ({"verdict": "approved", "engagement_count": 1},),
+            ("approved",),
+            (learning_journal.DialogueRound("approved", 1), None),
+        ):
+            with self.subTest(rounds=impossible), self.assertRaises(ValueError):
+                self._dialogue_quality_record(rounds=impossible)
+        with self.assertRaises(ValueError):
+            self._dialogue_quality_record(rounds="approved")
+
+    def test_rounds_serialize_as_one_object_per_round(self) -> None:
+        """The wire form a metrics reader gets: a round is one object, so
+        round three's engagement count is read from round three rather than
+        by indexing a second array and trusting it lines up."""
+        record = self._write_and_read(
+            [
+                self._dialogue_quality_record(
+                    rounds=(
+                        learning_journal.DialogueRound("revise", 4),
+                        learning_journal.DialogueRound("unparseable", 0),
+                        learning_journal.DialogueRound("approved", 2),
+                    )
+                )
+            ]
+        )[0]
+
+        self.assertEqual(
+            record["rounds"],
+            [
+                {"verdict": "revise", "engagement_count": 4},
+                {"verdict": "unparseable", "engagement_count": 0},
+                {"verdict": "approved", "engagement_count": 2},
+            ],
+        )
+        self.assertEqual(record["rounds_run"], 3)
+
+    # --- the CI contract ---
+
+    def test_ci_lints_and_type_checks_one_single_sourced_module_list(self) -> None:
+        """The ruff and mypy steps carried identical hand-maintained module
+        lists, so every new module had to be added twice — and a module added
+        to one list only is checked by one tool only, silently. One list, and
+        every path in it names a file that exists."""
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
+        )
+        listed = [
+            line.strip()
+            for line in workflow.splitlines()
+            if line.strip().startswith("skills/") and line.strip().endswith(".py")
+        ]
+
+        self.assertIn("skills/worker-routing/learning_journal.py", listed)
+        self.assertEqual(
+            sorted(listed),
+            sorted(set(listed)),
+            "a module named twice means the two steps carry their own copies again",
+        )
+        for module in listed:
+            with self.subTest(module=module):
+                self.assertTrue(
+                    (REPO_ROOT / module).is_file(),
+                    f"{module} is checked by CI but does not exist",
+                )
+
+        commands = [
+            line.split("run:", 1)[1].strip()
+            for line in workflow.splitlines()
+            if line.strip().startswith("run:")
+        ]
+        checks = [c for c in commands if c.startswith(("ruff ", "mypy "))]
+        self.assertEqual(len(checks), 2, "one ruff step and one mypy step")
+        for command in checks:
+            with self.subTest(command=command):
+                self.assertIn("$PYTHON_MODULES", command)
+                self.assertNotIn(
+                    ".py",
+                    command,
+                    "a check step naming a module directly has stopped sharing "
+                    "the single-sourced list",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
