@@ -13,7 +13,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 MODULE_PATH = Path(__file__).with_name("production_invoker.py")
 LEARNING_JOURNAL_PATH = Path(__file__).with_name("learning_journal.py")
@@ -388,6 +388,27 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
             runner.assert_not_called()
             self.assertFalse(learning_journal.journal_path(root).exists())
 
+    def test_an_unjournalable_run_id_is_refused_at_wiring_time(self) -> None:
+        """A caller-supplied `run_id` is carried, not composed — the same
+        rule `task_id` faces in the test above — and is now checked at the
+        same moment: once, where the factory is built, rather than once per
+        invocation against a record that then silently fails to write.
+        """
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaises(ValueError):
+                production_invoker.make_journaled_invoke_worker(
+                    "task-1",
+                    root_dir=root,
+                    run_id="not a valid run id",
+                    runner=runner,
+                )
+
+            runner.assert_not_called()
+            self.assertFalse(learning_journal.journal_path(root).exists())
+
     def test_a_record_that_cannot_be_built_is_reported_not_silent(self) -> None:
         """A malformed record is a call-site bug, and by `learning_journal`'s
         contract a call-site bug must be loud. It cannot be loud by raising
@@ -396,22 +417,27 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         reported. Silence was the defect: `except Exception: pass` made a
         `WorkerExecutionRecord` bug undetectable in production.
 
-        Reached through an unjournalable `run_id`, which is now the field this
-        factory accepts without checking it at wiring time — `task_id` is
-        checked there (see the test above), while a caller-supplied `run_id`
-        is carried straight into each record. That asymmetry is what makes
-        this contract still reachable, and the outcome is the one it
-        promises: the worker's real output survives, nothing is journaled, and
-        the failure is named rather than swallowed.
+        Every field this factory itself hands to `WorkerExecutionRecord` is
+        safe by the time it is built: `task_id` and a caller-supplied
+        `run_id` are both refused at wiring time now (the two tests above),
+        `effort` is refused before the worker ever runs, and `model_id` /
+        `model_family` come from a fixed, closed mapping that cannot produce
+        an unjournalable pair. So this path — a record the constructor
+        itself refuses — is reached the only way left open: the constructor
+        is patched to fail, standing in for whatever a future field adds
+        that this factory does not yet validate up front.
         """
         reported: list[str] = []
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            learning_journal,
+            "WorkerExecutionRecord",
+            side_effect=ValueError("boom: unbuildable record"),
+        ):
             root = Path(tmp)
             journaled = production_invoker.make_journaled_invoke_worker(
-                "task-bad-run-id",
+                "task-bad-record",
                 root_dir=root,
-                run_id="run one, or perhaps two",
                 runner=runner,
                 report_journal_error=reported.append,
             )

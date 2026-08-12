@@ -5784,5 +5784,32 @@ class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
             self.assertEqual(record["kind"], "worker_execution")
 
 
+class JournaledRunIdWiringFailureTests(unittest.TestCase):
+    """`run_id` faces the same fail-fast-at-wiring-time rule `task_id` faces
+    in `JournaledInvokeWorkerTests.test_an_unjournalable_task_id_is_refused_at_wiring_time`
+    (`test_production_invoker.py`). A caller-supplied `run_id` used to be
+    accepted at wiring time and only checked once per invocation, when a
+    `WorkerExecutionRecord` was built from it — every record for the run
+    then silently failed to write, one stderr line per call, in a stream
+    easy to lose across a long run. Both identifiers are now checked at the
+    same moment, before any worker runs.
+    """
+
+    def test_an_unjournalable_run_id_is_refused_at_wiring_time(self) -> None:
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, "worker output", "")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaises(ValueError):
+                production_invoker.make_journaled_invoke_worker(
+                    "task-1", root_dir=root, run_id="not a valid run id", runner=runner
+                )
+
+            runner.assert_not_called()
+            self.assertFalse(learning_journal.journal_path(root).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

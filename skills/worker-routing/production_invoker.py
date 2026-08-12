@@ -105,6 +105,27 @@ def _validated_effort(effort: str) -> learning_journal.EffortLevel:
     return cast("learning_journal.EffortLevel", effort)
 
 
+def _validated_run_id(run_id: str | None) -> None:
+    """Reject a malformed caller-supplied ``run_id`` before any worker runs.
+
+    The same rule `TaskLabel.for_task` applies to `task_id` — both are
+    carried identifiers, not caller prose, and both are checked against
+    `learning_journal.TASK_ID_RE` (see `_validate_carried_identifier`, the
+    validator this mirrors without importing). `None` means the caller
+    supplied no run identity and is left alone: `make_journaled_invoke_worker`
+    then generates one with `secrets.token_hex(8)`, which is valid by
+    construction and never reaches this check.
+    """
+    if run_id is None:
+        return
+    if not learning_journal.TASK_ID_RE.fullmatch(run_id):
+        raise ValueError(
+            f"run_id must match {learning_journal.TASK_ID_RE.pattern} — the "
+            "journal carries identifiers only, never task text, prompt "
+            "text, or paths"
+        )
+
+
 def build_worker_command(model: str, effort: str, prompt: str) -> list[str]:
     """Build the documented CLI argv for a routed worker.
 
@@ -372,6 +393,14 @@ def make_journaled_invoke_worker(
     worker is contacted, so no invocation of a halted task exists to journal
     (see that constructor's own docstring).
 
+    A caller-supplied `run_id` faces the same fate, at the same moment, for
+    the same reason: `_validated_run_id` runs immediately below, so a typo'd
+    `run_id` and a typo'd `task_id` both fail the factory build rather than
+    one failing loudly here and the other failing quietly, once per
+    invocation, the first time a record is built from it. The two identifiers
+    used to be checked at two different times for no reason a reader could
+    infer from the code; they no longer are.
+
     `run_id` defaults to a fresh random identity per factory call, which is
     the honest granularity: one factory instance is built per consultation,
     so "this factory's records" and "this run's records" are the same set.
@@ -427,6 +456,7 @@ def make_journaled_invoke_worker(
     same value identically for callers that skip this wrapper.
     """
     task = learning_journal.TaskLabel.for_task(task_id, task_type=task_type)
+    _validated_run_id(run_id)
     journal_run_id = run_id if run_id is not None else secrets.token_hex(8)
 
     def _journaled_invoke_worker(model: str, effort: str, prompt: str) -> str:
