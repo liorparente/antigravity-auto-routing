@@ -855,11 +855,20 @@ DEFAULT_SESSION_DIALOGUE_CAP = 10
 #   `routing-config.json`'s existing `light_doer` role block instead is the
 #   same "config-driven substitution" shape ticket 08 already uses for
 #   canary fixture substitution. Every role gets the *same* single cheap
-#   model at this rung, deliberately: preserving cross-family independence
-#   is `resolve_roster`'s job and is tracked separately
-#   (`degraded_independence`), not this rung's -- rung 2 exists to cut
-#   cost, and a shared cheap model does that without pretending to also
-#   preserve independence it was never asked to protect.
+#   model at this rung, deliberately — rung 2 exists to cut cost, and a
+#   shared cheap model does that — but one model in every seat collapses
+#   the roster to a single family by construction, and that collapse is
+#   reported, never silent: the substitution site sets
+#   `degraded_independence` exactly as `resolve_roster` does when it is
+#   forced into family reuse (spec 0003 story 14 — a same-family fallback
+#   must be visible in telemetry and transcript, whatever mechanism
+#   caused it). Rung 2 is not asked to *preserve* independence — cutting
+#   cost is allowed to lose it — but it must not misreport losing it: a
+#   rung-2 dialogue is one model reviewing its own plan, the exact
+#   self-preference hazard the degraded-independence marker exists to
+#   surface, and an auditor filtering on that flag must see rung-2
+#   dialogues too, not only the roster resolver's own degraded
+#   assignments.
 # - Rung 3 ends the call entirely, before roster resolution, before a
 #   canary check, before any `invoke_worker` call -- see the
 #   `"budget_skipped"` outcome and `run_advisory_consultation_debate`'s own
@@ -1093,18 +1102,20 @@ class AdvisoryDebateResult:
     `occasion` for the identical reason and by the identical rule: every
     pre-ticket-07 construction of this dataclass — in this module and in
     tests — that never mentions it keeps meaning exactly what it meant
-    before this field existed, defaulting to `False`. True only when
-    `run_advisory_consultation_debate` resolved its roster via an injected
-    `reachability_check` (see that function's docstring) and
-    `resolve_roster` reported `RosterResolution.degraded_independence` —
-    i.e. two or more roles in this consultation had to share a model
-    family. A run that never opts into roster resolution at all — every
-    call site in this repo today — always carries `False` here, never
-    silently `True`: this field is deliberately not inferred from
-    `planner_model == critic_model` after the fact, because two roles
+    before this field existed, defaulting to `False`. True in exactly two
+    cases, both meaning "two or more roles in this consultation shared a
+    model family": `run_advisory_consultation_debate` resolved its roster
+    via an injected `reachability_check` (see that function's docstring)
+    and `resolve_roster` reported `RosterResolution.degraded_independence`;
+    or the budget ladder's rung 2 (spec 0003 ticket 09, story 14)
+    substituted its single cheap model into every role, which collapses
+    the roster to one family by construction — see that substitution
+    site's own comment. A run that triggers neither always carries `False`
+    here, never silently `True`: this field is deliberately not inferred
+    from `planner_model == critic_model` after the fact, because two roles
     sharing a literal model name by caller coincidence (an explicit
     `critic_model="Test Critic"` in a test, say) is not the same claim as
-    "the roster resolver was forced to reuse a family."
+    "this dialogue's roster was forced into family reuse."
 
     `canary_result` (spec 0003 ticket 08) is appended after
     `degraded_independence` for the identical append-only reason and by the
@@ -2537,7 +2548,9 @@ def run_advisory_consultation_debate(
     pre-ticket-07 call site's behaviour completely unchanged — the explicit
     ``planner_model``/``critic_model``/``critic_a_model``/``critic_b_model``
     arguments (or their existing string defaults) are used exactly as they
-    always were, and ``degraded_independence`` on the result stays ``False``.
+    always were, and ``degraded_independence`` on the result stays ``False``
+    unless the budget ladder's rung 2 collapses the roster on its own — see
+    ``session_spend_so_far`` below.
     Supplying a callable opts in: it is passed to ``resolve_roster`` (with
     the topology this call already selected via ``occasion``/``complexity``)
     as the injected ``is_family_reachable`` check, and the roster it returns
@@ -2645,7 +2658,14 @@ def run_advisory_consultation_debate(
     to the single model ``_load_degraded_roster_model`` reads from
     ``routing-config.json``'s ``light_doer`` role block — a genuine roster
     change, not effort alone, per the ticket's own "fall back toward
-    lighter/local families" language. This override is applied *after* the
+    lighter/local families" language. Because that substitution puts one
+    model in every seat, it collapses the roster to a single family by
+    construction, and a rung-2 result therefore also reports
+    ``degraded_independence`` — in the result, the telemetry record, and
+    the transcript's ``DEGRADED_INDEPENDENCE_MARKER`` line, the same
+    reporting path the roster-resolution case uses (spec 0003 story 14: a
+    same-family fallback is never silent, whatever mechanism caused it).
+    This override is applied *after* the
     roster-resolution block below, deliberately, so it wins even when
     ``reachability_check`` also resolved a roster for this call: budget
     exhaustion is a stronger, later-stage concern than independence. The
@@ -2705,15 +2725,16 @@ def run_advisory_consultation_debate(
     # therefore this — stays correct through both of those blocks
     # unmodified.
     result_topology: RosterTopology = "panel" if panel_mode else "pair"
-    # Spec 0003 (CriticalDialogue) ticket 07: set (if at all) only by the
-    # roster-resolution block below, which runs after the sensitivity gate
-    # and before this closure is ever invoked — see that block's own
-    # comment for why. Declared here, before `_result` is defined, purely
-    # so the sensitivity-halt branch (which calls `_result` before roster
-    # resolution ever runs) reads a real `False` rather than raising
-    # `UnboundLocalError`: a halted task never reaches roster resolution at
-    # all, and correctly reports no degradation for a dialogue that never
-    # ran.
+    # Spec 0003 (CriticalDialogue) ticket 07, and ticket 09's rung 2: set
+    # (if at all) only by the roster-resolution block below or by rung 2's
+    # single-model substitution just after it — both run after the
+    # sensitivity gate and before this closure is ever invoked — see each
+    # block's own comment for why. Declared here, before `_result` is
+    # defined, purely so the sensitivity-halt branch (which calls `_result`
+    # before either block ever runs) reads a real `False` rather than
+    # raising `UnboundLocalError`: a halted task never reaches roster
+    # resolution or the budget ladder at all, and correctly reports no
+    # degradation for a dialogue that never ran.
     roster_degraded_independence = False
     # Spec 0003 (CriticalDialogue) ticket 09: set (if at all — to a nonzero
     # rung) by the budget-ladder check below, which runs after the
@@ -2937,6 +2958,25 @@ def run_advisory_consultation_debate(
         if panel_mode:
             critic_b_model = degraded_model
         result_critic_model = critic_a_model if panel_mode else critic_model
+        # Spec 0003 story 14: a same-family fallback must be recorded as
+        # degraded independence in both telemetry and transcript, whatever
+        # mechanism caused it. One substituted model in every seat is a
+        # single-family roster by construction — `classify_model_family`
+        # maps the identical name to the identical family for every role —
+        # which is exactly the "same family serves more than one role"
+        # condition `resolve_roster` reports through this same flag. It is
+        # set here as that constructive fact rather than re-derived from
+        # the effective role models: the roster path computes the flag only
+        # inside `resolve_roster`, and a derivation at this site would be a
+        # computation whose answer is always True, dressed up as a check.
+        # Rung 2 is allowed to *lose* cross-family independence (cutting
+        # cost is its whole job); it is not allowed to lie about losing it
+        # — a rung-2 dialogue is one model reviewing its own plan, the
+        # exact self-preference hazard this flag exists to surface, and an
+        # auditor filtering telemetry on `degraded_independence` must see
+        # these dialogues too, not only `resolve_roster`'s own degraded
+        # assignments.
+        roster_degraded_independence = True
 
     # Spec 0003 (CriticalDialogue) ticket 08: the seeded-flaw canary round.
     # Placed after the sensitivity gate and (if opted into) roster
@@ -3170,6 +3210,8 @@ def _run_dispatched_post_mortem(
     planner_effort: str,
     critic_effort: str,
     task_id: str | None,
+    session_spend_so_far: int,
+    budget_config_path: Path,
 ) -> None:
     """`dispatch_post_mortem_consultation`'s actual thread target.
 
@@ -3250,6 +3292,8 @@ def _run_dispatched_post_mortem(
             planner_effort=planner_effort,
             critic_effort=critic_effort,
             task_id=task_id,
+            session_spend_so_far=session_spend_so_far,
+            budget_config_path=budget_config_path,
         )
     except Exception as exc:  # noqa: BLE001 - last-resort net for a dispatched thread; see docstring above.
         crash_result = AdvisoryDebateResult(
@@ -3343,18 +3387,36 @@ def dispatch_post_mortem_consultation(
     planner_effort: str = "high",
     critic_effort: str = "high",
     task_id: str | None = None,
+    session_spend_so_far: int = 0,
+    budget_config_path: Path = _CONFIG_PATH,
 ) -> threading.Thread:
     """Dispatch a post-mortem CriticalDialogue on a background thread and return immediately.
 
-    Mirrors `run_advisory_consultation_debate`'s parameter set exactly,
-    minus `occasion`: this function exists specifically to dispatch the
-    post-mortem occasion (its name says so), so `occasion` is hardcoded to
-    `"post-mortem"` in the call below rather than exposed as a knob — a
-    caller wanting a background dispatch of a different occasion is out of
-    this ticket's scope (spec 0003 only specifies post-mortem as
-    non-blocking) and would need its own function, not a parameter bolted
-    onto this one that could be misused to silently make a supposedly-
-    blocking occasion non-blocking.
+    Exposes a deliberate subset of `run_advisory_consultation_debate`'s
+    parameters, not a mirror of them: the pair-mode roster and effort knobs
+    (`planner_model`/`critic_model`/`planner_effort`/`critic_effort`),
+    `max_rounds`, `task_id`, and ticket 09's budget seam
+    (`session_spend_so_far`/`budget_config_path` — same names, same
+    defaults), threaded through unchanged. The budget seam is not optional
+    surface here: the post-mortem occasion fires on every failure,
+    escalation, and stalemate — exactly the sessions most likely to be
+    deep into their dialogue budget — so a dispatch path without it would
+    make post-mortems the one occasion the degradation ladder could never
+    reduce, cheapen, or skip. The debate function's remaining knobs — the
+    panel-topology models/efforts and `complexity` (a post-mortem never
+    selects the panel topology; see `_is_panel_topology`), the roster seam
+    (`reachability_check`/`roster_config_path`), and the canary seam
+    (`is_canary`/`canary_fixture`) — are deliberately not exposed: none has
+    a post-mortem consumer today, and this keyword-only signature can grow
+    any of them later without breaking an existing call site. `occasion`
+    is hardcoded to `"post-mortem"` in the call below rather than exposed
+    as a knob — this function exists specifically to dispatch the
+    post-mortem occasion (its name says so), and a caller wanting a
+    background dispatch of a different occasion is out of this ticket's
+    scope (spec 0003 only specifies post-mortem as non-blocking) and would
+    need its own function, not a parameter bolted onto this one that could
+    be misused to silently make a supposedly-blocking occasion
+    non-blocking.
 
     Delegates to `run_advisory_consultation_debate` as the background
     thread's target — via `_run_dispatched_post_mortem`, a thin wrapper
@@ -3406,6 +3468,8 @@ def dispatch_post_mortem_consultation(
             "planner_effort": planner_effort,
             "critic_effort": critic_effort,
             "task_id": task_id,
+            "session_spend_so_far": session_spend_so_far,
+            "budget_config_path": budget_config_path,
         },
         name="advisory-post-mortem-dispatch",
         daemon=False,

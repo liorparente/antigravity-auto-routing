@@ -4623,6 +4623,90 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
             self.assertEqual(threading.active_count(), threads_before)
             self.assertEqual(invoker.calls, [])
 
+    def test_dispatch_post_mortem_at_full_budget_exhaustion_skips_with_zero_invoker_calls(
+        self,
+    ) -> None:
+        """Spec 0003 ticket 09 reaches the dispatch path too: the post-mortem
+        occasion fires on every failure, escalation, and stalemate — exactly
+        the sessions most likely to be deep into their dialogue budget — so
+        `dispatch_post_mortem_consultation` must expose the same
+        `session_spend_so_far` seam the synchronous entry point has, or
+        post-mortems become the one unbudgetable occasion. At rung 3 the
+        dispatched debate must skip entirely: zero worker contact, and a
+        `budget_skipped` telemetry record still discoverable after the
+        thread completes (degradation is never silent, even in the
+        background)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "budget_skipped")
+        self.assertEqual(records[0]["degradation_rung"], 3)
+        self.assertEqual(records[0]["occasion"], "post-mortem")
+
+    def test_dispatch_post_mortem_at_a_lower_rung_observably_reduces_rounds(
+        self,
+    ) -> None:
+        """The ladder's milder rungs thread through the dispatch path too,
+        not only the skip rung: a spend at exactly one cap places the
+        dispatched debate at rung 1, whose reduced round cap is observable
+        the same way `test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls`
+        proves it for the synchronous path — six responses scripted, only
+        one round's two consumed before the stalemate."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first lesson.",
+                    _revise("Needs more detail."),
+                    "Planner's second lesson.",
+                    _revise("Still thin."),
+                    "Planner's third lesson.",
+                    _revise("Not convinced."),
+                ]
+            )
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                session_spend_so_far=cap,
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "stalemate")
+        self.assertEqual(records[0]["degradation_rung"], 1)
+        self.assertEqual(records[0]["rounds_run"], 1)
+
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):
     """Public key-loading and signature APIs fail closed for auditors."""
@@ -5670,7 +5754,12 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         resolved a roster for this call -- budget exhaustion is a
         stronger, later-stage override than family independence. Proves
         that every `invoke_worker` call carries the degraded model, not
-        whatever `resolve_roster` would otherwise have picked."""
+        whatever `resolve_roster` would otherwise have picked — and that
+        the resulting family collapse is reported rather than denied:
+        one substituted model in every seat is a single-family roster by
+        construction, so `degraded_independence` must read True (spec
+        0003 story 14) even though `resolve_roster` itself had three
+        distinct reachable families to work with."""
         cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
         expected_model = advisory_consultation._load_degraded_roster_model(
             advisory_consultation._CONFIG_PATH
@@ -5692,7 +5781,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(result.degradation_rung, 2)
         called_models = {model for model, _e, _p in invoker.calls}
         self.assertEqual(called_models, {expected_model})
-        self.assertFalse(result.degraded_independence)
+        self.assertTrue(result.degraded_independence)
         self.assertEqual(result.planner_model, expected_model)
         self.assertEqual(result.critic_model, expected_model)
 
@@ -5868,6 +5957,96 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(
             observed_rungs, [expected for _spend, expected in spends_and_expected_rungs]
         )
+
+    def test_rung_two_reports_degraded_independence_in_result_and_telemetry(
+        self,
+    ) -> None:
+        """Spec 0003 story 14: a same-family fallback must be recorded as
+        degraded independence, whatever mechanism caused it. Rung 2
+        substitutes one model into every seat — a single-family roster by
+        construction, one model reviewing its own plan — so the flag must
+        read True on the result and in the telemetry record even when no
+        `reachability_check` was supplied at all (mirrors
+        `test_degraded_independence_surfaces_in_telemetry_record`, the
+        ticket-07 roster-path version of this same assertion)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=2 * cap,
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertTrue(result.degraded_independence)
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["degraded_independence"])
+
+    def test_rung_two_reports_degraded_independence_in_transcript_text(self) -> None:
+        """The transcript half of story 14: a rung-2 dialogue's transcript
+        carries the exact same degraded-independence line the roster path
+        emits — the flag flows through `_result` into the one rendering
+        `DEGRADED_INDEPENDENCE_MARKER` already gates on, never a second,
+        rung-2-only rendering (mirrors
+        `test_degraded_independence_surfaces_in_transcript_text`)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=2 * cap,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+
+    def test_rung_two_reports_degraded_independence_in_panel_topology_too(
+        self,
+    ) -> None:
+        """Panel mode collapses three seats — Planner, Critic A, Critic B —
+        into the one substituted model at rung 2, so the single-family-by-
+        construction argument holds there identically: both Critics are the
+        same model as the Planner whose plan they judge, and the flag must
+        say so."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker(
+                [
+                    plan,
+                    _approve(plan, "Critic A: solid."),
+                    _approve(plan, "Critic B: solid."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertEqual(result.topology, "panel")
+        self.assertEqual(len(invoker.calls), 3)
+        self.assertTrue(result.degraded_independence)
 
 
 class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
