@@ -1326,6 +1326,226 @@ class _RecordingInvoker:
         return response
 
 
+def _approve(artifact_text: str, note: str = "Looks solid.") -> str:
+    """Build a scripted Critic response that satisfies the VerdictContract's
+    APPROVE path (spec 0003 ticket 02): rationale, then one verified quote —
+    the entire `artifact_text` (always trivially verbatim-contained in
+    itself), stated as `QUOTE: "<artifact_text>"` — then the verdict line
+    last. `artifact_text` must be exactly the Planner's plan text the
+    surrounding test scripts for that same round, since
+    `_parse_critic_verdict` verifies the quote against it.
+
+    Used throughout this file wherever a scripted Critic response must
+    actually reach `outcome == "consensus"`. Tests that probe the
+    VerdictContract's parsing rules themselves — the engagement-unit
+    counting, quote verification, and bare-approval rejection — live in
+    `VerdictContractParserTests` and build their response text by hand,
+    per spec 0003's pinned exception for VerdictContract parse behavior.
+    """
+    return f'{note}\nQUOTE: "{artifact_text}"\nVERDICT: APPROVE'
+
+
+def _revise(note: str) -> str:
+    """Build a scripted Critic response that satisfies the VerdictContract's
+    REVISE path. REVISE carries no engagement-unit requirement (spec 0003
+    ticket 02) — only APPROVE does — so the rationale/objection text alone,
+    with the verdict line last, is sufficient.
+    """
+    return f"{note}\nVERDICT: REVISE"
+
+
+class VerdictContractParserTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 02: `_parse_critic_verdict` under
+    the VerdictContract. This is the one class in this file permitted to
+    assert on the exact textual shape of a Critic response — the QUOTE:/N.
+    line syntax and the verdict line — per the spec's Testing Decisions
+    pinned exception for VerdictContract parse behavior. Every other test in
+    this file that needs a scripted APPROVE/REVISE response should go
+    through `_approve`/`_revise` instead of hand-rolling the contract text,
+    so those tests stay agnostic to exactly this syntax.
+
+    Calls `advisory_consultation._parse_critic_verdict` directly rather than
+    through the full debate loop: the loop is exercised end-to-end elsewhere
+    (`AdvisoryConsultationTests`), and driving every one of ticket 02's
+    acceptance criteria through a full Planner/Critic round trip would
+    duplicate this file's slowest fixture for no additional coverage of the
+    parser itself.
+    """
+
+    def test_rationale_quotes_and_objections_before_approve_parses_as_approved_with_counts(
+        self,
+    ) -> None:
+        artifact_text = (
+            "The system shall retry failed writes up to three times before "
+            "surfacing an error to the caller."
+        )
+        critic_response = (
+            "This is a reasonable first pass at the retry behaviour.\n"
+            'QUOTE: "retry failed writes up to three times"\n'
+            "1. The backoff strategy between retries is unspecified.\n"
+            "2. Nothing says whether the operation must be idempotent.\n"
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 1)
+        self.assertEqual(result.objection_count, 2)
+
+    def test_bare_approve_with_zero_engagement_units_parses_as_not_approved(
+        self,
+    ) -> None:
+        result = advisory_consultation._parse_critic_verdict(
+            "VERDICT: APPROVE", "The reviewed artifact text."
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_quote_absent_from_artifact_does_not_count_and_leaves_response_not_approved(
+        self,
+    ) -> None:
+        artifact_text = "The system shall retry failed writes up to three times."
+        critic_response = (
+            "Looks fine to me.\n"
+            'QUOTE: "this exact text never appears in the artifact"\n'
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_mixed_valid_and_invalid_quotes_only_the_verbatim_one_counts(
+        self,
+    ) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "Partial engagement.\n"
+            'QUOTE: "Ship the feature behind a flag."\n'
+            'QUOTE: "this text is fabricated and not in the artifact"\n'
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 1)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_zero_objections_is_valid_when_at_least_one_quote_verifies(self) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "Solid reasoning, nothing to add.\n"
+            'QUOTE: "Ship the feature behind a flag."\n'
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 1)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_zero_quotes_and_zero_objections_parses_as_not_approved_even_with_rationale(
+        self,
+    ) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "I read this carefully and it seems fine overall, no notes.\n"
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 0)
+
+    def test_objections_alone_with_no_verified_quotes_do_not_earn_approval(self) -> None:
+        """The asymmetric half of the rule: spec 0003's VerdictContract
+        paragraph only licenses "zero objections is fine alongside a
+        verified quote" — never the mirror "zero quotes is fine alongside
+        objections". Objections are unverified free text a Critic could
+        fabricate without reading anything; only a quote is mechanically
+        checked against the artifact, so only a quote may unlock approval.
+        Several numbered objections, with zero verified quotes, must still
+        parse as not-approved.
+        """
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "No verbatim passage is worth quoting, but I have concerns.\n"
+            "1. The flag's default state is not specified.\n"
+            "2. Nothing says who owns the flag once it is removed.\n"
+            "VERDICT: APPROVE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertNotEqual(result.verdict, "approved")
+        self.assertEqual(result.verified_quote_count, 0)
+        self.assertEqual(result.objection_count, 2)
+
+    def test_unparseable_response_with_no_recognizable_verdict_line_is_not_approved(
+        self,
+    ) -> None:
+        for critic_response in (
+            "",
+            "   \n\n   ",
+            "This plan looks fine to me, no verdict line at all.",
+        ):
+            with self.subTest(critic_response=repr(critic_response)):
+                result = advisory_consultation._parse_critic_verdict(
+                    critic_response, "The reviewed artifact text."
+                )
+
+                self.assertEqual(result.verdict, "unparseable")
+                self.assertNotEqual(result.verdict, "approved")
+
+    def test_revise_still_works_with_rationale_and_objections_before_it(self) -> None:
+        artifact_text = "Ship the feature behind a flag."
+        critic_response = (
+            "This needs another pass before it is ready.\n"
+            "1. The rollback plan is missing.\n"
+            "2. No mention of the flag's default state.\n"
+            "VERDICT: REVISE"
+        )
+
+        result = advisory_consultation._parse_critic_verdict(
+            critic_response, artifact_text
+        )
+
+        self.assertEqual(result.verdict, "revise")
+        self.assertEqual(result.objection_count, 2)
+
+    def test_result_is_a_verdict_contract_result_with_all_three_fields(self) -> None:
+        result = advisory_consultation._parse_critic_verdict(
+            "VERDICT: APPROVE", "irrelevant artifact text"
+        )
+
+        self.assertIsInstance(result, advisory_consultation.VerdictContractResult)
+        self.assertEqual(
+            dataclasses.fields(advisory_consultation.VerdictContractResult).__len__(),
+            3,
+        )
+
+
 class AdvisoryConsultationTests(unittest.TestCase):
     """The Planner-Critic loop must never report fake consensus.
 
@@ -1341,7 +1561,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
@@ -1370,11 +1590,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's proposed plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's revised plan.",
-                    "VERDICT: REVISE\nStill missing detail.",
+                    _revise("Still missing detail."),
                     "Planner's third plan.",
-                    "VERDICT: REVISE\nNot convinced.",
+                    _revise("Not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1423,7 +1643,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -1452,7 +1672,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -1468,7 +1688,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -1487,9 +1707,9 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nMissing a rollback strategy.",
+                    _revise("Missing a rollback strategy."),
                     "Planner's revised plan.",
-                    "VERDICT: APPROVE\nRollback strategy addressed.",
+                    _approve("Planner's revised plan.", "Rollback strategy addressed."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1512,11 +1732,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: APPROVE\nThis works.",
+                    _approve("Planner's third plan.", "This works."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1539,9 +1759,9 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: APPROVE\nGood now.",
+                    _approve("Planner's second plan.", "Good now."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1551,11 +1771,12 @@ class AdvisoryConsultationTests(unittest.TestCase):
         self.assertEqual(len(result.rounds), 2)
         self.assertEqual(result.rounds[0].planner_proposal, "Planner's first plan.")
         self.assertEqual(
-            result.rounds[0].critic_response, "VERDICT: REVISE\nNeeds more detail."
+            result.rounds[0].critic_response, _revise("Needs more detail.")
         )
         self.assertEqual(result.rounds[1].planner_proposal, "Planner's second plan.")
         self.assertEqual(
-            result.rounds[1].critic_response, "VERDICT: APPROVE\nGood now."
+            result.rounds[1].critic_response,
+            _approve("Planner's second plan.", "Good now."),
         )
 
     def test_critic_that_never_approves_produces_exactly_two_times_max_rounds_calls(
@@ -1571,7 +1792,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     responses: list[str | Exception] = []
                     for i in range(max_rounds):
                         responses.append(f"Planner's plan #{i + 1}.")
-                        responses.append(f"VERDICT: REVISE\nStill not good enough #{i + 1}.")
+                        responses.append(_revise(f"Still not good enough #{i + 1}."))
                     invoker = _RecordingInvoker(responses)
                     result = advisory_consultation.run_advisory_consultation_debate(
                         "Plan the auth rewrite",
@@ -1594,11 +1815,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: APPROVE\nThis works.",
+                    _approve("Planner's third plan.", "This works."),
                 ]
             )
             advisory_consultation.run_advisory_consultation_debate(
@@ -1617,11 +1838,11 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: REVISE\nNot convinced.",
+                    _revise("Not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1644,9 +1865,9 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's final plan.",
-                    "VERDICT: REVISE\nStill not convinced.",
+                    _revise("Still not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -1657,7 +1878,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         assert result.stalemate is not None
         self.assertEqual(result.stalemate.planner_position, "Planner's final plan.")
         self.assertEqual(
-            result.stalemate.critic_position, "VERDICT: REVISE\nStill not convinced."
+            result.stalemate.critic_position, _revise("Still not convinced.")
         )
         self.assertEqual(len(result.stalemate.options), 3)
         labels = {option.label for option in result.stalemate.options}
@@ -1674,7 +1895,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         """The defect carried out of ticket 02: a stale plan must not survive."""
         scenarios: dict[str, _RecordingInvoker] = {
             "stalemate": _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: REVISE\nNot convinced."]
+                ["Planner's plan.", _revise("Not convinced.")]
             ),
             "unparseable": _RecordingInvoker(
                 ["Planner's plan.", "This plan looks fine to me."]
@@ -1746,7 +1967,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     RuntimeError("worker unreachable"),
                 ]
             )
@@ -1763,7 +1984,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         """Criterion 6: no failure path may report a consensus that was not granted."""
         scenarios: dict[str, _RecordingInvoker] = {
             "stalemate": _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: REVISE\nNot convinced."]
+                ["Planner's plan.", _revise("Not convinced.")]
             ),
             "worker_error": _RecordingInvoker([RuntimeError("worker unreachable")]),
             "unparseable": _RecordingInvoker(
@@ -1860,7 +2081,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                             "Planner's first plan.",
                             critic_response,
                             "Planner's revised plan.",
-                            "VERDICT: APPROVE\nGood now.",
+                            _approve("Planner's revised plan.", "Good now."),
                         ]
                     )
                     result = advisory_consultation.run_advisory_consultation_debate(
@@ -1938,7 +2159,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                             "Planner's first plan.",
                             critic_response,
                             "Planner's revised plan.",
-                            "VERDICT: APPROVE\nGood now.",
+                            _approve("Planner's revised plan.", "Good now."),
                         ]
                     )
                     result = advisory_consultation.run_advisory_consultation_debate(
@@ -1990,7 +2211,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2010,7 +2231,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
                 ):
                     root = Path(tmp)
                     invoker = _RecordingInvoker(
-                        ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                        ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
                     )
                     result = advisory_consultation.run_advisory_consultation_debate(
                         "Review the change",
@@ -2056,7 +2277,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
             ):
                 root = Path(tmp)
                 invoker = _RecordingInvoker(
-                    ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                    ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
                 )
                 advisory_consultation.run_advisory_consultation_debate(
                     "Plan the auth rewrite", invoker, root_dir=root, occasion=occasion
@@ -2093,7 +2314,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite using api_key=sk-abc123 for the test fixture",
@@ -2112,7 +2333,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "[SENSITIVE] Plan the customer PII migration",
@@ -2207,7 +2428,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's plan mentions api_key rotation as a step.",
-                    "VERDICT: APPROVE\nLooks solid.",
+                    _approve("Planner's plan mentions api_key rotation as a step."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -2246,7 +2467,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's proposed plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2258,7 +2479,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         self.assertIn("Plan the auth rewrite", transcript)
         self.assertIn("Round 1", transcript)
         self.assertIn("Planner's proposed plan.", transcript)
-        self.assertIn("VERDICT: APPROVE\nLooks solid.", transcript)
+        self.assertIn(_approve("Planner's proposed plan."), transcript)
 
     def test_stalemate_writes_transcript_with_every_round_in_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -2268,11 +2489,11 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's second plan.",
-                    "VERDICT: REVISE\nStill thin.",
+                    _revise("Still thin."),
                     "Planner's third plan.",
-                    "VERDICT: REVISE\nNot convinced.",
+                    _revise("Not convinced."),
                 ]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
@@ -2323,7 +2544,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     RuntimeError("worker unreachable"),
                 ]
             )
@@ -2401,9 +2622,9 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 [
                     "Planner's first plan.",
-                    "VERDICT: REVISE\nNeeds more detail.",
+                    _revise("Needs more detail."),
                     "Planner's revised plan.",
-                    "VERDICT: APPROVE\nGood now.",
+                    _approve("Planner's revised plan.", "Good now."),
                 ]
             )
             advisory_consultation.run_advisory_consultation_debate(
@@ -2431,7 +2652,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2447,7 +2668,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             for _ in range(2):
                 invoker = _RecordingInvoker(
-                    ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                    ["Planner's plan.", _approve("Planner's plan.")]
                 )
                 advisory_consultation.run_advisory_consultation_debate(
                     "Plan the auth rewrite", invoker, root_dir=root
@@ -2481,13 +2702,13 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             first_invoker = _RecordingInvoker(
-                ["First run's plan.", "VERDICT: APPROVE\nFirst run approved."]
+                ["First run's plan.", _approve("First run's plan.", "First run approved.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the first task", first_invoker, root_dir=root
             )
             second_invoker = _RecordingInvoker(
-                ["Second run's plan.", "VERDICT: APPROVE\nSecond run approved."]
+                ["Second run's plan.", _approve("Second run's plan.", "Second run approved.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the second task", second_invoker, root_dir=root
@@ -2505,7 +2726,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".scratch").write_text("not a directory")
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2526,7 +2747,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             (root / ".ralph").write_text("not a directory")
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2558,7 +2779,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             root = Path(tmp)
             (root / "implementation_plan.md").mkdir()
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2585,7 +2806,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(
-                ["Planner's plan.", "VERDICT: APPROVE\nLooks solid."]
+                ["Planner's plan.", _approve("Planner's plan.")]
             )
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
@@ -2635,7 +2856,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             agent_council, "check_local_model_endpoint", return_value=True
         ):
             root = Path(tmp)
-            invoker = _RecordingInvoker(["Plan.", "VERDICT: APPROVE\nGood."])
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.", "Good.")])
             advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,

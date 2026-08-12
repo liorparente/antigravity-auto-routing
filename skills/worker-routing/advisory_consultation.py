@@ -19,6 +19,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import tempfile
 import time
@@ -56,8 +57,64 @@ AdvisoryOutcome = Literal[
 # The Critic's verdict line, once read, is one of these three states.
 # "unparseable" is deliberately not folded into "revise": a malformed
 # response must halt the consultation, not be fed back to the Planner as if
-# it were a reasoned objection.
+# it were a reasoned objection. See `VerdictContractResult` below for the
+# richer shape `_parse_critic_verdict` actually returns (spec 0003 ticket
+# 02): this three-way type is still exactly what a caller branches on, just
+# no longer the parser's entire return value.
 CriticVerdict = Literal["approved", "revise", "unparseable"]
+
+# Spec 0003 (CriticalDialogue) ticket 02: the VerdictContract's textual
+# shape. Nothing in the spec pins the literal syntax below -- that choice
+# belongs to this ticket, and it is load-bearing for every later ticket that
+# reads a Critic response (panel topology, canaries, telemetry), so it is
+# documented once, here, rather than re-derived from `_parse_critic_verdict`
+# each time.
+#
+# A Critic response must contain, in order:
+#
+#   1. Free-text rationale -- any prose, any number of lines, no marker.
+#   2. Zero or more "engagement units", each occupying exactly one line,
+#      interleaved with rationale text in any order, but all of them before
+#      the verdict line:
+#        - A QUOTE line: stripped text starting, case-insensitively, with
+#          "QUOTE:", e.g. `QUOTE: "text copied verbatim from the artifact"`.
+#          One leading and one trailing '"' are stripped from the remainder
+#          if present (the quote marks are a convention for the Critic to
+#          follow, not something the parser requires). What remains is
+#          checked for verbatim (byte-for-byte) containment in the artifact
+#          text `_parse_critic_verdict` is given -- the Planner's plan on
+#          today's occasion, a diff or a lesson on later ones. A quote that
+#          fails this check is silently dropped: it does not count toward
+#          `verified_quote_count`, and it does NOT by itself make the
+#          response unparseable -- see `_parse_critic_verdict`.
+#        - An OBJECTION line: stripped text matching `^\d+\.\s+\S`, e.g.
+#          `1. The rollback plan omits a database migration step.` Numbers
+#          need not be sequential or unique; every matching line counts as
+#          one objection.
+#   3. The verdict line, LAST: the final non-empty line of the entire
+#      response (reversed from spec 0001's "first line" contract, to make
+#      room for rationale and engagement units ahead of it). Its own shape
+#      is unchanged from spec 0001: an exact "VERDICT: APPROVE"
+#      (case-insensitive, no other content on that line) or a
+#      "VERDICT: REVISE"-prefixed line, tolerantly matched exactly as
+#      `_is_tolerant_revise` always has.
+#
+# An APPROVE verdict line is only ever read as "approved" when
+# `verified_quote_count >= 1` for that response -- `objection_count` is
+# tallied alongside it but never substitutes for a verified quote. This is
+# deliberately asymmetric, not `verified_quote_count + objection_count >=
+# 1`: a quote is mechanically checked, byte-for-byte, against the artifact
+# text, so it is evidence the Critic actually engaged with something real;
+# an objection is free text with no verification at all, so any number of
+# objections backed by zero verified quotes is exactly as untrustworthy as
+# zero engagement -- a Critic could fabricate ten numbered objections about
+# a plan it never read. A bare or fabricated APPROVE (zero verified quotes,
+# regardless of objection_count) parses as "unparseable" instead (see
+# `_parse_critic_verdict`). REVISE carries no such requirement: it is read
+# exactly as tolerantly, and exactly as unconditionally, as spec 0001 always
+# read it.
+_QUOTE_LINE_PATTERN = re.compile(r"(?i)^QUOTE:\s*(.*)$")
+_OBJECTION_LINE_PATTERN = re.compile(r"^\d+\.\s+\S")
 
 # Spec 0003 (CriticalDialogue) ticket 01: the occasion a consultation runs
 # under. "ambiguity" is the sole occasion spec 0001 shipped — every default
@@ -302,24 +359,45 @@ def _build_planner_prompt(
 def _build_critic_prompt(
     task_description: str, planner_plan: str, *, occasion: Occasion = "ambiguity"
 ) -> str:
+    # spec 0003 ticket 02's VerdictContract, reversed from spec 0001: the
+    # verdict line now comes LAST, after rationale and engagement units, not
+    # first. See the textual-contract comment above `_QUOTE_LINE_PATTERN`
+    # for the exact QUOTE:/N. line shapes `_parse_critic_verdict` reads —
+    # this prompt and that parser must keep asking for and reading the same
+    # shape, since later tickets (panel topology, canaries, telemetry) build
+    # on this one.
+    #
     # The prompt still asks for an exact verdict line: the tolerance added in
     # `_is_tolerant_revise` is a parser-side safety net for what real models
     # actually emit, not a relaxation of the contract we ask for. Asking for
     # exactness and parsing with tolerance are not in tension — the ask stays
     # strict so most responses need no tolerance at all.
     #
-    # The verdict-line instruction and closing "Planner's plan:" label stay
-    # fixed across every occasion, unlike the intro above: they are the
-    # VerdictContract's territory (spec 0003 ticket 02), not this ticket's,
-    # and ticket 02 needs one shared shape to extend across all four
-    # occasions rather than four independently-drifting copies.
+    # The engagement-unit and verdict-line instructions, and the closing
+    # "Planner's plan:" label, stay fixed across every occasion, unlike the
+    # intro above: they are the VerdictContract's territory, and ticket 02
+    # needs one shared shape to extend across all four occasions rather than
+    # four independently-drifting copies.
+    #
+    # "at least one verified quote" (not "quotes or objections"): only a
+    # quote is mechanically checked against the plan text, so only a quote
+    # is proof the Critic engaged with something real. Objections are
+    # encouraged and still counted, but — per `_parse_critic_verdict` — they
+    # can never substitute for a quote in the approval decision, so the
+    # prompt must not imply they can.
     mission = _MISSION_COPY[occasion]
     return (
         f"{WORKER_MODE_TOKEN}\n"
         f"{mission.critic_intro}\n\n"
-        "Open your response with exactly one verdict line, then your "
-        f"critique: either \"{CRITIC_VERDICT_APPROVE}\" if the plan is sound "
-        "as written, or \"VERDICT: REVISE\" if it is not.\n\n"
+        "Write your rationale first. Before you verdict, show your "
+        "engagement with it: quote the exact passages you are judging, one "
+        "per line, as QUOTE: \"<verbatim text copied from what you were "
+        "given>\", and list any concrete objections as a numbered list, one "
+        "per line, like \"1. <objection>\". End your response with exactly "
+        f"one verdict line, LAST: either \"{CRITIC_VERDICT_APPROVE}\" if it "
+        "is sound as written, or \"VERDICT: REVISE\" if it is not. An "
+        "APPROVE backed by zero verified quotes will be treated as invalid, "
+        "even if it lists objections.\n\n"
         f"Task: {task_description}\n\n"
         f"Planner's plan:\n{planner_plan}"
     )
@@ -350,29 +428,142 @@ def _is_tolerant_revise(upper_line: str) -> bool:
     return not remainder[0].isalnum()
 
 
-def _parse_critic_verdict(critic_response: str) -> CriticVerdict:
-    """Parse only the first non-empty line; anything else is unparseable.
+@dataclass(frozen=True)
+class VerdictContractResult:
+    """The result of parsing a Critic response under the VerdictContract
+    (spec 0003 ticket 02).
 
-    Absence of rejection is not agreement: only an exact "VERDICT: APPROVE"
-    counts as approval — no prefix matching, no punctuation or trailing-text
-    tolerance, ever, because a wrongly-inferred approval would report a
-    consensus nobody granted. "VERDICT: REVISE" is read tolerantly instead
-    (see `_is_tolerant_revise`), because a rejection that keeps the loop
-    going carries none of that risk. Everything else (empty, prose-only,
-    a genuine near-miss like "REVISED") fails closed as "unparseable"
-    rather than being silently treated as either.
+    `verdict` is the same three-way `CriticVerdict` spec 0001 shipped —
+    every existing call site's approved/unparseable/revise branching keeps
+    meaning exactly what it always meant, so this is additive, not a
+    replacement type. `verified_quote_count` and `objection_count` are new:
+    the engagement-unit tally that justifies (or fails to justify) an
+    "approved" verdict, carried on the result so a caller — or a later
+    ticket's telemetry (ticket 10) — can observe not just whether the
+    Critic approved, but whether it earned that approval.
+
+    An "approved" verdict is only ever returned when
+    `verified_quote_count >= 1`; see `_parse_critic_verdict` for the exact
+    rule. This is deliberately NOT symmetric with `objection_count`: a quote
+    is mechanically checked against the artifact text (see
+    `_count_engagement_units`), so it is evidence the Critic actually read
+    something real; an objection is free text with no verification at all,
+    so any number of objections with zero verified quotes is exactly as
+    trustworthy as zero engagement — a Critic could fabricate ten numbered
+    objections about a plan it never opened. `objection_count` is still
+    carried on every result (including "unparseable" ones) as a genuine
+    engagement signal for a caller or telemetry to read, it just cannot by
+    itself unlock "approved". A bare or fabricated approval instead comes
+    back as `verdict="unparseable"`, carrying whatever counts were actually
+    found — the same fail-closed state a genuinely malformed response gets,
+    on purpose: an approval that cannot be trusted is exactly as
+    untrustworthy as one that cannot be read at all, so this module gives
+    both the same verdict rather than inventing a fourth state every call
+    site would then have to learn to distinguish.
     """
-    for line in critic_response.splitlines():
+
+    verdict: CriticVerdict
+    verified_quote_count: int
+    objection_count: int
+
+
+def _split_off_verdict_line(critic_response: str) -> tuple[str | None, list[str]]:
+    """Split `critic_response` into its verdict line and everything before it.
+
+    The verdict line is the LAST non-empty line (spec 0003 ticket 02 moved
+    it there from spec 0001's first line, to make room for rationale and
+    engagement units ahead of it). Everything before that line — the
+    "body" — is where `_count_engagement_units` looks for quotes and
+    objections; trailing blank lines after the verdict line are simply
+    skipped, not treated as a second body. Returns `(None, [])` when the
+    response has no non-empty line at all.
+    """
+    lines = critic_response.splitlines()
+    for index in range(len(lines) - 1, -1, -1):
+        if lines[index].strip():
+            return lines[index].strip(), lines[:index]
+    return None, []
+
+
+def _count_engagement_units(body_lines: list[str], artifact_text: str) -> tuple[int, int]:
+    """Count verified quotes and numbered objections among `body_lines`.
+
+    Returns `(verified_quote_count, objection_count)`. See the
+    VerdictContract comment above `_QUOTE_LINE_PATTERN` for the exact line
+    shapes recognised. A quote line whose text does not verify against
+    `artifact_text` is dropped silently — it contributes to neither count —
+    rather than being counted as a malformed line of any kind.
+    """
+    verified_quotes = 0
+    objections = 0
+    for line in body_lines:
         stripped = line.strip()
-        if not stripped:
+        quote_match = _QUOTE_LINE_PATTERN.match(stripped)
+        if quote_match:
+            candidate = quote_match.group(1).strip()
+            if len(candidate) >= 2 and candidate[0] == '"' and candidate[-1] == '"':
+                candidate = candidate[1:-1]
+            if candidate and candidate in artifact_text:
+                verified_quotes += 1
             continue
-        upper = stripped.upper()
-        if upper == CRITIC_VERDICT_APPROVE:
-            return "approved"
-        if _is_tolerant_revise(upper):
-            return "revise"
-        return "unparseable"
-    return "unparseable"
+        if _OBJECTION_LINE_PATTERN.match(stripped):
+            objections += 1
+    return verified_quotes, objections
+
+
+def _parse_critic_verdict(
+    critic_response: str, artifact_text: str
+) -> VerdictContractResult:
+    """Parse `critic_response` under the VerdictContract, verifying quotes
+    against `artifact_text` — the reviewed artifact (the Planner's plan on
+    today's sole wired occasion; a diff or a lesson on later ones).
+
+    Absence of rejection is still not agreement (spec 0001's rule,
+    unchanged, now extended to bare/fabricated approval per spec 0003):
+    only an exact "VERDICT: APPROVE" last line counts as an approval
+    attempt at all — no prefix matching, no punctuation or trailing-text
+    tolerance, ever, because a wrongly-inferred approval would report a
+    consensus nobody granted — and even then only when it is backed by at
+    least one *verified* quote (`verified_quote_count >= 1`). Objections do
+    NOT substitute for a quote here, on purpose: spec 0003's VerdictContract
+    paragraph is one-directional — "zero objections is valid only alongside
+    verified quotes" — never the mirror "zero quotes is valid alongside
+    objections". Quotes are the only engagement unit this function checks
+    against reality (`_count_engagement_units` verifies each one
+    byte-for-byte against `artifact_text`); a numbered objection is free
+    text a Critic can fabricate without having read anything, so it cannot
+    by itself earn an approval — it can only ride along with at least one
+    quote that already did. A bare or fabricated approval (zero verified
+    quotes, regardless of objection_count) parses as "unparseable", the
+    same fail-closed state a response with no readable verdict line at all
+    gets — see `VerdictContractResult`.
+
+    "VERDICT: REVISE" is still read tolerantly instead (see
+    `_is_tolerant_revise`), and carries no engagement-unit requirement: a
+    rejection that keeps the loop going risks nothing a bare approval does,
+    exactly the asymmetry spec 0001 already established.
+    """
+    verdict_line, body_lines = _split_off_verdict_line(critic_response)
+    if verdict_line is None:
+        return VerdictContractResult("unparseable", 0, 0)
+
+    verified_quotes, objections = _count_engagement_units(body_lines, artifact_text)
+    upper = verdict_line.upper()
+
+    if upper == CRITIC_VERDICT_APPROVE:
+        # Quotes only: `objections` is never part of this gate. A quote is
+        # mechanically verified against `artifact_text` above; an objection
+        # is unverified free text, so it cannot substitute for one. See the
+        # docstring above and on `VerdictContractResult` for why this is
+        # deliberately asymmetric rather than `verified_quotes + objections`.
+        if verified_quotes == 0:
+            return VerdictContractResult("unparseable", verified_quotes, objections)
+        return VerdictContractResult("approved", verified_quotes, objections)
+
+    if _is_tolerant_revise(upper):
+        return VerdictContractResult("revise", verified_quotes, objections)
+
+    return VerdictContractResult("unparseable", verified_quotes, objections)
 
 
 def _detect_sensitivity_marker(text: str) -> str | None:
@@ -905,9 +1096,13 @@ def run_advisory_consultation_debate(
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
         rounds.append(AdvisoryDebateRound(planner_plan, critic_response))
-        verdict = _parse_critic_verdict(critic_response)
+        # `planner_plan` is the reviewed artifact: the VerdictContract
+        # (spec 0003 ticket 02) verifies the Critic's quotes against exactly
+        # what the Critic was shown as "Planner's plan" in `critic_prompt`
+        # above, never against the task description or anything else.
+        verdict_result = _parse_critic_verdict(critic_response, planner_plan)
 
-        if verdict == "approved":
+        if verdict_result.verdict == "approved":
             write_error: str | None = None
             try:
                 _atomic_text_write(plan_path, planner_plan)
@@ -915,7 +1110,7 @@ def run_advisory_consultation_debate(
                 write_error = f"failed to write plan artifact at {plan_path}: {exc}"
             return _result("consensus", final_plan=planner_plan, error=write_error)
 
-        if verdict == "unparseable":
+        if verdict_result.verdict == "unparseable":
             cleanup_error = _remove_stale_plan_artifact(plan_path)
             return _result("unparseable_verdict", error=cleanup_error)
 
