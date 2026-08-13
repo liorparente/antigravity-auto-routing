@@ -1,0 +1,42 @@
+# 26 — The replay benchmark leaves a record
+
+**What to build:** A journal home for the replay benchmark's score, and the writer that fills it.
+
+Ticket 16 requires all four metric families to be computed "from journal records alone", and its
+fourth family is the replay benchmark's trend over time. No record family carries a score. The
+outcome family cannot be made to hold one: `OUTCOME_VERDICTS` pairs every ground truth to a closed
+vocabulary of categorical verdicts, deliberately, so that `("tests", "planner")` is unconstructible
+— a number has nowhere to sit in that shape.
+
+The runner itself arrives in ticket 18, which is blocked by 16. So the trend is missing a source at
+both ends, and no ticket in the graph persists what the runner returns. Left alone, ticket 16 ships
+a metric family that reports "no data" forever and ticket 18 produces scores that evaporate the way
+audit verdicts did before ticket 15.
+
+Decide where the score lives, and pay that decision's cost openly:
+
+- **A fifth record family** makes the shape obvious and makes "four signal families" wrong in three
+  places that currently agree — `CONTEXT.md`'s glossary, `learning_journal.py`'s module docstring,
+  and `docs/specs/0004-learning-loop.md`.
+- **Extending an existing family** keeps the count honest and needs a field the family's own
+  validation can defend, in a module whose whole design is that a malformed record is
+  unconstructible rather than merely discouraged.
+
+Either way the schema lands in ticket 12's module — one module owns the record contract, its writers
+live elsewhere — and content-freedom applies unchanged: a score is a number and a task set is an
+identifier, so neither carries task text, and the existing `_validate_*` helpers already cover both
+shapes.
+
+**Blocked by:** 12 for the schema; 18 for the writer
+
+**Status:** ready-for-agent — the schema half can land now and unblocks 16's fourth family
+
+- [ ] A journal record can carry a replay-benchmark score and the identity of the task set scored.
+- [ ] The four-family enumeration is left correct everywhere it is written down — glossary, module
+      docstring, spec — whether by keeping the count or by correcting every instance of it.
+- [ ] Each benchmark trial reaches the journal, and a trial that failed is recorded as failed rather
+      than omitted, so the trend has no silent gaps.
+- [ ] Ticket 16's replay-benchmark family reports "no data" until such records exist, and a real
+      trend once they do.
+- [ ] The record is content-free and written beneath the injected root, like every other family.
+- [ ] Tests cover the record's schema, the no-data case, a multi-trial trend, and a failed trial.

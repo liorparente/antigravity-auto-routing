@@ -8,7 +8,23 @@ __pycache__/
 .codex/
 .claude/
 .ralph/
-.scratch/
+
+# Scratch is throwaway by default — diffs, prompts, review dumps, planner
+# runs. Its decision records are not: the tickets, the wayfinder maps, and the
+# draft specs are the only written account of why the code looks the way it
+# does, and they lived on one disk until 2026-08-13, when a fully-merged
+# worktree beside them was deleted mid-session and nobody could say by whom.
+#
+# `.scratch/**` rather than `.scratch/`, because a re-include cannot reach
+# inside an excluded *directory* — git never descends into it. The `**/`
+# negation re-admits directories only, so git walks the tree; everything in it
+# stays ignored unless a rule below names it.
+.scratch/**
+!.scratch/**/
+!.scratch/*/issues/**
+!.scratch/*/tickets/**
+!.scratch/*/map.md
+!.scratch/*/spec.md
 
 # Generated from skills/worker-routing/protocol.md by install.sh — do not
 # hand-edit or track; edit protocol.md instead.
