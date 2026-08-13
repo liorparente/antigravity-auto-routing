@@ -249,12 +249,31 @@ OUTCOME_VERDICTS: Mapping[GroundTruth, frozenset[str]] = {
 
 # Spec 0003's four dialogue occasions. Schema only in this ticket — spec
 # 0003's machinery is what will write these records.
-DialogueOccasion = Literal["ambiguity", "plan_review", "code_review", "post_mortem"]
+#
+# **Must stay byte-identical to `advisory_consultation.Occasion`, hyphens and
+# all.** These are two separately-declared `Literal` aliases in two different
+# files describing what is supposed to be one vocabulary; nothing in the type
+# system ties them together, so nothing stops them from drifting apart. They
+# already did once — this alias used to spell three of the four values with
+# underscores while the shipped `Occasion` uses hyphens — and the drift was
+# invisible until a future writer did
+# `DialogueQualityRecord(occasion=telemetry_record.occasion, ...)` and hit a
+# runtime `ValueError` from `_validate_choice` against `DIALOGUE_OCCASIONS`.
+# `test_cross_spec_vocabularies_agree` below pins the two aliases equal so
+# that failure mode reappears as a test failure instead of a production
+# surprise.
+DialogueOccasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
 DIALOGUE_OCCASIONS: frozenset[str] = frozenset(get_args(DialogueOccasion))
 
 # "pair" is the default cross-family Planner-Critic exchange; "panel" is the
 # Complex-task topology of one Planner and two Critics from two other model
 # families.
+#
+# Same cross-file agreement risk as `DialogueOccasion` above, against
+# `advisory_consultation.RosterTopology`: currently identical
+# (`Literal["pair", "panel"]` on both sides), and just as unguarded by the
+# type system if one side ever grows a third topology.
+# `test_cross_spec_vocabularies_agree` pins this pair too.
 DialogueTopology = Literal["pair", "panel"]
 DIALOGUE_TOPOLOGIES: frozenset[str] = frozenset(get_args(DialogueTopology))
 

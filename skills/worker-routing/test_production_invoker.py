@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from test_routing import _approve
+
 MODULE_PATH = Path(__file__).with_name("production_invoker.py")
 LEARNING_JOURNAL_PATH = Path(__file__).with_name("learning_journal.py")
 
@@ -122,18 +124,16 @@ class AdvisoryConsultationIntegrationTests(unittest.TestCase):
 
         calls: list[tuple[str, str, str]] = []
 
-        # The Critic reply satisfies spec 0003's VerdictContract: rationale,
-        # one quote verifiable against the Planner's plan (the whole of it,
-        # trivially contained in itself), then the verdict line last. A bare
-        # "VERDICT: APPROVE" parses as `unparseable` by design — an approval
-        # backed by no engagement is the rubber-stamp the contract exists to
-        # refuse — and would never reach the consensus this test asserts.
-        planner_plan = "Planner plan"
-        critic_response = f'Looks solid.\nQUOTE: "{planner_plan}"\nVERDICT: APPROVE'
-
         def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
             calls.append((model, effort, prompt))
-            return planner_plan if len(calls) == 1 else critic_response
+            # `_approve` (shared with test_routing.py) is what actually
+            # satisfies spec 0003's VerdictContract here: rationale, one
+            # quote verifiable against the Planner's plan, verdict line
+            # last. A bare "VERDICT: APPROVE" parses as `unparseable` by
+            # design — an approval backed by no engagement is the
+            # rubber-stamp the contract exists to refuse — and would never
+            # reach the consensus this test asserts.
+            return "Planner plan" if len(calls) == 1 else _approve("Planner plan")
 
         def fake_make_journaled_invoke_worker(task_id: str, *, root_dir: Path) -> object:
             # This test's own subject is "the production default is reached

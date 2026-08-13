@@ -22,9 +22,18 @@ import sys
 import tempfile
 import threading
 import unittest
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING, get_args
 from unittest import mock
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    # For type annotations only — at runtime `advisory_consultation` is the
+    # dynamically loaded module object below, whose attributes mypy cannot
+    # resolve inside annotations.
+    from advisory_consultation import CanaryFixture, IsFamilyReachable
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent
@@ -1404,7 +1413,31 @@ def _revise(note: str) -> str:
     return f"{note}\nVERDICT: REVISE"
 
 
-def _reachable(*families: str) -> Callable[[str], bool]:
+def _approve_fixture(
+    fixture: CanaryFixture, note: str = "Looks solid."
+) -> str:
+    """Build a scripted Critic response that approves `fixture` under the
+    VerdictContract, for canary tests (spec 0003 ticket 08).
+
+    Unlike `_approve`, this quotes only `fixture.plan_text`'s first line
+    rather than the whole fixture text. `_approve`'s single-line
+    `QUOTE: "<artifact_text>"` construction relies on `artifact_text`
+    containing no newline of its own — true for every other artifact_text
+    in this file ("Planner's proposed plan.", etc.) but not for
+    `CANARY_FIXTURES`, whose entries are deliberately multi-line, realistic
+    plans. `_parse_critic_verdict` reads a QUOTE line per physical line
+    (`critic_response.splitlines()`), so embedding a real newline inside
+    the quoted text splits it across several lines, none of which end with
+    the closing `"` on the same line as the opening one — the quote never
+    verifies. A fixture's first line is still guaranteed to be a verbatim
+    substring of the whole `plan_text`, which is all the VerdictContract's
+    quote verification actually requires for `verified_quote_count >= 1`.
+    """
+    quotable_line = fixture.plan_text.splitlines()[0]
+    return f'{note}\nQUOTE: "{quotable_line}"\nVERDICT: APPROVE'
+
+
+def _reachable(*families: str) -> IsFamilyReachable:
     """Build a scripted `is_family_reachable` fake for `resolve_roster` and
     `run_advisory_consultation_debate`'s `reachability_check` parameter
     (spec 0003 ticket 07): reachable for exactly the named families,
@@ -2743,7 +2776,11 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
             plans = [f"Planner's plan #{i}." for i in range(1, 4)]
             invoker = _RoleKeyedInvoker(
                 {
-                    "Test Planner": plans,
+                    # `list(plans)` re-types the entry as this dict literal's
+                    # `list[str | Exception]` value type without widening
+                    # `plans` itself, which the surrounding test keeps as
+                    # `list[str]`.
+                    "Test Planner": list(plans),
                     "Test Critic A": [
                         _approve(plan, f"A approves plan #{i}.")
                         for i, plan in enumerate(plans, start=1)
@@ -2793,7 +2830,11 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
             plans = [f"Planner's plan #{i}." for i in range(1, 4)]
             invoker = _RoleKeyedInvoker(
                 {
-                    "Test Planner": plans,
+                    # `list(plans)` re-types the entry as this dict literal's
+                    # `list[str | Exception]` value type without widening
+                    # `plans` itself, which the surrounding test keeps as
+                    # `list[str]`.
+                    "Test Planner": list(plans),
                     "Test Critic A": [
                         _revise(f"A objects, round #{i}.") for i in range(1, 4)
                     ],
@@ -2839,7 +2880,11 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
             plans = [f"Planner's plan #{i}." for i in range(1, 4)]
             invoker = _RoleKeyedInvoker(
                 {
-                    "Test Planner": plans,
+                    # `list(plans)` re-types the entry as this dict literal's
+                    # `list[str | Exception]` value type without widening
+                    # `plans` itself, which the surrounding test keeps as
+                    # `list[str]`.
+                    "Test Planner": list(plans),
                     "Test Critic A": [
                         _revise(f"A objects, round #{i}.") for i in range(1, 4)
                     ],
@@ -4384,28 +4429,24 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
         caller's next line of code provably does not run until the dialogue
         result is available."""
 
-        def _ordering_invoker(
-            order: list[str], scripted: Iterator[str]
-        ) -> Callable[[str, str, str], str]:
-            """Build the fake outside the loop below so its closure captures
-            this function's parameters rather than the loop's own rebound
-            variables — a closure over a loop variable is called correctly
-            here (synchronously, within the same iteration) but is the shape
-            that silently breaks the moment such a fake outlives its
-            iteration, which is why ruff's B023 refuses it."""
-
-            def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
-                order.append("invoker_called")
-                return next(scripted)
-
-            return fake_invoke_worker
-
         for occasion in ("plan-review", "code-review"):
             with self.subTest(occasion=occasion):
                 order: list[str] = []
-                fake_invoke_worker = _ordering_invoker(
-                    order, iter(["Planner's plan.", _approve("Planner's plan.")])
-                )
+                scripted_responses = iter(["Planner's plan.", _approve("Planner's plan.")])
+
+                def fake_invoke_worker(
+                    model: str,
+                    effort: str,
+                    prompt: str,
+                    *,
+                    # Bind the loop-scoped fixtures as defaults (B023): each
+                    # subTest iteration gets its own fake closed over its own
+                    # `order`/`scripted_responses`.
+                    _order: list[str] = order,
+                    _responses: Iterator[str] = scripted_responses,
+                ) -> str:
+                    _order.append("invoker_called")
+                    return next(_responses)
 
                 with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
                     os.environ, {}, clear=True
@@ -4595,6 +4636,90 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
 
             self.assertEqual(threading.active_count(), threads_before)
             self.assertEqual(invoker.calls, [])
+
+    def test_dispatch_post_mortem_at_full_budget_exhaustion_skips_with_zero_invoker_calls(
+        self,
+    ) -> None:
+        """Spec 0003 ticket 09 reaches the dispatch path too: the post-mortem
+        occasion fires on every failure, escalation, and stalemate — exactly
+        the sessions most likely to be deep into their dialogue budget — so
+        `dispatch_post_mortem_consultation` must expose the same
+        `session_spend_so_far` seam the synchronous entry point has, or
+        post-mortems become the one unbudgetable occasion. At rung 3 the
+        dispatched debate must skip entirely: zero worker contact, and a
+        `budget_skipped` telemetry record still discoverable after the
+        thread completes (degradation is never silent, even in the
+        background)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "budget_skipped")
+        self.assertEqual(records[0]["degradation_rung"], 3)
+        self.assertEqual(records[0]["occasion"], "post-mortem")
+
+    def test_dispatch_post_mortem_at_a_lower_rung_observably_reduces_rounds(
+        self,
+    ) -> None:
+        """The ladder's milder rungs thread through the dispatch path too,
+        not only the skip rung: a spend at exactly one cap places the
+        dispatched debate at rung 1, whose reduced round cap is observable
+        the same way `test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls`
+        proves it for the synchronous path — six responses scripted, only
+        one round's two consumed before the stalemate."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first lesson.",
+                    _revise("Needs more detail."),
+                    "Planner's second lesson.",
+                    _revise("Still thin."),
+                    "Planner's third lesson.",
+                    _revise("Not convinced."),
+                ]
+            )
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for the auth rewrite failure",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                session_spend_so_far=cap,
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "stalemate")
+        self.assertEqual(records[0]["degradation_rung"], 1)
+        self.assertEqual(records[0]["rounds_run"], 1)
 
 
 class AgentCouncilSignatureApiTests(unittest.TestCase):
@@ -4923,6 +5048,23 @@ class LearningJournalTests(unittest.TestCase):
 
     FIXED_TIMESTAMP = "2026-08-12T09:30:00Z"
 
+    # Checked (linted/type-checked) but deliberately never executed by CI —
+    # read by test_ci_runs_every_test_file_it_checks below. Sized to exactly
+    # one file today: test_lmstudio.py's own module docstring says "CI lints
+    # and type-checks this file, but never executes it," because it makes
+    # real `urlopen` calls to a live LM Studio server at 127.0.0.1:1234 with
+    # a 120-second timeout — no CI runner has that server, so running it in
+    # the test step would hang or fail on every run, not sometimes. That is
+    # a structural, already-documented exclusion, unlike the accidental one
+    # this whole test exists to catch — test_production_invoker.py, whose 16
+    # tests were linted and type-checked but silently never executed. Any
+    # other test file missing from PYTHON_TESTS still fails the assertion
+    # below; this exempts exactly this one file, by name, not the shape of
+    # the check.
+    _CHECKED_BUT_NOT_EXECUTED_BY_DESIGN = frozenset(
+        {"skills/worker-routing/test_lmstudio.py"}
+    )
+
     def _worker_execution_record(self, **overrides: object) -> object:
         fields: dict[str, object] = {
             "task": learning_journal.TaskLabel.for_task("task-1", task_type="bugfix"),
@@ -4951,7 +5093,7 @@ class LearningJournalTests(unittest.TestCase):
     def _dialogue_quality_record(self, **overrides: object) -> object:
         fields: dict[str, object] = {
             "task": learning_journal.TaskLabel.for_task("task-1"),
-            "occasion": "plan_review",
+            "occasion": "plan-review",
             "topology": "panel",
             "rounds": (
                 learning_journal.DialogueRound("revise", 4),
@@ -5121,7 +5263,7 @@ class LearningJournalTests(unittest.TestCase):
             },
         )
         self.assertEqual(record["kind"], "dialogue_quality")
-        self.assertEqual(record["occasion"], "plan_review")
+        self.assertEqual(record["occasion"], "plan-review")
         self.assertEqual(record["topology"], "panel")
         self.assertEqual(record["rounds_run"], 2)
         self.assertEqual(
@@ -5767,6 +5909,31 @@ class LearningJournalTests(unittest.TestCase):
     def test_effort_vocabulary_matches_agent_council(self) -> None:
         self.assertEqual(learning_journal.VALID_EFFORTS, agent_council.VALID_EFFORTS)
 
+    def test_cross_spec_vocabularies_agree(self) -> None:
+        """Drift guard for the incident this fix addresses: `DialogueOccasion`
+        (spec 0004, schema-only) and `advisory_consultation.Occasion` (spec
+        0003, shipped) are two separately-declared `Literal` aliases meant to
+        describe one vocabulary, but nothing in the type system keeps them in
+        sync. They drifted — this alias spelled three of its four values with
+        underscores (`plan_review`, `code_review`, `post_mortem`) while the
+        shipped `Occasion` uses hyphens — and nothing caught it, because no
+        test in this file ever constructed a `DialogueQualityRecord` from a
+        real `Occasion` value; `_dialogue_quality_record` always hand-supplied
+        its own occasion string in isolation. Left unfixed, spec 0004's future
+        writer doing `DialogueQualityRecord(occasion=telemetry_record.occasion,
+        ...)` would raise `ValueError` inside `_validate_choice` the first
+        time it ran against real production data. Same risk, smaller
+        surface, for `DialogueTopology` against `RosterTopology`: identical
+        today (`Literal["pair", "panel"]` both sides) but just as unpinned."""
+        self.assertEqual(
+            set(get_args(advisory_consultation.Occasion)),
+            set(get_args(learning_journal.DialogueOccasion)),
+        )
+        self.assertEqual(
+            set(get_args(advisory_consultation.RosterTopology)),
+            set(get_args(learning_journal.DialogueTopology)),
+        )
+
     def test_sensitivity_markers_are_a_superset_of_agent_council_patterns(self) -> None:
         """Same drift guard the advisory module carries, for the same reason:
         neither module imports `agent_council`, so only a test keeps the three
@@ -6170,7 +6337,9 @@ class LearningJournalTests(unittest.TestCase):
         named `test_routing.py` directly. This asserts the property that gap
         violated: every `test_*.py` the workflow checks is also a file the
         workflow executes, and the executing step reads its list from the
-        environment rather than naming a file inline.
+        environment rather than naming a file inline — with exactly one named,
+        documented exception (`_CHECKED_BUT_NOT_EXECUTED_BY_DESIGN` above),
+        for a file CI cannot run rather than merely forgot to.
         """
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
             encoding="utf-8"
@@ -6183,7 +6352,7 @@ class LearningJournalTests(unittest.TestCase):
         }
         self.assertTrue(checked_tests, "no test files are checked at all")
         self.assertEqual(
-            checked_tests,
+            checked_tests - self._CHECKED_BUT_NOT_EXECUTED_BY_DESIGN,
             set(executed),
             "a test file CI checks but never runs is a suite that cannot fail",
         )
@@ -7872,6 +8041,1970 @@ class JournaledRunIdWiringFailureTests(unittest.TestCase):
 
             runner.assert_not_called()
             self.assertFalse(learning_journal.journal_path(root).exists())
+
+
+class CanaryCadencePredicateTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 08: `is_canary_dialogue` is a pure
+    function over an injected dialogue-count/clock pair, config-driven
+    (`canary_cadence.dialogues_per_canary` /
+    `canary_cadence.seconds_between_canaries`) rather than a hardcoded
+    literal — mirroring `needs_code_review_consultation`'s
+    `_load_code_review_risk_config` pattern. It fires "whichever comes
+    first": either boundary alone is sufficient.
+    """
+
+    def test_fires_exactly_at_the_dialogue_count_boundary(self) -> None:
+        threshold = advisory_consultation.DEFAULT_CANARY_DIALOGUES_PER_CANARY
+        self.assertFalse(
+            advisory_consultation.is_canary_dialogue(threshold - 1, 0.0)
+        )
+        self.assertTrue(advisory_consultation.is_canary_dialogue(threshold, 0.0))
+
+    def test_fires_exactly_at_the_weekly_time_boundary(self) -> None:
+        threshold = advisory_consultation.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES
+        self.assertFalse(
+            advisory_consultation.is_canary_dialogue(0, threshold - 1)
+        )
+        self.assertTrue(advisory_consultation.is_canary_dialogue(0, threshold))
+
+    def test_fires_when_both_boundaries_are_met(self) -> None:
+        self.assertTrue(
+            advisory_consultation.is_canary_dialogue(
+                advisory_consultation.DEFAULT_CANARY_DIALOGUES_PER_CANARY,
+                advisory_consultation.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES,
+            )
+        )
+
+    def test_does_not_fire_when_neither_boundary_is_met(self) -> None:
+        self.assertFalse(advisory_consultation.is_canary_dialogue(1, 1.0))
+        self.assertFalse(advisory_consultation.is_canary_dialogue(5, 12345.0))
+
+    def test_dialogue_count_threshold_is_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        """Same proof style as `test_code_review_threshold_is_read_from_injected_config_not_hardcoded`:
+        inject two different configs and observe the boolean answer flip for
+        the exact same input, showing the value is genuinely read from
+        config rather than merely referenced by key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            low_config = Path(tmp) / "low.json"
+            low_config.write_text(
+                json.dumps({"canary_cadence": {"dialogues_per_canary": 3}})
+            )
+            high_config = Path(tmp) / "high.json"
+            high_config.write_text(
+                json.dumps({"canary_cadence": {"dialogues_per_canary": 3000}})
+            )
+
+            fires_low = advisory_consultation.is_canary_dialogue(
+                5, 0.0, config_path=low_config
+            )
+            fires_high = advisory_consultation.is_canary_dialogue(
+                5, 0.0, config_path=high_config
+            )
+
+        self.assertTrue(fires_low)
+        self.assertFalse(fires_high)
+
+    def test_seconds_threshold_is_read_from_injected_config_not_hardcoded(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            low_config = Path(tmp) / "low.json"
+            low_config.write_text(
+                json.dumps({"canary_cadence": {"seconds_between_canaries": 10}})
+            )
+            high_config = Path(tmp) / "high.json"
+            high_config.write_text(
+                json.dumps({"canary_cadence": {"seconds_between_canaries": 10_000_000}})
+            )
+
+            fires_low = advisory_consultation.is_canary_dialogue(
+                0, 100.0, config_path=low_config
+            )
+            fires_high = advisory_consultation.is_canary_dialogue(
+                0, 100.0, config_path=high_config
+            )
+
+        self.assertTrue(fires_low)
+        self.assertFalse(fires_high)
+
+
+class AdvisorySeededFlawCanaryTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 08: `is_canary`/`canary_fixture`
+    on `run_advisory_consultation_debate`. `is_canary` defaults to `False`
+    and every pre-existing test in this file never mentions it, so the
+    entire pre-existing suite is this ticket's regression guard that the
+    opt-in changes nothing when a caller does not ask for it — mirroring
+    ticket 07's identical `reachability_check` regression argument.
+    """
+
+    def test_canary_shows_the_critic_the_fixture_text_and_never_invokes_the_planner(
+        self,
+    ) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        invoker = _RecordingInvoker([_approve_fixture(fixture)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+            )
+
+        self.assertEqual(len(invoker.calls), 1)
+        called_model, _effort, prompt = invoker.calls[0]
+        self.assertEqual(called_model, "Test Critic")
+        self.assertNotEqual(called_model, "Test Planner")
+        self.assertIn(fixture.plan_text, prompt)
+        self.assertEqual(result.outcome, "canary")
+
+    def test_canary_approval_is_recorded_as_a_miss(self) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        invoker = _RecordingInvoker([_approve_fixture(fixture)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "miss")
+        self.assertFalse(result.consensus_reached)
+
+    def test_canary_objection_is_recorded_as_a_catch(self) -> None:
+        invoker = _RecordingInvoker(
+            [_revise("Missing lock around the write to the telemetry file.")]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "catch")
+        self.assertFalse(result.consensus_reached)
+
+    def test_canary_unparseable_verdict_is_also_recorded_as_a_catch(self) -> None:
+        """Per the ticket's own instructions: 'objecting (or any
+        not-approved outcome) -> catch' — an unparseable response is not an
+        approval, so it counts as a catch, not a third canary state."""
+        invoker = _RecordingInvoker(["This plan looks fine, I guess."])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "catch")
+
+    def test_canary_never_writes_implementation_plan_on_miss_or_catch(self) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        for critic_response, expected_canary_result in (
+            (_approve_fixture(fixture), "miss"),
+            (_revise("Objection."), "catch"),
+        ):
+            with self.subTest(expected_canary_result=expected_canary_result):
+                invoker = _RecordingInvoker([critic_response])
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        "Plan the auth rewrite",
+                        invoker,
+                        root_dir=root,
+                        is_canary=True,
+                    )
+                    self.assertFalse((root / "implementation_plan.md").exists())
+                self.assertEqual(result.canary_result, expected_canary_result)
+
+    def test_canary_does_not_touch_a_pre_existing_real_plan_artifact(self) -> None:
+        """Isolation: a canary run must not affect a real mission's
+        consultation outcome. Run a real consensus dialogue first (which
+        writes `implementation_plan.md`), then run a canary against the
+        same root, and confirm the real plan file survives untouched — a
+        canary must neither write NOR delete a mission's plan artifact."""
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            real_plan = "The real mission's agreed plan."
+            real_invoker = _RecordingInvoker([real_plan, _approve(real_plan)])
+            real_result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", real_invoker, root_dir=root
+            )
+            self.assertTrue(real_result.consensus_reached)
+            plan_path = root / "implementation_plan.md"
+            self.assertEqual(plan_path.read_text(), real_plan)
+
+            canary_invoker = _RecordingInvoker([_approve_fixture(fixture)])
+            canary_result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the checkout rewrite",
+                canary_invoker,
+                root_dir=root,
+                is_canary=True,
+            )
+
+            self.assertEqual(canary_result.outcome, "canary")
+            self.assertEqual(plan_path.read_text(), real_plan)
+
+    def test_canary_worker_error_fails_closed_without_touching_the_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([RuntimeError("critic unreachable")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+            self.assertFalse((root / "implementation_plan.md").exists())
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertIsNone(result.canary_result)
+
+    def test_canary_transcript_is_clearly_marked_and_not_read_as_a_normal_round(
+        self,
+    ) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_approve_fixture(fixture)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn(advisory_consultation.CANARY_MARKER, transcript)
+        self.assertIn(fixture.id, transcript)
+        self.assertIn("Outcome:** canary", transcript)
+        self.assertIn(fixture.plan_text, transcript)
+
+    def test_canary_telemetry_record_carries_the_canary_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_revise("Objection.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "canary")
+        self.assertEqual(records[0]["canary_result"], "catch")
+
+    def test_explicit_canary_fixture_overrides_the_library_default(self) -> None:
+        """Proves the fixture shown is genuinely injectable — the caller
+        can assert 'the Critic was shown THIS specific known-flawed text'
+        rather than merely 'some canary ran'."""
+        custom_fixture = advisory_consultation.CanaryFixture(
+            id="test-custom-fixture",
+            flaw_summary="A deliberately planted test-only flaw.",
+            plan_text="Custom fixture plan text unique to this test.",
+        )
+        invoker = _RecordingInvoker([_approve(custom_fixture.plan_text)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                canary_fixture=custom_fixture,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertEqual(result.canary_result, "miss")
+        self.assertIn(custom_fixture.plan_text, invoker.calls[0][2])
+        self.assertIn("test-custom-fixture", transcript)
+
+    def test_canary_still_respects_the_sensitivity_gate(self) -> None:
+        """A canary must not bypass the sensitivity halt: the task text
+        (not the fixture) still reaches the Critic prompt, so a sensitive
+        task must still halt before any worker is contacted."""
+        invoker = _RecordingInvoker([])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite using api_key=sk-abc123",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertEqual(invoker.calls, [])
+        self.assertIsNone(result.canary_result)
+
+    def test_canary_ignores_panel_topology_and_probes_a_single_critic(self) -> None:
+        """Design decision: canaries default to the narrower, pair-mode-only
+        scope regardless of what topology the occasion/complexity would
+        otherwise select — a canary always probes exactly one Critic
+        (`critic_model`/`critic_effort`), never both panel Critics. This
+        proves that even for an occasion/complexity combination that would
+        normally select the panel topology (`plan-review` + `complex`), a
+        canary run invokes only `critic_model`, never `critic_b_model`, and
+        reports `critic_model` (not `critic_a_model`) on the result."""
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        invoker = _RecordingInvoker([_approve_fixture(fixture)])
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                is_canary=True,
+                critic_model="Pair Critic",
+                critic_a_model="Panel Critic A",
+                critic_b_model="Panel Critic B",
+            )
+
+        self.assertEqual(len(invoker.calls), 1)
+        self.assertEqual(invoker.calls[0][0], "Pair Critic")
+        self.assertEqual(result.critic_model, "Pair Critic")
+        self.assertEqual(result.outcome, "canary")
+
+    def test_default_fixture_used_when_no_fixture_is_explicitly_supplied(self) -> None:
+        invoker = _RecordingInvoker(
+            [_approve_fixture(advisory_consultation.CANARY_FIXTURES[0])]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
+            )
+
+        self.assertEqual(len(invoker.calls), 1)
+        self.assertEqual(
+            invoker.calls[0][2].count(advisory_consultation.CANARY_FIXTURES[0].plan_text),
+            1,
+        )
+
+    def test_non_canary_dialogue_is_completely_unaffected_by_default(self) -> None:
+        """Regression test: omitting `is_canary` (its default, `False`)
+        must behave byte-for-byte as before this ticket — a real consensus
+        run still invokes the Planner, writes the plan, and reports
+        `canary_result=None`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            self.assertEqual(
+                (root / "implementation_plan.md").read_text(), "Planner's proposed plan."
+            )
+
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertTrue(result.consensus_reached)
+        self.assertNotEqual(result.outcome, "canary")
+        self.assertIsNone(result.canary_result)
+
+    def test_canary_task_id_never_collides_with_the_real_missions_task_id(
+        self,
+    ) -> None:
+        """A canary keeps the real `task_description` untouched (only the
+        Planner's plan is substituted for a fixture), so without a
+        dedicated fail-safe its default `task_id` would fall back to the
+        same digest-of-task-description a real, non-canary dialogue over
+        the identical task resolves to — silently colliding the canary's
+        miss/catch into that mission's real telemetry stream for any
+        consumer that groups or joins by `task_id` alone (spec 0004's
+        future LearningJournal/scoreboard, most notably). Proves the two
+        never collide: the real run's `task_id` is exactly the expected
+        digest, and the canary's `task_id` is neither that digest nor equal
+        to the real run's id."""
+        task_description = "Plan the auth rewrite"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            real_plan = "The real mission's agreed plan."
+            real_invoker = _RecordingInvoker([real_plan, _approve(real_plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                task_description, real_invoker, root_dir=root
+            )
+
+            canary_invoker = _RecordingInvoker([_revise("Objection.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                task_description, canary_invoker, root_dir=root, is_canary=True
+            )
+
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(len(records), 2)
+        real_task_id = records[0]["task_id"]
+        canary_task_id = records[1]["task_id"]
+        expected_real_digest = advisory_consultation._default_task_id(task_description)
+        self.assertEqual(real_task_id, expected_real_digest)
+        self.assertNotEqual(canary_task_id, expected_real_digest)
+        self.assertNotEqual(canary_task_id, real_task_id)
+
+
+class DialogueBudgetLadderTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 09: `resolve_degradation_rung` is
+    a pure function over a caller-tracked session-spend counter and the
+    configured `dialogue_budget.session_dialogue_cap`, config-driven rather
+    than a hardcoded literal — mirroring `is_canary_dialogue`'s identical
+    `_load_canary_cadence_config` pattern. Thresholds fall at multiples of
+    the cap: spend under 1x the cap is rung 0, 1x-2x is rung 1, 2x-3x is
+    rung 2, 3x and beyond is rung 3 — see the module comment above
+    `DegradationRung` for the full reasoning.
+    """
+
+    def test_well_under_the_cap_is_rung_zero(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(0), 0)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap // 2), 0)
+
+    def test_fires_rung_one_exactly_at_the_cap_boundary(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap - 1), 0)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap), 1)
+
+    def test_rung_one_holds_up_to_but_not_including_twice_the_cap(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(2 * cap - 1), 1)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(2 * cap), 2)
+
+    def test_rung_two_holds_up_to_but_not_including_three_times_the_cap(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap - 1), 2)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap), 3)
+
+    def test_rung_three_holds_for_any_spend_at_or_beyond_three_times_the_cap(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap), 3)
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(100 * cap), 3)
+
+    def test_negative_spend_is_always_rung_zero(self) -> None:
+        """A caller passing a negative spend is under budget by construction —
+        `resolve_degradation_rung` never raises for it (see its docstring)."""
+        self.assertEqual(advisory_consultation.resolve_degradation_rung(-5), 0)
+
+    def test_cap_is_read_from_injected_config_not_hardcoded(self) -> None:
+        """Same proof style as
+        `CanaryCadencePredicateTests.test_dialogue_count_threshold_is_read_from_injected_config_not_hardcoded`:
+        inject two different configs and observe the rung answer flip for
+        the exact same spend, showing the cap is genuinely read from config
+        rather than merely referenced by key."""
+        with tempfile.TemporaryDirectory() as tmp:
+            low_config = Path(tmp) / "low.json"
+            low_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 2}})
+            )
+            high_config = Path(tmp) / "high.json"
+            high_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 2000}})
+            )
+
+            rung_low = advisory_consultation.resolve_degradation_rung(
+                5, config_path=low_config
+            )
+            rung_high = advisory_consultation.resolve_degradation_rung(
+                5, config_path=high_config
+            )
+
+        self.assertEqual(rung_low, 2)  # 5 is >= 2*2 and < 3*2 -> rung 2
+        self.assertEqual(rung_high, 0)
+
+    def test_zero_cap_degenerates_to_always_rung_three(self) -> None:
+        """A session with no budget at all has no room for any dialogue —
+        see the module comment above `DegradationRung` for why this is the
+        correct reading rather than a special case the function must guard."""
+        with tempfile.TemporaryDirectory() as tmp:
+            zero_config = Path(tmp) / "zero.json"
+            zero_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 0}})
+            )
+            self.assertEqual(
+                advisory_consultation.resolve_degradation_rung(0, config_path=zero_config),
+                3,
+            )
+            self.assertEqual(
+                advisory_consultation.resolve_degradation_rung(5, config_path=zero_config),
+                3,
+            )
+
+
+class DegradedRosterModelTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 09 (revised): `_load_degraded_roster_model`
+    reads rung 2's substitute model from `routing-config.json`'s existing
+    `light_doer` role block — `light_doer.name` lists several
+    interchangeable alternatives (e.g. "Codex 5.6 Terra / Luna / Gemini 3.6
+    Flash (Low)"), and this function reads the first one, the same
+    "first is primary" convention `DEFAULT_ROSTER_FALLBACK_CHAINS` already
+    establishes for its own ordered tuples.
+    """
+
+    def test_reads_the_first_alternative_from_light_doer_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"light_doer": {"name": "Model A / Model B / Model C"}})
+            )
+            self.assertEqual(
+                advisory_consultation._load_degraded_roster_model(config_path),
+                "Model A",
+            )
+
+    def test_falls_back_to_default_when_light_doer_section_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(json.dumps({}))
+            self.assertEqual(
+                advisory_consultation._load_degraded_roster_model(config_path),
+                advisory_consultation._DEFAULT_DEGRADED_ROSTER_MODEL,
+            )
+
+    def test_falls_back_to_default_when_the_first_alternative_is_blank(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.json"
+            config_path.write_text(
+                json.dumps({"light_doer": {"name": " / Model B"}})
+            )
+            self.assertEqual(
+                advisory_consultation._load_degraded_roster_model(config_path),
+                advisory_consultation._DEFAULT_DEGRADED_ROSTER_MODEL,
+            )
+
+    def test_checked_in_config_resolves_to_codex_terra(self) -> None:
+        """Pins the checked-in `routing-config.json`'s current
+        `light_doer.name` value so a future edit to that block is caught
+        here rather than silently changing what rung 2 substitutes."""
+        self.assertEqual(
+            advisory_consultation._load_degraded_roster_model(
+                advisory_consultation._CONFIG_PATH
+            ),
+            "Codex 5.6 Terra",
+        )
+
+
+class AdvisoryBudgetDegradationTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 09: `session_spend_so_far`/
+    `budget_config_path` wired into `run_advisory_consultation_debate`.
+    `session_spend_so_far` defaults to `0`, which always resolves to rung 0
+    for any positive configured cap, so every pre-existing test in this
+    file never mentions this parameter and continues to invoke exactly the
+    rounds/effort it always did — the entire pre-existing suite is this
+    ticket's regression guard that the opt-in changes nothing when a caller
+    does not ask for it, mirroring ticket 07's and ticket 08's identical
+    regression argument for their own opt-in seams.
+
+    The checked-in `routing-config.json` sets `dialogue_budget.session_dialogue_cap`
+    to `10`, matching `DEFAULT_SESSION_DIALOGUE_CAP` exactly — these tests
+    read `DEFAULT_SESSION_DIALOGUE_CAP` rather than hardcoding `10`, so they
+    stay correct even if that checked-in value and the default are ever
+    changed together.
+    """
+
+    def test_normal_run_carries_no_degradation_marker_and_reports_rung_zero(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", _approve("Planner's plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=0,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(result.degradation_rung, 0)
+        self.assertTrue(result.consensus_reached)
+        self.assertNotIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertEqual(records[0]["degradation_rung"], 0)
+
+    def test_sensitivity_halt_takes_priority_over_the_budget_ladder(self) -> None:
+        """The sensitivity gate 'still precedes everything' (spec 0003's own
+        phrase) — a session deep into budget exhaustion must still halt on
+        sensitive task text before the budget ladder is ever consulted, and
+        report no degradation for a dialogue that never ran, exactly like
+        `AdvisoryRosterIntegrationTests` already proves for roster
+        resolution."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite using api_key=sk-abc123",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertEqual(result.degradation_rung, 0)
+        self.assertEqual(invoker.calls, [])
+
+    def test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls(
+        self,
+    ) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's second plan.",
+                    _revise("Still thin."),
+                    "Planner's third plan.",
+                    _revise("Not convinced."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                session_spend_so_far=cap,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertEqual(result.degradation_rung, 1)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertLess(result.rounds_run, 3)
+        self.assertEqual(len(invoker.calls), 2)
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+
+    def test_rung_one_reduces_rounds_in_panel_topology_too(self) -> None:
+        """The round reduction is a plain `max_rounds` reassignment the
+        round loop already reads regardless of topology — proves it holds
+        for the panel loop (spec 0003 ticket 05) as well as the pair loop."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Claude Opus 5 (Thinking)": ["Planner's plan."],
+                    "Codex 5.6 Sol": [_revise("Critic A objects.")],
+                    "Gemini 3.6 Flash": [_revise("Critic B objects.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                max_rounds=3,
+                session_spend_so_far=cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 1)
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(len(invoker.calls), 3)
+        self.assertEqual(result.outcome, "stalemate")
+
+    def test_rung_two_cheapens_effort_observable_in_invoker_calls(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                planner_effort="high",
+                critic_effort="high",
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        # Rungs compound: rung 2 still carries rung 1's reduced round cap.
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(len(invoker.calls), 2)
+        efforts = {effort for _model, effort, _prompt in invoker.calls}
+        self.assertEqual(efforts, {advisory_consultation._DEGRADED_EFFORT})
+        self.assertNotIn("high", efforts)
+
+    def test_rung_two_changes_both_effort_and_model_sent_to_invoke_worker(
+        self,
+    ) -> None:
+        """Ticket 09 (revised): the ticket's own 'What to build' prose is
+        specific — rung 2 must 'cheapen the roster (e.g. fall back toward
+        lighter/local families)', not only lower effort. This proves the
+        `model` argument `invoke_worker` actually receives changes too, to
+        `_load_degraded_roster_model`'s substitute (drawn from
+        `routing-config.json`'s `light_doer` block), never the caller's own
+        explicit `planner_model`/`critic_model`."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        expected_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                planner_effort="high",
+                critic_effort="high",
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertNotEqual(expected_model, "Claude Opus 5 (Thinking)")
+        self.assertNotEqual(expected_model, "Codex 5.6 Sol")
+        self.assertEqual(len(invoker.calls), 2)
+        for model, effort, _prompt in invoker.calls:
+            self.assertEqual(model, expected_model)
+            self.assertEqual(effort, advisory_consultation._DEGRADED_EFFORT)
+        self.assertEqual(result.planner_model, expected_model)
+        self.assertEqual(result.critic_model, expected_model)
+
+    def test_rung_two_model_override_wins_over_an_already_resolved_roster(
+        self,
+    ) -> None:
+        """Rung 2's model substitution is applied AFTER roster resolution
+        specifically so it wins even when `reachability_check` also
+        resolved a roster for this call — budget exhaustion is a
+        stronger, later-stage override than family independence. Proves
+        that every `invoke_worker` call carries the degraded model, not
+        whatever `resolve_roster` would otherwise have picked — and that
+        the resulting family collapse is reported rather than denied:
+        one substituted model in every seat is a single-family roster by
+        construction, so `degraded_independence` must read True (spec
+        0003 story 14) even though `resolve_roster` itself had three
+        distinct reachable families to work with."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        expected_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        called_models = {model for model, _e, _p in invoker.calls}
+        self.assertEqual(called_models, {expected_model})
+        self.assertTrue(result.degraded_independence)
+        self.assertEqual(result.planner_model, expected_model)
+        self.assertEqual(result.critic_model, expected_model)
+
+    def test_rung_two_still_reaches_consensus_when_the_critic_approves_round_one(
+        self,
+    ) -> None:
+        """Degradation limits retries, it does not block a genuine consensus
+        that arrives on the first (and, at this rung, only) round."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=2 * cap,
+            )
+            written_plan = (root / "implementation_plan.md").read_text()
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(written_plan, plan)
+
+    def test_rung_three_skips_the_dialogue_entirely_with_zero_worker_calls(
+        self,
+    ) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertEqual(result.degradation_rung, 3)
+        self.assertFalse(result.consensus_reached)
+        self.assertEqual(result.final_plan, "")
+        self.assertFalse((root / "implementation_plan.md").exists())
+        self.assertIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertIn("Outcome:** budget_skipped", transcript)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "budget_skipped")
+        self.assertEqual(records[0]["degradation_rung"], 3)
+
+    def test_rung_three_removes_a_pre_existing_stale_plan_artifact(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan_path = root / "implementation_plan.md"
+            plan_path.write_text("stale plan from an earlier run")
+
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                _RecordingInvoker([]),
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+            )
+
+            self.assertFalse(plan_path.exists())
+        self.assertEqual(result.outcome, "budget_skipped")
+
+    def test_rung_three_preempts_an_is_canary_call_with_zero_invoker_calls(
+        self,
+    ) -> None:
+        """Design decision: a fully exhausted budget skips the dialogue
+        unconditionally, even for a call that also opted into `is_canary` —
+        a canary probe still contacts a real Critic, and rung 3 exists
+        specifically to guarantee zero worker contact this call. See this
+        ticket's report for why the two seams compose this way rather than
+        canaries bypassing the budget ladder."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                session_spend_so_far=3 * cap,
+            )
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertNotEqual(result.outcome, "canary")
+        self.assertIsNone(result.canary_result)
+        self.assertEqual(invoker.calls, [])
+
+    def test_budget_config_path_is_genuinely_injected_end_to_end(self) -> None:
+        """Same proof style as the roster/canary config-injection tests:
+        point `budget_config_path` at a small-cap config and observe the
+        end-to-end outcome flip to `budget_skipped` for a spend that the
+        checked-in `routing-config.json` (cap 10) would not skip at all."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            small_cap_config = Path(tmp) / "small_cap.json"
+            small_cap_config.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 1}})
+            )
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=3,
+                budget_config_path=small_cap_config,
+            )
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertEqual(result.degradation_rung, 3)
+        self.assertEqual(invoker.calls, [])
+
+    def test_a_caller_walking_session_spend_through_the_ladder_sees_progressively_worse_rungs(
+        self,
+    ) -> None:
+        """Characterizes the caller-tracked pattern the ticket's 'A session
+        tracks cumulative dialogue spend against the configured budget'
+        criterion describes. This module holds no state of its own (see the
+        module comment above `DegradationRung`), so this test plays the
+        caller: it increments its own counter across successive calls and
+        observes the rung climb the ladder exactly as
+        `resolve_degradation_rung` documents, all the way to the rung-3
+        skip."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        spends_and_expected_rungs = [
+            (0, 0),
+            (cap - 1, 0),
+            (cap, 1),
+            (2 * cap - 1, 1),
+            (2 * cap, 2),
+            (3 * cap - 1, 2),
+            (3 * cap, 3),
+        ]
+        observed_rungs = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            for session_spend, _expected in spends_and_expected_rungs:
+                if session_spend < 3 * cap:
+                    plan = "Planner's plan."
+                    invoker: _RecordingInvoker = _RecordingInvoker(
+                        [plan, _approve(plan)]
+                    )
+                else:
+                    invoker = _RecordingInvoker([])
+                result = advisory_consultation.run_advisory_consultation_debate(
+                    "Plan the auth rewrite",
+                    invoker,
+                    root_dir=root,
+                    session_spend_so_far=session_spend,
+                )
+                observed_rungs.append(result.degradation_rung)
+
+        self.assertEqual(
+            observed_rungs, [expected for _spend, expected in spends_and_expected_rungs]
+        )
+
+    def test_rung_two_reports_degraded_independence_in_result_and_telemetry(
+        self,
+    ) -> None:
+        """Spec 0003 story 14: a same-family fallback must be recorded as
+        degraded independence, whatever mechanism caused it. Rung 2
+        substitutes one model into every seat — a single-family roster by
+        construction, one model reviewing its own plan — so the flag must
+        read True on the result and in the telemetry record even when no
+        `reachability_check` was supplied at all (mirrors
+        `test_degraded_independence_surfaces_in_telemetry_record`, the
+        ticket-07 roster-path version of this same assertion)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=2 * cap,
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertTrue(result.degraded_independence)
+        self.assertEqual(len(records), 1)
+        self.assertTrue(records[0]["degraded_independence"])
+
+    def test_rung_two_reports_degraded_independence_in_transcript_text(self) -> None:
+        """The transcript half of story 14: a rung-2 dialogue's transcript
+        carries the exact same degraded-independence line the roster path
+        emits — the flag flows through `_result` into the one rendering
+        `DEGRADED_INDEPENDENCE_MARKER` already gates on, never a second,
+        rung-2-only rendering (mirrors
+        `test_degraded_independence_surfaces_in_transcript_text`)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=2 * cap,
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+
+    def test_rung_two_reports_degraded_independence_in_panel_topology_too(
+        self,
+    ) -> None:
+        """Panel mode collapses three seats — Planner, Critic A, Critic B —
+        into the one substituted model at rung 2, so the single-family-by-
+        construction argument holds there identically: both Critics are the
+        same model as the Planner whose plan they judge, and the flag must
+        say so."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker(
+                [
+                    plan,
+                    _approve(plan, "Critic A: solid."),
+                    _approve(plan, "Critic B: solid."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertEqual(result.topology, "panel")
+        self.assertEqual(len(invoker.calls), 3)
+        self.assertTrue(result.degraded_independence)
+
+    def test_rung_two_canary_reports_degraded_independence_by_design(self) -> None:
+        """Pins the canary × rung-2 combination as designed behavior, not an
+        accident: an `is_canary=True` run at rung 2 reports
+        `degraded_independence=True` even though a canary invokes only the
+        Critic role. The flag states the effective roster's family collapse
+        — rung 2 substituted the one cheap model into every seat, and the
+        one seat this probe actually used got that degraded model — so on a
+        canary record it carries exactly the signal a canary auditor needs:
+        this probe measured the degraded cheap Critic, not the production
+        Critic. And it can never distort mission-level statistics, because
+        canary records are mandatorily filtered out of mission aggregation
+        (`outcome != "canary"`, per `AdvisoryTelemetryRecord`'s own
+        WARNING) — the flag rides only where the canary auditor looks."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        degraded_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_approve_fixture(fixture)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                canary_fixture=fixture,
+                session_spend_so_far=2 * cap,
+            )
+            records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.degradation_rung, 2)
+        self.assertTrue(result.degraded_independence)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "canary")
+        self.assertTrue(records[0]["degraded_independence"])
+        self.assertEqual(len(invoker.calls), 1)
+        self.assertEqual(invoker.calls[0][0], degraded_model)
+
+    def test_rung_three_canary_leaves_a_real_missions_plan_artifact_untouched(
+        self,
+    ) -> None:
+        """The artifact half of the canary × rung-3 composition. The
+        preemption half is already pinned above
+        (`test_rung_three_preempts_an_is_canary_call_with_zero_invoker_calls`):
+        a fully exhausted budget skips even a canary probe, with zero worker
+        calls. But the stale-plan cleanup a real mission's rung-3 exit
+        performs must NOT run for a preempted canary — the module's canary
+        invariant says a canary never creates nor deletes
+        `implementation_plan.md`, and the plan sitting under `root_dir` here
+        is a REAL result's artifact, still accurately described by that real
+        result. A scheduled probe that happens to arrive while the session
+        is exhausted has no business destroying it."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        real_plan = "Real mission's consensus plan — still current.\n"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan_path = root / "implementation_plan.md"
+            plan_path.write_text(real_plan)
+
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                canary_fixture=fixture,
+                session_spend_so_far=3 * cap,
+            )
+
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(plan_path.read_bytes(), real_plan.encode("utf-8"))
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertEqual(invoker.calls, [])
+
+
+class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 10: `AdvisoryTelemetryRecord`
+    gains occasion, topology, per-round verdict sequence, and per-round
+    engagement-unit counts — the fields tickets 01/05 already put on
+    `AdvisoryDebateResult` (occasion, topology) or already compute and
+    discard mid-loop (`_parse_critic_verdict`'s `VerdictContractResult`
+    per round), now retained and threaded through to the telemetry record.
+    Every pre-ticket-10 telemetry test in `AdvisoryTranscriptAndTelemetryTests`,
+    `AdvisorySeededFlawCanaryTests`, and `AdvisoryBudgetDegradationTests`
+    keeps passing unmodified — this class only adds coverage, per the
+    append-only convention every prior ticket in this module already set.
+    """
+
+    TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
+
+    def test_pair_mode_telemetry_carries_occasion_and_pair_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.topology, "pair")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["occasion"], "plan-review")
+        self.assertEqual(records[0]["topology"], "pair")
+
+    def test_panel_mode_telemetry_carries_occasion_and_panel_topology(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's proposed plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan, "Critic A: solid.")],
+                    "Test Critic B": [_approve(plan, "Critic B: solid.")],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.topology, "panel")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["occasion"], "plan-review")
+        self.assertEqual(records[0]["topology"], "panel")
+
+    def test_pair_mode_two_round_telemetry_carries_a_two_element_round_sequence(
+        self,
+    ) -> None:
+        """A two-round pair consultation's telemetry carries exactly two
+        per-round entries, each holding one verdict plus its own engagement
+        counts — never a single flattened tally across both rounds."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "Planner's first plan."
+            second_plan = "Planner's revised plan."
+            invoker = _RecordingInvoker(
+                [
+                    first_plan,
+                    _revise("Needs more detail."),
+                    second_plan,
+                    _approve(second_plan, "Good now."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.rounds_run, 2)
+        self.assertEqual(len(result.round_verdicts), 2)
+
+        round_verdicts = records[0]["round_verdicts"]
+        self.assertEqual(len(round_verdicts), 2)
+
+        first_round, second_round = round_verdicts
+        self.assertEqual(first_round["critic_a"]["verdict"], "revise")
+        self.assertEqual(first_round["critic_a"]["verified_quote_count"], 0)
+        self.assertEqual(first_round["critic_a"]["objection_count"], 0)
+        self.assertIsNone(first_round["critic_b"])
+
+        self.assertEqual(second_round["critic_a"]["verdict"], "approved")
+        self.assertEqual(second_round["critic_a"]["verified_quote_count"], 1)
+        self.assertEqual(second_round["critic_a"]["objection_count"], 0)
+        self.assertIsNone(second_round["critic_b"])
+
+    def test_panel_mode_round_telemetry_carries_both_critics_distinguishably(
+        self,
+    ) -> None:
+        """A panel round's per-round element holds BOTH Critics' verdicts and
+        counts, and the two are distinguishable from one another — not
+        folded into one shared tally."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "Planner's first plan."
+            second_plan = "Planner's revised plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [first_plan, second_plan],
+                    "Test Critic A": [
+                        _approve(first_plan, "A: fine as-is."),
+                        _approve(second_plan, "A: still fine."),
+                    ],
+                    "Test Critic B": [
+                        _revise("B: needs a rollback plan."),
+                        _approve(second_plan, "B: rollback addressed."),
+                    ],
+                }
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.rounds_run, 2)
+        round_verdicts = records[0]["round_verdicts"]
+        self.assertEqual(len(round_verdicts), 2)
+
+        first_round, second_round = round_verdicts
+        self.assertEqual(first_round["critic_a"]["verdict"], "approved")
+        self.assertEqual(first_round["critic_a"]["verified_quote_count"], 1)
+        self.assertEqual(first_round["critic_b"]["verdict"], "revise")
+        self.assertEqual(first_round["critic_b"]["verified_quote_count"], 0)
+        self.assertNotEqual(
+            first_round["critic_a"]["verdict"], first_round["critic_b"]["verdict"]
+        )
+
+        self.assertEqual(second_round["critic_a"]["verdict"], "approved")
+        self.assertEqual(second_round["critic_b"]["verdict"], "approved")
+
+    def test_canary_round_verdicts_carries_the_single_critic_verdict_and_pair_topology(
+        self,
+    ) -> None:
+        """A canary probes exactly one Critic (ticket 08) and never runs a
+        real Planner round. Its `round_verdicts` still carries that one
+        Critic's verdict+counts (critic_b stays None, same pair-mode shape a
+        real pair round uses) and `topology` reports "pair" — never "panel"
+        — even under an occasion/complexity combination that would
+        otherwise select a panel, because a canary genuinely never invokes a
+        second Critic. `canary_result` (ticket 08) remains the authoritative
+        miss/catch summary; `round_verdicts` is the same generic verdict
+        data every other outcome carries, not a competing signal."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([_revise("Objection.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                is_canary=True,
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "catch")
+        self.assertEqual(result.topology, "pair")
+        self.assertEqual(len(result.round_verdicts), 1)
+
+        record = records[0]
+        self.assertEqual(record["topology"], "pair")
+        self.assertEqual(record["canary_result"], "catch")
+        self.assertEqual(len(record["round_verdicts"]), 1)
+        self.assertEqual(record["round_verdicts"][0]["critic_a"]["verdict"], "revise")
+        self.assertIsNone(record["round_verdicts"][0]["critic_b"])
+
+    def test_stalemate_and_worker_error_and_sensitivity_halt_still_carry_topology(
+        self,
+    ) -> None:
+        """Every outcome — not just consensus/canary — carries a topology,
+        since `_is_panel_topology` is resolved unconditionally at the top of
+        the function, before the sensitivity gate, the budget check, or any
+        worker is ever contacted."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            halt_result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the rollout, password=hunter2",
+                _RecordingInvoker([]),
+                root_dir=root,
+            )
+
+        self.assertEqual(halt_result.outcome, "sensitivity_halt")
+        self.assertEqual(halt_result.topology, "pair")
+        self.assertEqual(halt_result.round_verdicts, ())
+
+    def test_pre_ticket_10_direct_construction_still_defaults_correctly(self) -> None:
+        """Mirrors `test_occasion_field_defaults_to_ambiguity_on_direct_construction`:
+        a pre-ticket-10 direct `AdvisoryDebateResult(...)`/`AdvisoryTelemetryRecord(...)`
+        construction that never mentions `topology` or `round_verdicts` must
+        keep meaning exactly what it meant before those fields existed."""
+        result = advisory_consultation.AdvisoryDebateResult(
+            rounds_run=1, final_plan="A plan.", outcome="consensus"
+        )
+        self.assertEqual(result.topology, "pair")
+        self.assertEqual(result.round_verdicts, ())
+
+        record = advisory_consultation.AdvisoryTelemetryRecord(
+            timestamp="2026-01-01T00:00:00Z",
+            task_id="abc123",
+            rounds_run=1,
+            outcome="consensus",
+            planner_model="Test Planner",
+            critic_model="Test Critic",
+        )
+        self.assertEqual(record.occasion, "ambiguity")
+        self.assertEqual(record.topology, "pair")
+        self.assertEqual(record.round_verdicts, ())
+
+    def test_round_verdicts_carry_no_substring_of_a_distinctive_task_description(
+        self,
+    ) -> None:
+        """Redaction test (ticket 10's own acceptance criterion): the
+        per-round telemetry data is verdicts and engagement-unit counts
+        only — never plan/critique prose, and never the task text or a
+        substring of it. A distinctive task description makes an accidental
+        leak (of the task text, or of the Planner/Critic prose that
+        discusses it) trivially detectable rather than coincidentally
+        matching short common words."""
+        distinctive_task = (
+            "Plan the ZEBRA-QUASAR-77 migration for the northwind-prod cluster"
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "First plan mentioning ZEBRA-QUASAR-77 explicitly."
+            second_plan = "Second plan, still about ZEBRA-QUASAR-77."
+            invoker = _RecordingInvoker(
+                [
+                    first_plan,
+                    _revise("ZEBRA-QUASAR-77 needs a rollback section."),
+                    second_plan,
+                    _approve(second_plan, "ZEBRA-QUASAR-77 rollback looks good now."),
+                ]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                distinctive_task, invoker, root_dir=root
+            )
+            telemetry_text = (root / self.TELEMETRY_RELATIVE_PATH).read_text()
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        round_verdicts_json = json.dumps(records[0]["round_verdicts"])
+        for leak in (distinctive_task, "ZEBRA-QUASAR-77", "rollback"):
+            self.assertNotIn(leak, round_verdicts_json)
+        # And the belt-and-suspenders whole-record check every other
+        # redaction test in this file uses (see
+        # `test_redaction_boundary_secret_reaches_neither_artifact`).
+        self.assertNotIn(distinctive_task, telemetry_text)
+        self.assertNotIn("ZEBRA-QUASAR-77", telemetry_text)
+
+    def test_existing_spec_0001_telemetry_fields_are_unchanged(self) -> None:
+        """Acceptance criterion: existing spec-0001 telemetry fields and
+        their tests are unchanged. Same assertions as
+        `test_telemetry_record_carries_task_identity_rounds_outcome_and_models`,
+        re-run here as a ticket-10 characterization pin."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's revised plan.",
+                    _approve("Planner's revised plan.", "Good now."),
+                ]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                planner_model="Test Planner",
+                critic_model="Test Critic",
+                task_id="ticket-10-demo",
+            )
+            records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["task_id"], "ticket-10-demo")
+        self.assertEqual(record["rounds_run"], 2)
+        self.assertEqual(record["outcome"], "consensus")
+        self.assertEqual(record["planner_model"], "Test Planner")
+        self.assertEqual(record["critic_model"], "Test Critic")
+        self.assertIn("timestamp", record)
+
+
+class IsLocalFamilyTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 11: `is_local_family`, the pure
+    predicate the sensitive-task roster wrapper (see
+    `SensitiveTaskLocalOnlyDialogueTests` below) is built from. Tested here
+    on its own, standalone, the same way `ModelFamilyClassifierTests` above
+    tests `classify_model_family` on its own — a pure function earns its
+    own focused test class before it earns an integration test through the
+    full debate loop.
+    """
+
+    def test_every_cloud_family_reads_as_not_local(self) -> None:
+        """`is_local_family` is documented as derived from
+        `_CLOUD_FAMILY_SUBSTRINGS` rather than a second, hand-written list
+        of cloud names — this asserts against that constant directly (not
+        a copy-pasted `{"claude", "gemini", "codex-gpt"}` literal) so the
+        test itself cannot silently drift from the source it is meant to
+        guard, and separately pins today's known cloud vocabulary so a
+        change to that vocabulary is visible here too."""
+        cloud_families = {
+            family
+            for _substring, family in advisory_consultation._CLOUD_FAMILY_SUBSTRINGS
+        }
+        self.assertEqual(cloud_families, {"claude", "gemini", "codex-gpt"})
+        for family in cloud_families:
+            with self.subTest(family=family):
+                self.assertFalse(advisory_consultation.is_local_family(family))
+
+    def test_local_lineages_read_as_local(self) -> None:
+        for family in ("gemma", "qwen", "llama", "mistral", "unknown"):
+            with self.subTest(family=family):
+                self.assertTrue(advisory_consultation.is_local_family(family))
+
+    def test_agrees_with_classify_model_family_for_every_default_roster_model(
+        self,
+    ) -> None:
+        """Drift guard spanning both functions at once: for every model
+        name this module's own `DEFAULT_ROSTER_FALLBACK_CHAINS` actually
+        names, `is_local_family(classify_model_family(model))` must agree
+        with which of those models are genuinely local — proving the two
+        functions stay consistent with each other in practice, not merely
+        individually correct in isolation."""
+        cloud_models = (
+            "Claude Opus 5 (Thinking)",
+            "Claude Fable 5",
+            "Codex 5.6 Sol",
+            "GPT-OSS 120B (Medium)",
+            "Gemini 3.6 Flash (High)",
+            "Gemini 3.1 Pro (High)",
+            "Gemini 3.6 Flash",
+        )
+        local_models = ("Gemma 4 E4B", "Qwen3-Coder-Next")
+        for model in cloud_models:
+            with self.subTest(model=model):
+                self.assertFalse(
+                    advisory_consultation.is_local_family(
+                        advisory_consultation.classify_model_family(model)
+                    )
+                )
+        for model in local_models:
+            with self.subTest(model=model):
+                self.assertTrue(
+                    advisory_consultation.is_local_family(
+                        advisory_consultation.classify_model_family(model)
+                    )
+                )
+
+
+class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 11: the sensitivity gate
+    (`_detect_sensitivity_marker` and its fail-closed behaviour) now
+    precedes every occasion, not only ambiguity — a sensitive task may hold
+    a dialogue only between local models from two local families, and when
+    the local runtime is unavailable the consultation still fails closed
+    and escalates to the human, exactly spec 0001's original behaviour
+    (`AdvisorySensitivityGateTests`, untouched above), now proven true for
+    plan-review, code-review, and post-mortem as well.
+
+    `_ALL_FAMILIES` deliberately scripts every cloud family
+    (`claude`/`codex-gpt`/`gemini`) as reachable ALONGSIDE both local
+    families this repo's own default roster fallback chains actually offer
+    (`gemma`, `qwen` — see `DEFAULT_ROSTER_FALLBACK_CHAINS` in
+    advisory_consultation.py). Scripting the cloud families as reachable
+    too, rather than simply omitting them, is what actually proves the
+    local-only gate is doing the filtering: a test where nothing cloud was
+    ever "up" in the first place would pass even if the gate did nothing at
+    all. `_CLOUD_ONLY` is the mirror-image fake for the "local runtime is
+    unavailable" tests: everything cloud is reachable, nothing local is,
+    which is the scenario a sensitive task must fail closed against.
+    """
+
+    _ALL_FAMILIES: tuple[str, ...] = ("claude", "codex-gpt", "gemini", "gemma", "qwen")
+    _CLOUD_ONLY: tuple[str, ...] = ("claude", "codex-gpt", "gemini")
+
+    _SENSITIVE_TASK = "Rotate the api_key before the review lands"
+
+    @staticmethod
+    def _complexity_for(occasion: str) -> str:
+        """Panel topology (spec 0003 ticket 05) exists only for
+        plan-review/code-review at `complexity="complex"` (see
+        `_is_panel_topology`); ambiguity and post-mortem stay pair-mode
+        regardless of complexity. Same per-occasion choice
+        `AdvisoryOccasionParameterizationTests` already makes for its own
+        cross-occasion loop above."""
+        return "complex" if occasion in ("plan-review", "code-review") else "medium"
+
+    def test_criterion_1_zero_cloud_family_calls_across_all_four_occasions(self) -> None:
+        """Acceptance criterion 1: a sensitive task's dialogue on every
+        occasion invokes zero cloud-family workers — verified by
+        classifying what the recording fake actually recorded
+        (`classify_model_family` on the real `model` argument), never by
+        string-matching model names."""
+        for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                complexity = self._complexity_for(occasion)
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    plan = "Planner's plan for the sensitive task."
+                    responses: list[str | Exception]
+                    if complexity == "complex":
+                        responses = [
+                            plan,
+                            _approve(plan, "Critic A: solid."),
+                            _approve(plan, "Critic B: solid."),
+                        ]
+                    else:
+                        responses = [plan, _approve(plan)]
+                    invoker = _RecordingInvoker(responses)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        self._SENSITIVE_TASK,
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                        complexity=complexity,
+                        reachability_check=_reachable(*self._ALL_FAMILIES),
+                    )
+
+                self.assertTrue(result.consensus_reached)
+                self.assertTrue(invoker.calls)
+                called_families = {
+                    advisory_consultation.classify_model_family(model)
+                    for model, _effort, _prompt in invoker.calls
+                }
+                for family in called_families:
+                    self.assertTrue(
+                        advisory_consultation.is_local_family(family),
+                        f"occasion {occasion!r} invoked cloud family {family!r}",
+                    )
+
+    def test_criterion_2_local_runtime_unavailable_fails_closed_across_all_four_occasions(
+        self,
+    ) -> None:
+        """Acceptance criterion 2: with `reachability_check` supplied but
+        reporting only cloud families up, a sensitive task fails closed and
+        escalates — `sensitivity_halt`, zero worker calls, no
+        `implementation_plan.md` — matching spec 0001's existing
+        ambiguity-occasion behaviour, for all four occasions."""
+        for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                complexity = self._complexity_for(occasion)
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker([])
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        self._SENSITIVE_TASK,
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                        complexity=complexity,
+                        reachability_check=_reachable(*self._CLOUD_ONLY),
+                    )
+                    plan_exists = (root / "implementation_plan.md").exists()
+
+                self.assertEqual(result.outcome, "sensitivity_halt")
+                self.assertEqual(invoker.calls, [])
+                self.assertFalse(plan_exists)
+
+    def test_criterion_3_sensitive_panel_spans_two_distinct_local_families(self) -> None:
+        """Acceptance criterion 3: a sensitive panel (Complex tier) must
+        not collapse to one local family serving all three roles when a
+        second local family is actually reachable. This repo's own default
+        `roster_topology.role_fallback_chains` offer exactly two distinct
+        local families across all three roles (`gemma` for planner and
+        critic_b, `qwen` for critic_a — see `DEFAULT_ROSTER_FALLBACK_CHAINS`
+        in advisory_consultation.py), so "two distinct, not one" is the
+        strongest claim provable against the real production config without
+        hand-rolling a custom one for this test.
+
+        Because that real chain resolves planner=gemma, critic_a=qwen,
+        critic_b=gemma, `critic_b`'s own preferred family (`gemma`) is
+        already claimed by `planner` by the time `resolve_roster` reaches
+        it, so it can only be assigned via `resolve_roster`'s second,
+        degraded pass — `result.degraded_independence` must therefore read
+        `True` here. Asserting that, not just the family count above, is
+        what proves the flag itself stays honest for this exact roster
+        rather than merely going unexamined by this test."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan for the sensitive task."
+            invoker = _RecordingInvoker(
+                [
+                    plan,
+                    _approve(plan, "Critic A: solid."),
+                    _approve(plan, "Critic B: solid."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                reachability_check=_reachable(*self._ALL_FAMILIES),
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(len(invoker.calls), 3)
+        called_families = [
+            advisory_consultation.classify_model_family(model)
+            for model, _effort, _prompt in invoker.calls
+        ]
+        distinct_families = set(called_families)
+        self.assertGreaterEqual(
+            len(distinct_families),
+            2,
+            f"panel reused one local family for all three roles: {called_families!r}",
+        )
+        for family in distinct_families:
+            self.assertTrue(advisory_consultation.is_local_family(family))
+        self.assertTrue(
+            result.degraded_independence,
+            "planner and critic_b both resolve to gemma against the real "
+            "routing-config.json chains, so this roster is degraded and "
+            "must say so",
+        )
+
+    def test_criterion_4_rung_two_drops_effort_but_never_the_local_roster(self) -> None:
+        """Regression guard for the rung-2 carve-out (design point 4 of
+        this ticket): budget exhaustion may still cheapen a sensitive
+        dialogue's effort, but must never launder it onto
+        `_load_degraded_roster_model`'s substitute, which resolves to a
+        CLOUD model (`light_doer.name` in routing-config.json)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cloud_light_doer_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                reachability_check=_reachable(*self._ALL_FAMILIES),
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        # Rungs compound: rung 2 still carries rung 1's reduced round cap.
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(len(invoker.calls), 2)
+        efforts = {effort for _model, effort, _prompt in invoker.calls}
+        self.assertEqual(efforts, {advisory_consultation._DEGRADED_EFFORT})
+        called_models = {model for model, _effort, _prompt in invoker.calls}
+        self.assertNotIn(cloud_light_doer_model, called_models)
+        for model in called_models:
+            family = advisory_consultation.classify_model_family(model)
+            self.assertTrue(
+                advisory_consultation.is_local_family(family),
+                f"rung 2 invoked non-local model {model!r} (family {family!r}) "
+                "on a sensitive task",
+            )
+
+    def test_criterion_5_no_reachability_check_still_halts_closed_pinned_regression(
+        self,
+    ) -> None:
+        """Pins spec 0001's original, unconditional halt
+        (`AdvisorySensitivityGateTests` above) as this ticket's own
+        regression guard, so a future edit cannot quietly change it:
+        omitting `reachability_check` gives this module no way to
+        establish a local runtime exists at all, so "fail closed" remains
+        the only honest answer — completely unaffected by this ticket's new
+        local-only roster path, which only ever activates once a
+        `reachability_check` seam is actually supplied."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", _approve("Planner's plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                self._SENSITIVE_TASK, invoker, root_dir=root
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertEqual(invoker.calls, [])
+
+    def test_criterion_6_roster_exhaustion_halt_never_leaks_task_text_or_secret(
+        self,
+    ) -> None:
+        """The redaction boundary `_detect_sensitivity_marker`/
+        `_render_sensitivity_halt_transcript` establish for the
+        `reachability_check is None` halt path must hold just as tightly
+        for this ticket's new halt path — a `RosterResolutionError` caught
+        because no local family was reachable — since both converge on the
+        identical `sensitivity_halt` outcome and the identical redacted
+        transcript renderer."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            task = "Plan the rollout; api_key=sk-supersecretvalue-do-not-print"
+            result = advisory_consultation.run_advisory_consultation_debate(
+                task,
+                _RecordingInvoker([]),
+                root_dir=root,
+                reachability_check=_reachable(*self._CLOUD_ONLY),
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertNotIn("supersecretvalue", result.error)
+        self.assertNotIn(task, result.error)
+        self.assertNotIn("supersecretvalue", transcript)
+        self.assertNotIn(task, transcript)
+
+
+class SensitiveTaskDispatchPathTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 11, closing a review finding
+    against `SensitiveTaskLocalOnlyDialogueTests` above:
+    `test_criterion_1_zero_cloud_family_calls_across_all_four_occasions`
+    proves the local-only gate inside `run_advisory_consultation_debate`
+    itself, including for `occasion="post-mortem"` — but it gets there by
+    calling that function directly with its own `reachability_check`. It
+    never goes through `dispatch_post_mortem_consultation`, which is the
+    actual production entry point for the post-mortem occasion.
+
+    Before this ticket, `dispatch_post_mortem_consultation` exposed no
+    `reachability_check`/`roster_config_path` parameters at all, so every
+    dispatched post-mortem always called `run_advisory_consultation_debate`
+    with `reachability_check=None` — which always hits that function's
+    unconditional `marker is not None and reachability_check is None` halt
+    for a sensitive task, regardless of whether a local runtime was
+    actually up. A sensitive task dispatched for post-mortem could
+    therefore never hold the local-only dialogue user story 19 requires; it
+    could only ever escalate. `SensitiveTaskLocalOnlyDialogueTests`'s own
+    criterion-1 test could not have caught that, because it never calls the
+    dispatch function at all. These tests exercise the real
+    `dispatch_post_mortem_consultation`, with its real background thread
+    and the real default `routing-config.json`, closing that gap
+    specifically.
+    """
+
+    _SENSITIVE_TASK = "Rotate the api_key before the review lands"
+    _ALL_FAMILIES: tuple[str, ...] = ("claude", "codex-gpt", "gemini", "gemma", "qwen")
+    _CLOUD_ONLY: tuple[str, ...] = ("claude", "codex-gpt", "gemini")
+
+    def test_dispatched_sensitive_post_mortem_holds_a_local_only_dialogue(self) -> None:
+        """A sensitive task dispatched through the real
+        `dispatch_post_mortem_consultation`, with every family (cloud and
+        local) reachable, actually runs the dialogue to consensus, and
+        every call the recording fake observed belongs to a local family —
+        verified by classifying the real recorded `model` argument via
+        `classify_model_family`/`is_local_family`, never by string-matching
+        model names. Scripting every cloud family as reachable too, rather
+        than omitting them, is what actually proves the dispatch path's
+        gate is filtering: a test where nothing cloud was ever "up" in the
+        first place would pass even if the gate did nothing at all (same
+        reasoning `SensitiveTaskLocalOnlyDialogueTests` documents for its
+        own `_ALL_FAMILIES`). The thread is joined before any assertion
+        runs, the same way every other dispatch test in
+        `AdvisoryBlockingStanceTests` synchronizes with the background
+        thread rather than racing it."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's post-mortem lesson for the sensitive task."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable(*self._ALL_FAMILIES),
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertTrue(invoker.calls)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "consensus")
+        called_families = {
+            advisory_consultation.classify_model_family(model)
+            for model, _effort, _prompt in invoker.calls
+        }
+        for family in called_families:
+            self.assertTrue(
+                advisory_consultation.is_local_family(family),
+                f"dispatched sensitive post-mortem invoked cloud family {family!r}",
+            )
+
+    def test_dispatched_sensitive_post_mortem_fails_closed_with_no_local_family_up(
+        self,
+    ) -> None:
+        """The mirror case: `reachability_check` is supplied, but only
+        cloud families report reachable. The dispatched debate must fail
+        closed as `sensitivity_halt` with zero worker calls and no
+        `implementation_plan.md` — the dispatch path offering a local-only
+        roster does not mean it may ever launder a sensitive task onto a
+        cloud worker merely because the caller's own probe says cloud is
+        up; "no local family reachable" must escalate exactly the way
+        `SensitiveTaskLocalOnlyDialogueTests.
+        test_criterion_2_local_runtime_unavailable_fails_closed_across_all_four_occasions`
+        already proves for the synchronous path."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable(*self._CLOUD_ONLY),
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+            plan_exists = (root / "implementation_plan.md").exists()
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "sensitivity_halt")
+        self.assertFalse(plan_exists)
+
+    def test_dispatched_sensitive_post_mortem_with_no_reachability_check_still_halts(
+        self,
+    ) -> None:
+        """Pinned regression for the dispatch path specifically, mirroring
+        `SensitiveTaskLocalOnlyDialogueTests.
+        test_criterion_5_no_reachability_check_still_halts_closed_pinned_regression`:
+        omitting `reachability_check` — still this parameter's default on
+        `dispatch_post_mortem_consultation` — must halt closed exactly as
+        it always did before this ticket added the parameter at all. Adding
+        the seam is opt-in surface, never a change to the old default
+        behaviour: a caller that upgrades to a newer signature without
+        passing the new keyword must observe byte-for-byte the same
+        fail-closed halt it always got."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "sensitivity_halt")
 
 
 if __name__ == "__main__":

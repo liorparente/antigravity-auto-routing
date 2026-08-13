@@ -22,6 +22,7 @@ jobs:
         skills/worker-routing/production_invoker.py
         skills/worker-routing/test_production_invoker.py
         skills/worker-routing/learning_outcomes.py
+        skills/worker-routing/test_lmstudio.py
       # Every test file that must actually run. Listed separately from
       # PYTHON_MODULES for the same single-sourcing reason, and because the
       # two lists answer different questions: PYTHON_MODULES is "what gets

@@ -1,6 +1,6 @@
 # Spec 0003 — CriticalDialogue: genuinely adversarial model dialogue on four occasions
 
-* Status: ready-for-agent
+* Status: Implemented
 * Date: 2026-08-11
 * Related: Spec 0001 (AdvisoryConsultation, implemented), ADR 0004, ADR 0005 Pillar 3,
   wayfinder map `self-improving-orchestrator` (tickets 02, 04, 05), research:

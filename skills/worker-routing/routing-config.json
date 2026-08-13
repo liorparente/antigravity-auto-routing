@@ -81,6 +81,13 @@
       ]
     }
   },
+  "canary_cadence": {
+    "dialogues_per_canary": 20,
+    "seconds_between_canaries": 604800
+  },
+  "dialogue_budget": {
+    "session_dialogue_cap": 10
+  },
   "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"],
   "safe_commands": [
     "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
