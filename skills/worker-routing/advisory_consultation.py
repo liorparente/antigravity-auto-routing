@@ -1976,7 +1976,7 @@ def _render_consultation_transcript(
             [
                 (
                     f"**{BUDGET_DEGRADATION_MARKER}:** This session's dialogue "
-                    f"budget was exceeded, placing this dialogue at "
+                    f"budget was met or exceeded, placing this dialogue at "
                     f"degradation rung {result.degradation_rung} "
                     f"({_DEGRADATION_RUNG_LABELS[result.degradation_rung]}). "
                     "Degradation is never silent — see this dialogue's "
@@ -2499,11 +2499,13 @@ def run_advisory_consultation_debate(
 
     A pre-existing ``implementation_plan.md`` under ``root_dir`` from an
     earlier run is removed on a ``budget_skipped`` exit and on every one
-    of the four no-consensus exits above, with one exception: a
-    ``worker_error`` that arises inside a canary run removes nothing,
-    because a canary must neither create nor delete that artifact (see
-    ``is_canary`` below). Everywhere else, the artifact on disk is never
-    staler than the result describing it.
+    of the four no-consensus exits above, with two exceptions — both
+    canary-flavored, because a canary must neither create nor delete
+    that artifact (see ``is_canary`` below): a ``budget_skipped`` exit
+    that preempted an ``is_canary`` call removes nothing, and a
+    ``worker_error`` that arises inside a canary run removes nothing
+    either. Everywhere else, the artifact on disk is never staler than
+    the result describing it.
 
     Every one of the seven outcomes — including consensus — writes a fresh,
     human-readable transcript to ``root_dir / ".scratch" / "planning_debate.md"``
