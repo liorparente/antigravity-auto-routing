@@ -49,9 +49,21 @@ without reading anything, and `_parse_critic_verdict` (`:1758-1775`) implements 
 returning `unparseable` for a bare approval regardless of `objection_count`. A summed
 `engagement_count` would therefore encode, in the metric that exists to make rubber-stamping visible,
 the precise equivalence the parser refuses three hundred lines earlier. That is a contradiction
-inside one module, not a trade-off between two defensible options. What remains genuinely open — and
-is the implementer's to decide and justify — is whether `engagement_count` should be verified quotes
-alone, or quotes-gated with objections counted only once at least one verified quote exists.
+inside one module, not a trade-off between two defensible options.
+
+**Decided 2026-08-13 — quotes-alone.** `engagement_count` is the minimum, over the round's
+*participating* Critics, of that Critic's `verified_quote_count`. Objections are not counted at all.
+The alternative considered and rejected was quotes-gated (objections counted once at least one
+verified quote exists). Two arguments carried it, and the muddled `DialogueRound` docstring wording
+was explicitly *not* one of them: a response with zero verified quotes and three objections would
+journal `engagement_count=3` for a response `_parse_critic_verdict` classifies as `unparseable` for
+carrying no engagement at all; and `min` is already the rule for this record's sibling field, since a
+panel round resolves to `approved` only when every Critic approved (`learning_journal.py:877-881`),
+so the two fields cannot disagree about whether a round was engaged. The accepted cost, stated rather
+than buried: a Critic writing five substantive objections and quoting nothing journals `0`. That is
+the safe direction of error — a false low prompts a look at a working Critic, a false high certifies
+a fabricating one — and nothing is lost system-wide, because `AdvisoryTelemetryRecord.round_verdicts`
+keeps both integers.
 
 **An absent Critic is not a silent one.** `critic_b` is `None` on every pair-mode round by
 construction — including a canary's single-Critic probe — so a reduction across Critics must not read
@@ -76,7 +88,12 @@ means every canary spec 0003 built produces a caught-or-missed result that nothi
       recomputed from text.
 - [ ] The reduction never lets objections raise `engagement_count` with no verified quote present,
       and never lets one engaged Critic mask a silent one.
-- [ ] A pair-mode round's `critic_b is None` is scored as an absent Critic, never as a silent one.
+- [ ] A pair-mode round's `critic_b is None` is scored as an absent Critic, never as a silent one —
+      the reduction runs over participating Critics, not over slots.
+- [ ] `DialogueRound`'s docstring is corrected in the same change: its redaction claim (a count,
+      never the text) stays, and its definition clause stops implying objections are units while the
+      writer excludes them. A schema and a writer that disagree is the Occasion/DialogueOccasion
+      drift again.
 - [ ] It correlates to its task by TaskIdentity — the same id the run's worker-execution records
       already journal under, so a dialogue and its invocations read together.
 - [ ] A canary probe's record is distinguishable from a real dialogue's, so aggregation can count
