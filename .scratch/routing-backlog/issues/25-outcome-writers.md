@@ -38,16 +38,34 @@ property, the way `advisory_consultation`'s journal-wiring `except` already does
 
 **Blocked by:** 14
 
-**Status:** ready-for-agent
+**Status:** done — commit `533360f`
 
-- [ ] Each of the four ground truths has a named producer: a code path that calls the entry point,
+The ticket's own framing ("the consultation already knows its own outcome") turned out to be true of
+*less* than it sounds. The first implementation followed it literally — `consensus` → accepted,
+`stalemate` → rejected, every occasion — and two independent Codex Sol reviews rejected both halves
+from opposite axes. What the consultation actually knows is narrower: that a *plan-producing*
+dialogue's Critic approved a plan. It does not know that the developer accepted it, and on a
+stalemate it knows nothing at all, since option 1 is "approve the Planner's architecture" — the human
+resolving a stalemate may be accepting the plan a `rejected` record would already have condemned.
+
+So the code path is `outcome == "consensus" and occasion in _PLAN_PRODUCING_OCCASIONS`, recording
+`accepted` only, and `plan=rejected` is a documented human step. That split has a cost worth stating
+plainly, since nothing enforces it: accepted plans record themselves and rejected ones do not, so a
+journal nobody maintains by hand drifts toward reporting that every plan was accepted.
+
+Two records for one task therefore reduce positionally — group by `task_id`, last record wins, the
+same rule `ComplianceRecord` already documents. `OutcomeRecord` carries no actor or stage field to
+make that machine-readable; adding one is ticket 14's schema, not this ticket's wiring, and is the
+obvious follow-up if the positional convention proves too weak.
+
+- [x] Each of the four ground truths has a named producer: a code path that calls the entry point,
       or a documented orchestrator step where no code path can exist.
-- [ ] A consultation that reaches a stalemate leaves a record of the option the human chose, once
+- [x] A consultation that reaches a stalemate leaves a record of the option the human chose, once
       that choice is acted on.
-- [ ] Every outcome record carries the TaskIdentity the decision recorded, so the decision and its
+- [x] Every outcome record carries the TaskIdentity the decision recorded, so the decision and its
       result read together across the two streams.
-- [ ] A journal-write failure degrades the instrumentation and never the thing being measured.
-- [ ] A sensitivity-halted task produces no outcome record, consistent with ticket 12's rule.
-- [ ] Tests assert the records appear from a whole run through the public entry points, not from
+- [x] A journal-write failure degrades the instrumentation and never the thing being measured.
+- [x] A sensitivity-halted task produces no outcome record, consistent with ticket 12's rule.
+- [x] Tests assert the records appear from a whole run through the public entry points, not from
       calling `learning_outcomes` directly — the gap this ticket closes was invisible to exactly
       that kind of direct test.
