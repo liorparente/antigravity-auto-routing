@@ -23,6 +23,7 @@ jobs:
         skills/worker-routing/test_production_invoker.py
         skills/worker-routing/learning_outcomes.py
         skills/worker-routing/test_lmstudio.py
+        skills/worker-routing/test_learning_scoreboard.py
       # Every test file that must actually run. Listed separately from
       # PYTHON_MODULES for the same single-sourcing reason, and because the
       # two lists answer different questions: PYTHON_MODULES is "what gets
@@ -34,6 +35,7 @@ jobs:
       PYTHON_TESTS: >-
         skills/worker-routing/test_routing.py
         skills/worker-routing/test_production_invoker.py
+        skills/worker-routing/test_learning_scoreboard.py
     steps:
       - uses: actions/checkout@v4
 

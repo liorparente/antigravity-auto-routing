@@ -89,8 +89,9 @@ import json
 import math
 import re
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar, Literal, get_args
 
@@ -501,6 +502,33 @@ def _validate_timestamp(value: object, field_name: str = "timestamp") -> None:
         raise ValueError(
             f"{field_name} must match {TIMESTAMP_RE.pattern}, got {_echoable(text)}"
         )
+
+
+def parse_wire_timestamp(value: str) -> datetime:
+    """Parse a wire timestamp into a timezone-aware UTC `datetime`.
+
+    The wire format is defined once, here (`TIMESTAMP_RE`, `_utc_timestamp`);
+    defining it again inside a reader would be the exact drift this function
+    exists to prevent.
+
+    Raises `ValueError` on two distinct shapes of bad input: one
+    `TIMESTAMP_RE` itself refuses, and one it accepts but the calendar does
+    not — `"2026-99-99T99:99:99Z"` matches the regex and `strptime` refuses
+    it. It raises rather than returning `None` because its two callers want
+    opposite things: `read_journal` catches it and counts the line (see that
+    function), while a caller reached any other way is holding a value it
+    had no right to hold, and `None` would make that failure silent.
+    """
+    _validate_timestamp(value, "timestamp")
+    try:
+        # DTZ007: the wire format is always UTC ("Z"); made aware below.
+        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")  # noqa: DTZ007
+    except ValueError as exc:
+        raise ValueError(
+            f"timestamp matches {TIMESTAMP_RE.pattern} but names no real "
+            f"instant: {_echoable(value)}"
+        ) from exc
+    return parsed.replace(tzinfo=timezone.utc)
 
 
 def _validate_choice(value: object, allowed: frozenset[str], field_name: str) -> None:
@@ -1253,3 +1281,221 @@ def extract_issue_codes(messages: Iterable[str]) -> tuple[str, ...]:
                 codes.add(head)
                 break
     return tuple(sorted(codes))
+
+
+# --- the reader: the inverse of `to_mapping`, across all four families ---
+#
+# Lives here rather than in a consumer module because the schema knowledge
+# it needs — `TaskLabel`'s un-flattening, `DialogueRound`'s reconstruction,
+# which keys each family declares — already lives here, and duplicating it
+# into a second file is exactly the drift ticket 12's ownership principle
+# exists to prevent. See the design decision recorded in
+# `implementation_plan.md` Section 1 for the full argument.
+
+
+def _filtered_fields(cls: type, mapping: Mapping[str, Any]) -> dict[str, Any]:
+    """Restrict `mapping` to `cls`'s declared dataclass field names.
+
+    The forward-compatibility lock: a field this reader predates (ticket 26's
+    benchmark family, ticket 27's discriminator) is dropped rather than
+    reaching the constructor as an unexpected keyword argument, which would
+    otherwise turn `TypeError` into a lost record for every line of that
+    family. `dataclasses.fields` never sees a `ClassVar` (`KIND`) or a
+    `@property` (`DialogueQualityRecord.rounds_run`), so both are filtered
+    out here for free rather than needing a special case.
+    """
+    allowed = {declared.name for declared in dataclasses.fields(cls)}
+    return {key: value for key, value in mapping.items() if key in allowed}
+
+
+def _pop_task_label(mapping: dict[str, Any]) -> TaskLabel:
+    """Un-flatten a task-bearing record's three top-level keys back into a `TaskLabel`.
+
+    Mirrors `TaskLabel.to_mapping`. A missing `task_type` key defaults to
+    `None` (untagged) — never confused with a present-but-null one, which
+    `to_mapping` never writes in the first place. `TaskLabel.__post_init__`
+    re-runs both of its locks on the rebuilt object, so a corrupt line
+    claiming both `sensitivity_halted` and a `task_type` is rejected on read
+    exactly as it would be on write.
+    """
+    return TaskLabel(
+        task_id=mapping.pop("task_id", None),
+        task_type=mapping.pop("task_type", None),
+        sensitivity_halted=mapping.pop("sensitivity_halted", False),
+    )
+
+
+def _rehydrate_worker_execution(mapping: dict[str, Any]) -> WorkerExecutionRecord:
+    mapping["task"] = _pop_task_label(mapping)
+    return WorkerExecutionRecord(**_filtered_fields(WorkerExecutionRecord, mapping))
+
+
+def _rehydrate_outcome(mapping: dict[str, Any]) -> OutcomeRecord:
+    mapping["task"] = _pop_task_label(mapping)
+    return OutcomeRecord(**_filtered_fields(OutcomeRecord, mapping))
+
+
+def _rehydrate_dialogue_quality(mapping: dict[str, Any]) -> DialogueQualityRecord:
+    mapping["task"] = _pop_task_label(mapping)
+    rounds_raw = mapping.get("rounds", ())
+    if not isinstance(rounds_raw, (list, tuple)):
+        raise TypeError(f"rounds must be a list on the wire, got {type(rounds_raw).__name__}")
+    mapping["rounds"] = tuple(DialogueRound(**entry) for entry in rounds_raw)
+    # `rounds_run` is on the wire (`to_mapping` writes it explicitly) but is
+    # a derived property, not a field, so `_filtered_fields` drops it rather
+    # than the constructor choking on an unexpected keyword argument.
+    return DialogueQualityRecord(**_filtered_fields(DialogueQualityRecord, mapping))
+
+
+def _rehydrate_compliance(mapping: dict[str, Any]) -> ComplianceRecord:
+    issue_codes_raw = mapping.get("issue_codes")
+    if issue_codes_raw is not None:
+        if not isinstance(issue_codes_raw, (list, tuple)):
+            raise TypeError(
+                f"issue_codes must be a list on the wire, got {type(issue_codes_raw).__name__}"
+            )
+        mapping["issue_codes"] = tuple(issue_codes_raw)
+    return ComplianceRecord(**_filtered_fields(ComplianceRecord, mapping))
+
+
+# Every known `kind` value, mapped to the function that rebuilds its record.
+# A `kind` absent from this mapping is not this reader's schema problem — see
+# `read_journal`'s `unknown_kind_lines` handling — so this is deliberately
+# not the same thing as "every value `JournalRecord` can hold".
+_REHYDRATE_BY_KIND: dict[str, Callable[[dict[str, Any]], Any]] = {
+    WorkerExecutionRecord.KIND: _rehydrate_worker_execution,
+    OutcomeRecord.KIND: _rehydrate_outcome,
+    DialogueQualityRecord.KIND: _rehydrate_dialogue_quality,
+    ComplianceRecord.KIND: _rehydrate_compliance,
+}
+
+
+@dataclass(frozen=True)
+class JournalRead:
+    """The result of reading the journal: every record, grouped by family.
+
+    **File order is preserved within each family, and never sorted.** This
+    is load-bearing, not stylistic: a consumer's "last record wins"
+    reduction (`ComplianceRecord`'s own docstring; the same convention for a
+    task's `plan` outcomes) derives its meaning from file order in an
+    append-only stream, because `ComplianceRecord.timestamp` is
+    second-resolution and can tie. A reader that sorted by timestamp would
+    silently pick the wrong verdict on every same-second pair.
+
+    **Every record here has parseable timestamps.** `read_journal` calls
+    `parse_wire_timestamp` on every family's `timestamp` (and on
+    `ComplianceRecord.session_last_activity` when present) before a record
+    is admitted, so a consumer may parse them freely — this is the guarantee
+    that keeps that arithmetic branch-free. See `read_journal`.
+    """
+
+    worker_executions: tuple[WorkerExecutionRecord, ...] = ()
+    outcomes: tuple[OutcomeRecord, ...] = ()
+    dialogues: tuple[DialogueQualityRecord, ...] = ()
+    compliance: tuple[ComplianceRecord, ...] = ()
+    unreadable_lines: int = 0
+    unknown_kind_lines: int = 0
+
+
+def read_journal(root_dir: Path) -> JournalRead:
+    """Read every record in the journal beneath `root_dir`, tolerating damage.
+
+    **A missing journal file reads as an empty `JournalRead`, not an
+    error.** This is what makes "an empty journal produces a scoreboard
+    rather than an error" structural rather than a special case bolted onto
+    a consumer.
+
+    **A line is malformed** — skipped and counted in `unreadable_lines`,
+    never raised — when: it is not valid JSON; it parses to something other
+    than a JSON object; it has no `kind` key; re-hydration raises (a missing
+    required key, or a value a record's own validators reject, both of which
+    surface as `ValueError` or `TypeError` — argument binding for a missing
+    keyword raises the latter, not a validator, so both are caught); or a
+    timestamp that satisfies `TIMESTAMP_RE` names no real instant (parsed and
+    discarded here, inside the same try that builds the record, so a
+    calendar-invalid timestamp is counted unreadable rather than raising
+    three modules downstream). A torn final line — the ordinary artifact of a
+    crash or full disk mid-write — is exactly this case, not an exotic one.
+
+    **A record of an unknown `kind`** — a family this reader predates — is
+    skipped and counted separately, in `unknown_kind_lines`. Two different
+    facts deserve two different counters: `unreadable_lines` means *this
+    stream is damaged*; `unknown_kind_lines` means *this reader is older than
+    this stream*. Folding them into one number destroys the only signal that
+    distinguishes an operator's two different next steps (look at the disk,
+    or look at the deployment).
+
+    **File order is preserved; the read never sorts.** See `JournalRead`.
+
+    **A shared advisory lock** (`fcntl.LOCK_SH`) is held for the read,
+    mirroring `_append_jsonl_locked`'s `LOCK_EX`. This makes a *concurrent*
+    torn line impossible rather than merely tolerated; the tolerance above
+    remains for lines already on disk from a past crash — both, not either.
+    """
+    path = journal_path(root_dir)
+    if not path.exists():
+        return JournalRead()
+
+    with open(path, encoding="utf-8") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_SH)
+        try:
+            lines = stream.readlines()
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+    worker_executions: list[WorkerExecutionRecord] = []
+    outcomes: list[OutcomeRecord] = []
+    dialogues: list[DialogueQualityRecord] = []
+    compliance: list[ComplianceRecord] = []
+    unreadable_lines = 0
+    unknown_kind_lines = 0
+
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            unreadable_lines += 1
+            continue
+
+        if not isinstance(payload, dict) or "kind" not in payload:
+            unreadable_lines += 1
+            continue
+
+        rehydrate = _REHYDRATE_BY_KIND.get(payload["kind"])
+        if rehydrate is None:
+            unknown_kind_lines += 1
+            continue
+
+        try:
+            record = rehydrate(dict(payload))
+            parse_wire_timestamp(record.timestamp)
+            if (
+                isinstance(record, ComplianceRecord)
+                and record.session_last_activity is not None
+            ):
+                parse_wire_timestamp(record.session_last_activity)
+        except (ValueError, TypeError):
+            unreadable_lines += 1
+            continue
+
+        if isinstance(record, WorkerExecutionRecord):
+            worker_executions.append(record)
+        elif isinstance(record, OutcomeRecord):
+            outcomes.append(record)
+        elif isinstance(record, DialogueQualityRecord):
+            dialogues.append(record)
+        else:
+            compliance.append(record)
+
+    return JournalRead(
+        worker_executions=tuple(worker_executions),
+        outcomes=tuple(outcomes),
+        dialogues=tuple(dialogues),
+        compliance=tuple(compliance),
+        unreadable_lines=unreadable_lines,
+        unknown_kind_lines=unknown_kind_lines,
+    )
