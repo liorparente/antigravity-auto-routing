@@ -87,5 +87,28 @@ The `run_id` a [[LearningJournal]] record carries to say *which attempt* it belo
 ### ComplianceRecord
 One [[LearningJournal]] record per audit *run* — not per session. `routing-audit.sh` with no argument audits the most recent conversation, so a plain run followed by a `--strict` one appends two records under a single session id; that is kept rather than deduplicated, because a re-audit is a real event and a changed verdict is worth having. A consumer asking a per-session question reduces first: group by session id, and within a group the last record wins, file order being audit order in an append-only stream. Its `timestamp` is when the audit ran and never when the session happened — a backlog audited in one sitting stamps every record minutes apart — so a discipline trendline plots against `session_last_activity`, derived from the audited log's last modification, and skips a record that has none rather than substituting. A session id the journal's identifier pattern cannot hold is recorded under a digest of itself, never dropped: an audit is not re-run, so a refused record is a verdict lost permanently. Spec 0004.
 
+### OutcomeRecord
+One [[LearningJournal]] record per ground truth graded against an earlier decision: `tests`,
+`review`, `plan`, or `stalemate_resolution`, each paired with a closed vocabulary of verdicts
+(`OUTCOME_VERDICTS`) so a verdict belonging to another ground truth cannot be attached. Its `task_id`
+is deliberately the *decision's* identity, not a fresh one for the grading event — that reuse is the
+entire mechanism by which "what we decided" can be checked against "were we right." `run_id` narrows
+what a record grades (that run, vs. the task as a whole) and is never invented, the same rule
+[[RunIdentity]] states generally.
+
+`plan` has two producers under one `task_id`, and that is by design, not an oversight.
+[[AdvisoryConsultation]] records `accepted` itself, at its `_result` choke point — but only when
+`outcome == "consensus"` and the occasion is plan-producing (`ambiguity`, `plan-review`); a
+`code-review` or `post-mortem` dialogue debates a diff or a lesson, not a plan, so a plan verdict
+about one would describe an artifact that does not exist. `rejected` has no in-process producer at
+all: a stalemate is not a rejection — its first resolution option is "approve the Planner's
+architecture," so the human who resolves it may accept the very plan a `rejected` record would have
+condemned — so only a human who actually read and declined a plan may record one, by hand, once that
+happens. Two `plan` records for one task are therefore expected, not a conflict.
+`OutcomeRecord` carries no actor or stage field to distinguish them, so a consumer resolves them
+positionally: group by `task_id`, and the last record in the append-only stream wins — the same
+reduction [[ComplianceRecord]] already uses. Whether that positional convention is durable enough, or
+the schema needs an explicit discriminator, is open; see ticket 27. Spec 0004 ticket 25.
+
 ### LearnerWorker
 The background worker that turns the [[LearningJournal]] into changed behavior: a light session-end distillation into institutional memory, and a deep weekly run proposing routing-table updates and brief diffs. It only proposes — an external acceptance gate (repeated benchmark trials, zero scoreboard regression) disposes, application is risk-tiered, adopted state is git-versioned, and a post-adoption regression auto-reverts. The protocol is unreachable by construction. Spec 0004.
