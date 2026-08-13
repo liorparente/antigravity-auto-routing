@@ -55,6 +55,17 @@ still count and correlate distinct halts without recovering anything about what 
 random default only ever applies when no caller id was given, which is what makes the trade-off
 acceptable in practice.
 
+### TaskLabel
+The pair a [[LearningJournal]] record hangs on: a [[TaskIdentity]] plus, optionally, a coarse
+task-type tag such as "bugfix" or "refactor". A dedicated type rather than two loose fields on each
+record, because the rule worth enforcing is a rule about the pair — a sensitivity-halted task carries
+no tag of any kind, since a tag is derived from task text and a tag plus a timestamp is a
+confirmation oracle over guessable work. That rule has two independent locks: the halted constructor
+takes no tag argument, so there is no parameter through which one could be supplied, and construction
+itself rejects a label that is both halted and tagged, so bypassing the constructors fails too. A
+halted label's `task_id` must be the identity the halt already resolved — random, never a digest —
+which the journal cannot verify and the caller therefore owns. Spec 0004.
+
 ### AllowedDirectAction
 An action the orchestrator performs itself rather than routing to a worker. The set is closed and enumerated: everything outside it is a routing violation. Membership is decided by whether a worker *can* do the work, not by whether the orchestrator finds it convenient — version control is a member because worker sandboxes cannot perform it at all.
 
@@ -68,7 +79,13 @@ The response contract a Critic must satisfy for its approval to count: rationale
 The per-session budget response of a [[CriticalDialogue]]: `dialogue_budget.session_dialogue_cap` in `routing-config.json` is a degradation trigger, not a hard ceiling. Spend below the cap runs undegraded (rung 0); each further cap's-width of spend takes one rung — reduced rounds (1), a single cheap model in every seat at low effort (2, recorded as degraded independence), and only at three times the cap the skip rung (3), so a cap of 10 admits up to 30 dialogues — the last 20 of them degraded — before every further one is skipped. A cap of zero (or negative) degenerates to always-skip. Every rung is visible: rung 2 flags `degraded_independence`, rung 3 is its own `budget_skipped` outcome, and every rung reaches the [[AdvisoryTelemetryRecord]] as `degradation_rung`. Spec 0003 ticket 09.
 
 ### LearningJournal
-A dedicated, content-free JSONL stream recording four signal families per action — worker execution, ground-truth outcomes, dialogue quality, and protocol compliance. Kept separate from the audited [[AdvisoryTelemetryRecord]] stream so the audit contract stays frozen. Carries numbers, categories, and ids only; a coarse task-type tag on normal tasks; no tag of any kind on sensitivity halts. Records correlate via [[TaskIdentity]]. Spec 0004.
+A dedicated, content-free JSONL stream recording four signal families per action — worker execution, ground-truth outcomes, dialogue quality, and protocol compliance. Kept separate from the audited [[AdvisoryTelemetryRecord]] stream so the audit contract stays frozen. Carries numbers, categories, and ids only; a coarse task-type tag on normal tasks; no tag of any kind on sensitivity halts. Records correlate via [[TaskIdentity]] and, within a task, via [[RunIdentity]]. "Signal family" names one of those four groupings and nothing finer — the four ground truths *inside* the outcome family are ground truths, never signals, so that one word keeps one granularity. Spec 0004.
+
+### RunIdentity
+The `run_id` a [[LearningJournal]] record carries to say *which attempt* it belongs to, as [[TaskIdentity]] says *what was worked on*. The two are needed together because `task_id` is deliberately stable across repeats — absent a caller-supplied id it is a digest of the task text — so two consultations of one task otherwise collapse into a single identity whose costs sum as though one run happened and whose second attempt's ground truth attaches to the first. Rework, one of the three efficiency measures spec 0004 asks for, is exactly what that collapse hides: it is counted as the distinct run identities carrying one [[TaskIdentity]], minus one. Distinct from a retry count, which stays honestly zero — no worker invocation is ever re-attempted today, and a second consultation of the same task is a second run rather than a retry of the first. Optional on every family, and never invented: a writer with no honest run identity omits it, and a consumer treats an omission as "names no run" rather than folding all such records into one. A [[ComplianceRecord]] uses it for the same job one level up — telling two audits of one session apart from one audit written twice. Spec 0004.
+
+### ComplianceRecord
+One [[LearningJournal]] record per audit *run* — not per session. `routing-audit.sh` with no argument audits the most recent conversation, so a plain run followed by a `--strict` one appends two records under a single session id; that is kept rather than deduplicated, because a re-audit is a real event and a changed verdict is worth having. A consumer asking a per-session question reduces first: group by session id, and within a group the last record wins, file order being audit order in an append-only stream. Its `timestamp` is when the audit ran and never when the session happened — a backlog audited in one sitting stamps every record minutes apart — so a discipline trendline plots against `session_last_activity`, derived from the audited log's last modification, and skips a record that has none rather than substituting. A session id the journal's identifier pattern cannot hold is recorded under a digest of itself, never dropped: an audit is not re-run, so a refused record is a verdict lost permanently. Spec 0004.
 
 ### LearnerWorker
 The background worker that turns the [[LearningJournal]] into changed behavior: a light session-end distillation into institutional memory, and a deep weekly run proposing routing-table updates and brief diffs. It only proposes — an external acceptance gate (repeated benchmark trials, zero scoreboard regression) disposes, application is risk-tiered, adopted state is git-versioned, and a post-adoption regression auto-reverts. The protocol is unreachable by construction. Spec 0004.

@@ -1382,6 +1382,9 @@ def needs_post_mortem_consultation(
         return True
     if consecutive_failures >= ESCALATION_FAILURE_THRESHOLD:
         return True
+    # The last trigger returns its own flag rather than adding a fourth
+    # `if ...: return True` rung: `stalemate_occurred` is already a bool, so
+    # the rung and the fallthrough would say the same thing twice.
     return stalemate_occurred
 
 
@@ -2578,7 +2581,11 @@ def run_advisory_consultation_debate(
     telemetry record, so the two stay correlated for an auditor even though
     neither carries the task text. A failure writing either artifact is
     folded into the result's ``error`` field rather than raised or allowed
-    to replace the primary outcome.
+    to replace the primary outcome. The same is true of the learning
+    journal: if it cannot be wired to this run's worker calls — a caller
+    ``task_id`` the journal's own validation rejects, say — the consultation
+    runs un-instrumented and says so in ``error``, rather than failing as
+    ``worker_error`` before a worker is contacted.
 
     ``occasion`` (spec 0003 ticket 01) selects which mission the Planner and
     Critic prompts carry — see ``_MISSION_COPY``. It defaults to
@@ -2899,6 +2906,13 @@ def run_advisory_consultation_debate(
     transcript_path = root_dir / _TRANSCRIPT_RELATIVE_PATH
     telemetry_path = root_dir / _TELEMETRY_RELATIVE_PATH
 
+    # Set if the learning journal could not be wired to this run's worker
+    # calls (see the `invoke_worker is None` branch below). Folded into
+    # whatever outcome this run actually reaches, exactly like a transcript-
+    # or telemetry-write failure: a secondary failure is reported, never
+    # allowed to become the primary outcome.
+    journal_wiring_error: str | None = None
+
     def _result(
         outcome: AdvisoryOutcome,
         *,
@@ -2976,6 +2990,7 @@ def run_advisory_consultation_debate(
         folded_error = _fold_error(
             folded_error, _write_telemetry_record(telemetry_path, record)
         )
+        folded_error = _fold_error(folded_error, journal_wiring_error)
 
         return dataclasses.replace(provisional_result, error=folded_error)
 
@@ -3311,12 +3326,37 @@ def run_advisory_consultation_debate(
         )
 
     if invoke_worker is None:
+        # Two failures with opposite handling, so two separate blocks. Without
+        # a worker callable there is no consultation to run at all, and this
+        # fails closed. Without journaling there is still a consultation — the
+        # instrumentation is what degrades, and a run that would otherwise
+        # have succeeded must not be reported as `worker_error` because the
+        # journal could not be set up. Folding these two together is how a
+        # caller-supplied `task_id` that `TaskLabel.for_task` rejects (a
+        # space in it, say) used to fail every production consultation before
+        # a worker was ever contacted.
         try:
-            from production_invoker import invoke_worker as production_invoke_worker
-        except Exception as exc:  # noqa: BLE001 - a production worker failure fails closed.
+            import production_invoker
+        except Exception as exc:  # noqa: BLE001 - no worker callable at all fails closed.
             cleanup_error = _remove_stale_plan_artifact(plan_path)
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
-        invoke_worker = production_invoke_worker
+
+        invoke_worker = production_invoker.invoke_worker
+        try:
+            # Any non-`sensitivity_halt` outcome resolves the same task_id
+            # (see `_resolve_task_id`); the sensitivity gate above already
+            # ruled that outcome out for this call, so resolving here is
+            # exactly the id `_result` will resolve again for whichever
+            # outcome this run actually reaches — the journal record and
+            # this run's telemetry record stay correlated by TaskIdentity.
+            journaled_task_id = _resolve_task_id(task_description, task_id, "consensus")
+            invoke_worker = production_invoker.make_journaled_invoke_worker(
+                journaled_task_id, root_dir=root_dir
+            )
+        except Exception as exc:  # noqa: BLE001 - instrumentation never aborts what it observes.
+            journal_wiring_error = (
+                f"worker-execution journaling disabled for this run: {exc}"
+            )
 
     for _round_number in range(1, max_rounds + 1):
         planner_prompt = _build_planner_prompt(

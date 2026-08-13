@@ -32,6 +32,15 @@ GEMINI_MD="$HOME/.gemini/GEMINI.md"
 AGENTS_MD="$TARGET_PROJECT_DIR/AGENTS.md"
 CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 
+# Mirrors install.sh's MANAGED_FILES, plus the routing-config.json install.sh
+# writes separately (it installs only the default and preserves a customized
+# one, but it did put the file there, so uninstall removes it). Kept as an
+# array rather than one long `rm -f` line so a module added to install.sh and
+# forgotten here is visible; `test_routing.py`'s `ManagedFileClosureTests`
+# additionally asserts this list covers every managed file, so the drift that
+# left `learning_journal.py` behind cannot recur silently in either script.
+INSTALLED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py protocol.md routing-config.json)
+
 # Same versionless sentinel markers install.sh writes/looks for.
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END="# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
@@ -50,7 +59,9 @@ echo "---"
 #    Any other content a user placed there is left untouched.
 for target_dir in "${TARGET_DIRS[@]}"; do
     if [ -d "$target_dir" ]; then
-        rm -f "$target_dir/SKILL.md" "$target_dir/REFERENCE.md" "$target_dir/routing-audit.sh" "$target_dir/routing_check.py" "$target_dir/agent_council.py" "$target_dir/advisory_consultation.py" "$target_dir/production_invoker.py" "$target_dir/routing-config.json" "$target_dir/protocol.md"
+        for installed_file in "${INSTALLED_FILES[@]}"; do
+            rm -f "$target_dir/$installed_file"
+        done
         rmdir "$target_dir" 2>/dev/null || true
         if [ -d "$target_dir" ]; then
             echo "✅ Removed skill files from $target_dir (other content preserved)"

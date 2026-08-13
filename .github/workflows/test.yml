@@ -8,6 +8,32 @@ on:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
+    # The one list of Python modules ruff and mypy both check. Single-sourced
+    # because it was duplicated across the two steps, so every new module had
+    # to be added twice — and a module added to only one of them is checked by
+    # only one of them, silently.
+    env:
+      PYTHON_MODULES: >-
+        skills/worker-routing/routing_check.py
+        skills/worker-routing/test_routing.py
+        skills/worker-routing/agent_council.py
+        skills/worker-routing/advisory_consultation.py
+        skills/worker-routing/learning_journal.py
+        skills/worker-routing/production_invoker.py
+        skills/worker-routing/test_production_invoker.py
+        skills/worker-routing/learning_outcomes.py
+        skills/worker-routing/test_lmstudio.py
+      # Every test file that must actually run. Listed separately from
+      # PYTHON_MODULES for the same single-sourcing reason, and because the
+      # two lists answer different questions: PYTHON_MODULES is "what gets
+      # checked", this is "what gets executed". A test file present in the
+      # first and absent from the second is linted and type-checked but
+      # never run — which is exactly what happened to
+      # test_production_invoker.py's 16 tests, green in CI without a single
+      # one of them having executed.
+      PYTHON_TESTS: >-
+        skills/worker-routing/test_routing.py
+        skills/worker-routing/test_production_invoker.py
     steps:
       - uses: actions/checkout@v4
 
@@ -18,17 +44,19 @@ jobs:
       - name: Install lint tooling
         run: pip install ruff mypy
 
-      - name: Run routing-check unit and integration tests
-        run: python3 skills/worker-routing/test_routing.py -v
-
-      - name: Run production-invoker unit and integration tests
-        run: python3 skills/worker-routing/test_production_invoker.py -v
+      - name: Run unit and integration tests
+        run: |
+          for test_file in $PYTHON_TESTS; do
+            echo "::group::$test_file"
+            python3 "$test_file" -v
+            echo "::endgroup::"
+          done
 
       - name: Lint with ruff
-        run: ruff check skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py skills/worker-routing/advisory_consultation.py skills/worker-routing/production_invoker.py skills/worker-routing/test_production_invoker.py skills/worker-routing/test_lmstudio.py
+        run: ruff check $PYTHON_MODULES
 
       - name: Type-check with mypy
-        run: mypy skills/worker-routing/routing_check.py skills/worker-routing/test_routing.py skills/worker-routing/agent_council.py skills/worker-routing/advisory_consultation.py skills/worker-routing/production_invoker.py skills/worker-routing/test_production_invoker.py skills/worker-routing/test_lmstudio.py
+        run: mypy $PYTHON_MODULES
 
       - name: Shellcheck installer and audit scripts
         run: shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh

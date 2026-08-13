@@ -6,6 +6,37 @@ Modes:
   --strict               Treat warnings as failures too (exit 1 instead of
                           0 when a 🟡 WARNING is emitted but no 🔴 VIOLATION
                           is found).
+  --session-id ID         Spec 0004 ticket 15: persist this run's verdict as
+                          a `learning_journal.ComplianceRecord` keyed on ID
+                          (routing-audit.sh passes the conversation id it
+                          already resolved). Omit it and nothing is
+                          persisted — no placeholder id is ever fabricated.
+                          An ID the journal's identifier pattern cannot hold
+                          verbatim is recorded under a digest of itself, with
+                          a note on stderr, rather than dropped; see
+                          `_journalable_session_id`. One record is written per
+                          audit *run*, so a re-audit of one session appends a
+                          second — `learning_journal.ComplianceRecord` states
+                          how a per-session consumer reduces them.
+                          See `_persist_compliance_record` and `run_audit`
+                          for what is recorded and where that call lives.
+  --root-dir PATH         Where the journal beneath `PATH` (see
+                          `learning_journal.journal_path`) is written. This
+                          must be the same root every other record family in
+                          this loop journals under — worker-execution and
+                          outcome records (via `learning_journal`'s other
+                          callers) and the routing telemetry `AgentCouncil`
+                          writes beside it — so that ID resolves to a single
+                          shared journal, not a second one only this record
+                          kind writes to. routing-audit.sh resolves this to
+                          the repository the audit is being run in (never
+                          `$HOME`, and never a path derived from where the
+                          script itself was installed — see its comments) and
+                          passes it; omit it and nothing is persisted, which
+                          is exactly what routing-audit.sh does when it can
+                          resolve no repository. The process's own working
+                          directory is never promoted into a destination on
+                          this side (see `_persist_compliance_record`).
   <log_file>              Full audit: parses the log, computes every routing
                           metric strictly within each conversation step's own
                           boundaries, prints a human-readable report to
@@ -71,10 +102,14 @@ Exit codes:
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import itertools
 import json
 import re
+import secrets
 import shlex
 import sys
+import time
 import traceback
 from collections import Counter
 from collections.abc import Sequence
@@ -167,6 +202,19 @@ class AuditResult:
 
 @dataclass(frozen=True)
 class AuditReport:
+    """One audit run's complete verdict — the concept every consumer takes.
+
+    `warning_codes` is the only field that is not a raw `compute_metrics`
+    output. The two warnings this audit can raise (`WARN-01`, `WARN-02`) are
+    rendered as prose by `run_audit` and as `AuditIssue` messages by
+    `RoutingAuditEngine.audit`, so before this field existed the *code* for
+    a warning existed nowhere a caller could read — which is how a
+    `--strict` run that failed on warnings alone persisted a compliance
+    record indistinguishable from a clean session's. Carried as bare codes
+    rather than messages because that is all any consumer of this field
+    needs and all `ComplianceRecord` may hold.
+    """
+
     total_writes: int
     code_writes: int
     routing_declarations: int
@@ -177,6 +225,7 @@ class AuditReport:
     calibration_markers: int
     code_write_files: list[str]
     exit_code: int
+    warning_codes: tuple[str, ...] = ()
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -873,6 +922,54 @@ def compute_metrics(
     }
 
 
+def _has_violation(metrics: dict[str, Any]) -> bool:
+    """Whether this run's metrics constitute a violation.
+
+    Extracted so `run_audit` and `audit_log` state the rule once instead of
+    twice. Both computed it identically before; the duplication is what let
+    the warning *codes* exist in one and not the other.
+    """
+    return (metrics["code_writes"] > 0 and metrics["worker_calls"] == 0) or bool(
+        metrics["violations"]
+    )
+
+
+def _warning_code(metrics: dict[str, Any], violation: bool) -> str | None:
+    """The one warning code this run raises, or `None`.
+
+    At most one: `WARN-01` takes precedence over `WARN-02` (the printed
+    report has always used an `if`/`elif` chain, and `RoutingAuditEngine`
+    the same), and a violation suppresses both — an unrouted edit is not
+    also reported as "some edits may not have been properly routed."
+    """
+    if violation:
+        return None
+    if metrics["code_writes"] > metrics["worker_calls"]:
+        return "WARN-01"
+    if metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0:
+        return "WARN-02"
+    return None
+
+
+def _build_audit_report(
+    metrics: dict[str, Any], *, exit_code: int, warning_code: str | None
+) -> AuditReport:
+    """Assemble the `AuditReport` for one run's metrics and resolved verdict."""
+    return AuditReport(
+        total_writes=metrics["total_writes"],
+        code_writes=metrics["code_writes"],
+        routing_declarations=metrics["routing_declarations"],
+        worker_calls=metrics["worker_calls"],
+        violations=metrics["violations"],
+        declaration_drift=metrics["declaration_drift"],
+        violation_details=metrics["violation_details"],
+        calibration_markers=metrics["calibration_markers"],
+        code_write_files=metrics["code_write_files"],
+        exit_code=exit_code,
+        warning_codes=() if warning_code is None else (warning_code,),
+    )
+
+
 class LogParserAdapter:
     """Base interface for parsing conversation log steps."""
 
@@ -1176,31 +1273,219 @@ class RoutingAuditEngine:
         evaluator = PolicyEvaluator(legacy_config, security_ctx=self.security_ctx)
         metrics = evaluator.evaluate(steps)
 
-        violation_count = len(metrics["violations"])
-        violation = (
-            metrics["code_writes"] > 0 and metrics["worker_calls"] == 0
-        ) or violation_count > 0
-        warning = (
-            metrics["code_writes"] > metrics["worker_calls"] and not violation
-        ) or (
-            metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0 and not violation
+        violation = _has_violation(metrics)
+        warning_code = _warning_code(metrics, violation)
+        exit_code = 1 if violation or (strict and warning_code is not None) else 0
+
+        return _build_audit_report(
+            metrics, exit_code=exit_code, warning_code=warning_code
         )
 
-        exit_code = 1 if violation or (strict and warning) else 0
 
-        return AuditReport(
-            total_writes=metrics["total_writes"],
-            code_writes=metrics["code_writes"],
-            routing_declarations=metrics["routing_declarations"],
-            worker_calls=metrics["worker_calls"],
-            violations=metrics["violations"],
-            declaration_drift=metrics["declaration_drift"],
-            violation_details=metrics["violation_details"],
-            calibration_markers=metrics["calibration_markers"],
-            code_write_files=metrics["code_write_files"],
-            exit_code=exit_code,
+
+def _journal_identifier_re() -> re.Pattern[str]:
+    """The journal's identifier pattern, resolved at call time.
+
+    Imported lazily and by name for exactly the reason
+    `_persist_compliance_record` documents at length: `learning_journal` is a
+    sibling loaded by path, and this module must keep working — degrading to
+    a reported persistence failure — on an installation that lacks it. A
+    module-level `from learning_journal import TASK_ID_RE` would turn that
+    into an ImportError at load time and take the whole audit down with it.
+
+    Falls back to a character-for-character copy if the import fails, so the
+    normalization decision below is still made correctly on the way to a
+    failure `_persist_compliance_record` reports anyway. `test_routing.py`
+    pins the two patterns identical, so the copy cannot drift.
+    """
+    try:
+        import learning_journal
+    except ImportError:
+        return re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+    return learning_journal.TASK_ID_RE
+
+
+def _journalable_session_id(session_id: str) -> tuple[str, str | None]:
+    """Return `(id the journal can hold, note if it had to be derived)`.
+
+    `routing-audit.sh` resolves its conversation id from a directory name
+    under `$HOME/.gemini/antigravity/brain` or from a positional argument,
+    and bounds neither. `learning_journal.TASK_ID_RE` bounds both — no
+    spaces, no leading punctuation, 128 characters — so an ordinary
+    conversation name like `fix login 500` cannot be journaled verbatim.
+
+    The previous handling of that was to let record construction raise, which
+    `_persist_compliance_record` reported and dropped. Dropping is the worst
+    of the options: an audit is not re-run, so that session's verdict was
+    gone permanently, and the trendline lost it with no gap where it had
+    been. So an id that cannot be represented is *derived* instead — a
+    truncated SHA-256 of the original, prefixed to read as what it is. Two
+    audits of the same conversation derive the same id, so the session stays
+    one session and `ComplianceRecord`'s per-session reduction still works.
+
+    This is `advisory_consultation._default_task_id`'s precedent, applied to
+    the other identifier: a digest, never the text it came from. The halt
+    exception that governs *task* text does not reach here — a conversation's
+    directory name is not halted task text, and no redaction boundary
+    promises anything about it — but the digest is one-way regardless, so a
+    conversation named after something sensitive still contributes a verdict
+    without contributing its name.
+
+    Idempotent by construction: the derived form matches `TASK_ID_RE`, so
+    applying this twice is applying it once. That is what lets `run_audit`
+    call it to *report* the substitution while `_persist_compliance_record`
+    calls it again to guarantee it, with no coordination between them.
+
+    The note is the second half of "not silent": a caller that prints it
+    leaves the mapping from conversation name to journaled id recoverable
+    from the audit's own output, rather than only from re-deriving the digest
+    by hand.
+    """
+    if _journal_identifier_re().fullmatch(session_id):
+        return session_id, None
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+    derived = f"session-{digest}"
+    return derived, (
+        f"session id is not journalable verbatim; recorded as {derived!r} "
+        "(a digest of it) so the verdict is not lost"
+    )
+
+
+def _session_last_activity(log_file: str | Path) -> str | None:
+    """When the audited log was last written, in the journal's wire format.
+
+    The closest observable this process can reach to "when the session
+    happened", as distinct from when the audit ran — see
+    `learning_journal.ComplianceRecord`, which explains why a trendline
+    plotted on the latter collapses whenever a backlog is audited in one
+    sitting.
+
+    Returns `None` rather than a substitute if the log cannot be stat'd. A
+    missing value is a record the trendline skips; a wrong one is a point it
+    plots in the wrong place.
+    """
+    try:
+        modified = Path(log_file).stat().st_mtime
+    except OSError:
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(modified))
+
+
+def _persist_compliance_record(
+    report: AuditReport,
+    *,
+    session_id: str | None,
+    root_dir: Path | None,
+    session_last_activity: str | None = None,
+) -> str | None:
+    """Append one `learning_journal.ComplianceRecord` for this audit run.
+
+    Best-effort and silent on the happy path: returns `None` on success (or
+    when there is nothing to persist), an error string on failure, and never
+    raises. Two independent failure modes are folded into that one string —
+    a record that cannot be *built* (a value `ComplianceRecord` refuses, or
+    `learning_journal` missing from an installation), and a broken disk
+    failing at `append_journal_record` — because from `run_audit`'s
+    point of view they are the same fact: the session that produced this
+    verdict must not be blocked or altered by either one (matching tickets
+    13 and 14's "reported, not raised" contract for journal failures).
+
+    `session_id is None` or `root_dir is None` is not a failure at all — it
+    is the explicit, documented result of no `--session-id` or no
+    `--root-dir` being given (see `main`), and it means exactly "no
+    conversation id was resolved for this run" or "no journal destination
+    was resolved for this run", never a placeholder id or an implicit
+    destination standing in for an unknown one. `Path.cwd()` in particular
+    is never that destination: the audit can be invoked from anywhere, and
+    "wherever the process happened to start" is not a journal. Nothing is
+    persisted, and nothing is reported, because nothing was attempted.
+
+    `learning_journal` is imported locally, not at module scope, for the
+    same reason the `agent_council` imports elsewhere in this module are
+    local: these sibling modules are loaded by path rather than as a
+    package (see `learning_journal`'s own docstring), and `test_routing.py`
+    registers `sys.modules["learning_journal"]` only once its own
+    `LearningJournalTests` block runs — well after this module is first
+    exec'd. Importing here, at call time, means either loading path works:
+    the CLI's own `sys.path[0]` when run as a script, or the test's
+    pre-registered module when run in-process. It is imported *inside* the
+    `try` on purpose: an installation missing `learning_journal.py` must
+    degrade to a reported persistence failure like any other, never a
+    traceback out of `run_audit` that truncates the audit's stdout and
+    abandons its 0/1/2 exit contract. `ManagedFileClosureTests` is what
+    stops that installation from existing in the first place; this is the
+    second lock.
+
+    **Every issue code the audit computed reaches the record, not just the
+    violating ones.** `report.declaration_drift` carries each step's issues
+    whether or not that step also tripped a violation, so DEC-01..05 and
+    LOG-01 on an otherwise-passing step are trended rather than dropped;
+    `report.warning_codes` carries WARN-01/WARN-02, which `run_audit`
+    renders as prose and would otherwise never reach a record at all — the
+    case where a `--strict` run fails on warnings alone and persists a
+    verdict indistinguishable from a clean session. `report.violations`
+    still supplies the count; it is `declaration_drift` that supplies the
+    codes, and the two are deliberately different sets.
+
+    Messages go to `extract_issue_codes` exactly as `_analyze_step` and
+    `RoutingAuditEngine` built them — unprefixed. That function reads a
+    leading code directly and only falls back to looking past a `"Step N: "`
+    prefix, so no caller has to know its parsing rule (see its docstring).
+    This function previously synthesized such a prefix purely to satisfy
+    that rule, which made a cross-module string format an unwritten
+    contract between two files.
+
+    **One record per call, and a call is one audit run.** Nothing here
+    deduplicates against records already in the journal, and nothing should:
+    two audits of one conversation are two events, and the second is usually
+    the one that matters (a `--strict` re-run, or an end-of-session check
+    after a mid-session one). The `run_id` stamped below is what lets a
+    consumer tell those two events apart from one event written twice; the
+    reduction rule that turns N run-records into one session verdict is
+    stated in full on `learning_journal.ComplianceRecord`, which is where
+    spec 0004 ticket 16's scoreboard should read it.
+
+    `session_id` is normalized through `_journalable_session_id` rather than
+    passed through, so a conversation whose name the journal's identifier
+    pattern cannot hold contributes a derived-id record instead of nothing at
+    all. That call is idempotent, so `run_audit` normalizing first (to report
+    the substitution) and this function normalizing again (to guarantee it
+    for every caller, including direct ones) agree by construction.
+    """
+    if session_id is None or root_dir is None:
+        return None
+
+    journalable_session_id, _note = _journalable_session_id(session_id)
+    try:
+        import learning_journal
+
+        issue_codes = learning_journal.extract_issue_codes(
+            itertools.chain(
+                (
+                    message
+                    for _step_index, messages in report.declaration_drift
+                    for message in messages
+                ),
+                report.warning_codes,
+            )
         )
-
+        record = learning_journal.ComplianceRecord(
+            session_id=journalable_session_id,
+            total_writes=report.total_writes,
+            code_writes=report.code_writes,
+            routing_declarations=report.routing_declarations,
+            worker_calls=report.worker_calls,
+            violation_count=len(report.violations),
+            declaration_drift_count=len(report.declaration_drift),
+            calibration_markers=report.calibration_markers,
+            code_write_count=len(report.code_write_files),
+            issue_codes=issue_codes,
+            run_id=secrets.token_hex(8),
+            session_last_activity=session_last_activity,
+        )
+    except (ImportError, ValueError) as exc:
+        return f"failed to build compliance record: {exc}"
+    return learning_journal.append_journal_record(record, root_dir=root_dir)
 
 
 def run_audit(
@@ -1208,7 +1493,40 @@ def run_audit(
     log_file: str,
     security_ctx: SecurityContext,
     strict: bool = False,
+    *,
+    session_id: str | None = None,
+    root_dir: Path | None = None,
 ) -> int:
+    """Run the full audit and print its report — the CLI's actual entry point.
+
+    **Where compliance persistence hangs, and why here rather than
+    `RoutingAuditEngine.audit_log`.** Both compute the same metrics through
+    the same `compute_metrics`, but only this function is what
+    `routing-audit.sh` (via `main`) actually runs in production; `audit_log`
+    is a separate, currently test-only library entry point that the
+    real audit does not go through. Persisting inside `audit_log` would keep
+    that one computation pure, but it would silently miss the one caller
+    that matters operationally — the CLI a security auditor actually runs —
+    which is exactly the "verdict evaporates" problem this ticket exists to
+    fix. Persisting here means the CLI boundary is no longer a pure
+    computation, but it is the boundary that is already impure (it prints),
+    and it is the only boundary that has a `session_id` to key the record on
+    at all (see `main`). A future caller of `audit_log` wanting the same
+    persistence can call `_persist_compliance_record` itself; that seam is
+    module-level and not private to this function's control flow.
+
+    `session_id` and `root_dir` are both `None` by default so every existing
+    caller — direct or via `main` without `--session-id`/`--root-dir` — is
+    unaffected. A missing `root_dir` is treated exactly like a missing
+    `session_id`: persistence is explicitly skipped, never redirected to
+    `Path.cwd()`. `routing-audit.sh` is the caller that supplies a real
+    destination in production (see its own comments for how it resolves
+    one); `RoutingAuditIntegrationTests` isolates it under the same
+    temporary `$HOME` it already sets, and every test this ticket adds
+    (`PersistComplianceRecordTests`, `RoutingCheckCliCompliancePersistenceTests`,
+    `RoutingAuditShWiresConversationIdToComplianceRecordTests`) isolates
+    `root_dir` under a temporary directory and writes nothing real.
+    """
     worker_patterns = load_patterns(config)
     code_extensions = load_code_extensions(config)
     safe_patterns = load_safe_patterns(config)
@@ -1254,6 +1572,42 @@ def run_audit(
 
     violation_count = len(metrics["violations"])
 
+    # The verdict is resolved here, before anything is printed, so the record
+    # this run persists and the report it prints are the same verdict rather
+    # than two independent readings of the same metrics. The printing below
+    # renders `violation` and `warning_code`; it no longer recomputes them.
+    violation = _has_violation(metrics)
+    warning_code = _warning_code(metrics, violation)
+    exit_code = 1 if violation or (strict and warning_code is not None) else 0
+    report = _build_audit_report(
+        metrics, exit_code=exit_code, warning_code=warning_code
+    )
+
+    # Persisted only once the audit has actually produced a verdict — never
+    # for the exit-2 paths above, where there is no trustworthy metric to
+    # record. A write failure is reported to stderr, matching how a
+    # per-violation detail line is already reported below; it never changes
+    # `violation_count` or anything printed to stdout.
+    #
+    # The id is normalized here as well as inside `_persist_compliance_record`
+    # — the call is idempotent — purely so the substitution can be *reported*.
+    # A conversation whose name the journal cannot hold verbatim is now
+    # recorded under a digest rather than dropped, and an operator who is
+    # never told that has to re-derive the digest by hand to find the session
+    # again.
+    if session_id is not None and root_dir is not None:
+        _, id_note = _journalable_session_id(session_id)
+        if id_note:
+            print(f"⚠️  {id_note}", file=sys.stderr)
+    persist_error = _persist_compliance_record(
+        report,
+        session_id=session_id,
+        root_dir=root_dir,
+        session_last_activity=_session_last_activity(log_file),
+    )
+    if persist_error:
+        print(f"⚠️  {persist_error}", file=sys.stderr)
+
     print("📊 Results:")
     print(f"  {'Total file write tool calls:':<33} {metrics['total_writes']}")
     print(f"  {'Writes to source code files:':<33} {metrics['code_writes']}")
@@ -1262,12 +1616,9 @@ def run_audit(
     print(f"  {'Unrouted code edit violations:':<33} {violation_count}")
     print()
 
-    violation = False
-
     if metrics["code_writes"] > 0 and metrics["worker_calls"] == 0:
         print(f"🔴 VIOLATION: {metrics['code_writes']} source code edits with 0 worker calls.")
         print("   Antigravity executed code changes directly without routing.")
-        violation = True
 
     if violation_count > 0:
         print(f"🔴 VIOLATION: Unrouted code edit detected in {violation_count} step(s).")
@@ -1278,23 +1629,19 @@ def run_audit(
                 f"  ⚠️  Step {step_index}: unrouted code edit detected ({files})",
                 file=sys.stderr,
             )
-        violation = True
 
-    warning = False
-    if metrics["code_writes"] > metrics["worker_calls"] and not violation:
+    if warning_code == "WARN-01":
         print(
             "🟡 WARNING: More code edits "
             f"({metrics['code_writes']}) than worker calls "
             f"({metrics['worker_calls']})."
         )
         print("   Some edits may not have been properly routed.")
-        warning = True
-    elif metrics["routing_declarations"] == 0 and metrics["total_writes"] > 0 and not violation:
+    elif warning_code == "WARN-02":
         print(
             "🟡 WARNING: No [ROUTING:] declarations found, but "
             f"{metrics['total_writes']} file writes occurred."
         )
-        warning = True
     elif not violation:
         print("✅ No violations detected.")
 
@@ -1304,17 +1651,51 @@ def run_audit(
     for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
         print(f"{count:>7} {name}")
 
-    if violation:
-        return 1
-    if strict and warning:
-        return 1
-    return 0
+    return report.exit_code
 
 
 def main() -> None:
     strict = "--strict" in sys.argv
     if strict:
         sys.argv.remove("--strict")
+
+    # `--session-id ID` is spec 0004 ticket 15's addition: `routing-audit.sh`
+    # already resolves the real conversation id before it ever invokes this
+    # script, so that id is threaded through here rather than this module
+    # inventing or guessing one. Absent entirely — a bare `<log_file>`
+    # invocation, exactly like every caller before this ticket — `session_id`
+    # stays `None` and `_persist_compliance_record` persists nothing; that is
+    # the explicit, documented handling of "no id available" this ticket
+    # calls for, not a silent placeholder.
+    session_id: str | None = None
+    if "--session-id" in sys.argv:
+        index = sys.argv.index("--session-id")
+        if index + 1 >= len(sys.argv):
+            print("--session-id requires a value", file=sys.stderr)
+            sys.exit(2)
+        session_id = sys.argv[index + 1]
+        del sys.argv[index : index + 2]
+
+    # `--root-dir PATH` mirrors `--session-id ID` exactly: routing-audit.sh
+    # resolves the journal destination before ever invoking this script (see
+    # its own comments), so that destination is threaded through here rather
+    # than this module inventing one. Absent entirely, `root_dir` stays
+    # `None` and `_persist_compliance_record` persists nothing — never a
+    # `Path.cwd()` fallback (see that function's docstring for why).
+    #
+    # Converted to a `Path` here, at the one boundary where it genuinely is a
+    # string: `argv` is text. Everything inward of this line — `run_audit`,
+    # `_persist_compliance_record`, `learning_journal.journal_path` and
+    # `append_journal_record` — takes `Path`, so a journal destination has one
+    # type across the whole loop rather than being re-decided per function.
+    root_dir: Path | None = None
+    if "--root-dir" in sys.argv:
+        index = sys.argv.index("--root-dir")
+        if index + 1 >= len(sys.argv):
+            print("--root-dir requires a value", file=sys.stderr)
+            sys.exit(2)
+        root_dir = Path(sys.argv[index + 1])
+        del sys.argv[index : index + 2]
 
     try:
         config = load_config()
@@ -1323,7 +1704,10 @@ def main() -> None:
         sys.exit(2)
 
     if len(sys.argv) < 2:
-        print("Usage: routing_check.py [--strict] <log_file>", file=sys.stderr)
+        print(
+            "Usage: routing_check.py [--strict] [--session-id ID] [--root-dir PATH] <log_file>",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     security_ctx = SecurityContext.create()
@@ -1333,6 +1717,8 @@ def main() -> None:
             sys.argv[1],
             security_ctx=security_ctx,
             strict=strict,
+            session_id=session_id,
+            root_dir=root_dir,
         )
     )
 
