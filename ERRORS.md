@@ -185,3 +185,53 @@
 - Issue: Attempting to on-demand load MLX models in LM Studio (such as `qwen3-coder-next-mlx`) via OpenAI-compatible API (`/v1/chat/completions`) failed with HTTP 400 (`Failed to load model... Error: Model loading was stopped due to insufficient system resources.`).
 - Root Cause: By default, `qwen3-coder-next-mlx` declares a `max_context_length` of 262,144 tokens (256K). On JIT auto-load, LM Studio attempts to allocate KV cache memory for the full default context size, triggering LM Studio's pre-load resource guardrails even when sufficient RAM exists for smaller context windows.
 - Resolution: Restricted `Context Length` in LM Studio's load parameters/presets to `8,192` or `16,384` tokens (via GUI `+ Load Model` or `Model Defaults`), reducing RAM allocation requirements by >70% and allowing the model to load and serve API requests cleanly.
+
+## 2026-08-12 — Two Writers, One Tree
+
+- Mission: land spec 0003's remaining tickets and reconcile with spec 0004.
+- Issue: two separate Claude Code sessions wrote to `advisory_consultation.py`/`test_routing.py` on the same `main` working tree at the same time, on 2026-08-12. Neither session was aware of the other until the resulting confusion forced a coordination handoff.
+- Consequence: a session had to spend real effort re-establishing ground truth (whose edits were whose, what was actually committed vs. still in flight) before any further work could safely proceed. A stale worktree (`review-snapshot`, detached at `23a138c`) was left behind from that period and was only cleaned up on 2026-08-13, after confirming its one commit was already reachable from the real branch history and nothing would be lost.
+- Resolution: single-writer, sequential discipline for the rest of the session — one working tree per active session, never two sessions editing the same branch's tree concurrently. Before deleting an orphaned worktree, always confirm its HEAD commit is already an ancestor of a real branch (`git branch --contains <sha>`) rather than assuming it is safe to discard.
+- Lesson: a shared working tree is shared mutable state. Two agents (or two sessions of the same agent) writing to it without coordination is the same class of bug as two threads writing to memory without a lock — the fix is the same too: one writer at a time, enforced structurally, not by convention alone.
+
+## 2026-08-13 — Checked Is Not Run
+
+- Mission: reconcile main into spec/0004-learning-loop; verify the merged CI configuration.
+- Issue: `.github/workflows/test.yml` can list a `test_*.py` file in its ruff/mypy module list without that file ever appearing in the step that actually executes tests. This already happened once, silently, to `test_production_invoker.py` (sixteen tests never run despite CI staying green) — spec 0004 later added `test_ci_runs_every_test_file_it_checks` specifically to catch a repeat.
+- Root Cause: linting and executing are two independent CI steps reading two independently-maintained lists; nothing forces them to agree except discipline, until a test asserts it.
+- Detection: the new guard test itself failed immediately after this merge, because `test_lmstudio.py` (a live-LM-Studio-server smoke suite, checked but deliberately never executed — its own module docstring says so) was newly added to the checked list without being added to the executed list.
+- Resolution: narrowed the guard test's assertion with one named, commented exception (`_CHECKED_BUT_NOT_EXECUTED_BY_DESIGN = frozenset({"skills/worker-routing/test_lmstudio.py"})`) rather than loosening it for every file — a second, accidental gap (a new `test_production_invoker.py` incident) is still caught.
+- Lesson: "CI checks this file" and "CI runs this file's tests" are different claims. Either assert their equality as a test, with named exceptions for genuinely unrunnable files, or expect the gap to reopen silently the next time a file is added to one list and not the other.
+
+## 2026-08-13 — A Canary Probe Deleted a Real Mission's Plan
+
+- Mission: implement spec 0003 ticket 11 (the sensitive-task path); caught while reviewing the surrounding budget-degradation code this ticket touches.
+- Issue: budget rung 3 (full session exhaustion) returns before any worker is contacted, and its early-return branch unconditionally called `_remove_stale_plan_artifact`, deleting `root_dir / "implementation_plan.md"` — even when the triggering run was a seeded-flaw canary probe (`is_canary=True`), not a real mission. A canary neither creates nor deletes that file, by the canary invariant documented elsewhere in the same module; this path silently violated it.
+- Root Cause: the early-return path was written to match "what a real budget-exhausted mission should do" (clean up any stale plan) without checking whether the current run was a mission at all.
+- Resolution: fixed in `aa118f1` — the cleanup call is now guarded on `not is_canary`, so the preemption itself stays unconditional (a rung-3 canary still returns `budget_skipped` with zero worker calls) but the file-deleting side effect does not.
+- Lesson: an early-return / preemption shortcut inherits none of the guarantees its "normal path" sibling implicitly relies on. Every side effect a shortcut performs (file writes, deletions, telemetry) needs its own check against what kind of run is actually in flight — "this path always means a real mission" is an assumption that needs to be stated and verified, not inherited by association.
+
+## 2026-08-13 — A New Seam Doesn't Reach a Downstream Dispatcher on Its Own
+
+- Mission: implement spec 0003 ticket 11, extending the sensitivity gate's local-only roster resolution across all four dialogue occasions, including post-mortem.
+- Issue: `run_advisory_consultation_debate` gained a new `reachability_check`/`roster_config_path` seam so a sensitive task could resolve a local-only roster instead of always halting. `dispatch_post_mortem_consultation` — the actual production entry point for the post-mortem occasion — has its own, separate, narrower keyword-only parameter list and did not expose either new parameter. Its own docstring had explicitly, and previously correctly, declared the roster seam "deliberately not exposed: none has a post-mortem consumer today."
+- Consequence: a sensitive task dispatched for post-mortem through the real production API could only ever halt — it could never reach the local-only dialogue the ticket required for that occasion, even though the core function fully supported it.
+- Detection: not caught by the implementation's own tests, which called the core function directly. Caught by the Spec-axis code review, which specifically read the dispatch entry point rather than assuming a fix to the core function was sufficient.
+- Resolution: threaded `reachability_check`/`roster_config_path` through `dispatch_post_mortem_consultation` and its background-thread target, and rewrote the stale "deliberately not exposed" docstring paragraph to state what became true.
+- Lesson: in a system with multiple entry points to shared core logic, a new capability added to the core function does not automatically reach a dispatcher, wrapper, or background-thread target with its own parameter surface. Enumerate every entry point explicitly when wiring through a new seam — don't assume propagation.
+
+## 2026-08-13 — Two Independently-Declared Vocabularies Will Drift
+
+- Mission: verify spec 0004's LearningJournal schema against spec 0003's final telemetry shape, as part of the main → spec/0004-learning-loop reconciliation merge.
+- Issue: `advisory_consultation.Occasion` (`Literal["ambiguity", "plan-review", "code-review", "post-mortem"]`, shipped, tested) and `learning_journal.DialogueOccasion` (`Literal["ambiguity", "plan_review", "code_review", "post_mortem"]`, schema-only) are meant to describe the same four-value vocabulary. Three of the four values used hyphens on one side and underscores on the other.
+- Root Cause: each module's own test suite was internally self-consistent — `learning_journal.py`'s test helper always hand-supplied its own `"occasion"` string in isolation — and nothing ever constructed a `DialogueQualityRecord` from a real `Occasion` value. Python's type system does not enforce agreement between two separately-declared `Literal` aliases; nothing would have raised until a real writer eventually passed a live `Occasion` value through and hit `ValueError` in `_validate_choice`.
+- Resolution: aligned `DialogueOccasion` to `Occasion`'s shipped spelling (the established vocabulary, not the schema-only one), and added `test_cross_spec_vocabularies_agree`, asserting `set(get_args(Occasion)) == set(get_args(DialogueOccasion))` (and the same for the topology vocabularies), so a future drift is caught immediately rather than waiting for a real writer to hit it.
+- Lesson: when two modules or two specs are meant to share a vocabulary, don't rely on both authors getting the spelling right independently — pin the agreement with an explicit equality test the moment the second vocabulary is declared.
+
+## 2026-08-13 — A Task Brief Describing Future Work As Present Tense
+
+- Mission: the same reconciliation merge — its own non-negotiable checklist item read "learning_journal.py/learning_outcomes.py consume the FINAL AdvisoryTelemetryRecord shape ... and filter canary records before any aggregation."
+- Issue: no code in either file reads `.ralph/routing_telemetry.jsonl` or constructs an `AdvisoryTelemetryRecord`/`DialogueQualityRecord` translation at all. `learning_journal.py`'s own `DialogueQualityRecord` docstring says so plainly: "Spec 0003's machinery writes these; this module owns the contract so both specs agree on the shape before either has a writer." The checklist item's present-tense phrasing described a future capability as if it already existed.
+- Consequence: none this time — caught before the checklist item was marked done, by reading the actual code path instead of trusting the item's wording.
+- Resolution: recorded the schema-compatibility work that genuinely was done (the occasion/topology vocabulary fix above) and explicitly flagged the consumption/filtering requirement as deferred future work, in the merge commit message, rather than checking off something that doesn't exist.
+- Lesson: a "verify X does Y" checklist item can describe intent, not current fact. Before marking it done, verify Y's implementation exists at all — read the actual code path — rather than inferring from the item's own phrasing that the described behavior is live.
