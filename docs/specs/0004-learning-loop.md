@@ -107,7 +107,9 @@ frozen. Records correlate across streams via TaskIdentity.
   path, today's biggest blind spot.
 - *Outcome*: emitted when each truth becomes known — test pass/fail, review verdict, plan
   accepted or rejected, and the human's stalemate choice — each carrying the TaskIdentity of the
-  decision it grades.
+  decision it grades. "Emitted" names an intent, not a mechanism: the entry points are backlog
+  ticket 14 and the callers that invoke them are backlog ticket 25, filed after a 2026-08-13 review
+  found this paragraph had assumed writers no ticket ever assigned.
 - *Dialogue-quality*: written by spec 0003's machinery — occasion, topology, rounds, per-round
   verdict sequence, engagement counts, canary results, degradation and independence flags.
 - *Compliance*: the post-session audit's violations, issue codes, and metrics, persisted per

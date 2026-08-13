@@ -33,13 +33,32 @@ explicitly "for spec 0004's future LearningJournal to read", and it delivered:
   each carrying `verdict`, `verified_quote_count`, and `objection_count`. Nothing needs threading
   out of the parser; ticket 10 already retained what the round loop used to discard.
 
-So the work is not plumbing. It is one reduction decision, and it deserves to be made deliberately:
-the journal's `DialogueRound` carries **one** `engagement_count` per round, while the consultation
-supplies two integers per Critic and up to two Critics per round. Decide how verified quotes and
-objections combine, and how a panel round's two Critics combine, and write the rule into the record's
-docstring before writing the loop. A reduction chosen implicitly by whoever types first is a rule the
-scoreboard then trends forever — and this is the metric that makes rubber-stamping visible, so a
-reduction that hides one silent Critic behind one engaged one defeats the family's whole purpose.
+So the work is not plumbing. It is one reduction decision: the journal's `DialogueRound` carries
+**one** `engagement_count` per round, while the consultation supplies two integers per Critic and up
+to two Critics per round. State the rule in the record's docstring before writing the loop — a
+reduction chosen implicitly by whoever types first is a rule the scoreboard then trends forever.
+
+Two things constrain that rule, and neither is a matter of taste:
+
+**Quotes and objections are not interchangeable, and the parser says so at the gate.** An APPROVE
+verdict is read as approved only when `verified_quote_count >= 1`; objections never substitute, in
+any quantity. The comment at `advisory_consultation.py:133-141` names the rejected alternative
+explicitly — "deliberately asymmetric, not `verified_quote_count + objection_count >= 1`" — because
+a quote is byte-checked against the artifact while an objection is free text a Critic could fabricate
+without reading anything, and `_parse_critic_verdict` (`:1758-1775`) implements exactly that,
+returning `unparseable` for a bare approval regardless of `objection_count`. A summed
+`engagement_count` would therefore encode, in the metric that exists to make rubber-stamping visible,
+the precise equivalence the parser refuses three hundred lines earlier. That is a contradiction
+inside one module, not a trade-off between two defensible options. What remains genuinely open — and
+is the implementer's to decide and justify — is whether `engagement_count` should be verified quotes
+alone, or quotes-gated with objections counted only once at least one verified quote exists.
+
+**An absent Critic is not a silent one.** `critic_b` is `None` on every pair-mode round by
+construction — including a canary's single-Critic probe — so a reduction across Critics must not read
+its absence as a second Critic that said nothing. Guarding against one engaged Critic masking a
+silent one (the reason a per-Critic minimum is tempting) and guarding against absence being scored as
+silence pull in opposite directions; a rule that handles only the first is a quiet defect, and this
+ticket's own earlier wording had exactly that lean.
 
 Until this lands the scoreboard's critique-authenticity family reports "no data" (ticket 16), which
 means every canary spec 0003 built produces a caught-or-missed result that nothing ever trends.
@@ -53,8 +72,11 @@ means every canary spec 0003 built produces a caught-or-missed result that nothi
 - [ ] The record carries occasion, topology, rounds, per-round verdicts, engagement counts, canary
       results, and the degradation and independence flags.
 - [ ] Engagement counts reach the record per round, reduced from the `VerdictContractResult`s
-      already carried on `round_verdicts` by a rule the ticket states out loud — never recomputed
-      from text, and never a reduction that lets one engaged Critic mask a silent one.
+      already carried on `round_verdicts` by a rule written into the record's docstring — never
+      recomputed from text.
+- [ ] The reduction never lets objections raise `engagement_count` with no verified quote present,
+      and never lets one engaged Critic mask a silent one.
+- [ ] A pair-mode round's `critic_b is None` is scored as an absent Critic, never as a silent one.
 - [ ] It correlates to its task by TaskIdentity — the same id the run's worker-execution records
       already journal under, so a dialogue and its invocations read together.
 - [ ] A canary probe's record is distinguishable from a real dialogue's, so aggregation can count
