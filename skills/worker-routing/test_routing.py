@@ -6453,5 +6453,496 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
         self.assertIn("timestamp", record)
 
 
+class IsLocalFamilyTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 11: `is_local_family`, the pure
+    predicate the sensitive-task roster wrapper (see
+    `SensitiveTaskLocalOnlyDialogueTests` below) is built from. Tested here
+    on its own, standalone, the same way `ModelFamilyClassifierTests` above
+    tests `classify_model_family` on its own — a pure function earns its
+    own focused test class before it earns an integration test through the
+    full debate loop.
+    """
+
+    def test_every_cloud_family_reads_as_not_local(self) -> None:
+        """`is_local_family` is documented as derived from
+        `_CLOUD_FAMILY_SUBSTRINGS` rather than a second, hand-written list
+        of cloud names — this asserts against that constant directly (not
+        a copy-pasted `{"claude", "gemini", "codex-gpt"}` literal) so the
+        test itself cannot silently drift from the source it is meant to
+        guard, and separately pins today's known cloud vocabulary so a
+        change to that vocabulary is visible here too."""
+        cloud_families = {
+            family
+            for _substring, family in advisory_consultation._CLOUD_FAMILY_SUBSTRINGS
+        }
+        self.assertEqual(cloud_families, {"claude", "gemini", "codex-gpt"})
+        for family in cloud_families:
+            with self.subTest(family=family):
+                self.assertFalse(advisory_consultation.is_local_family(family))
+
+    def test_local_lineages_read_as_local(self) -> None:
+        for family in ("gemma", "qwen", "llama", "mistral", "unknown"):
+            with self.subTest(family=family):
+                self.assertTrue(advisory_consultation.is_local_family(family))
+
+    def test_agrees_with_classify_model_family_for_every_default_roster_model(
+        self,
+    ) -> None:
+        """Drift guard spanning both functions at once: for every model
+        name this module's own `DEFAULT_ROSTER_FALLBACK_CHAINS` actually
+        names, `is_local_family(classify_model_family(model))` must agree
+        with which of those models are genuinely local — proving the two
+        functions stay consistent with each other in practice, not merely
+        individually correct in isolation."""
+        cloud_models = (
+            "Claude Opus 5 (Thinking)",
+            "Claude Fable 5",
+            "Codex 5.6 Sol",
+            "GPT-OSS 120B (Medium)",
+            "Gemini 3.6 Flash (High)",
+            "Gemini 3.1 Pro (High)",
+            "Gemini 3.6 Flash",
+        )
+        local_models = ("Gemma 4 E4B", "Qwen3-Coder-Next")
+        for model in cloud_models:
+            with self.subTest(model=model):
+                self.assertFalse(
+                    advisory_consultation.is_local_family(
+                        advisory_consultation.classify_model_family(model)
+                    )
+                )
+        for model in local_models:
+            with self.subTest(model=model):
+                self.assertTrue(
+                    advisory_consultation.is_local_family(
+                        advisory_consultation.classify_model_family(model)
+                    )
+                )
+
+
+class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 11: the sensitivity gate
+    (`_detect_sensitivity_marker` and its fail-closed behaviour) now
+    precedes every occasion, not only ambiguity — a sensitive task may hold
+    a dialogue only between local models from two local families, and when
+    the local runtime is unavailable the consultation still fails closed
+    and escalates to the human, exactly spec 0001's original behaviour
+    (`AdvisorySensitivityGateTests`, untouched above), now proven true for
+    plan-review, code-review, and post-mortem as well.
+
+    `_ALL_FAMILIES` deliberately scripts every cloud family
+    (`claude`/`codex-gpt`/`gemini`) as reachable ALONGSIDE both local
+    families this repo's own default roster fallback chains actually offer
+    (`gemma`, `qwen` — see `DEFAULT_ROSTER_FALLBACK_CHAINS` in
+    advisory_consultation.py). Scripting the cloud families as reachable
+    too, rather than simply omitting them, is what actually proves the
+    local-only gate is doing the filtering: a test where nothing cloud was
+    ever "up" in the first place would pass even if the gate did nothing at
+    all. `_CLOUD_ONLY` is the mirror-image fake for the "local runtime is
+    unavailable" tests: everything cloud is reachable, nothing local is,
+    which is the scenario a sensitive task must fail closed against.
+    """
+
+    _ALL_FAMILIES: tuple[str, ...] = ("claude", "codex-gpt", "gemini", "gemma", "qwen")
+    _CLOUD_ONLY: tuple[str, ...] = ("claude", "codex-gpt", "gemini")
+
+    _SENSITIVE_TASK = "Rotate the api_key before the review lands"
+
+    @staticmethod
+    def _complexity_for(occasion: str) -> str:
+        """Panel topology (spec 0003 ticket 05) exists only for
+        plan-review/code-review at `complexity="complex"` (see
+        `_is_panel_topology`); ambiguity and post-mortem stay pair-mode
+        regardless of complexity. Same per-occasion choice
+        `AdvisoryOccasionParameterizationTests` already makes for its own
+        cross-occasion loop above."""
+        return "complex" if occasion in ("plan-review", "code-review") else "medium"
+
+    def test_criterion_1_zero_cloud_family_calls_across_all_four_occasions(self) -> None:
+        """Acceptance criterion 1: a sensitive task's dialogue on every
+        occasion invokes zero cloud-family workers — verified by
+        classifying what the recording fake actually recorded
+        (`classify_model_family` on the real `model` argument), never by
+        string-matching model names."""
+        for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                complexity = self._complexity_for(occasion)
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    plan = "Planner's plan for the sensitive task."
+                    responses: list[str | Exception]
+                    if complexity == "complex":
+                        responses = [
+                            plan,
+                            _approve(plan, "Critic A: solid."),
+                            _approve(plan, "Critic B: solid."),
+                        ]
+                    else:
+                        responses = [plan, _approve(plan)]
+                    invoker = _RecordingInvoker(responses)
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        self._SENSITIVE_TASK,
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                        complexity=complexity,
+                        reachability_check=_reachable(*self._ALL_FAMILIES),
+                    )
+
+                self.assertTrue(result.consensus_reached)
+                self.assertTrue(invoker.calls)
+                called_families = {
+                    advisory_consultation.classify_model_family(model)
+                    for model, _effort, _prompt in invoker.calls
+                }
+                for family in called_families:
+                    self.assertTrue(
+                        advisory_consultation.is_local_family(family),
+                        f"occasion {occasion!r} invoked cloud family {family!r}",
+                    )
+
+    def test_criterion_2_local_runtime_unavailable_fails_closed_across_all_four_occasions(
+        self,
+    ) -> None:
+        """Acceptance criterion 2: with `reachability_check` supplied but
+        reporting only cloud families up, a sensitive task fails closed and
+        escalates — `sensitivity_halt`, zero worker calls, no
+        `implementation_plan.md` — matching spec 0001's existing
+        ambiguity-occasion behaviour, for all four occasions."""
+        for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
+            with self.subTest(occasion=occasion):
+                complexity = self._complexity_for(occasion)
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                    os.environ, {}, clear=True
+                ):
+                    root = Path(tmp)
+                    invoker = _RecordingInvoker([])
+                    result = advisory_consultation.run_advisory_consultation_debate(
+                        self._SENSITIVE_TASK,
+                        invoker,
+                        root_dir=root,
+                        occasion=occasion,
+                        complexity=complexity,
+                        reachability_check=_reachable(*self._CLOUD_ONLY),
+                    )
+                    plan_exists = (root / "implementation_plan.md").exists()
+
+                self.assertEqual(result.outcome, "sensitivity_halt")
+                self.assertEqual(invoker.calls, [])
+                self.assertFalse(plan_exists)
+
+    def test_criterion_3_sensitive_panel_spans_two_distinct_local_families(self) -> None:
+        """Acceptance criterion 3: a sensitive panel (Complex tier) must
+        not collapse to one local family serving all three roles when a
+        second local family is actually reachable. This repo's own default
+        `roster_topology.role_fallback_chains` offer exactly two distinct
+        local families across all three roles (`gemma` for planner and
+        critic_b, `qwen` for critic_a — see `DEFAULT_ROSTER_FALLBACK_CHAINS`
+        in advisory_consultation.py), so "two distinct, not one" is the
+        strongest claim provable against the real production config without
+        hand-rolling a custom one for this test.
+
+        Because that real chain resolves planner=gemma, critic_a=qwen,
+        critic_b=gemma, `critic_b`'s own preferred family (`gemma`) is
+        already claimed by `planner` by the time `resolve_roster` reaches
+        it, so it can only be assigned via `resolve_roster`'s second,
+        degraded pass — `result.degraded_independence` must therefore read
+        `True` here. Asserting that, not just the family count above, is
+        what proves the flag itself stays honest for this exact roster
+        rather than merely going unexamined by this test."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's plan for the sensitive task."
+            invoker = _RecordingInvoker(
+                [
+                    plan,
+                    _approve(plan, "Critic A: solid."),
+                    _approve(plan, "Critic B: solid."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                reachability_check=_reachable(*self._ALL_FAMILIES),
+            )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertEqual(len(invoker.calls), 3)
+        called_families = [
+            advisory_consultation.classify_model_family(model)
+            for model, _effort, _prompt in invoker.calls
+        ]
+        distinct_families = set(called_families)
+        self.assertGreaterEqual(
+            len(distinct_families),
+            2,
+            f"panel reused one local family for all three roles: {called_families!r}",
+        )
+        for family in distinct_families:
+            self.assertTrue(advisory_consultation.is_local_family(family))
+        self.assertTrue(
+            result.degraded_independence,
+            "planner and critic_b both resolve to gemma against the real "
+            "routing-config.json chains, so this roster is degraded and "
+            "must say so",
+        )
+
+    def test_criterion_4_rung_two_drops_effort_but_never_the_local_roster(self) -> None:
+        """Regression guard for the rung-2 carve-out (design point 4 of
+        this ticket): budget exhaustion may still cheapen a sensitive
+        dialogue's effort, but must never launder it onto
+        `_load_degraded_roster_model`'s substitute, which resolves to a
+        CLOUD model (`light_doer.name` in routing-config.json)."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cloud_light_doer_model = advisory_consultation._load_degraded_roster_model(
+            advisory_consultation._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                reachability_check=_reachable(*self._ALL_FAMILIES),
+                session_spend_so_far=2 * cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 2)
+        # Rungs compound: rung 2 still carries rung 1's reduced round cap.
+        self.assertEqual(result.rounds_run, 1)
+        self.assertEqual(len(invoker.calls), 2)
+        efforts = {effort for _model, effort, _prompt in invoker.calls}
+        self.assertEqual(efforts, {advisory_consultation._DEGRADED_EFFORT})
+        called_models = {model for model, _effort, _prompt in invoker.calls}
+        self.assertNotIn(cloud_light_doer_model, called_models)
+        for model in called_models:
+            family = advisory_consultation.classify_model_family(model)
+            self.assertTrue(
+                advisory_consultation.is_local_family(family),
+                f"rung 2 invoked non-local model {model!r} (family {family!r}) "
+                "on a sensitive task",
+            )
+
+    def test_criterion_5_no_reachability_check_still_halts_closed_pinned_regression(
+        self,
+    ) -> None:
+        """Pins spec 0001's original, unconditional halt
+        (`AdvisorySensitivityGateTests` above) as this ticket's own
+        regression guard, so a future edit cannot quietly change it:
+        omitting `reachability_check` gives this module no way to
+        establish a local runtime exists at all, so "fail closed" remains
+        the only honest answer — completely unaffected by this ticket's new
+        local-only roster path, which only ever activates once a
+        `reachability_check` seam is actually supplied."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", _approve("Planner's plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                self._SENSITIVE_TASK, invoker, root_dir=root
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertEqual(invoker.calls, [])
+
+    def test_criterion_6_roster_exhaustion_halt_never_leaks_task_text_or_secret(
+        self,
+    ) -> None:
+        """The redaction boundary `_detect_sensitivity_marker`/
+        `_render_sensitivity_halt_transcript` establish for the
+        `reachability_check is None` halt path must hold just as tightly
+        for this ticket's new halt path — a `RosterResolutionError` caught
+        because no local family was reachable — since both converge on the
+        identical `sensitivity_halt` outcome and the identical redacted
+        transcript renderer."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            task = "Plan the rollout; api_key=sk-supersecretvalue-do-not-print"
+            result = advisory_consultation.run_advisory_consultation_debate(
+                task,
+                _RecordingInvoker([]),
+                root_dir=root,
+                reachability_check=_reachable(*self._CLOUD_ONLY),
+            )
+            transcript = (root / ".scratch" / "planning_debate.md").read_text()
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertIsNotNone(result.error)
+        assert result.error is not None
+        self.assertNotIn("supersecretvalue", result.error)
+        self.assertNotIn(task, result.error)
+        self.assertNotIn("supersecretvalue", transcript)
+        self.assertNotIn(task, transcript)
+
+
+class SensitiveTaskDispatchPathTests(unittest.TestCase):
+    """Spec 0003 (CriticalDialogue) ticket 11, closing a review finding
+    against `SensitiveTaskLocalOnlyDialogueTests` above:
+    `test_criterion_1_zero_cloud_family_calls_across_all_four_occasions`
+    proves the local-only gate inside `run_advisory_consultation_debate`
+    itself, including for `occasion="post-mortem"` — but it gets there by
+    calling that function directly with its own `reachability_check`. It
+    never goes through `dispatch_post_mortem_consultation`, which is the
+    actual production entry point for the post-mortem occasion.
+
+    Before this ticket, `dispatch_post_mortem_consultation` exposed no
+    `reachability_check`/`roster_config_path` parameters at all, so every
+    dispatched post-mortem always called `run_advisory_consultation_debate`
+    with `reachability_check=None` — which always hits that function's
+    unconditional `marker is not None and reachability_check is None` halt
+    for a sensitive task, regardless of whether a local runtime was
+    actually up. A sensitive task dispatched for post-mortem could
+    therefore never hold the local-only dialogue user story 19 requires; it
+    could only ever escalate. `SensitiveTaskLocalOnlyDialogueTests`'s own
+    criterion-1 test could not have caught that, because it never calls the
+    dispatch function at all. These tests exercise the real
+    `dispatch_post_mortem_consultation`, with its real background thread
+    and the real default `routing-config.json`, closing that gap
+    specifically.
+    """
+
+    _SENSITIVE_TASK = "Rotate the api_key before the review lands"
+    _ALL_FAMILIES: tuple[str, ...] = ("claude", "codex-gpt", "gemini", "gemma", "qwen")
+    _CLOUD_ONLY: tuple[str, ...] = ("claude", "codex-gpt", "gemini")
+
+    def test_dispatched_sensitive_post_mortem_holds_a_local_only_dialogue(self) -> None:
+        """A sensitive task dispatched through the real
+        `dispatch_post_mortem_consultation`, with every family (cloud and
+        local) reachable, actually runs the dialogue to consensus, and
+        every call the recording fake observed belongs to a local family —
+        verified by classifying the real recorded `model` argument via
+        `classify_model_family`/`is_local_family`, never by string-matching
+        model names. Scripting every cloud family as reachable too, rather
+        than omitting them, is what actually proves the dispatch path's
+        gate is filtering: a test where nothing cloud was ever "up" in the
+        first place would pass even if the gate did nothing at all (same
+        reasoning `SensitiveTaskLocalOnlyDialogueTests` documents for its
+        own `_ALL_FAMILIES`). The thread is joined before any assertion
+        runs, the same way every other dispatch test in
+        `AdvisoryBlockingStanceTests` synchronizes with the background
+        thread rather than racing it."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's post-mortem lesson for the sensitive task."
+            invoker = _RecordingInvoker([plan, _approve(plan)])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable(*self._ALL_FAMILIES),
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertTrue(invoker.calls)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "consensus")
+        called_families = {
+            advisory_consultation.classify_model_family(model)
+            for model, _effort, _prompt in invoker.calls
+        }
+        for family in called_families:
+            self.assertTrue(
+                advisory_consultation.is_local_family(family),
+                f"dispatched sensitive post-mortem invoked cloud family {family!r}",
+            )
+
+    def test_dispatched_sensitive_post_mortem_fails_closed_with_no_local_family_up(
+        self,
+    ) -> None:
+        """The mirror case: `reachability_check` is supplied, but only
+        cloud families report reachable. The dispatched debate must fail
+        closed as `sensitivity_halt` with zero worker calls and no
+        `implementation_plan.md` — the dispatch path offering a local-only
+        roster does not mean it may ever launder a sensitive task onto a
+        cloud worker merely because the caller's own probe says cloud is
+        up; "no local family reachable" must escalate exactly the way
+        `SensitiveTaskLocalOnlyDialogueTests.
+        test_criterion_2_local_runtime_unavailable_fails_closed_across_all_four_occasions`
+        already proves for the synchronous path."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+                reachability_check=_reachable(*self._CLOUD_ONLY),
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+            plan_exists = (root / "implementation_plan.md").exists()
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "sensitivity_halt")
+        self.assertFalse(plan_exists)
+
+    def test_dispatched_sensitive_post_mortem_with_no_reachability_check_still_halts(
+        self,
+    ) -> None:
+        """Pinned regression for the dispatch path specifically, mirroring
+        `SensitiveTaskLocalOnlyDialogueTests.
+        test_criterion_5_no_reachability_check_still_halts_closed_pinned_regression`:
+        omitting `reachability_check` — still this parameter's default on
+        `dispatch_post_mortem_consultation` — must halt closed exactly as
+        it always did before this ticket added the parameter at all. Adding
+        the seam is opt-in surface, never a change to the old default
+        behaviour: a caller that upgrades to a newer signature without
+        passing the new keyword must observe byte-for-byte the same
+        fail-closed halt it always got."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([])
+
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                self._SENSITIVE_TASK,
+                invoker,
+                root_dir=root,
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+
+            records = _read_jsonl(
+                root / AdvisoryTranscriptAndTelemetryTests.TELEMETRY_RELATIVE_PATH
+            )
+
+        self.assertEqual(invoker.calls, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["outcome"], "sensitivity_halt")
+
+
 if __name__ == "__main__":
     unittest.main()

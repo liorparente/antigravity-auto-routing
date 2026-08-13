@@ -298,6 +298,35 @@ def classify_model_family(model_name: str) -> str:
     return lowered.strip() or "unknown"
 
 
+def is_local_family(family: str) -> bool:
+    """True when `family` is a local model lineage, not one of the cloud
+    families `_CLOUD_FAMILY_SUBSTRINGS` recognizes.
+
+    Spec 0003 (CriticalDialogue) ticket 11: the sensitive-task path needs
+    "is this family local" as its own predicate, distinct from
+    `classify_model_family`'s "which family is this". `resolve_roster`'s
+    `is_family_reachable` seam (ticket 07) is already exactly the callable
+    shape `(family) -> bool` a sensitive task needs to compose local-only
+    reachability with — `lambda family: is_local_family(family) and
+    reachability_check(family)`, wired in at `run_advisory_consultation_debate`'s
+    roster-resolution block — so this function's whole job is to be that one
+    missing half of the composition, nothing more.
+
+    Deliberately derived from `_CLOUD_FAMILY_SUBSTRINGS` — the set of family
+    names those pairs actually produce — rather than a second, hand-written
+    list of cloud family names. The cloud vocabulary already lives in
+    exactly one place in this module; a second list of the same four names
+    would only ever be a duplicate that could silently drift the next time a
+    cloud family is added, renamed, or split. `family` is expected to
+    already be `classify_model_family`'s output, which is always lowercase
+    (see that function's own docstring for why), so this performs no
+    case-folding of its own — every real caller (`resolve_roster`'s
+    resolution loop) already hands this a lowercase family string.
+    """
+    cloud_families = {cloud_family for _substring, cloud_family in _CLOUD_FAMILY_SUBSTRINGS}
+    return family not in cloud_families
+
+
 # Spec 0003 (CriticalDialogue) ticket 07: the two topologies a roster can be
 # resolved for. "critic_a" doubles as pair mode's sole critic role — the
 # same "`critic_position` means Critic A in panel mode" convention
@@ -2475,6 +2504,14 @@ def run_advisory_consultation_debate(
       Planner proposal, no Critic verdict, nothing sensitive ever leaves
       this process. The result names which marker tripped the halt (never
       the surrounding text) and states that human approval is required.
+      Spec 0003 (CriticalDialogue) ticket 11: a marker match no longer
+      halts immediately when ``reachability_check`` is supplied — instead
+      the roster resolved for this call (see ``reachability_check`` below)
+      is constrained to local families only, and the halt is deferred to
+      whether that constrained resolution actually finds one. Omitting
+      ``reachability_check`` (the default) still halts right here, exactly
+      as spec 0001 always did — this module has no other way to establish
+      that a local runtime exists.
     - Stalemate: every round runs and none is approved. The result carries
       both final positions and three resolution options.
     - Unparseable verdict: a Critic response has no readable verdict line.
@@ -2617,7 +2654,34 @@ def run_advisory_consultation_debate(
     ``RosterResolutionError`` (no reachable family at all for some role) is
     caught and reported as a ``worker_error`` outcome, the same fail-closed
     treatment every other pre-flight failure to reach a worker already gets
-    in this function.
+    in this function — except on a sensitive task, where it is
+    ``sensitivity_halt`` instead; see the next paragraph.
+
+    **Sensitive tasks (spec 0003 ticket 11, user story 19).** When
+    ``_detect_sensitivity_marker`` matches the task text AND
+    ``reachability_check`` was supplied (see the "Sensitivity halt" bullet
+    above for the ``reachability_check is None`` case, which halts earlier
+    and never reaches this paragraph at all), the callable passed to
+    ``resolve_roster`` above is not ``reachability_check`` itself but
+    ``lambda family: is_local_family(family) and reachability_check(family)``
+    — a cloud family is reported unreachable regardless of what the
+    caller's own probe says, so every role's fallback chain walks past its
+    cloud candidates to its local entry on its own, with no change to
+    ``resolve_roster`` itself. If that leaves some role with no reachable
+    family at all, the ``RosterResolutionError`` this function always
+    catches is reported as ``sensitivity_halt`` (carrying the matched
+    marker, so the redacted transcript renders) rather than the
+    ``worker_error`` a non-sensitive task gets for the identical exception —
+    this is "the local runtime is unavailable" for a sensitive task, and
+    user story 19 requires that to fail closed and escalate to the human,
+    exactly like an absent ``reachability_check`` already does. One further
+    carve-out lives in the budget ladder below: rung 2 ordinarily
+    substitutes a single (cloud) model into every role, but on a sensitive
+    task it degrades only ``planner_effort``/``critic_effort``/
+    ``critic_a_effort``/``critic_b_effort`` and leaves the already-local
+    roster this paragraph resolved completely untouched — see
+    ``session_spend_so_far`` below and the rung-2 code block's own comment
+    for why.
 
     ``is_canary`` (spec 0003 ticket 08) is the opt-in seam for a seeded-flaw
     canary round: ``False`` by default, which leaves every pre-ticket-08
@@ -2719,7 +2783,18 @@ def run_advisory_consultation_debate(
     This override is applied *after* the
     roster-resolution block below, deliberately, so it wins even when
     ``reachability_check`` also resolved a roster for this call: budget
-    exhaustion is a stronger, later-stage concern than independence. The
+    exhaustion is a stronger, later-stage concern than independence — for a
+    non-sensitive task. For a **sensitive** one (spec 0003 ticket 11), the
+    model reassignment does not apply at all: ``_load_degraded_roster_model``
+    reads a cloud model (``light_doer.name`` resolves to "Codex 5.6 Terra
+    ..."), and substituting it into a sensitive dialogue's roster would put
+    sensitive task text on a cloud worker purely because a session ran up
+    its dialogue budget — privacy beats cost, so a sensitive task's rung 2
+    degrades only the four effort locals and leaves its already-local
+    roster (see the "Sensitive tasks" paragraph above) standing untouched;
+    ``degraded_independence`` is therefore also left exactly as the roster
+    resolution block set it, never forced to ``True`` by this rung the way
+    it is for a non-sensitive task. The
     two rung-2 effects (effort, model) and rung 1's round reduction all
     compound rather than replace each other, so a rung-2 call also keeps
     rung 1's reduced round cap. The resolved rung is carried on the
@@ -2904,8 +2979,29 @@ def run_advisory_consultation_debate(
 
         return dataclasses.replace(provisional_result, error=folded_error)
 
+    # Spec 0003 (CriticalDialogue) ticket 11: the gate now branches on
+    # whether local reachability is even knowable, rather than halting on a
+    # marker match unconditionally. Ticket 05's original reasoning — with no
+    # way to prove a local runtime exists, "fail closed" is the only honest
+    # answer — still holds exactly as written whenever `reachability_check`
+    # was never supplied, so that half of this `if` is byte-for-byte the
+    # same halt ticket 05 always produced. That is what keeps every
+    # `AdvisorySensitivityGateTests` case (spec 0001; none of them ever pass
+    # `reachability_check`) passing completely unmodified. But user story 19
+    # asks for a sensitive task to be debatable "only between local models
+    # from two local families," not to be unconditionally refused whenever
+    # it happens to be sensitive — so a caller that DOES supply a seam for
+    # asking "is this family up right now" gets asked, rather than being
+    # short-circuited past it. `marker` (kept, not reassigned) is carried
+    # forward past this point for exactly that reason: it still gates the
+    # roster-resolution block below into a local-only shape, and it is what
+    # that block's own `RosterResolutionError` handler reads to decide
+    # whether "no reachable family" means `sensitivity_halt` or the ordinary
+    # `worker_error` a non-sensitive task gets for the identical failure —
+    # see that block's own comment for the fail-closed halt this deferral
+    # ultimately still produces whenever local really is unavailable.
     marker = _detect_sensitivity_marker(task_description)
-    if marker is not None:
+    if marker is not None and reachability_check is None:
         cleanup_error = _remove_stale_plan_artifact(plan_path)
         reason = (
             f"human approval required: task text matched sensitivity marker '{marker}'"
@@ -2981,14 +3077,76 @@ def run_advisory_consultation_debate(
     # returned by the time control reaches here.
     if reachability_check is not None:
         roster_topology: RosterTopology = "panel" if panel_mode else "pair"
+        # Spec 0003 (CriticalDialogue) ticket 11: for a sensitive task
+        # (`marker is not None` — and, by the sensitivity-gate block above,
+        # that is only ever true here when `reachability_check` was indeed
+        # supplied), no cloud family may be considered reachable, however
+        # reachable the caller's own probe says it is. `resolve_roster`
+        # itself stays completely ignorant of "sensitive" — it only ever
+        # optimizes for cross-role independence, never for privacy — so
+        # this composes that constraint on top of the caller's callable
+        # instead of teaching `resolve_roster` a second, sensitivity-aware
+        # resolution mode it would otherwise have no other use for.
+        # `is_local_family` alone decides local-or-not; `reachability_check`
+        # alone still decides up-or-down for whichever families remain
+        # candidates — composition, not a new resolver. Every role's own
+        # fallback chain then naturally walks past its cloud entries to its
+        # local entry exactly as it already walks past any other
+        # unreachable candidate; nothing about `resolve_roster`'s own walk
+        # changes.
+        #
+        # `narrowed_reachability_check` exists only so the lambda below has
+        # something to close over whose type mypy can see as
+        # non-`None`: mypy does not carry a narrowed type
+        # (`reachability_check is not None`, established by this block's own
+        # `if`) into a nested function's free variables, since the outer
+        # name could in principle be reassigned between the closure's
+        # definition and its call — binding the already-narrowed value to
+        # its own local name sidesteps that rather than fighting it with a
+        # `# type: ignore`.
+        narrowed_reachability_check = reachability_check
+        effective_reachability_check = (
+            narrowed_reachability_check
+            if marker is None
+            else (
+                lambda family: is_local_family(family)
+                and narrowed_reachability_check(family)
+            )
+        )
         try:
             roster = resolve_roster(
                 roster_topology,
-                is_family_reachable=reachability_check,
+                is_family_reachable=effective_reachability_check,
                 config_path=roster_config_path,
             )
         except RosterResolutionError as exc:
             cleanup_error = _remove_stale_plan_artifact(plan_path)
+            # Spec 0003 (CriticalDialogue) ticket 11: for a sensitive task,
+            # "no reachable family for some role" under the local-only
+            # wrapper just above means exactly one thing — no local runtime
+            # is actually up — which is precisely the condition user story
+            # 19 requires to fail closed and escalate to the human, the same
+            # way the sensitivity gate above already fails closed when no
+            # `reachability_check` was ever supplied to ask the question at
+            # all. Reusing `sensitivity_halt` here (rather than
+            # `worker_error`, what this exact `except` reports for a
+            # non-sensitive task) is what makes those two "local is
+            # unavailable" paths converge on the same outcome and the same
+            # redacted transcript (`_render_sensitivity_halt_transcript`
+            # reads only `marker`/`task_id`, never `exc`), instead of a
+            # sensitive task's roster exhaustion silently reading as a
+            # generic worker error with no redaction boundary at all.
+            if marker is not None:
+                reason = (
+                    f"human approval required: task text matched sensitivity "
+                    f"marker '{marker}'; no local-family worker was reachable "
+                    f"({exc})"
+                )
+                return _result(
+                    "sensitivity_halt",
+                    error=_fold_error(reason, cleanup_error),
+                    sensitivity_marker=marker,
+                )
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
         planner_model = roster.model_for("planner")
@@ -3020,39 +3178,65 @@ def run_advisory_consultation_debate(
         critic_a_effort = _DEGRADED_EFFORT
         critic_b_effort = _DEGRADED_EFFORT
 
-        degraded_model = _load_degraded_roster_model(budget_config_path)
-        planner_model = degraded_model
-        critic_a_model = degraded_model
-        critic_model = degraded_model
-        if panel_mode:
-            critic_b_model = degraded_model
-        result_critic_model = critic_a_model if panel_mode else critic_model
-        # Spec 0003 story 14: a same-family fallback must be recorded as
-        # degraded independence in both telemetry and transcript, whatever
-        # mechanism caused it. One substituted model in every seat is a
-        # single-family roster by construction — `classify_model_family`
-        # maps the identical name to the identical family for every role —
-        # which is exactly the "same family serves more than one role"
-        # condition `resolve_roster` reports through this same flag. It is
-        # set here as that constructive fact rather than re-derived from
-        # the effective role models: the roster path computes the flag only
-        # inside `resolve_roster`, and a derivation at this site would be a
-        # computation whose answer is always True, dressed up as a check.
-        # Rung 2 is allowed to *lose* cross-family independence (cutting
-        # cost is its whole job); it is not allowed to lie about losing it
-        # — a rung-2 dialogue is one model reviewing its own plan, the
-        # exact self-preference hazard this flag exists to surface, and an
-        # auditor filtering telemetry on `degraded_independence` must see
-        # these dialogues too, not only `resolve_roster`'s own degraded
-        # assignments. This deliberately includes `is_canary=True` runs,
-        # even though a canary invokes only the Critic role: the flag
-        # states the effective roster's family collapse, and on a canary
-        # record it carries exactly the signal a canary auditor needs —
-        # the probe measured the degraded cheap Critic, not the production
-        # Critic. Mission-level aggregation never sees it, because canary
-        # records are mandatorily filtered out (`outcome != "canary"`, per
-        # `AdvisoryTelemetryRecord`'s own WARNING).
-        roster_degraded_independence = True
+        # Spec 0003 (CriticalDialogue) ticket 11: on a sensitive task
+        # (`marker is not None`), rung 2 must degrade effort ONLY — it must
+        # never touch which model fills each seat. `_load_degraded_roster_model`
+        # reads `light_doer.name` from `routing-config.json`, which resolves
+        # to "Codex 5.6 Terra ..." — a CLOUD model. Substituting it into
+        # every role here unconditionally, the way a non-sensitive task's
+        # rung 2 does just below, would launder a sensitive dialogue onto a
+        # cloud worker the moment a session merely ran up its dialogue
+        # budget — exactly the leak user story 19 exists to prevent, and a
+        # far worse failure than the cost overrun rung 2 exists to control.
+        # Privacy beats cost: a rung-2 sensitive dialogue is allowed to get
+        # cheaper in effort, but never cheaper in family. The roster
+        # resolved above is already local-only by construction whenever
+        # `marker is not None` (see the roster-resolution block's own
+        # `effective_reachability_check`), so leaving `planner_model`/
+        # `critic_a_model`/`critic_model`/`critic_b_model` untouched here
+        # simply keeps that already-local roster standing — there is
+        # nothing more this rung needs to do for a sensitive task beyond
+        # the effort reduction four lines above. Rung 1's round reduction
+        # and rung 3's full skip both remain completely unaffected by
+        # sensitivity, and correctly so: neither one ever touches which
+        # family runs, so neither needed a carve-out here.
+        if marker is None:
+            degraded_model = _load_degraded_roster_model(budget_config_path)
+            planner_model = degraded_model
+            critic_a_model = degraded_model
+            critic_model = degraded_model
+            if panel_mode:
+                critic_b_model = degraded_model
+            result_critic_model = critic_a_model if panel_mode else critic_model
+            # Spec 0003 story 14: a same-family fallback must be recorded as
+            # degraded independence in both telemetry and transcript, whatever
+            # mechanism caused it. One substituted model in every seat is a
+            # single-family roster by construction — `classify_model_family`
+            # maps the identical name to the identical family for every role —
+            # which is exactly the "same family serves more than one role"
+            # condition `resolve_roster` reports through this same flag. It is
+            # set here as that constructive fact rather than re-derived from
+            # the effective role models: the roster path computes the flag only
+            # inside `resolve_roster`, and a derivation at this site would be a
+            # computation whose answer is always True, dressed up as a check.
+            # Rung 2 is allowed to *lose* cross-family independence (cutting
+            # cost is its whole job); it is not allowed to lie about losing it
+            # — a rung-2 dialogue is one model reviewing its own plan, the
+            # exact self-preference hazard this flag exists to surface, and an
+            # auditor filtering telemetry on `degraded_independence` must see
+            # these dialogues too, not only `resolve_roster`'s own degraded
+            # assignments. This deliberately includes `is_canary=True` runs,
+            # even though a canary invokes only the Critic role: the flag
+            # states the effective roster's family collapse, and on a canary
+            # record it carries exactly the signal a canary auditor needs —
+            # the probe measured the degraded cheap Critic, not the production
+            # Critic. Mission-level aggregation never sees it, because canary
+            # records are mandatorily filtered out (`outcome != "canary"`, per
+            # `AdvisoryTelemetryRecord`'s own WARNING). None of this applies on
+            # a sensitive task, whose roster (and therefore whose
+            # `degraded_independence` value) this `if` leaves completely
+            # alone — see this block's own comment above for why.
+            roster_degraded_independence = True
 
     # Spec 0003 (CriticalDialogue) ticket 08: the seeded-flaw canary round.
     # Placed after the sensitivity gate and (if opted into) roster
@@ -3286,6 +3470,8 @@ def _run_dispatched_post_mortem(
     planner_effort: str,
     critic_effort: str,
     task_id: str | None,
+    reachability_check: IsFamilyReachable | None,
+    roster_config_path: Path,
     session_spend_so_far: int,
     budget_config_path: Path,
 ) -> None:
@@ -3370,6 +3556,8 @@ def _run_dispatched_post_mortem(
             planner_effort=planner_effort,
             critic_effort=critic_effort,
             task_id=task_id,
+            reachability_check=reachability_check,
+            roster_config_path=roster_config_path,
             session_spend_so_far=session_spend_so_far,
             budget_config_path=budget_config_path,
         )
@@ -3465,6 +3653,8 @@ def dispatch_post_mortem_consultation(
     planner_effort: str = "high",
     critic_effort: str = "high",
     task_id: str | None = None,
+    reachability_check: IsFamilyReachable | None = None,
+    roster_config_path: Path = _CONFIG_PATH,
     session_spend_so_far: int = 0,
     budget_config_path: Path = _CONFIG_PATH,
 ) -> threading.Thread:
@@ -3473,22 +3663,40 @@ def dispatch_post_mortem_consultation(
     Exposes a deliberate subset of `run_advisory_consultation_debate`'s
     parameters, not a mirror of them: the pair-mode roster and effort knobs
     (`planner_model`/`critic_model`/`planner_effort`/`critic_effort`),
-    `max_rounds`, `task_id`, and ticket 09's budget seam
+    `max_rounds`, `task_id`, ticket 07's roster seam
+    (`reachability_check`/`roster_config_path` — same names, same
+    defaults), and ticket 09's budget seam
     (`session_spend_so_far`/`budget_config_path` — same names, same
     defaults), threaded through unchanged. The budget seam is not optional
     surface here: the post-mortem occasion fires on every failure,
     escalation, and stalemate — exactly the sessions most likely to be
     deep into their dialogue budget — so a dispatch path without it would
     make post-mortems the one occasion the degradation ladder could never
-    reduce, cheapen, or skip. The debate function's remaining knobs — the
-    panel-topology models/efforts and `complexity` (a post-mortem never
-    selects the panel topology; see `_is_panel_topology`), the roster seam
-    (`reachability_check`/`roster_config_path`), and the canary seam
-    (`is_canary`/`canary_fixture`) — are deliberately not exposed: none has
-    a post-mortem consumer today, and this keyword-only signature can grow
-    any of them later without breaking an existing call site. `occasion`
-    is hardcoded to `"post-mortem"` in the call below rather than exposed
-    as a knob — this function exists specifically to dispatch the
+    reduce, cheapen, or skip.
+
+    The roster seam is exposed for a closely related reason, surfaced only
+    once ticket 11 gave the post-mortem occasion a sensitivity gate of its
+    own: without `reachability_check`, this function always called
+    `run_advisory_consultation_debate` with `reachability_check=None`, and
+    that function halts a sensitive task unconditionally whenever
+    `reachability_check is None` (see its own "Sensitivity halt"
+    documentation) — so a sensitive post-mortem dispatched through the old,
+    narrower signature could never hold the local-only dialogue user story
+    19 requires, only ever the fail-closed halt spec 0001 already gave
+    every occasion. Threading `reachability_check`/`roster_config_path`
+    through here, unchanged in name, default, and meaning, is what lets a
+    caller that can answer "is this local family up right now" give a
+    sensitive post-mortem the same chance every other occasion already had
+    to resolve a local-only roster instead of always escalating.
+
+    The debate function's remaining knobs — the panel-topology
+    models/efforts and `complexity` (a post-mortem never selects the panel
+    topology; see `_is_panel_topology`) and the canary seam
+    (`is_canary`/`canary_fixture`) — stay deliberately unexposed: neither
+    has a post-mortem consumer today, and this keyword-only signature can
+    grow either of them later without breaking an existing call site.
+    `occasion` is hardcoded to `"post-mortem"` in the call below rather
+    than exposed as a knob — this function exists specifically to dispatch the
     post-mortem occasion (its name says so), and a caller wanting a
     background dispatch of a different occasion is out of this ticket's
     scope (spec 0003 only specifies post-mortem as non-blocking) and would
@@ -3546,6 +3754,8 @@ def dispatch_post_mortem_consultation(
             "planner_effort": planner_effort,
             "critic_effort": critic_effort,
             "task_id": task_id,
+            "reachability_check": reachability_check,
+            "roster_config_path": roster_config_path,
             "session_spend_so_far": session_spend_so_far,
             "budget_config_path": budget_config_path,
         },
