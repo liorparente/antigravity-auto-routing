@@ -135,7 +135,9 @@ class AdvisoryConsultationIntegrationTests(unittest.TestCase):
             # reach the consensus this test asserts.
             return "Planner plan" if len(calls) == 1 else _approve("Planner plan")
 
-        def fake_make_journaled_invoke_worker(task_id: str, *, root_dir: Path) -> object:
+        def fake_make_journaled_invoke_worker(
+            task_id: str, *, root_dir: Path, run_id: str | None = None
+        ) -> object:
             # This test's own subject is "the production default is reached
             # and used end-to-end" — journaling itself is covered directly by
             # JournaledInvokeWorkerTests below, so the fake factory here just

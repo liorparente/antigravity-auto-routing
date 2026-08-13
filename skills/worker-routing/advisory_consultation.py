@@ -2296,6 +2296,31 @@ class AdvisoryTelemetryRecord:
         return dataclasses.asdict(self)
 
 
+def _reduce_dialogue_round(entry: AdvisoryRoundVerdict) -> tuple[CriticVerdict, int]:
+    """Reduce one round's Critic verdict(s) to the single (verdict, engagement
+    count) pair `learning_journal.DialogueRound` carries.
+
+    The rule itself — verified quotes only, `min` across a panel's Critics — is
+    stated in full on `learning_journal.DialogueRound.engagement_count`, which
+    is where a reader of the schema meets it. It is deliberately not restated
+    here: one authority, not two that can drift apart.
+
+    The verdict half mirrors this module's own panel control flow exactly
+    rather than forming a second opinion about it: either Critic unparseable
+    ends the round unparseable (see the round loop's `unparseable` check),
+    both approved is approved, and every other combination is a revision.
+    """
+    results = [entry.critic_a] if entry.critic_b is None else [entry.critic_a, entry.critic_b]
+    verdicts = [result.verdict for result in results]
+    if "unparseable" in verdicts:
+        verdict: CriticVerdict = "unparseable"
+    elif all(item == "approved" for item in verdicts):
+        verdict = "approved"
+    else:
+        verdict = "revise"
+    return verdict, min(result.verified_quote_count for result in results)
+
+
 def _build_telemetry_record(
     result: AdvisoryDebateResult, *, task_id: str
 ) -> AdvisoryTelemetryRecord:
@@ -2333,6 +2358,62 @@ def _write_telemetry_record(path: Path, record: AdvisoryTelemetryRecord) -> str 
     except OSError as exc:
         return f"failed to write consultation telemetry at {path}: {exc}"
     return None
+
+
+def _write_dialogue_quality_record(
+    result: AdvisoryDebateResult, *, task_id: str, run_id: str | None, root_dir: Path
+) -> str | None:
+    """Append this dialogue's one `learning_journal.DialogueQualityRecord`.
+
+    Best-effort, exactly like `_write_telemetry_record` and
+    `routing_check._persist_compliance_record`: returns `None` on success and
+    an error string on failure, and never raises. Two independent failures fold
+    into that one string — a record that cannot be *built* (a caller-supplied
+    `task_id` the journal's identifier pattern refuses, or `learning_journal`
+    missing from an installation) and a disk that cannot be *written*. From the
+    consultation's point of view they are one fact: instrumentation must never
+    displace or fail the dialogue it merely observes.
+
+    `import learning_journal` is local for the reason
+    `routing_check._persist_compliance_record`'s is: an installation missing
+    the module degrades to a reported error rather than an ImportError at
+    module load. `install.sh` does propagate it, and
+    `ManagedFileClosureTests` reads this import out of the AST to keep that
+    true.
+
+    Every field is copied from `result`, never re-derived — the same contract
+    `_build_telemetry_record` documents. Note the two deliberate translations:
+    `independent` is the *negation* of `degraded_independence` (the journal
+    names both flags for their healthy state), and `degraded` is "the budget
+    ladder degraded this call at all", i.e. a nonzero rung.
+
+    `canaries_planted` keys on `result.canary_result`, not on the caller's
+    `is_canary` argument: a canary that never reached a verdict (a worker
+    error, a rung-3 preemption) planted nothing a Critic ever saw, and
+    counting it would put a probe that never ran into the catch rate's
+    denominator. It also carries no round, so it cannot reach an engagement
+    statistic either way.
+    """
+    try:
+        import learning_journal
+
+        record = learning_journal.DialogueQualityRecord(
+            task=learning_journal.TaskLabel.for_task(task_id),
+            occasion=result.occasion,
+            topology=result.topology,
+            rounds=tuple(
+                learning_journal.DialogueRound(*_reduce_dialogue_round(entry))
+                for entry in result.round_verdicts
+            ),
+            canaries_planted=1 if result.canary_result is not None else 0,
+            canaries_caught=1 if result.canary_result == "catch" else 0,
+            degraded=result.degradation_rung != 0,
+            independent=not result.degraded_independence,
+            run_id=run_id,
+        )
+    except (ImportError, ValueError) as exc:
+        return f"failed to build dialogue-quality record: {exc}"
+    return learning_journal.append_journal_record(record, root_dir=root_dir)
 
 
 def _build_stalemate_report(
@@ -2551,7 +2632,14 @@ def run_advisory_consultation_debate(
     human-readable transcript to ``root_dir / ".scratch" / "planning_debate.md"``
     (never appended, so a stale transcript can't survive) and emits exactly
     one structured telemetry record to
-    ``root_dir / ".ralph" / "routing_telemetry.jsonl"``. On a
+    ``root_dir / ".ralph" / "routing_telemetry.jsonl"``. Every outcome except
+    ``sensitivity_halt`` also appends one
+    ``learning_journal.DialogueQualityRecord`` — spec 0004 ticket 24's
+    dialogue-quality journal, occasion/topology/per-round verdicts and
+    engagement counts/canary results/degradation and independence flags,
+    correlated to this run by the same ``task_id`` the telemetry record
+    carries. A halt writes none: it ran no round, so the record would
+    describe a dialogue that never happened. On a
     ``sensitivity_halt`` the transcript carries only the matched marker
     constant, never the task text; every other outcome's transcript carries
     the full task description, plus each round's Planner/Critic exchange
@@ -2913,6 +3001,15 @@ def run_advisory_consultation_debate(
     # allowed to become the primary outcome.
     journal_wiring_error: str | None = None
 
+    # Ticket 24: the run identity this consultation's `DialogueQualityRecord`
+    # carries. Set only where this function owns the journal wiring below (and
+    # only once the factory has accepted it), so it is present exactly when
+    # there are `WorkerExecutionRecord`s sharing it to join against. A caller
+    # that supplied its own journaled `invoke_worker` owns a run identity this
+    # function cannot see; minting a second one here would read as an extra run
+    # of the same task and inflate the rework count `_countable_runs` derives.
+    dialogue_run_id: str | None = None
+
     def _result(
         outcome: AdvisoryOutcome,
         *,
@@ -2990,6 +3087,30 @@ def run_advisory_consultation_debate(
         folded_error = _fold_error(
             folded_error, _write_telemetry_record(telemetry_path, record)
         )
+
+        # Spec 0004 ticket 24: the fourth journal family. Written here, at the
+        # same choke point the transcript and telemetry record already use, for
+        # the same reason — a per-call-site write is a guarantee that only
+        # covers the sites someone remembered.
+        #
+        # One documented carve-out: a sensitivity halt writes no
+        # dialogue-quality record. It ran no round, so the record would
+        # describe a dialogue that never happened, and the journal must not
+        # become the first exception to the halt boundary the rest of this
+        # module keeps (`_render_sensitivity_halt_transcript`,
+        # `_resolve_task_id`). `learning_journal.TaskLabel.for_halted_task`
+        # already states this from the schema's side: "it runs no round, so
+        # there is no `DialogueQualityRecord`".
+        if outcome != "sensitivity_halt":
+            folded_error = _fold_error(
+                folded_error,
+                _write_dialogue_quality_record(
+                    provisional_result,
+                    task_id=resolved_task_id,
+                    run_id=dialogue_run_id,
+                    root_dir=root_dir,
+                ),
+            )
         folded_error = _fold_error(folded_error, journal_wiring_error)
 
         return dataclasses.replace(provisional_result, error=folded_error)
@@ -3350,9 +3471,11 @@ def run_advisory_consultation_debate(
             # outcome this run actually reaches — the journal record and
             # this run's telemetry record stay correlated by TaskIdentity.
             journaled_task_id = _resolve_task_id(task_description, task_id, "consensus")
+            journal_run_id = secrets.token_hex(8)
             invoke_worker = production_invoker.make_journaled_invoke_worker(
-                journaled_task_id, root_dir=root_dir
+                journaled_task_id, root_dir=root_dir, run_id=journal_run_id
             )
+            dialogue_run_id = journal_run_id
         except Exception as exc:  # noqa: BLE001 - instrumentation never aborts what it observes.
             journal_wiring_error = (
                 f"worker-execution journaling disabled for this run: {exc}"
@@ -3583,6 +3706,20 @@ def _run_dispatched_post_mortem(
     `crash_result.error` that `_render_consultation_transcript`'s own output
     for every other outcome and every other call site still deliberately
     omits.
+
+    **No `DialogueQualityRecord` is written on this path, deliberately.**
+    `crash_result` is a guess, not a measurement: `rounds_run=0` and
+    `round_verdicts=()` are hardcoded above because the exception may have
+    fired before any round ran at all, so a dialogue-quality record built from
+    it would assert "this dialogue ran zero rounds" about a dialogue whose
+    real state is unknown. Worse, the `try` above wraps the whole call to
+    `run_advisory_consultation_debate` — including its own `_result` choke
+    point — so an exception raised after that inner `_result` already wrote
+    its record would produce a *second* dialogue-quality record for one
+    dialogue, breaking the one-record-per-dialogue guarantee on the very path
+    meant to be a safety net. The transcript this function writes already
+    carries the crash detail for an operator, so nothing is unobservable by
+    skipping the fourth journal family here.
     """
     try:
         run_advisory_consultation_debate(

@@ -1762,15 +1762,18 @@ class AdvisoryConsultationTests(unittest.TestCase):
         }
         self.assertEqual(before, after)
 
-    def test_ralph_directory_contains_nothing_but_the_telemetry_file(self) -> None:
-        """Ticket 06: telemetry now lands at `.ralph/routing_telemetry.jsonl`, and
-        that is the ONLY thing a consultation ever creates under `.ralph` —
-        asserted as an allowlist of the whole directory listing, not a
-        denylist of the two names (`decisions`, `cache`) ticket 06 happened
-        to predict a collision with. A denylist stops catching new writes
-        the moment anything else starts touching the directory — it would
-        not have caught `agent_council.py`'s own `.ralph/errors.log`, which
-        this whole-directory allowlist does."""
+    def test_ralph_directory_contains_nothing_but_the_telemetry_and_journal_files(
+        self,
+    ) -> None:
+        """Ticket 06: telemetry lands at `.ralph/routing_telemetry.jsonl`.
+        Spec 0004 ticket 24 adds the second and (as of this ticket) last
+        thing a consultation creates under `.ralph`:
+        `.ralph/learning_journal.jsonl`, the dialogue-quality record every
+        non-halted outcome appends — asserted as an allowlist of the whole
+        directory listing, not a denylist of specific names, for the same
+        reason ticket 06's version of this test gives: a denylist stops
+        catching new writes the moment anything else starts touching the
+        directory."""
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -1783,7 +1786,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             )
             self.assertEqual(
                 sorted(p.name for p in (root / ".ralph").iterdir()),
-                ["routing_telemetry.jsonl"],
+                ["learning_journal.jsonl", "routing_telemetry.jsonl"],
             )
 
     def test_both_prompts_carry_worker_mode_token(self) -> None:
@@ -5489,7 +5492,10 @@ class LearningJournalTests(unittest.TestCase):
                 telemetry_before,
                 "writing the journal must not touch the audited stream",
             )
-            self.assertEqual(len(_read_jsonl(learning_journal.journal_path(root))), 1)
+            # 2, not 1: the consultation itself already appended one
+            # `dialogue_quality` record (spec 0004 ticket 24) before this test
+            # appends its own `worker_execution` record by hand.
+            self.assertEqual(len(_read_jsonl(learning_journal.journal_path(root))), 2)
 
     def test_records_are_appended_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5589,8 +5595,13 @@ class LearningJournalTests(unittest.TestCase):
 
         self.assertEqual(len(decisions), 1)
         self.assertEqual(decisions[0]["outcome"], "consensus")
+        # `dialogue_quality` joins the same task_id too (spec 0004 ticket 24):
+        # the consultation itself already wrote one at its `_result` choke
+        # point, so the three-way join is worker_execution + outcome +
+        # dialogue_quality, not just the first two.
         self.assertEqual(
-            {record["kind"] for record in graded}, {"worker_execution", "outcome"}
+            {record["kind"] for record in graded},
+            {"worker_execution", "outcome", "dialogue_quality"},
         )
         self.assertEqual(
             next(r for r in graded if r["kind"] == "outcome")["verdict"], "pass"
@@ -6393,10 +6404,17 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
 
     TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
 
-    def test_injecting_a_plain_fake_writes_nothing_to_the_journal(self) -> None:
-        """The consultation's seam is unchanged: a caller-supplied fake
-        `invoke_worker` bypasses instrumentation entirely, exactly as it did
-        before this ticket."""
+    def test_injecting_a_plain_fake_writes_nothing_to_the_worker_execution_journal(
+        self,
+    ) -> None:
+        """The consultation's worker-execution seam is unchanged: a
+        caller-supplied fake `invoke_worker` bypasses that instrumentation
+        entirely, exactly as it did before this ticket. The dialogue-quality
+        writer (spec 0004 ticket 24) is a separate, always-on write at the
+        `_result` choke point that does not depend on which `invoke_worker`
+        the caller supplied, so the journal file itself now exists — holding
+        exactly one `dialogue_quality` record and zero `worker_execution`
+        records."""
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -6407,9 +6425,10 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             result = advisory_consultation.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
+            records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertTrue(result.consensus_reached)
-        self.assertFalse(learning_journal.journal_path(root).exists())
+        self.assertEqual([record["kind"] for record in records], ["dialogue_quality"])
 
     def test_journaled_invocations_correlate_to_the_consultation_by_task_id(self) -> None:
         """Wrapping a caller-supplied callable through
@@ -6450,15 +6469,20 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
 
         self.assertTrue(result.consensus_reached)
 
-        self.assertEqual(len(journal_records), 2)
-        for record in journal_records:
+        self.assertEqual(len(journal_records), 3)
+        worker_records = [r for r in journal_records if r["kind"] == "worker_execution"]
+        self.assertEqual(len(worker_records), 2)
+        for record in worker_records:
             self.assertEqual(record["task_id"], "task-correlated-1")
-            self.assertEqual(record["kind"], "worker_execution")
             self.assertTrue(record["success"])
-        self.assertEqual(journal_records[0]["model_id"], "claude-opus-5")
-        self.assertEqual(journal_records[0]["model_family"], "claude")
-        self.assertEqual(journal_records[1]["model_id"], "gpt-5.6-sol")
-        self.assertEqual(journal_records[1]["model_family"], "codex")
+        self.assertEqual(worker_records[0]["model_id"], "claude-opus-5")
+        self.assertEqual(worker_records[0]["model_family"], "claude")
+        self.assertEqual(worker_records[1]["model_id"], "gpt-5.6-sol")
+        self.assertEqual(worker_records[1]["model_family"], "codex")
+
+        dialogue_records = [r for r in journal_records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(dialogue_records), 1)
+        self.assertEqual(dialogue_records[0]["task_id"], "task-correlated-1")
 
         self.assertEqual(len(telemetry_records), 1)
         self.assertEqual(telemetry_records[0]["task_id"], "task-correlated-1")
@@ -6503,7 +6527,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             journal_records = _read_jsonl(learning_journal.journal_path(root))
             telemetry_records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
 
-        self.assertEqual(len(journal_records), 4)
+        self.assertEqual(len(journal_records), 6)
         self.assertEqual(
             {record["task_id"] for record in journal_records}, {"task-reworked-1"}
         )
@@ -6512,9 +6536,10 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         self.assertEqual(
             len(runs) - 1, 1, "which is one rework — the number task_id alone hides"
         )
+        worker_records = [r for r in journal_records if r["kind"] == "worker_execution"]
         self.assertEqual(
             [
-                len([r for r in journal_records if r["run_id"] == run])
+                len([r for r in worker_records if r["run_id"] == run])
                 for run in sorted(runs)
             ],
             [2, 2],
@@ -6632,10 +6657,11 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             journal_records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertTrue(result.consensus_reached)
-        self.assertEqual(len(journal_records), 2)
-        for record in journal_records:
+        self.assertEqual(len(journal_records), 3)
+        worker_records = [r for r in journal_records if r["kind"] == "worker_execution"]
+        self.assertEqual(len(worker_records), 2)
+        for record in worker_records:
             self.assertEqual(record["task_id"], "task-default-path-1")
-            self.assertEqual(record["kind"], "worker_execution")
             self.assertTrue(record["success"])
 
 
@@ -6748,11 +6774,11 @@ class OutcomeRecordingTests(unittest.TestCase):
             records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertIsNone(error)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["kind"], "outcome")
-        self.assertEqual(records[0]["task_id"], "task-stalemate-1")
-        self.assertEqual(records[0]["ground_truth"], "stalemate_resolution")
-        self.assertEqual(records[0]["verdict"], "critic")
+        self.assertEqual(len(records), 2)
+        outcome_record = next(r for r in records if r["kind"] == "outcome")
+        self.assertEqual(outcome_record["task_id"], "task-stalemate-1")
+        self.assertEqual(outcome_record["ground_truth"], "stalemate_resolution")
+        self.assertEqual(outcome_record["verdict"], "critic")
 
     def test_record_stalemate_resolution_maps_all_three_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -6770,7 +6796,14 @@ class OutcomeRecordingTests(unittest.TestCase):
                 )
             records = _read_jsonl(learning_journal.journal_path(root))
 
-        self.assertEqual([record["verdict"] for record in records], ["planner", "critic", "human"])
+        # `_run_to_stalemate` already appended one `dialogue_quality` record
+        # (spec 0004 ticket 24) before the loop above wrote its three
+        # `outcome` records — filter to the kind this test is actually about.
+        outcome_records = [r for r in records if r["kind"] == "outcome"]
+        self.assertEqual(
+            [record["verdict"] for record in outcome_records],
+            ["planner", "critic", "human"],
+        )
 
     def test_record_stalemate_resolution_rejects_an_option_from_a_different_report(
         self,
@@ -6790,7 +6823,12 @@ class OutcomeRecordingTests(unittest.TestCase):
                     "task-stalemate-1", result.stalemate, foreign_option, root_dir=root
                 )
 
-            self.assertFalse(learning_journal.journal_path(root).exists())
+            # The journal file itself already exists — `_run_to_stalemate`
+            # wrote one `dialogue_quality` record (spec 0004 ticket 24) before
+            # the rejected call above ever ran. What must stay true is that
+            # the rejection left no orphan `outcome` record behind.
+            records = _read_jsonl(learning_journal.journal_path(root))
+            self.assertEqual([r["kind"] for r in records], ["dialogue_quality"])
 
     def test_missing_task_id_is_refused_rather_than_writing_an_orphan_record(self) -> None:
         """"Unknown task" handling: this module never fabricates a `task_id`
@@ -7881,11 +7919,15 @@ class ManagedFileClosureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines()[0], "consensus")
         self.assertEqual(result.stdout.splitlines()[1], "None")
-        self.assertEqual(len(records), 2)
-        for record in records:
-            self.assertEqual(record["kind"], "worker_execution")
+        self.assertEqual(len(records), 3)
+        worker_records = [r for r in records if r["kind"] == "worker_execution"]
+        self.assertEqual(len(worker_records), 2)
+        for record in worker_records:
             self.assertEqual(record["task_id"], "installed-consultation-1")
             self.assertTrue(record["success"])
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(dialogue_records), 1)
+        self.assertEqual(dialogue_records[0]["task_id"], "installed-consultation-1")
 
 
 class InstalledAuditJournalRootTests(unittest.TestCase):
@@ -8010,10 +8052,13 @@ class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
             records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertIsNone(result.error)
-        self.assertEqual(len(records), 2)
+        self.assertEqual(len(records), 3)
         for record in records:
             self.assertEqual(record["task_id"], "task-still-journaled-1")
-            self.assertEqual(record["kind"], "worker_execution")
+        worker_records = [r for r in records if r["kind"] == "worker_execution"]
+        self.assertEqual(len(worker_records), 2)
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(dialogue_records), 1)
 
 
 class JournaledRunIdWiringFailureTests(unittest.TestCase):
@@ -10005,6 +10050,678 @@ class SensitiveTaskDispatchPathTests(unittest.TestCase):
         self.assertEqual(invoker.calls, [])
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["outcome"], "sensitivity_halt")
+
+
+# Spec 0004 ticket 24 — the fourth journal family's writer. Appended here, at
+# the end of the file, per this file's own convention (see the comment above
+# `JournalUnificationTests`): this file is edited concurrently on other
+# branches, so an insertion anywhere but the end is a merge conflict for
+# everyone.
+class DialogueQualityRecordWriterTests(unittest.TestCase):
+    """`advisory_consultation._write_dialogue_quality_record` /
+    `_reduce_dialogue_round`: one `learning_journal.DialogueQualityRecord`
+    per dialogue, written at the `_result` choke point, reduced from the
+    `AdvisoryRoundVerdict`s a consultation already computes and discards
+    nowhere else. Organized 1:1 against
+    `.scratch/routing-backlog/issues/24-dialogue-quality-records.md`'s eight
+    acceptance criteria, plus a handful of tests (`test_a_*`, prefixed to read
+    near their AC siblings) pinning decisions the implementation plan made
+    that no acceptance criterion states directly.
+    """
+
+    # --- AC1: one record per dialogue, never one per round ---
+
+    def test_a_two_round_dialogue_writes_exactly_one_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "Planner's first plan."
+            second_plan = "Planner's revised plan."
+            invoker = _RecordingInvoker(
+                [
+                    first_plan,
+                    _revise("Needs more detail."),
+                    second_plan,
+                    _approve(second_plan, "Good now."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="dq-two-round-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertTrue(result.consensus_reached)
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(dialogue_records), 1)
+        self.assertEqual(dialogue_records[0]["rounds_run"], 2)
+        self.assertEqual(len(dialogue_records[0]["rounds"]), 2)
+
+    def test_a_three_round_stalemate_still_writes_exactly_one_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's second plan.",
+                    _revise("Still thin."),
+                    "Planner's third plan.",
+                    _revise("Not convinced."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="dq-stalemate-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "stalemate")
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(dialogue_records), 1)
+        self.assertEqual(dialogue_records[0]["rounds_run"], 3)
+
+    # --- AC2: carries occasion, topology, rounds, canaries, both flags ---
+
+    def test_the_record_carries_occasion_topology_rounds_canaries_and_both_flags(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's proposed plan."
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [_approve(plan, "Critic A: solid.")],
+                    "Test Critic B": [_approve(plan, "Critic B: solid.")],
+                }
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+                task_id="dq-fields-1",
+            )
+            record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        self.assertEqual(record["occasion"], "plan-review")
+        self.assertEqual(record["topology"], "panel")
+        self.assertEqual(record["rounds"], [{"verdict": "approved", "engagement_count": 1}])
+        self.assertIn("canaries_planted", record)
+        self.assertIn("canaries_caught", record)
+        self.assertIn("degraded", record)
+        self.assertIn("independent", record)
+        self.assertIn("rounds_run", record)
+
+    def test_flag_polarity_is_not_inverted(self) -> None:
+        """The one place a copy-don't-derive bug would be silent: the journal
+        names both flags for their healthy state (`degraded`/`independent`),
+        while the result names one for its unhealthy state
+        (`degraded_independence`). A rung-2 run must read `degraded=True`,
+        `independent=False`; a rung-0 run must read the mirror image."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=3,
+                session_spend_so_far=2 * cap,
+                task_id="dq-rung2-1",
+            )
+            degraded_record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Planner's plan.", _approve("Planner's plan.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                session_spend_so_far=0,
+                task_id="dq-rung0-1",
+            )
+            healthy_record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        self.assertTrue(degraded_record["degraded"])
+        self.assertFalse(degraded_record["independent"])
+        self.assertFalse(healthy_record["degraded"])
+        self.assertTrue(healthy_record["independent"])
+
+    # --- AC3: reduction rule, stated once, never recomputed from text ---
+
+    def test_reduce_dialogue_round_counts_verified_quotes_not_objections(self) -> None:
+        entry = advisory_consultation.AdvisoryRoundVerdict(
+            critic_a=advisory_consultation.VerdictContractResult("revise", 0, 3)
+        )
+        self.assertEqual(
+            advisory_consultation._reduce_dialogue_round(entry), ("revise", 0)
+        )
+
+    def test_reduce_dialogue_round_takes_the_minimum_across_a_panel(self) -> None:
+        """The ticket's hard constraint: one engaged Critic must never mask a
+        silent one. Critic A verified five quotes, Critic B verified zero —
+        the round's count must be zero, never five (`sum`/`max` would both
+        report five, indistinguishable from a pair round's sole Critic
+        having verified five)."""
+        entry = advisory_consultation.AdvisoryRoundVerdict(
+            critic_a=advisory_consultation.VerdictContractResult("approved", 5, 0),
+            critic_b=advisory_consultation.VerdictContractResult("approved", 0, 0),
+        )
+        _verdict, count = advisory_consultation._reduce_dialogue_round(entry)
+        self.assertEqual(count, 0)
+        self.assertNotEqual(count, 5, "min must govern the count, never sum or max")
+
+    def test_reduce_dialogue_round_verdicts_follow_the_panel_control_flow(self) -> None:
+        approved = advisory_consultation.VerdictContractResult("approved", 1, 0)
+        revise = advisory_consultation.VerdictContractResult("revise", 0, 1)
+        unparseable = advisory_consultation.VerdictContractResult("unparseable", 0, 0)
+        cases = (
+            (approved, approved, "approved"),
+            (approved, revise, "revise"),
+            (unparseable, approved, "unparseable"),
+            (approved, unparseable, "unparseable"),
+        )
+        for critic_a, critic_b, expected in cases:
+            with self.subTest(critic_a=critic_a.verdict, critic_b=critic_b.verdict):
+                entry = advisory_consultation.AdvisoryRoundVerdict(
+                    critic_a=critic_a, critic_b=critic_b
+                )
+                verdict, _count = advisory_consultation._reduce_dialogue_round(entry)
+                self.assertEqual(verdict, expected)
+
+    def test_an_engaged_critic_cannot_mask_a_silent_one_end_to_end(self) -> None:
+        """The unit test above, proven through the real parser: a panel round
+        where Critic A quotes the plan and Critic B raises an objection with
+        no quote at all must journal `engagement_count == 0` for that round —
+        Critic A's engagement never masks Critic B's silence."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's proposed plan."
+            critic_a_response = (
+                f'Solid start.\nQUOTE: "{plan}"\n1. Consider a rollback step.\n'
+                "VERDICT: REVISE"
+            )
+            invoker = _RoleKeyedInvoker(
+                {
+                    "Test Planner": [plan],
+                    "Test Critic A": [critic_a_response],
+                    "Test Critic B": [_revise("No quotes, just a concern.")],
+                }
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                planner_model="Test Planner",
+                critic_a_model="Test Critic A",
+                critic_b_model="Test Critic B",
+                max_rounds=1,
+                task_id="dq-masking-1",
+            )
+            record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        self.assertEqual(record["rounds"][0]["engagement_count"], 0)
+
+    def test_engagement_counts_are_never_recomputed_from_text(self) -> None:
+        """The writer reads the already-parsed `round_verdicts` structures,
+        never the raw Critic prose: a rationale line that merely mentions the
+        word `QUOTE:` without matching the VerdictContract's line-start
+        pattern must not inflate the journaled count."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan = "Planner's proposed plan."
+            critic_response = (
+                "This response never uses a QUOTE: line, it just discusses "
+                "the word QUOTE: in passing.\nVERDICT: REVISE"
+            )
+            invoker = _RecordingInvoker([plan, critic_response])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                max_rounds=1,
+                task_id="dq-no-recompute-1",
+            )
+            record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        self.assertEqual(record["rounds"][0]["engagement_count"], 0)
+
+    # --- AC4: correlates to its task by TaskIdentity ---
+
+    def test_the_dialogue_record_shares_the_task_id_of_the_runs_worker_records(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            production_invoker,
+            "invoke_worker",
+            side_effect=[
+                "Planner's proposed plan.",
+                _approve("Planner's proposed plan."),
+            ],
+        ):
+            root = Path(tmp)
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                root_dir=root,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                task_id="dq-shared-run-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual({r["task_id"] for r in records}, {"dq-shared-run-1"})
+        worker_records = [r for r in records if r["kind"] == "worker_execution"]
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(worker_records), 2)
+        self.assertEqual(len(dialogue_records), 1)
+        run_ids = {r["run_id"] for r in worker_records} | {dialogue_records[0]["run_id"]}
+        self.assertEqual(len(run_ids), 1, "all three records share one run_id")
+
+    def test_a_caller_supplied_journaled_invoker_leaves_the_dialogue_record_run_free(
+        self,
+    ) -> None:
+        """Pins §2.4's anti-rework-inflation rule: when the caller owns the
+        journal wiring, `advisory_consultation` cannot see that factory's run
+        identity, so it must not mint a second one — the dialogue record
+        carries no `run_id` key at all, and `_countable_runs` still reports
+        exactly one run for the task."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            runner = mock.Mock(
+                side_effect=[
+                    subprocess.CompletedProcess(
+                        [], 0, "Planner's proposed plan.", ""
+                    ),
+                    subprocess.CompletedProcess(
+                        [], 0, _approve("Planner's proposed plan."), ""
+                    ),
+                ]
+            )
+            journaled_invoker = production_invoker.make_journaled_invoke_worker(
+                "dq-caller-run-1", root_dir=root, runner=runner
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                journaled_invoker,
+                root_dir=root,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                task_id="dq-caller-run-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        dialogue_record = next(r for r in records if r["kind"] == "dialogue_quality")
+        self.assertNotIn("run_id", dialogue_record)
+        self.assertEqual(len(_countable_runs(records, "dq-caller-run-1")), 1)
+
+    # --- AC5: a canary probe's record is distinguishable ---
+
+    def test_a_canary_catch_and_miss_are_marked_and_a_real_dialogue_is_not(self) -> None:
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        task_description = "Plan the auth rewrite"
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            catch_invoker = _RecordingInvoker([_revise("Objection.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                task_description, catch_invoker, root_dir=root, is_canary=True
+            )
+            catch_record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            miss_invoker = _RecordingInvoker([_approve_fixture(fixture)])
+            advisory_consultation.run_advisory_consultation_debate(
+                task_description, miss_invoker, root_dir=root, is_canary=True
+            )
+            miss_record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            real_invoker = _RecordingInvoker(["Real plan.", _approve("Real plan.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                task_description, real_invoker, root_dir=root
+            )
+            real_record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        self.assertEqual(
+            (catch_record["canaries_planted"], catch_record["canaries_caught"]), (1, 1)
+        )
+        self.assertEqual(
+            (miss_record["canaries_planted"], miss_record["canaries_caught"]), (1, 0)
+        )
+        self.assertEqual(
+            (real_record["canaries_planted"], real_record["canaries_caught"]), (0, 0)
+        )
+        expected_real_digest = advisory_consultation._default_task_id(task_description)
+        self.assertEqual(real_record["task_id"], expected_real_digest)
+        self.assertNotEqual(catch_record["task_id"], expected_real_digest)
+
+    # --- AC6: content-free ---
+
+    def test_no_substring_of_the_task_plan_or_critique_reaches_the_journal(self) -> None:
+        distinctive_task = (
+            "Plan the ZEBRA-QUASAR-77 migration for the northwind-prod cluster"
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            first_plan = "First plan mentioning ZEBRA-QUASAR-77 explicitly."
+            second_plan = "Second plan, still about ZEBRA-QUASAR-77."
+            invoker = _RecordingInvoker(
+                [
+                    first_plan,
+                    _revise("ZEBRA-QUASAR-77 needs a rollback section."),
+                    second_plan,
+                    _approve(second_plan, "ZEBRA-QUASAR-77 rollback looks good now."),
+                ]
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                distinctive_task, invoker, root_dir=root
+            )
+            journal_text = learning_journal.journal_path(root).read_text()
+
+        for leak in (
+            distinctive_task,
+            "ZEBRA-QUASAR-77",
+            "rollback",
+            first_plan,
+            second_plan,
+        ):
+            self.assertNotIn(leak, journal_text)
+
+    def test_the_record_key_set_is_exactly_the_expected_set(self) -> None:
+        """A leak added by a future field is a failure, not an invisible
+        addition."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, task_id="dq-keyset-1"
+            )
+            record = next(
+                r
+                for r in _read_jsonl(learning_journal.journal_path(root))
+                if r["kind"] == "dialogue_quality"
+            )
+
+        self.assertEqual(
+            set(record),
+            {
+                "kind",
+                "task_id",
+                "sensitivity_halted",
+                "occasion",
+                "topology",
+                "rounds",
+                "canaries_planted",
+                "canaries_caught",
+                "degraded",
+                "independent",
+                "rounds_run",
+                "timestamp",
+            },
+        )
+
+    # --- AC7: a sensitivity-halted consultation writes no dialogue record ---
+
+    def test_a_sensitivity_halted_consultation_writes_no_dialogue_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the rollout, password=hunter2", _RecordingInvoker([]), root_dir=root
+            )
+            telemetry_exists = (root / ".ralph" / "routing_telemetry.jsonl").exists()
+            journal_exists = learning_journal.journal_path(root).exists()
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertTrue(telemetry_exists)
+        self.assertFalse(journal_exists)
+
+    def test_a_halt_from_an_exhausted_local_roster_writes_no_dialogue_record(self) -> None:
+        """The second halt exit (`reachability_check` supplied but reporting
+        only cloud families up) — the carve-out proven where it is claimed,
+        for both of `_result`'s two `sensitivity_halt` call sites."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Rotate the api_key before the review lands",
+                _RecordingInvoker([]),
+                root_dir=root,
+                reachability_check=_reachable("claude", "codex-gpt", "gemini"),
+            )
+            journal_exists = learning_journal.journal_path(root).exists()
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertFalse(journal_exists)
+
+    # --- AC8: the scoreboard's data half ---
+
+    def test_a_real_consultation_leaves_dialogue_quality_data_in_the_journal(self) -> None:
+        """The buildable half of AC8 — the scoreboard itself is ticket 16 and
+        does not exist yet."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", invoker, root_dir=root, task_id="dq-scoreboard-1"
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertGreaterEqual(len(dialogue_records), 1)
+        for record in dialogue_records:
+            self.assertTrue(record["rounds"])
+            for round_entry in record["rounds"]:
+                self.assertIsInstance(round_entry["engagement_count"], int)
+
+    # --- pinned decisions with no direct acceptance criterion ---
+
+    def test_a_budget_skipped_dialogue_writes_a_zero_round_record(self) -> None:
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                _RecordingInvoker([]),
+                root_dir=root,
+                session_spend_so_far=3 * cap,
+                task_id="dq-rung3-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(dialogue_records), 1)
+        self.assertEqual(dialogue_records[0]["rounds"], [])
+        self.assertEqual(dialogue_records[0]["rounds_run"], 0)
+        self.assertTrue(dialogue_records[0]["degraded"])
+
+    def test_a_worker_error_before_any_round_writes_a_zero_round_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([RuntimeError("planner unreachable")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="dq-worker-error-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "worker_error")
+        dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
+        self.assertEqual(len(dialogue_records), 1)
+        self.assertEqual(dialogue_records[0]["rounds"], [])
+
+    def test_a_journal_the_writer_cannot_reach_degrades_the_run_and_never_fails_it(
+        self,
+    ) -> None:
+        """Instrumentation never breaks what it observes: an unwritable
+        `.ralph` (pre-created as a file, the shape
+        `LearningJournalTests.test_write_failure_is_reported_to_the_caller_and_never_raised`
+        uses) still lets the dialogue itself reach consensus; only the
+        record of it degrades, named in `result.error`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            learning_journal.journal_path(root).parent.write_text("not a directory")
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="dq-unwritable-1",
+            )
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertEqual(result.final_plan, "Plan.")
+        assert result.error is not None
+        self.assertIn("learning journal", result.error.lower())
+
+    def test_the_dispatch_crash_net_writes_no_dialogue_quality_record(self) -> None:
+        """§2.3: the dispatch thread's own last-resort exception net
+        (`_run_dispatched_post_mortem`'s `except`) writes a telemetry record
+        but deliberately no dialogue-quality record — its synthesized result
+        is a guess about a dialogue whose real state is unknown, and the
+        inner `try` already wraps `_result`, so writing one here risks a
+        second record for one dialogue."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            advisory_consultation,
+            "run_advisory_consultation_debate",
+            side_effect=RuntimeError("unexpected bug: sentinel-oops"),
+        ):
+            root = Path(tmp)
+            thread = advisory_consultation.dispatch_post_mortem_consultation(
+                "Post-mortem for a mystery failure",
+                _RecordingInvoker([]),
+                root_dir=root,
+                task_id="dq-dispatch-crash-1",
+            )
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive(), "background thread leaked past the test")
+            telemetry_records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
+            journal_exists = learning_journal.journal_path(root).exists()
+
+        self.assertEqual(len(telemetry_records), 1)
+        self.assertEqual(telemetry_records[0]["outcome"], "worker_error")
+        self.assertFalse(journal_exists)
+
+    def test_critic_verdict_and_round_verdict_vocabularies_agree(self) -> None:
+        """The third cross-spec vocabulary pin (`ERRORS.md`, "pin the
+        agreement with an explicit equality test the moment the second
+        vocabulary is declared"), now load-bearing: `_reduce_dialogue_round`
+        returns a bare string that must be a valid `learning_journal.RoundVerdict`
+        for `DialogueRound.__post_init__` to accept it."""
+        self.assertEqual(
+            set(get_args(advisory_consultation.CriticVerdict)),
+            set(get_args(learning_journal.RoundVerdict)),
+        )
+
+    def test_an_unjournalable_task_id_writes_no_dialogue_record_and_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            production_invoker,
+            "invoke_worker",
+            side_effect=["Plan.", _approve("Plan.")],
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite", root_dir=root, task_id="not a valid task id"
+            )
+            journal_exists = learning_journal.journal_path(root).exists()
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertFalse(journal_exists)
+        assert result.error is not None
+        self.assertIn("journaling disabled", result.error)
+        self.assertIn("dialogue-quality record", result.error)
 
 
 if __name__ == "__main__":

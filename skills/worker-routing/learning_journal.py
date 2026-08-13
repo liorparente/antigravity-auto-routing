@@ -880,12 +880,44 @@ class DialogueRound:
     otherwise. Per-critic detail stays in the transcript, which is
     content-bearing and governed by its own rules; the journal counts.
 
-    `engagement_count` is the number of atomic engagement units in that
-    round's critique — the VerdictContract measure that makes rubber-stamping
-    visible, since an approval carrying zero of them does not parse as an
-    approval at all. Trending it is how the loop notices a Critic going quiet.
-    A count, never the objections themselves: the units are quoted from the
-    reviewed artifact, so carrying them would carry the artifact.
+    `engagement_count` is the round's **verified-quote count, reduced across its
+    Critics by `min`** — never a sum with objections, and never `sum` or `max`
+    across Critics. The VerdictContract measure that makes rubber-stamping
+    visible: an approval carrying zero of these does not parse as an approval at
+    all. Trending it is how the loop notices a Critic going quiet. A count, never
+    the objections themselves: the units are quoted from the reviewed artifact,
+    so carrying them would carry the artifact.
+
+    **Quotes, not objections.** `advisory_consultation` counts two things per
+    Critic — verified quotes, each checked byte-for-byte against the reviewed
+    artifact, and numbered objections, which are unverified free text. That
+    module already refuses to let the second substitute for the first: an
+    APPROVE is honored only when `verified_quote_count >= 1`, explicitly not
+    when `verified_quote_count + objection_count >= 1`, because a Critic can
+    fabricate ten numbered objections about a plan it never read. Summing them
+    here would contradict that rule and the first paragraph above it — a
+    fabricated approval with three objections and no quotes would journal
+    `engagement_count=3` for a response the parser classified `unparseable` for
+    carrying no engagement at all. Objections are not discarded from the system;
+    `advisory_consultation.AdvisoryTelemetryRecord.round_verdicts` keeps both
+    integers per Critic. They are simply not what this field counts.
+
+    **`min` across a panel's Critics, never `sum` or `max`.** With Critic A at
+    five verified quotes and Critic B at zero, `sum` and `max` both report five —
+    indistinguishable from a pair round whose sole Critic verified five, so one
+    engaged Critic masks a silent one, which is the exact failure this metric
+    exists to expose. `min` reports zero: a panel round is only as engaged as its
+    least engaged Critic. This is the same reduction the verdict paragraph above
+    already uses ("approved" only when every Critic approved), applied to the
+    count instead of the label, so the two can never disagree about whether a
+    round was engaged. A pair round — and a canary's single-Critic probe —
+    reduces over one value and is unaffected.
+
+    The direction of the error is deliberate. Verified quotes are the only
+    mechanically checked evidence available, so this count reads low for a Critic
+    that objected at length without quoting anything. That is the safe direction:
+    it can prompt a look at a Critic that was in fact working, and it can never
+    certify a rubber-stamping one as engaged.
     """
 
     verdict: RoundVerdict
@@ -913,10 +945,14 @@ def _validate_rounds(value: object, field_name: str) -> None:
 
 @dataclass(frozen=True)
 class DialogueQualityRecord:
-    """How a CriticalDialogue behaved — schema only in this ticket.
+    """How a CriticalDialogue behaved.
 
-    Spec 0003's machinery writes these; this module owns the contract so both
-    specs agree on the shape before either has a writer.
+    The writer is `advisory_consultation._write_dialogue_quality_record`, one
+    record per dialogue, appended at that module's `_result` choke point —
+    the same single exit every `AdvisoryTelemetryRecord` already passes
+    through. Ownership returned to spec 0004 on 2026-08-13 (spec 0004 ticket
+    24): this module owns the contract, `advisory_consultation` owns the one
+    caller that fills it in from a real dialogue's result.
 
     `rounds` is a tuple of `DialogueRound` — one value per round, not parallel
     arrays; see that class for why. It serializes as a list of objects
@@ -935,6 +971,18 @@ class DialogueQualityRecord:
     or shorter than its occasion called for (a budget degradation), and
     `independent` is True when the participants genuinely came from different
     model families.
+
+    **Telling a canary probe's record from a real dialogue's — and why there is
+    no `outcome` field.** `canaries_planted` already answers it. The writer sets
+    it to 1 exactly when a Critic was actually shown a seeded-flaw fixture and
+    returned a verdict, and to 0 for every ordinary dialogue, so
+    `canaries_planted == 0` *is* the filter for ordinary dialogue activity and
+    `canaries_planted >= 1` marks a probe whose single round's verdict was
+    forced by a fixture. An aggregation that skips that filter blends a probe's
+    engagement count into real-mission statistics — the identical silent-blend
+    `advisory_consultation.AdvisoryTelemetryRecord` warns about for
+    `round_verdicts`. A second discriminator field would be a second thing to
+    keep in step with the first; this record already carries the answer.
     """
 
     KIND: ClassVar[str] = "dialogue_quality"
