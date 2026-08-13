@@ -185,9 +185,3 @@
 - Issue: Attempting to on-demand load MLX models in LM Studio (such as `qwen3-coder-next-mlx`) via OpenAI-compatible API (`/v1/chat/completions`) failed with HTTP 400 (`Failed to load model... Error: Model loading was stopped due to insufficient system resources.`).
 - Root Cause: By default, `qwen3-coder-next-mlx` declares a `max_context_length` of 262,144 tokens (256K). On JIT auto-load, LM Studio attempts to allocate KV cache memory for the full default context size, triggering LM Studio's pre-load resource guardrails even when sufficient RAM exists for smaller context windows.
 - Resolution: Restricted `Context Length` in LM Studio's load parameters/presets to `8,192` or `16,384` tokens (via GUI `+ Load Model` or `Model Defaults`), reducing RAM allocation requirements by >70% and allowing the model to load and serve API requests cleanly.
-
-
-
-
-
-

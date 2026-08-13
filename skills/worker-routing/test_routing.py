@@ -6090,6 +6090,46 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(len(invoker.calls), 1)
         self.assertEqual(invoker.calls[0][0], degraded_model)
 
+    def test_rung_three_canary_leaves_a_real_missions_plan_artifact_untouched(
+        self,
+    ) -> None:
+        """The artifact half of the canary × rung-3 composition. The
+        preemption half is already pinned above
+        (`test_rung_three_preempts_an_is_canary_call_with_zero_invoker_calls`):
+        a fully exhausted budget skips even a canary probe, with zero worker
+        calls. But the stale-plan cleanup a real mission's rung-3 exit
+        performs must NOT run for a preempted canary — the module's canary
+        invariant says a canary never creates nor deletes
+        `implementation_plan.md`, and the plan sitting under `root_dir` here
+        is a REAL result's artifact, still accurately described by that real
+        result. A scheduled probe that happens to arrive while the session
+        is exhausted has no business destroying it."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        real_plan = "Real mission's consensus plan — still current.\n"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            plan_path = root / "implementation_plan.md"
+            plan_path.write_text(real_plan)
+
+            invoker = _RecordingInvoker([])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                canary_fixture=fixture,
+                session_spend_so_far=3 * cap,
+            )
+
+            self.assertTrue(plan_path.exists())
+            self.assertEqual(plan_path.read_bytes(), real_plan.encode("utf-8"))
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertEqual(invoker.calls, [])
+
 
 class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
     """Spec 0003 (CriticalDialogue) ticket 10: `AdvisoryTelemetryRecord`

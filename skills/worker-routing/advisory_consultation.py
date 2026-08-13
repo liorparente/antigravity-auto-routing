@@ -1976,7 +1976,7 @@ def _render_consultation_transcript(
             [
                 (
                     f"**{BUDGET_DEGRADATION_MARKER}:** This session's dialogue "
-                    f"budget was exhausted, placing this dialogue at "
+                    f"budget was exceeded, placing this dialogue at "
                     f"degradation rung {result.degradation_rung} "
                     f"({_DEGRADATION_RUNG_LABELS[result.degradation_rung]}). "
                     "Degradation is never silent — see this dialogue's "
@@ -2645,10 +2645,13 @@ def run_advisory_consultation_debate(
     ``AdvisoryOutcome``'s own docstrings for why a canary is deliberately
     not folded into either. A canary round never writes
     ``implementation_plan.md`` and never calls ``_remove_stale_plan_artifact``
-    either, so it neither creates nor deletes that file: an already-current
-    real plan from an earlier consensus in the same ``root_dir`` survives a
-    later canary run completely untouched, which is what keeps a canary
-    from ever contaminating a real mission's outcome. It still reaches the
+    either — not even on the rung-3 budget-preemption path, whose
+    non-canary exit does remove a stale plan (see the budget paragraph
+    below) — so it neither creates nor deletes that file: an
+    already-current real plan from an earlier consensus in the same
+    ``root_dir`` survives a later canary run completely untouched, which
+    is what keeps a canary from ever contaminating a real mission's
+    outcome. It still reaches the
     same ``_result`` choke point as every other exit path, so it still
     writes a transcript (carrying ``CANARY_MARKER`` and the fixture's id
     and flaw summary — see ``_render_consultation_transcript``) and exactly
@@ -2687,8 +2690,12 @@ def run_advisory_consultation_debate(
     ``"budget_skipped"`` result right there — no Planner or Critic is ever
     contacted, and this holds even for a call that also set ``is_canary``.
     A pre-existing ``implementation_plan.md`` under ``root_dir`` is removed
-    exactly as every other early exit already does, and the same
-    transcript/telemetry choke point (``_result``) still fires, so the
+    exactly as every other early exit already does — with one carve-out:
+    a preempted ``is_canary`` call skips that removal, because the plan
+    sitting there belongs to a real mission's earlier result, and a
+    canary's own result describes a probe, never the mission (see the
+    canary invariant above). Either way the same transcript/telemetry
+    choke point (``_result``) still fires, so the
     caller receives a real, inspectable result rather than silence. Rungs 1
     and 2 instead degrade this call in place before it proceeds: rung 1
     lowers the effective round cap to ``_DEGRADED_ROUND_CAP`` (reassigning
@@ -2936,7 +2943,20 @@ def run_advisory_consultation_debate(
         # `"budget_skipped"` outcome's own comment on `AdvisoryOutcome` for
         # why that is exactly what "degradation is never silent" requires
         # even at the ladder's harshest rung.
-        cleanup_error = _remove_stale_plan_artifact(plan_path)
+        #
+        # The stale-plan removal is guarded on `not is_canary`, though —
+        # the preemption itself stays unconditional (a rung-3 canary still
+        # returns `budget_skipped` with zero worker calls), but the
+        # removal exists so the plan artifact is never staler than the
+        # result describing it, and a canary's result describes a probe,
+        # not the mission. Any `implementation_plan.md` sitting under
+        # `root_dir` when a canary arrives is a REAL result's artifact,
+        # still accurately described by that real result; deleting it here
+        # would be exactly the contamination the canary invariant ("a
+        # canary neither creates nor deletes that file") exists to prevent.
+        cleanup_error = (
+            None if is_canary else _remove_stale_plan_artifact(plan_path)
+        )
         return _result("budget_skipped", error=cleanup_error)
     if degradation_rung >= 1:
         # Rung 1 (reduce rounds): reassigned as a plain enclosing-scope
