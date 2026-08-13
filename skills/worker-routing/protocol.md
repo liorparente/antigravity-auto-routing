@@ -65,6 +65,79 @@ Then ask the user how to proceed.
 All sessions are auditable via: `~/.gemini/config/skills/worker-routing/routing-audit.sh [conversation-id]`
 This script detects source code edits made without worker routing. Violations are flagged automatically.
 
+## 📓 Learning-Journal Ground-Truth Recording (Spec 0004 Ticket 25)
+
+`learning_outcomes.py` grades four ground truths after the fact — `tests`, `review`, `plan`, and
+`stalemate_resolution` — each through its own `record_*` entry point.
+
+Exactly one of them is partly self-recording. `advisory_consultation.py`'s `_result` choke point
+writes `plan=accepted` itself, at the same site that already writes the transcript, telemetry, and
+dialogue-quality records — but only when the dialogue reached `consensus` *and* its occasion was one
+that produces a plan at all (`ambiguity` or `plan-review`; a `code-review` or `post-mortem` dialogue
+debates a diff or a lesson, so a plan verdict about it would describe an artifact that does not
+exist). **What that record asserts is that the dialogue accepted the plan — the Critic approved it —
+and not that you did.** Your sign-off on `implementation_plan.md` is a separate, later event; do not
+read the automatic record as standing in for it.
+
+Everything else in this family is recorded by hand, because everything else becomes known outside any
+process this repository controls. Record each one once the fact is known.
+
+**One rule governs every hand-recorded step below: `task_id` must be the id you passed *into* the
+consultation.** Nothing returned by `run_advisory_consultation_debate` carries the resolved identity
+— neither `AdvisoryDebateResult` nor `AdvisoryStalemateReport` has a `task_id` field — so a
+consultation you invoked without one got a digest of its own task text, and that value is
+unrecoverable from anything these steps can see. Every record you then write by hand lands under a
+different identity than the decision it grades: an orphan, and precisely the broken join this family
+exists to prevent. So always supply a `task_id` when invoking a consultation you may later record
+against. The routing protocol's own production path already does.
+
+- **Test results.** There are two producers, and both are outside any process this repository
+  controls: the **Doer** running local unit/integration tests in Phase 3 (`SKILL.md`'s "Zero-Defect
+  Verification & QA"), and CI (`.github/workflows/test.yml`'s "Run unit and integration tests" step).
+  No in-repo process runs the suite and observes its own exit code, so neither can call this itself.
+  Record at whichever of the two gates the task actually passed through — the Doer's local run is the
+  earlier and more frequent one, and skipping it because CI will "also" run leaves every task that
+  never reached CI with no test ground truth at all. Once a run reports pass/fail for a task's tests,
+  call `learning_outcomes.record_test_result(task_id, passed=<True if
+  the suite passed>, root_dir=<repo root>)`. **`passed` is a boolean, never the exit status.** A
+  shell exit code is `0` on success, which is falsy in Python, so handing the exit code straight to
+  `passed` records every green run as `fail` and every red one as `pass`. Nothing downstream can
+  detect that: an inverted outcome record is structurally identical to an honest one, so the
+  learning loop would train on the exact negation of what happened — strictly worse than the silence
+  this section exists to end.
+- **Plan rejection.** `plan=rejected` has no in-process producer, by design. A stalemate looks like a
+  rejection and is not one: stalemate option 1 is "approve the Planner's architecture", so the human
+  who resolves it may well be *accepting* the plan a stalemate-triggered `rejected` record would have
+  condemned. The only actor who can honestly reject a plan is the one who read it and said no. So
+  when you decline a plan the dialogue agreed on — or abandon it unimplemented — call
+  `learning_outcomes.record_plan_outcome(task_id, accepted=False, root_dir=<repo root>)`. Skipping
+  this is the one gap that biases the whole family: accepted plans record themselves and rejected
+  ones do not, so a journal nobody maintains by hand drifts toward reporting that every plan was
+  accepted.
+
+  **Two `plan` records for one task are expected, not a conflict.** A consensus you later decline
+  leaves the consultation's automatic `accepted` and then your `rejected` under the same `task_id`
+  and the same `ground_truth`. `OutcomeRecord` carries `task`, `ground_truth`, `verdict`, `run_id`,
+  and `timestamp` — no actor and no stage — so nothing in the record itself says which of the two
+  wrote it. Reduce them positionally, exactly as `ComplianceRecord` is already reduced (see
+  `CONTEXT.md`): group by `task_id`, and within a group the last record wins. The stream is
+  append-only, so file order is verdict order, and yours is always the later one. That is a
+  positional convention rather than a machine-readable distinction; making it explicit would mean
+  adding an actor or stage field to `OutcomeRecord`, which is ticket 14's schema, not this wiring.
+- **Review verdicts.** No in-repo process renders an approved/rejected verdict on a task's work.
+  `routing_check.py`'s audit (`run_audit`/`_persist_compliance_record`) grades protocol *compliance* —
+  whether Antigravity itself routed correctly — a separate, already-wired `ComplianceRecord` family, not
+  whether a reviewer approved the deliverable. The `/code-review` skill produces a report for a human to
+  read, not a boolean this repository observes. Once a human reaches a verdict (reading `/code-review`'s
+  output, a GitHub PR review, or any other review process), call
+  `learning_outcomes.record_review_verdict(task_id, approved=<the human's verdict>, root_dir=<repo
+  root>)`.
+- **Stalemate resolution.** `run_advisory_consultation_debate` returns an `AdvisoryStalemateReport` and
+  stops — choosing one of its three options belongs to a human, not to this repository. Once a human
+  acts on a stalemate report, call `learning_outcomes.record_stalemate_resolution(task_id, report,
+  chosen, root_dir=<repo root>)` with the actual `AdvisoryResolutionOption` the human picked from
+  `report.options` (never a hand-built stand-in — passing one back raises `ValueError`).
+
 ## ✅ Allowed Direct Actions (No Worker, No Gate)
 - Reading/analyzing files (`view_file`, `grep_search`, `list_dir`, `read_url_content`) — **EXCEPT Code Reviews (must route to Codex)**
 - Answering questions, planning, conversation

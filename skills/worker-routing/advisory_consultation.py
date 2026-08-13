@@ -156,6 +156,16 @@ _OBJECTION_LINE_PATTERN = re.compile(r"^\d+\.\s+\S")
 # ticket 03) and blocking stance (ticket 04) is deliberately not done here.
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
 
+# Spec 0004 ticket 25 (fix pass 2): the occasions whose artifact under debate
+# is actually a plan. "ambiguity" and "plan-review" both debate a Planner's
+# architecture, so a consensus reached under either one is honestly describable
+# as "the plan was accepted". "code-review" debates a diff and "post-mortem"
+# debates a lesson — neither produces a plan at all, so there is no plan for a
+# consensus under those two to have accepted. This is the one place that fact
+# is declared: a fifth occasion added later must be added here, deliberately,
+# rather than silently inheriting a plan verdict it may not have earned.
+_PLAN_PRODUCING_OCCASIONS: tuple[Occasion, ...] = ("ambiguity", "plan-review")
+
 # Mirrors `agent_council.SENSITIVE_PATTERNS` rather than importing it:
 # importing `agent_council` would pull `urllib.request`, `asyncio`, and
 # `fcntl` into a module whose docstring promises no HTTP client and full
@@ -2416,6 +2426,51 @@ def _write_dialogue_quality_record(
     return learning_journal.append_journal_record(record, root_dir=root_dir)
 
 
+def _write_plan_outcome_record(
+    *, task_id: str, accepted: bool, run_id: str | None, root_dir: Path
+) -> str | None:
+    """Record this consultation's own ground truth: was the plan it produced accepted?
+
+    Best-effort, like `_write_dialogue_quality_record` immediately above:
+    returns `None` on success and an error string on failure, never raises,
+    and folds a construction failure (an ill-formed `task_id`) and a write
+    failure into that one string — from the consultation's point of view
+    they are one fact, an instrumentation problem that must never become the
+    dialogue's own outcome.
+
+    The error boundary here is wider than that function's, and the
+    difference is not incidental. `_write_dialogue_quality_record` builds its
+    own record, so it can keep `append_journal_record` outside the `try` and
+    catch construction alone. This one goes through
+    `learning_outcomes.record_plan_outcome`, whose entire purpose (ticket 14)
+    is that no caller builds a `TaskLabel` or imports `learning_journal` —
+    so construction and append arrive as a single call and are necessarily
+    caught as one. The consequence is that a `ValueError` raised on the write
+    path is folded here where the precedent above would let it escape. That
+    is the safer direction for a writer whose whole contract is that it never
+    aborts what it observes, which is why this is deliberately not a verbatim
+    copy of the function it otherwise follows.
+
+    `import learning_outcomes` is local for the same reason
+    `_write_dialogue_quality_record`'s `import learning_journal` is: an
+    installation missing the module degrades to a reported error rather than
+    an `ImportError` at module load, and `install.sh` propagates the module
+    so this is a defensive fallback, not the expected path.
+
+    Ticket 25: unlike the dialogue-quality write, this one does not fire for
+    every non-halted outcome — see the two call sites below for which
+    outcomes state a plan verdict at all and why.
+    """
+    try:
+        import learning_outcomes
+
+        return learning_outcomes.record_plan_outcome(
+            task_id, accepted=accepted, run_id=run_id, root_dir=root_dir
+        )
+    except (ImportError, ValueError) as exc:
+        return f"failed to record plan outcome: {exc}"
+
+
 def _build_stalemate_report(
     planner_position: str,
     critic_position: str,
@@ -3107,6 +3162,53 @@ def run_advisory_consultation_debate(
                 _write_dialogue_quality_record(
                     provisional_result,
                     task_id=resolved_task_id,
+                    run_id=dialogue_run_id,
+                    root_dir=root_dir,
+                ),
+            )
+
+        # Spec 0004 ticket 25 (fix pass 2): the outcome family's `plan` ground
+        # truth. This consultation writes a record only when it can honestly
+        # assert one thing: that the dialogue's Critic approved the Planner's
+        # plan. That requires both `outcome == "consensus"` — nothing less
+        # decisive counts — and `occasion in _PLAN_PRODUCING_OCCASIONS`,
+        # because a `code-review` or `post-mortem` dialogue debates a diff or
+        # a lesson, not a plan; `plan=accepted` about either would be a fact
+        # asserted about an artifact that was never on the table.
+        #
+        # `stalemate` writes nothing, on purpose, not just "not yet reached
+        # here". The three ways a human resolves a stalemate are enumerated
+        # in `learning_outcomes.record_stalemate_resolution`, and option 1 is
+        # "approve the Planner's architecture" — the exact plan a
+        # `plan=rejected` record would already have condemned. A human who
+        # resolves a stalemate that way would produce a `stalemate_resolution`
+        # record and a `plan_outcome` record that flatly contradict each
+        # other. `stalemate_resolution` is the one entry point allowed to say
+        # how a stalemate ended; this choke point does not get a second,
+        # earlier, and possibly wrong opinion.
+        #
+        # What `accepted=True` asserts, precisely: that the *dialogue*
+        # accepted the plan — the Critic issued an APPROVE verdict this round.
+        # That is not the same event as the developer's later sign-off on
+        # `implementation_plan.md`, which happens after this function has
+        # already returned and is recorded elsewhere. A reader of this record
+        # must not read it as "the developer approved this plan"; it says
+        # only that the Critic did.
+        #
+        # `plan=rejected` therefore has no producer anywhere in this module,
+        # by design. The only actor who can honestly call a plan rejected is
+        # the developer who rejects it — a documented orchestrator step, not
+        # a debate outcome — because every path that reaches this choke point
+        # either ended in the Critic's approval (worth recording) or ended
+        # without an answer to "was the plan accepted" at all (a stalemate,
+        # an unparseable verdict, a worker error, a canary, a budget skip, or
+        # a sensitivity halt — none of which is a rejection).
+        if outcome == "consensus" and occasion in _PLAN_PRODUCING_OCCASIONS:
+            folded_error = _fold_error(
+                folded_error,
+                _write_plan_outcome_record(
+                    task_id=resolved_task_id,
+                    accepted=True,
                     run_id=dialogue_run_id,
                     root_dir=root_dir,
                 ),

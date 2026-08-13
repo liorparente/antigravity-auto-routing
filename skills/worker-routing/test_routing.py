@@ -5492,10 +5492,12 @@ class LearningJournalTests(unittest.TestCase):
                 telemetry_before,
                 "writing the journal must not touch the audited stream",
             )
-            # 2, not 1: the consultation itself already appended one
-            # `dialogue_quality` record (spec 0004 ticket 24) before this test
-            # appends its own `worker_execution` record by hand.
-            self.assertEqual(len(_read_jsonl(learning_journal.journal_path(root))), 2)
+            # 3, not 1: the consultation itself already appended one
+            # `dialogue_quality` record (spec 0004 ticket 24) and one
+            # `outcome` record grading its own plan (spec 0004 ticket 25 —
+            # this run reached consensus) before this test appends its own
+            # `worker_execution` record by hand.
+            self.assertEqual(len(_read_jsonl(learning_journal.journal_path(root))), 3)
 
     def test_records_are_appended_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5603,8 +5605,27 @@ class LearningJournalTests(unittest.TestCase):
             {record["kind"] for record in graded},
             {"worker_execution", "outcome", "dialogue_quality"},
         )
+        # Two `outcome` records now share this task_id: the consultation's
+        # own `plan` verdict (spec 0004 ticket 25 — this run reached
+        # consensus) and the `tests` verdict this test appends by hand.
+        # Disambiguate by `ground_truth` rather than taking the first
+        # `outcome` record, or this assertion would silently start reading
+        # the wrong one the moment a producer's write order changes.
+        outcome_records = [r for r in graded if r["kind"] == "outcome"]
         self.assertEqual(
-            next(r for r in graded if r["kind"] == "outcome")["verdict"], "pass"
+            {r["ground_truth"] for r in outcome_records}, {"plan", "tests"}
+        )
+        self.assertEqual(
+            next(r for r in outcome_records if r["ground_truth"] == "tests")[
+                "verdict"
+            ],
+            "pass",
+        )
+        self.assertEqual(
+            next(r for r in outcome_records if r["ground_truth"] == "plan")[
+                "verdict"
+            ],
+            "accepted",
         )
 
     # --- content-freedom, enforced by construction ---
@@ -6410,11 +6431,12 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         """The consultation's worker-execution seam is unchanged: a
         caller-supplied fake `invoke_worker` bypasses that instrumentation
         entirely, exactly as it did before this ticket. The dialogue-quality
-        writer (spec 0004 ticket 24) is a separate, always-on write at the
-        `_result` choke point that does not depend on which `invoke_worker`
-        the caller supplied, so the journal file itself now exists — holding
-        exactly one `dialogue_quality` record and zero `worker_execution`
-        records."""
+        writer (spec 0004 ticket 24) and the plan-outcome writer (ticket 25)
+        are both separate, always-on writes at the `_result` choke point
+        that do not depend on which `invoke_worker` the caller supplied, so
+        the journal file itself now exists — holding one `dialogue_quality`
+        record, one `outcome` record (this run reached consensus), and zero
+        `worker_execution` records."""
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -6428,7 +6450,9 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertTrue(result.consensus_reached)
-        self.assertEqual([record["kind"] for record in records], ["dialogue_quality"])
+        self.assertEqual(
+            [record["kind"] for record in records], ["dialogue_quality", "outcome"]
+        )
 
     def test_journaled_invocations_correlate_to_the_consultation_by_task_id(self) -> None:
         """Wrapping a caller-supplied callable through
@@ -6469,7 +6493,10 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
 
         self.assertTrue(result.consensus_reached)
 
-        self.assertEqual(len(journal_records), 3)
+        # 4: two `worker_execution` records, one `dialogue_quality` record
+        # (ticket 24), and one `outcome` record grading this consultation's
+        # own plan — accepted, since this run reached consensus (ticket 25).
+        self.assertEqual(len(journal_records), 4)
         worker_records = [r for r in journal_records if r["kind"] == "worker_execution"]
         self.assertEqual(len(worker_records), 2)
         for record in worker_records:
@@ -6483,6 +6510,12 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         dialogue_records = [r for r in journal_records if r["kind"] == "dialogue_quality"]
         self.assertEqual(len(dialogue_records), 1)
         self.assertEqual(dialogue_records[0]["task_id"], "task-correlated-1")
+
+        outcome_records = [r for r in journal_records if r["kind"] == "outcome"]
+        self.assertEqual(len(outcome_records), 1)
+        self.assertEqual(outcome_records[0]["task_id"], "task-correlated-1")
+        self.assertEqual(outcome_records[0]["ground_truth"], "plan")
+        self.assertEqual(outcome_records[0]["verdict"], "accepted")
 
         self.assertEqual(len(telemetry_records), 1)
         self.assertEqual(telemetry_records[0]["task_id"], "task-correlated-1")
@@ -6527,7 +6560,10 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             journal_records = _read_jsonl(learning_journal.journal_path(root))
             telemetry_records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
 
-        self.assertEqual(len(journal_records), 6)
+        # 8: each of the two runs writes 2 `worker_execution` records, 1
+        # `dialogue_quality` record (ticket 24), and 1 `outcome` record
+        # grading its own plan (ticket 25) — 4 per run, 2 runs.
+        self.assertEqual(len(journal_records), 8)
         self.assertEqual(
             {record["task_id"] for record in journal_records}, {"task-reworked-1"}
         )
@@ -6657,7 +6693,10 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             journal_records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertTrue(result.consensus_reached)
-        self.assertEqual(len(journal_records), 3)
+        # 4: 2 `worker_execution` records, 1 `dialogue_quality` record
+        # (ticket 24), 1 `outcome` record grading this consultation's own
+        # plan (ticket 25).
+        self.assertEqual(len(journal_records), 4)
         worker_records = [r for r in journal_records if r["kind"] == "worker_execution"]
         self.assertEqual(len(worker_records), 2)
         for record in worker_records:
@@ -6774,10 +6813,20 @@ class OutcomeRecordingTests(unittest.TestCase):
             records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertIsNone(error)
+        # 2: `_run_to_stalemate` already appended one `dialogue_quality`
+        # record (ticket 24). It writes no `plan` outcome record — a
+        # stalemate is exactly the case a human resolves afterward (fix pass
+        # 2 of ticket 25), and this call's own `stalemate_resolution` record
+        # is that resolution — so the only records here are that
+        # `dialogue_quality` record and the `stalemate_resolution` record
+        # this call appends.
         self.assertEqual(len(records), 2)
-        outcome_record = next(r for r in records if r["kind"] == "outcome")
+        outcome_record = next(
+            r
+            for r in records
+            if r["kind"] == "outcome" and r["ground_truth"] == "stalemate_resolution"
+        )
         self.assertEqual(outcome_record["task_id"], "task-stalemate-1")
-        self.assertEqual(outcome_record["ground_truth"], "stalemate_resolution")
         self.assertEqual(outcome_record["verdict"], "critic")
 
     def test_record_stalemate_resolution_maps_all_three_options(self) -> None:
@@ -6798,8 +6847,17 @@ class OutcomeRecordingTests(unittest.TestCase):
 
         # `_run_to_stalemate` already appended one `dialogue_quality` record
         # (spec 0004 ticket 24) before the loop above wrote its three
-        # `outcome` records — filter to the kind this test is actually about.
-        outcome_records = [r for r in records if r["kind"] == "outcome"]
+        # `stalemate_resolution` records — it writes no `plan` outcome
+        # record of its own (fix pass 2 of ticket 25: a stalemate is silent,
+        # left for a human to resolve) — but filter to the ground truth this
+        # test is actually about anyway, not just the `outcome` kind, so a
+        # future record kind sharing the `outcome` kind cannot throw off the
+        # ordered comparison below.
+        outcome_records = [
+            r
+            for r in records
+            if r["kind"] == "outcome" and r["ground_truth"] == "stalemate_resolution"
+        ]
         self.assertEqual(
             [record["verdict"] for record in outcome_records],
             ["planner", "critic", "human"],
@@ -6823,10 +6881,13 @@ class OutcomeRecordingTests(unittest.TestCase):
                     "task-stalemate-1", result.stalemate, foreign_option, root_dir=root
                 )
 
-            # The journal file itself already exists — `_run_to_stalemate`
-            # wrote one `dialogue_quality` record (spec 0004 ticket 24) before
-            # the rejected call above ever ran. What must stay true is that
-            # the rejection left no orphan `outcome` record behind.
+            # The journal file itself already holds one record —
+            # `_run_to_stalemate` wrote one `dialogue_quality` record
+            # (spec 0004 ticket 24) and no `plan` outcome record of its own
+            # (fix pass 2 of ticket 25: a stalemate is silent, left for a
+            # human to resolve) — before the rejected call above ever ran.
+            # What must stay true is that the rejection left no
+            # *additional*, orphan `outcome` record behind.
             records = _read_jsonl(learning_journal.journal_path(root))
             self.assertEqual([r["kind"] for r in records], ["dialogue_quality"])
 
@@ -7919,7 +7980,10 @@ class ManagedFileClosureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines()[0], "consensus")
         self.assertEqual(result.stdout.splitlines()[1], "None")
-        self.assertEqual(len(records), 3)
+        # 4: 2 `worker_execution` records, 1 `dialogue_quality` record
+        # (ticket 24), 1 `outcome` record grading this consultation's own
+        # plan (ticket 25).
+        self.assertEqual(len(records), 4)
         worker_records = [r for r in records if r["kind"] == "worker_execution"]
         self.assertEqual(len(worker_records), 2)
         for record in worker_records:
@@ -7928,6 +7992,11 @@ class ManagedFileClosureTests(unittest.TestCase):
         dialogue_records = [r for r in records if r["kind"] == "dialogue_quality"]
         self.assertEqual(len(dialogue_records), 1)
         self.assertEqual(dialogue_records[0]["task_id"], "installed-consultation-1")
+        outcome_records = [r for r in records if r["kind"] == "outcome"]
+        self.assertEqual(len(outcome_records), 1)
+        self.assertEqual(outcome_records[0]["task_id"], "installed-consultation-1")
+        self.assertEqual(outcome_records[0]["ground_truth"], "plan")
+        self.assertEqual(outcome_records[0]["verdict"], "accepted")
 
 
 class InstalledAuditJournalRootTests(unittest.TestCase):
@@ -8052,7 +8121,10 @@ class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
             records = _read_jsonl(learning_journal.journal_path(root))
 
         self.assertIsNone(result.error)
-        self.assertEqual(len(records), 3)
+        # 4: 2 `worker_execution` records, 1 `dialogue_quality` record
+        # (ticket 24), 1 `outcome` record grading this consultation's own
+        # plan (ticket 25).
+        self.assertEqual(len(records), 4)
         for record in records:
             self.assertEqual(record["task_id"], "task-still-journaled-1")
         worker_records = [r for r in records if r["kind"] == "worker_execution"]
@@ -10722,6 +10794,380 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         assert result.error is not None
         self.assertIn("journaling disabled", result.error)
         self.assertIn("dialogue-quality record", result.error)
+
+
+# Spec 0004 ticket 25 — the outcome family's first in-process producer.
+# Appended here, at the end of the file, per this file's own convention (see
+# the comment above `JournalUnificationTests`): this file is edited
+# concurrently on other branches, so an insertion anywhere but the end is a
+# merge conflict for everyone.
+class PlanOutcomeRecordWriterTests(unittest.TestCase):
+    """`advisory_consultation._write_plan_outcome_record`: the `_result`
+    choke point's fifth write, grading whether the consultation's own plan
+    was accepted.
+
+    Every test here drives a whole run through the public
+    `run_advisory_consultation_debate` entry point rather than calling
+    `learning_outcomes.record_plan_outcome` directly — ticket 25 exists
+    precisely because a component fully tested in isolation (ticket 14) had
+    no caller, and a direct test of the writer would repeat that gap instead
+    of closing it.
+    """
+
+    # --- only a consensus reached on a plan-producing occasion states a
+    # plan verdict ---
+
+    def test_a_consensus_run_writes_plan_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="plan-outcome-consensus-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "consensus")
+        outcome_record = next(r for r in records if r["kind"] == "outcome")
+        self.assertEqual(outcome_record["task_id"], "plan-outcome-consensus-1")
+        self.assertEqual(outcome_record["ground_truth"], "plan")
+        self.assertEqual(outcome_record["verdict"], "accepted")
+
+    def test_a_stalemate_run_writes_no_plan_outcome_record(self) -> None:
+        """A stalemate is deliberately silent, not a `rejected` verdict: one
+        of the three ways a human resolves a stalemate
+        (`learning_outcomes.record_stalemate_resolution`, option 1) is to
+        approve the Planner's architecture — the exact plan a `rejected`
+        record would already have condemned. Writing `rejected` here would
+        let this choke point's record contradict the human's own later
+        resolution, so it writes nothing and leaves the verdict to whichever
+        of the three options the human actually picks."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                [
+                    "Planner's first plan.",
+                    _revise("Needs more detail."),
+                    "Planner's second plan.",
+                    _revise("Still thin."),
+                    "Planner's third plan.",
+                    _revise("Not convinced."),
+                ]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="plan-outcome-stalemate-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "stalemate")
+        self.assertEqual([r for r in records if r["kind"] == "outcome"], [])
+
+    # --- code-review and post-mortem debate a diff or a lesson, never a
+    # plan, so even a consensus under those occasions writes nothing ---
+
+    def test_a_code_review_consensus_writes_no_plan_outcome_record(self) -> None:
+        """`code-review` debates a diff, not a plan — `plan=accepted` about
+        it would be a fact asserted about an artifact that was never on the
+        table."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Diff defense.", _approve("Diff defense.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Review the diff",
+                invoker,
+                root_dir=root,
+                occasion="code-review",
+                task_id="plan-outcome-code-review-consensus-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertEqual([r for r in records if r["kind"] == "outcome"], [])
+
+    def test_a_post_mortem_consensus_writes_no_plan_outcome_record(self) -> None:
+        """`post-mortem` debates a lesson, not a plan — same rule as
+        `code-review`, for the same reason."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Lesson learned.", _approve("Lesson learned.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Write the post-mortem",
+                invoker,
+                root_dir=root,
+                occasion="post-mortem",
+                task_id="plan-outcome-post-mortem-consensus-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertEqual([r for r in records if r["kind"] == "outcome"], [])
+
+    def test_a_plan_review_consensus_writes_plan_accepted(self) -> None:
+        """`plan-review` is the second plan-producing occasion alongside the
+        default `ambiguity` already covered above — both debate a Planner's
+        architecture, so both honestly support `plan=accepted`."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                task_id="plan-outcome-plan-review-consensus-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "consensus")
+        outcome_record = next(r for r in records if r["kind"] == "outcome")
+        self.assertEqual(
+            outcome_record["task_id"], "plan-outcome-plan-review-consensus-1"
+        )
+        self.assertEqual(outcome_record["ground_truth"], "plan")
+        self.assertEqual(outcome_record["verdict"], "accepted")
+
+    # --- the other five outcomes never know whether the plan was accepted ---
+
+    def test_worker_error_writes_no_plan_outcome_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker([RuntimeError("worker unreachable")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="plan-outcome-worker-error-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "worker_error")
+        self.assertEqual([r for r in records if r["kind"] == "outcome"], [])
+
+    def test_unparseable_verdict_writes_no_plan_outcome_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(
+                ["Planner's plan.", "This plan looks fine to me."]
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="plan-outcome-unparseable-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "unparseable_verdict")
+        self.assertEqual([r for r in records if r["kind"] == "outcome"], [])
+
+    def test_budget_skipped_writes_no_plan_outcome_record(self) -> None:
+        """`budget_skipped` still writes a `dialogue_quality` record (ticket
+        24 excludes only `sensitivity_halt`), so the journal file itself
+        exists — the assertion here is that no `outcome` record joins it."""
+        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                _RecordingInvoker([]),
+                root_dir=root,
+                task_id="plan-outcome-budget-skipped-1",
+                session_spend_so_far=3 * cap,
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "budget_skipped")
+        self.assertEqual([r for r in records if r["kind"] == "outcome"], [])
+
+    def test_canary_writes_no_plan_outcome_record(self) -> None:
+        invoker = _RecordingInvoker(
+            [_revise("Missing lock around the write to the telemetry file.")]
+        )
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="plan-outcome-canary-1",
+                is_canary=True,
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual([r for r in records if r["kind"] == "outcome"], [])
+
+    def test_sensitivity_halt_writes_no_outcome_record_of_any_kind(self) -> None:
+        """Same carve-out shape as `dialogue_quality` (ticket 24): a halted
+        task ran no round, so it carries no `plan` verdict either — ticket
+        12's rule holds for every record kind, not only this one."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the rollout, password=hunter2", _RecordingInvoker([]), root_dir=root
+            )
+            journal_exists = learning_journal.journal_path(root).exists()
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+        self.assertFalse(journal_exists)
+
+    # --- the record carries the TaskIdentity and RunIdentity the decision itself carries ---
+
+    def test_the_plan_outcome_record_shares_the_runs_worker_execution_run_id(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            production_invoker,
+            "invoke_worker",
+            side_effect=[
+                "Planner's proposed plan.",
+                _approve("Planner's proposed plan."),
+            ],
+        ):
+            root = Path(tmp)
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                root_dir=root,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                task_id="plan-outcome-shared-run-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        worker_records = [r for r in records if r["kind"] == "worker_execution"]
+        outcome_record = next(r for r in records if r["kind"] == "outcome")
+        # Count first: an empty worker set makes the union one element and
+        # silently leaves the correlation assertion untested.
+        self.assertEqual(len(worker_records), 2, "one record per worker invocation")
+        run_ids = {r["run_id"] for r in worker_records} | {outcome_record["run_id"]}
+        self.assertEqual(len(run_ids), 1, "all records share one run_id")
+
+    def test_a_caller_supplied_journaled_invoker_leaves_the_plan_outcome_record_run_free(
+        self,
+    ) -> None:
+        """Same anti-rework-inflation rule ticket 24 already proved for the
+        dialogue-quality record: when the caller owns the journal wiring,
+        this module cannot see that factory's run identity, so it must not
+        mint a second one for the plan-outcome record either."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            runner = mock.Mock(
+                side_effect=[
+                    subprocess.CompletedProcess(
+                        [], 0, "Planner's proposed plan.", ""
+                    ),
+                    subprocess.CompletedProcess(
+                        [], 0, _approve("Planner's proposed plan."), ""
+                    ),
+                ]
+            )
+            journaled_invoker = production_invoker.make_journaled_invoke_worker(
+                "plan-outcome-caller-run-1", root_dir=root, runner=runner
+            )
+            advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                journaled_invoker,
+                root_dir=root,
+                planner_model="Claude Opus 5 (Thinking)",
+                critic_model="Codex 5.6 Sol",
+                task_id="plan-outcome-caller-run-1",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        outcome_record = next(r for r in records if r["kind"] == "outcome")
+        self.assertNotIn("run_id", outcome_record)
+        self.assertEqual(
+            len(_countable_runs(records, "plan-outcome-caller-run-1")), 1
+        )
+
+    # --- a write failure degrades the instrumentation, never the consultation ---
+
+    def test_a_journal_write_failure_is_folded_into_the_result_error_and_never_raised(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            learning_journal.journal_path(root).parent.write_text("not a directory")
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="plan-outcome-unwritable-1",
+            )
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertEqual(result.final_plan, "Plan.")
+        assert result.error is not None
+        self.assertIn("learning journal", result.error.lower())
+
+    def test_a_plan_outcome_write_failure_alone_is_folded_and_never_raised(self) -> None:
+        """The test above blocks the whole journal directory, so ticket 24's
+        `_write_dialogue_quality_record` fails first and its error alone
+        satisfies the assertion — it would still pass if this ticket's writer
+        dropped its own failure on the floor. This one fails nothing but the
+        plan-outcome write, so the asserted error has exactly one possible
+        producer. A green test over a path nobody exercises is the defect
+        ticket 25 exists to end; the test proving ticket 25 must not be one.
+        """
+        refusal = "plan-outcome journal write refused by this test"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ), mock.patch.object(
+            learning_outcomes, "record_plan_outcome", return_value=refusal
+        ):
+            root = Path(tmp)
+            invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                invoker,
+                root_dir=root,
+                task_id="plan-outcome-write-refused-1",
+            )
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertEqual(result.final_plan, "Plan.")
+        assert result.error is not None
+        self.assertIn(refusal, result.error)
 
 
 if __name__ == "__main__":

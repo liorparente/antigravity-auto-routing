@@ -66,6 +66,20 @@ See [`protocol.md`](protocol.md) for the authoritative Quality-First complexity 
 
 ---
 
+## 📓 Learning-Journal Ground-Truth Recording
+
+`advisory_consultation.py` records one fact by itself: `plan=accepted`, and only when a
+plan-producing dialogue (`ambiguity` or `plan-review`) reached consensus. That record says the
+dialogue's Critic approved the plan — **not** that you did. Every other ground truth in this family
+becomes known outside any process this repository controls, so the Orchestrator is the one who
+records it: test results, review verdicts, stalemate resolutions, **and a plan you rejected** —
+`learning_outcomes.py`'s `record_test_result` / `record_review_verdict` /
+`record_stalemate_resolution` / `record_plan_outcome`, each once its fact is known. Accepted plans
+record themselves and rejected ones do not, so the hand-recorded half is what keeps the family from
+drifting toward "every plan was accepted". See [`protocol.md`](protocol.md#-learning-journal-ground-truth-recording-spec-0004-ticket-25) for exactly which step, which producer, and why.
+
+---
+
 ## ⛔ Enforcement & Anti-Patterns
 
 1. **No Rushed Execution:** Never skip Phase 0 (Deep Research) or Phase 1 (Deep Thinking) just to save time or tokens.
