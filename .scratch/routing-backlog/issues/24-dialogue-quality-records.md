@@ -77,28 +77,34 @@ means every canary spec 0003 built produces a caught-or-missed result that nothi
 
 **Blocked by:** — (12 is done; spec 0003's dialogue machinery is on `main`)
 
-**Status:** ready-for-agent — unowned since it was filed, against a spec that had excluded it
+**Status:** implemented — `95c215b` (2026-08-13). Was unowned from filing until 2026-08-13, having been assigned to a spec that had excluded it in writing.
 
-- [ ] Each completed dialogue emits one dialogue-quality record via the ticket 12 writer — one per
+- [x] Each completed dialogue emits one dialogue-quality record via the ticket 12 writer — one per
       dialogue, not one per round.
-- [ ] The record carries occasion, topology, rounds, per-round verdicts, engagement counts, canary
+- [x] The record carries occasion, topology, rounds, per-round verdicts, engagement counts, canary
       results, and the degradation and independence flags.
-- [ ] Engagement counts reach the record per round, reduced from the `VerdictContractResult`s
+- [x] Engagement counts reach the record per round, reduced from the `VerdictContractResult`s
       already carried on `round_verdicts` by a rule written into the record's docstring — never
       recomputed from text.
-- [ ] The reduction never lets objections raise `engagement_count` with no verified quote present,
+- [x] The reduction never lets objections raise `engagement_count` with no verified quote present,
       and never lets one engaged Critic mask a silent one.
-- [ ] A pair-mode round's `critic_b is None` is scored as an absent Critic, never as a silent one —
+- [x] A pair-mode round's `critic_b is None` is scored as an absent Critic, never as a silent one —
       the reduction runs over participating Critics, not over slots.
-- [ ] `DialogueRound`'s docstring is corrected in the same change: its redaction claim (a count,
+- [x] `DialogueRound`'s docstring is corrected in the same change: its redaction claim (a count,
       never the text) stays, and its definition clause stops implying objections are units while the
       writer excludes them. A schema and a writer that disagree is the Occasion/DialogueOccasion
       drift again.
-- [ ] It correlates to its task by TaskIdentity — the same id the run's worker-execution records
+- [x] It correlates to its task by TaskIdentity — the same id the run's worker-execution records
       already journal under, so a dialogue and its invocations read together.
-- [ ] A canary probe's record is distinguishable from a real dialogue's, so aggregation can count
+- [x] A canary probe's record is distinguishable from a real dialogue's, so aggregation can count
       catches without counting the probe as ordinary dialogue activity.
-- [ ] It stays content-free: no proposal text, no critique text.
-- [ ] A sensitivity-halted consultation writes no dialogue-quality record, consistent with the
+- [x] It stays content-free: no proposal text, no critique text.
+- [x] A sensitivity-halted consultation writes no dialogue-quality record, consistent with the
       halted-task rule ticket 12 enforces.
-- [ ] The scoreboard's critique-authenticity family stops reporting "no data" once records exist.
+- [~] The scoreboard's critique-authenticity family stops reporting "no data" once records exist.
+      **Half of this is done and half belongs to ticket 16.** The data half is complete: a real
+      consultation now leaves `dialogue_quality` records in the journal, asserted by
+      `test_a_real_consultation_leaves_dialogue_quality_data_in_the_journal`. The scoreboard that
+      would read them does not exist yet, so nothing has actually stopped reporting "no data" —
+      ticket 16 closes this line, not this ticket. Recorded as `[~]` rather than `[x]` because
+      ticking it would claim an observable outcome no one can observe.
