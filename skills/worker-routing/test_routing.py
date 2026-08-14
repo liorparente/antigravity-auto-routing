@@ -5139,6 +5139,16 @@ class LearningJournalTests(unittest.TestCase):
         fields.update(overrides)
         return learning_journal.ComplianceRecord(**fields)  # type: ignore[arg-type]
 
+    def _replay_benchmark_record(self, **overrides: object) -> object:
+        fields: dict[str, object] = {
+            "task_set": "bench-v1",
+            "success": True,
+            "score": 0.82,
+            "timestamp": self.FIXED_TIMESTAMP,
+        }
+        fields.update(overrides)
+        return learning_journal.ReplayBenchmarkRecord(**fields)  # type: ignore[arg-type]
+
     def _write_and_read(self, records: list[object]) -> list[dict]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5312,7 +5322,46 @@ class LearningJournalTests(unittest.TestCase):
             "for it would fabricate a join that does not exist",
         )
 
-    def test_all_four_families_are_distinguishable_by_kind(self) -> None:
+    def test_replay_benchmark_record_lands_with_its_schema(self) -> None:
+        """A successful trial carries a score; a failed one carries none at
+        all — the same "absence is the honest claim" rule every optional
+        field in this module follows, applied to a field a trial can
+        genuinely have nothing to say about."""
+        succeeded = self._write_and_read([self._replay_benchmark_record()])[0]
+
+        self.assertEqual(
+            set(succeeded),
+            {"kind", "task_set", "success", "score", "timestamp"},
+        )
+        self.assertEqual(succeeded["kind"], "replay_benchmark")
+        self.assertEqual(succeeded["task_set"], "bench-v1")
+        self.assertTrue(succeeded["success"])
+        self.assertEqual(succeeded["score"], 0.82)
+        self.assertNotIn(
+            "task_id",
+            succeeded,
+            "the replay benchmark grades the evaluator's fixed task set, "
+            "never a development task: there is no TaskIdentity to carry",
+        )
+
+        failed = self._write_and_read(
+            [self._replay_benchmark_record(success=False, score=None)]
+        )[0]
+        self.assertEqual(set(failed), {"kind", "task_set", "success", "timestamp"})
+        self.assertFalse(failed["success"])
+        self.assertNotIn(
+            "score",
+            failed,
+            "a failed trial has no score to report — not zero, absent",
+        )
+
+    def test_a_replay_benchmark_records_success_and_score_must_agree(self) -> None:
+        with self.assertRaises(ValueError):
+            self._replay_benchmark_record(success=True, score=None)
+        with self.assertRaises(ValueError):
+            self._replay_benchmark_record(success=False, score=0.5)
+
+    def test_all_five_families_are_distinguishable_by_kind(self) -> None:
         records = self._write_and_read(
             [
                 self._worker_execution_record(),
@@ -5323,18 +5372,25 @@ class LearningJournalTests(unittest.TestCase):
                 ),
                 self._dialogue_quality_record(),
                 self._compliance_record(),
+                self._replay_benchmark_record(),
             ]
         )
 
         self.assertEqual(
             [record["kind"] for record in records],
-            ["worker_execution", "outcome", "dialogue_quality", "compliance"],
+            [
+                "worker_execution",
+                "outcome",
+                "dialogue_quality",
+                "compliance",
+                "replay_benchmark",
+            ],
         )
 
     # --- RunIdentity: which attempt, as distinct from which task ---
 
     def test_every_family_can_carry_a_run_id_and_none_has_to(self) -> None:
-        """`run_id` is optional on all four families and never invented. A
+        """`run_id` is optional on all five families and never invented. A
         writer that has an honest run identity supplies it; one that does not
         omits it, which is a different and weaker claim than any value."""
         named = self._write_and_read(
@@ -5343,6 +5399,7 @@ class LearningJournalTests(unittest.TestCase):
                 self._outcome_record(run_id="run-a1b2c3d4"),
                 self._dialogue_quality_record(run_id="run-a1b2c3d4"),
                 self._compliance_record(run_id="run-a1b2c3d4"),
+                self._replay_benchmark_record(run_id="run-a1b2c3d4"),
             ]
         )
         anonymous = self._write_and_read(
@@ -5351,6 +5408,7 @@ class LearningJournalTests(unittest.TestCase):
                 self._outcome_record(),
                 self._dialogue_quality_record(),
                 self._compliance_record(),
+                self._replay_benchmark_record(),
             ]
         )
 
@@ -5420,7 +5478,7 @@ class LearningJournalTests(unittest.TestCase):
         """One word, one granularity — the whole of item 9.
 
         CONTEXT.md is the glossary this codebase is driven by, and it spends
-        "signal family" on the journal's four *record* families. A field named
+        "signal family" on the journal's five *record* families. A field named
         `signal` discriminating the four ground truths *inside* one of those
         families would make the same word mean a family in the glossary and a
         subdivision of one family in the code — a reader's trap, and the kind
@@ -5431,6 +5489,7 @@ class LearningJournalTests(unittest.TestCase):
             self._outcome_record,
             self._dialogue_quality_record,
             self._compliance_record,
+            self._replay_benchmark_record,
         ):
             record = build()
             with self.subTest(record=type(record).__name__):
@@ -5444,7 +5503,7 @@ class LearningJournalTests(unittest.TestCase):
         self.assertFalse(
             hasattr(learning_journal, "OutcomeSignal"),
             "the four truths inside one record family must not wear the word "
-            "CONTEXT.md spends on the four families themselves",
+            "CONTEXT.md spends on the five families themselves",
         )
         self.assertEqual(
             set(learning_journal.OUTCOME_VERDICTS),
@@ -5453,7 +5512,7 @@ class LearningJournalTests(unittest.TestCase):
 
         entry = (REPO_ROOT / "CONTEXT.md").read_text(encoding="utf-8")
         entry = entry.split("### LearningJournal", 1)[1].split("\n### ", 1)[0]
-        self.assertIn("four signal families", entry)
+        self.assertIn("five signal families", entry)
         self.assertIn(
             "nothing finer",
             entry,
@@ -6014,6 +6073,7 @@ class LearningJournalTests(unittest.TestCase):
             self._outcome_record,
             self._dialogue_quality_record,
             self._compliance_record,
+            self._replay_benchmark_record,
         )
         for build in builders:
             record = build()
@@ -6043,6 +6103,7 @@ class LearningJournalTests(unittest.TestCase):
             ("outcome", self._outcome_record),
             ("dialogue_quality", self._dialogue_quality_record),
             ("compliance", self._compliance_record),
+            ("replay_benchmark", self._replay_benchmark_record),
         )
         for expected_kind, build in families:
             with self.subTest(kind=expected_kind):
@@ -6076,6 +6137,7 @@ class LearningJournalTests(unittest.TestCase):
             (self._dialogue_quality_record, "degraded"),
             (self._dialogue_quality_record, "independent"),
             (self._task_label, "sensitivity_halted"),
+            (self._replay_benchmark_record, "success"),
         )
         for build, name in attacks:
             for value in ("task text leaks here", 1, 0, None, "true"):
@@ -6111,6 +6173,11 @@ class LearningJournalTests(unittest.TestCase):
             self._dialogue_quality_record(canaries_planted=True)
         with self.assertRaises(ValueError):
             learning_journal.DialogueRound("approved", "four objections")
+        for value in ("a great score", None, True, float("nan"), float("inf")):
+            with self.subTest(field="score", value=value), self.assertRaises(
+                ValueError
+            ):
+                self._replay_benchmark_record(score=value)
 
         priced = self._write_and_read(
             [self._worker_execution_record(cost_estimate_usd=1)]

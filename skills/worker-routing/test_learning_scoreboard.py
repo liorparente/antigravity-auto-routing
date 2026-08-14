@@ -151,6 +151,16 @@ def _valid_dialogue_quality_wire(task_id: str, *, timestamp: str) -> dict[str, A
     }
 
 
+def _valid_replay_benchmark_wire(task_set: str, *, timestamp: str) -> dict[str, Any]:
+    return {
+        "kind": "replay_benchmark",
+        "task_set": task_set,
+        "success": True,
+        "score": 0.75,
+        "timestamp": timestamp,
+    }
+
+
 def _valid_compliance_wire(session_id: str, *, timestamp: str) -> dict[str, Any]:
     return {
         "kind": "compliance",
@@ -181,6 +191,7 @@ class ReadJournalEmptyTests(unittest.TestCase):
         self.assertEqual(read.outcomes, ())
         self.assertEqual(read.dialogues, ())
         self.assertEqual(read.compliance, ())
+        self.assertEqual(read.replay_benchmarks, ())
         self.assertEqual(read.unreadable_lines, 0)
         self.assertEqual(read.unknown_kind_lines, 0)
 
@@ -197,6 +208,7 @@ class ReadJournalEmptyTests(unittest.TestCase):
         self.assertEqual(read.outcomes, ())
         self.assertEqual(read.dialogues, ())
         self.assertEqual(read.compliance, ())
+        self.assertEqual(read.replay_benchmarks, ())
         self.assertEqual(read.unreadable_lines, 0)
         self.assertEqual(read.unknown_kind_lines, 0)
 
@@ -273,6 +285,17 @@ class ReadJournalRoundTripTests(unittest.TestCase):
             )
             self.assertIsNone(error)
 
+            replay_benchmark_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1",
+                success=True,
+                score=0.9,
+                run_id="run-benchmark-1",
+                timestamp="2026-01-01T00:00:00Z",
+            )
+            self.assertIsNone(
+                learning_journal.append_journal_record(replay_benchmark_record, root_dir=root)
+            )
+
             raw_lines = [
                 json.loads(line)
                 for line in learning_journal.journal_path(root).read_text().splitlines()
@@ -299,6 +322,7 @@ class ReadJournalRoundTripTests(unittest.TestCase):
         self.assertEqual(len(read.outcomes), 1)
         self.assertEqual(len(read.dialogues), 1)
         self.assertEqual(len(read.compliance), 1)
+        self.assertEqual(len(read.replay_benchmarks), 1)
         self.assertEqual(read.unreadable_lines, 0)
         self.assertEqual(read.unknown_kind_lines, 0)
 
@@ -306,6 +330,7 @@ class ReadJournalRoundTripTests(unittest.TestCase):
         self.assertEqual(read.outcomes[0], outcome_record)
         self.assertEqual(read.dialogues[0], dialogue_record)
         self.assertEqual(read.compliance[0], compliance_record)
+        self.assertEqual(read.replay_benchmarks[0], replay_benchmark_record)
 
     def test_an_absent_run_id_reads_back_as_none(self) -> None:
         # Narrowed to what this test can actually observe: an absent
@@ -1276,6 +1301,70 @@ class ReadJournalRequiredWireKeyTests(unittest.TestCase):
 
                 self.assertEqual(len(read.compliance), 1)
                 self.assertEqual(read.unreadable_lines, 1)
+
+    def test_every_required_key_of_replay_benchmark_makes_its_line_unreadable(self) -> None:
+        """`score` is deliberately absent from this list: it is one of the
+        three fields typed `X | None` (`_optional_wire_fields`), so a missing
+        `score` is not a required-key violation at all. A successful trial
+        missing its score still becomes unreadable, but through
+        `ReplayBenchmarkRecord.__post_init__`'s own success/score agreement
+        check — see the dedicated test below."""
+        required_keys = ("task_set", "success", "timestamp")
+        for missing_key in required_keys:
+            with self.subTest(missing_key=missing_key):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    neighbour_wire = _valid_replay_benchmark_wire(
+                        f"bench-{missing_key}-neighbour", timestamp="2026-01-01T00:00:00Z"
+                    )
+                    _append_raw_line(root, json.dumps(neighbour_wire))
+                    wire = _valid_replay_benchmark_wire(
+                        f"bench-{missing_key}-missing", timestamp="2026-01-01T00:00:01Z"
+                    )
+                    del wire[missing_key]
+                    _append_raw_line(root, json.dumps(wire))
+
+                    read = learning_journal.read_journal(root)
+
+                self.assertEqual(len(read.replay_benchmarks), 1)
+                self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_successful_replay_benchmark_line_missing_its_score_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbour_wire = _valid_replay_benchmark_wire(
+                "bench-score-neighbour", timestamp="2026-01-01T00:00:00Z"
+            )
+            _append_raw_line(root, json.dumps(neighbour_wire))
+            wire = _valid_replay_benchmark_wire(
+                "bench-score-missing", timestamp="2026-01-01T00:00:01Z"
+            )
+            del wire["score"]
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.replay_benchmarks), 1)
+        self.assertEqual(read.replay_benchmarks[0].task_set, "bench-score-neighbour")
+        self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_failed_replay_benchmark_line_with_no_score_at_all_reads_back(self) -> None:
+        """The positive control for the test above: a failed trial's wire
+        form never carries `score` at all, and that must read back as a
+        genuine, complete record — not as damage."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=False, timestamp="2026-01-01T00:00:00Z"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.replay_benchmarks), 1)
+        self.assertEqual(read.replay_benchmarks[0], record)
+        self.assertIsNone(read.replay_benchmarks[0].score)
+        self.assertEqual(read.unreadable_lines, 0)
 
 
 class ReadJournalKindTypeTests(unittest.TestCase):
@@ -3338,9 +3427,13 @@ def _write_fully_populated_journal(root: Path) -> None:
     ordinary dialogue), and efficiency's `dialogue_non_consensus_rate`,
     `mean_rework_per_task` (two runs of one task), and
     `cost_per_completed_task_usd` (a `tests` outcome for a second task).
-    `escalation_rate` and `mean_benchmark_score` have no producer here or
-    anywhere — see implementation_plan.md Sections 3.2.1, 3.7 — and stay
-    `MetricNoData` by construction, not because this fixture forgot them.
+    `escalation_rate` has no producer here or anywhere — see
+    implementation_plan.md Section 3.2.1 — and stays `MetricNoData` by
+    construction, not because this fixture forgot it. `mean_benchmark_score`
+    does have a producer since ticket 26 (`acceptance_gate.py`); this fixture
+    simply carries no `ReplayBenchmarkRecord`, so it stays `MetricNoData` too
+    — by omission, not by construction. See `ReplayBenchmarkFamilyTests`
+    below for the fed case.
     """
     records: tuple[Any, ...] = (
         _compliance_record(
@@ -3378,7 +3471,13 @@ def _write_fully_populated_journal(root: Path) -> None:
 class EndToEndTests(unittest.TestCase):
     """Slice 13 — the replay benchmark and the end-to-end path."""
 
-    def test_the_replay_benchmark_family_is_no_data_until_ticket_26(self) -> None:
+    def test_the_replay_benchmark_family_is_no_data_when_unfed(self) -> None:
+        """Not "until ticket 26" any more: ticket 26 gave this family a real
+        producer (`acceptance_gate.py`). It is still `MetricNoData` here
+        because `_write_fully_populated_journal` carries no
+        `ReplayBenchmarkRecord` at all — the same reason
+        `violations_per_session` would read `MetricNoData` from a journal
+        with no `ComplianceRecord`, not a special case."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _write_fully_populated_journal(root)
@@ -3427,14 +3526,84 @@ class EndToEndTests(unittest.TestCase):
         self.assertIsInstance(
             board.efficiency.cost_per_completed_task_usd, learning_scoreboard.MetricValue
         )
-        # Excluded from "fed" by construction, not by omission — see
-        # `_write_fully_populated_journal`'s docstring.
+        # `escalation_rate` is excluded from "fed" by construction (no
+        # producer exists anywhere); `mean_benchmark_score` is excluded by
+        # this fixture's own omission (it carries no `ReplayBenchmarkRecord`)
+        # — see `_write_fully_populated_journal`'s docstring and
+        # `ReplayBenchmarkFamilyTests` below for the fed case.
         self.assertIsInstance(
             board.efficiency.escalation_rate, learning_scoreboard.MetricNoData
         )
         self.assertIsInstance(
             board.replay_benchmark.mean_benchmark_score, learning_scoreboard.MetricNoData
         )
+
+
+class ReplayBenchmarkFamilyTests(unittest.TestCase):
+    """Ticket 26 — `mean_benchmark_score` becomes real arithmetic once the
+    replay-benchmark family is actually fed."""
+
+    def test_a_fed_family_produces_a_real_mean_over_successful_trials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for score, timestamp in (
+                (0.9, "2026-01-04T00:00:00Z"),
+                (0.7, "2026-01-05T00:00:00Z"),
+            ):
+                record = learning_journal.ReplayBenchmarkRecord(
+                    task_set="bench-v1", success=True, score=score, timestamp=timestamp
+                )
+                self.assertIsNone(
+                    learning_journal.append_journal_record(record, root_dir=root)
+                )
+            # A failed trial is real evidence, kept in the journal, and
+            # deliberately excluded from the mean it has no score to feed —
+            # not silently dropped, just not averaged in.
+            failed = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=False, timestamp="2026-01-05T12:00:00Z"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(failed, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        metric = board.replay_benchmark.mean_benchmark_score
+        self.assertIsInstance(metric, learning_scoreboard.MetricValue)
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertAlmostEqual(metric.value, 0.8)
+        self.assertEqual(metric.sample_size, 2)
+        self.assertEqual(metric.direction, "higher_is_better")
+
+    def test_a_trial_outside_the_window_does_not_feed_the_trend(self) -> None:
+        """The default 7-day window: `_NOW` is 2026-01-08, so a trial from
+        2025-12-01 predates `window_start` (2026-01-01) and must not move the
+        mean — the same windowing rule every other metric in this file
+        already honors."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            in_window = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=True, score=0.5, timestamp="2026-01-05T00:00:00Z"
+            )
+            out_of_window = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=True, score=1.0, timestamp="2025-12-01T00:00:00Z"
+            )
+            self.assertIsNone(
+                learning_journal.append_journal_record(in_window, root_dir=root)
+            )
+            self.assertIsNone(
+                learning_journal.append_journal_record(out_of_window, root_dir=root)
+            )
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        metric = board.replay_benchmark.mean_benchmark_score
+        self.assertIsInstance(metric, learning_scoreboard.MetricValue)
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.5)
+        self.assertEqual(metric.sample_size, 1)
 
 
 if __name__ == "__main__":

@@ -9,21 +9,23 @@ snapshot, at one `now`, of eight named metrics grouped into four families
 `implementation_plan.md` (spec 0004 ticket 16) for the full design record;
 this docstring states only what a caller of this module needs to know.
 
-**Stage 2c of the ticket: the scoreboard is functionally complete.** Six of
-the eight metrics are real arithmetic; `escalation_rate` and
-`mean_benchmark_score` report `MetricNoData` unconditionally, each for its
-own permanent reason (Section 3.2.1's missing producer; Section 3.7's
-ticket-26 dependency) — every other metric is computed from `JournalRead`,
-cut first to the `<= now` prefix (Section 3 rule 1) and, where its subject
-calls for it, further reduced to the trailing `window_days` window.
-`compute_scoreboard` is a total, pure function over any `JournalRead`,
-including an empty one, built on the type contract stage 2a established
-(`MetricValue`/`MetricNoData`, the four family dataclasses, the
-duplicate-name guard, the no-clock and naive-`now` guards).
-`compare_scoreboards` closes the loop: it pairs two boards' metrics by name
-and classifies each one's movement, reading `direction` rather than a bare
-sign comparison, so a rising violation rate can never read as an
-improvement (Section 5).
+**The scoreboard is functionally complete as of ticket 26.** Seven of the
+eight metrics are real arithmetic; `escalation_rate` alone reports
+`MetricNoData` unconditionally, for a permanent reason (Section 3.2.1's
+missing producer — no journal writer names a 2-failure routing escalation).
+`mean_benchmark_score` was the same until ticket 26 gave the replay-benchmark
+family a producer (`acceptance_gate.py`); it now reports `MetricNoData` only
+when the window holds no successful trial, exactly like every other
+data-backed metric. Every metric is computed from `JournalRead`, cut first to
+the `<= now` prefix (Section 3 rule 1) and, where its subject calls for it,
+further reduced to the trailing `window_days` window. `compute_scoreboard` is
+a total, pure function over any `JournalRead`, including an empty one, built
+on the type contract stage 2a established (`MetricValue`/`MetricNoData`, the
+four family dataclasses, the duplicate-name guard, the no-clock and
+naive-`now` guards). `compare_scoreboards` closes the loop: it pairs two
+boards' metrics by name and classifies each one's movement, reading
+`direction` rather than a bare sign comparison, so a rising violation rate
+can never read as an improvement (Section 5).
 
 **No metric can be misread as a genuine zero.** `MetricNoData` carries only
 a `name` and a `direction` — there is no `value` attribute through which a
@@ -46,9 +48,9 @@ from an injected `now` is reproducible; one computed from a live clock is
 not.
 
 **The scoreboard reads. It never writes.** `read_scoreboard` calls
-`learning_journal.read_journal` and nothing else journal-shaped. Ticket 26
-owns writing a benchmark score, and no ticket ever writes a scoreboard back
-to the journal.
+`learning_journal.read_journal` and nothing else journal-shaped.
+`acceptance_gate.py` (ticket 18) owns writing a `ReplayBenchmarkRecord` per
+benchmark trial, and no ticket ever writes a scoreboard back to the journal.
 """
 from __future__ import annotations
 
@@ -237,7 +239,8 @@ class EfficiencyMetrics:
 
 @dataclass(frozen=True)
 class ReplayBenchmarkMetrics:
-    """The one metric ticket 26 will eventually supply."""
+    """The one metric ticket 26 supplies: a windowed mean over successful
+    `ReplayBenchmarkRecord` scores."""
 
     mean_benchmark_score: Metric
 
@@ -285,7 +288,7 @@ def _in_window(ts: datetime, *, window_start: datetime, now: datetime) -> bool:
 def _prefix_cut(records: tuple[Any, ...], *, now: datetime) -> tuple[Any, ...]:
     """The `<= now` prefix — Rule 1 of implementation_plan.md Section 3: no
     metric, and no history a metric consults, ever sees a record whose
-    timestamp is after `now`. Applied once, to all four families, right
+    timestamp is after `now`. Applied once, to all five families, right
     after the read, so no per-metric rule can forget it and a board stays
     reproducible from a longer journal later (Round 3 objection R3-3). Every
     record in a `JournalRead` has a parseable `timestamp`
@@ -556,6 +559,42 @@ def _cost_per_completed_task_usd(
     )
 
 
+def _windowed_replay_benchmarks(
+    replay_benchmarks: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> tuple[Any, ...]:
+    return tuple(
+        record
+        for record in replay_benchmarks
+        if _in_window(
+            learning_journal.parse_wire_timestamp(record.timestamp),
+            window_start=window_start,
+            now=now,
+        )
+    )
+
+
+def _replay_benchmark_metrics(
+    replay_benchmarks: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> ReplayBenchmarkMetrics:
+    """Ticket 26's records, finally: a mean over the window's *successful*
+    trials' scores. A failed trial (`success=False`, `score=None`) is real
+    evidence the gate must not lose — it is what makes a runner failure
+    "fails closed" rather than "silently absent" — but it has no score to
+    average in; excluding it from this mean is not the same as discarding it,
+    since `learning_report.py` renders `sample_size` from the same window and
+    a future metric is free to read the excluded trials for a failure rate.
+    `MetricNoData` when the window holds no successful trial, matching every
+    other `_mean`-shaped metric's no-data rule.
+    """
+    windowed = _windowed_replay_benchmarks(replay_benchmarks, window_start=window_start, now=now)
+    scores = [record.score for record in windowed if record.success]
+    return ReplayBenchmarkMetrics(
+        mean_benchmark_score=_mean(
+            name="mean_benchmark_score", direction="higher_is_better", values=scores
+        )
+    )
+
+
 def _efficiency_metrics(
     worker_executions: tuple[Any, ...],
     outcomes: tuple[Any, ...],
@@ -592,11 +631,14 @@ def _efficiency_metrics(
 class Scoreboard:
     """A snapshot, at `window_end`, of every metric this ticket defines.
 
-    Six of the eight metrics are real arithmetic as of stage 2b;
-    `escalation_rate` and `mean_benchmark_score` are `MetricNoData`
-    unconditionally and permanently (Sections 3.2.1, 3.7). The two skip
-    counters are passed straight through from `learning_journal.JournalRead`,
-    unchanged — see implementation_plan.md Section 2.4.
+    Seven of the eight metrics are real arithmetic; `escalation_rate` alone
+    is `MetricNoData` unconditionally and permanently (Section 3.2.1 — no
+    journal writer names a 2-failure routing escalation).
+    `mean_benchmark_score` reports `MetricNoData` only when its window holds
+    no successful `ReplayBenchmarkRecord`, exactly like every other
+    data-backed metric (ticket 26). The two skip counters are passed straight
+    through from `learning_journal.JournalRead`, unchanged — see
+    implementation_plan.md Section 2.4.
     """
 
     discipline: DisciplineMetrics
@@ -701,14 +743,14 @@ def compute_scoreboard(
 
     Every family is first cut to the `<= now` prefix (implementation_plan.md
     Section 3, rule 1) — no metric, and no history a metric consults, ever
-    sees a record stamped after `now`. Six of the eight metrics are then
+    sees a record stamped after `now`. Seven of the eight metrics are then
     real arithmetic over that prefix, each reduced or windowed per Sections
-    3.1-3.6. Two stay `MetricNoData` unconditionally, for their own
-    permanent reasons: `escalation_rate` because the 2-failure routing
-    escalation it names has no journal writer at all (`agent_council.py`
-    calls `append_journal_record` zero times — Section 3.2.1);
-    `mean_benchmark_score` because no record family carries a benchmark
-    score until ticket 26 (Section 3.7).
+    3.1-3.6 and (for `mean_benchmark_score`) ticket 26's own windowed mean
+    over the replay-benchmark family's successful trials. `escalation_rate`
+    alone stays `MetricNoData` unconditionally, for a permanent reason: the
+    2-failure routing escalation it names has no journal writer at all
+    (`agent_council.py` calls `append_journal_record` zero times —
+    Section 3.2.1).
     """
     _require_aware_now(now)
     _validate_window_days(window_days)
@@ -717,6 +759,7 @@ def compute_scoreboard(
     outcomes = _prefix_cut(journal.outcomes, now=now)
     dialogues = _prefix_cut(journal.dialogues, now=now)
     compliance = _prefix_cut(journal.compliance, now=now)
+    replay_benchmarks = _prefix_cut(journal.replay_benchmarks, now=now)
 
     window_start = now - timedelta(days=window_days)
 
@@ -728,11 +771,8 @@ def compute_scoreboard(
         efficiency=_efficiency_metrics(
             worker_executions, outcomes, dialogues, window_start=window_start, now=now
         ),
-        replay_benchmark=ReplayBenchmarkMetrics(
-            # No record family carries a benchmark score until ticket 26.
-            mean_benchmark_score=MetricNoData(
-                name="mean_benchmark_score", direction="higher_is_better"
-            ),
+        replay_benchmark=_replay_benchmark_metrics(
+            replay_benchmarks, window_start=window_start, now=now
         ),
         window_days=window_days,
         window_end=now,

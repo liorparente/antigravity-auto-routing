@@ -2,10 +2,10 @@
 """LearningJournal: the content-free signal stream the learning loop reads.
 
 A dedicated, append-only JSONL stream beside the audited routing telemetry,
-carrying four record families — worker execution, ground-truth outcomes,
-dialogue quality, and protocol compliance. It exists so the orchestrator can
-be judged against what actually happened rather than against what it declared
-it would do.
+carrying five record families — worker execution, ground-truth outcomes,
+dialogue quality, protocol compliance, and replay-benchmark trials. It exists
+so the orchestrator can be judged against what actually happened rather than
+against what it declared it would do.
 
 **This is not the routing telemetry stream, and must never become it.**
 ``.ralph/routing_telemetry.jsonl`` has two writers with a frozen, audited
@@ -213,12 +213,13 @@ VALID_EFFORTS: frozenset[str] = frozenset(get_args(EffortLevel))
 #
 # Named `GroundTruth`, not `OutcomeSignal`, because CONTEXT.md — the glossary
 # this codebase is driven by, and the authority when the two disagree —
-# already spends "signal family" on the journal's four *record* families
+# already spends "signal family" on the journal's five *record* families
 # (worker execution, ground-truth outcomes, dialogue quality, protocol
-# compliance). One word at two granularities in a glossary-driven codebase is
-# a reader's trap: "signal" would mean the outcome family in CONTEXT.md and a
-# subdivision *inside* that one family here. The prose in this module already
-# called these four "ground truth" throughout; the type now agrees with it.
+# compliance, replay-benchmark trials). One word at two granularities in a
+# glossary-driven codebase is a reader's trap: "signal" would mean the outcome
+# family in CONTEXT.md and a subdivision *inside* that one family here. The
+# prose in this module already called these four "ground truth" throughout;
+# the type now agrees with it.
 GroundTruth = Literal["tests", "review", "plan", "stalemate_resolution"]
 
 OutcomeVerdict = Literal[
@@ -507,13 +508,13 @@ def _validate_timestamp(value: object, field_name: str = "timestamp") -> None:
     error at the call site — the value being journaled was never fit to
     journal — and it must be loud." A record built from a
     calendar-invalid timestamp was never fit to journal either, and every one
-    of the four record types below calls this function from `__post_init__`
+    of the five record types below calls this function from `__post_init__`
     — so a calendar check that lived only downstream, in
     `parse_wire_timestamp`, would let `WorkerExecutionRecord`,
-    `OutcomeRecord`, `DialogueQualityRecord`, and `ComplianceRecord` all
-    construct successfully from a value that `read_journal` — this module's
-    own reader — later discards as unreadable. A record accepted at
-    construction must not vanish on read.
+    `OutcomeRecord`, `DialogueQualityRecord`, `ComplianceRecord`, and
+    `ReplayBenchmarkRecord` all construct successfully from a value that
+    `read_journal` — this module's own reader — later discards as unreadable.
+    A record accepted at construction must not vanish on read.
     """
     text = _require_str(value, field_name)
     if not TIMESTAMP_RE.fullmatch(text):
@@ -705,11 +706,14 @@ class TaskLabel:
         before any worker is contacted, so there is no invocation for a
         `WorkerExecutionRecord` to describe; it produces no ground truth, so
         there is no `OutcomeRecord`; it runs no round, so there is no
-        `DialogueQualityRecord`; and `ComplianceRecord` is session-scoped and
-        carries no `TaskLabel` at all. None of the four families this module
-        defines is reachable on a halt, so no caller can exist yet without
-        first fabricating a record about work that never ran — which is
-        exactly what the halt boundary forbids.
+        `DialogueQualityRecord`; `ComplianceRecord` is session-scoped and
+        carries no `TaskLabel` at all; and `ReplayBenchmarkRecord` grades the
+        evaluator's own fixed task set, never a development task, so it
+        carries no `TaskLabel` either — permanently, not just until some
+        future ticket. None of the five families this module defines is
+        reachable on a halt, so no caller can exist yet without first
+        fabricating a record about work that never ran — which is exactly
+        what the halt boundary forbids.
 
         The first caller therefore arrives with the first family that *is*
         reachable on a halt, and it must be built by whichever ticket adds
@@ -1207,14 +1211,78 @@ class ComplianceRecord:
         return _wire_form(self)
 
 
+@dataclass(frozen=True)
+class ReplayBenchmarkRecord:
+    """One trial of the fixed replay benchmark: its score, or that it failed.
+
+    Ticket 26's fifth family, added because the outcome family cannot hold a
+    score by design — `OUTCOME_VERDICTS` pairs every `GroundTruth` to a closed
+    vocabulary of categorical verdicts precisely so `("tests", "planner")` is
+    unconstructible, and a number has nowhere to sit in that shape. Extending
+    `WorkerExecutionRecord` or `DialogueQualityRecord` instead would have bent
+    an unrelated family's schema around a value neither one is about. A fifth
+    family costs updating the "how many families" count in three places
+    (this module's own docstring, `CONTEXT.md`, `docs/specs/0004-learning-loop.md`)
+    and is otherwise the shape ticket 26 itself calls the obvious one.
+
+    **No `TaskLabel`.** The replay benchmark scores a fixed, versioned task
+    set the evaluator owns — not a development task, the way three of this
+    module's other four families are (`ComplianceRecord` is the other
+    exception: session-scoped, and carries no `TaskLabel` either) — so there
+    is no `TaskIdentity` to correlate against and no sensitivity-halt
+    boundary to enforce: the benchmark set is never a user's task text.
+    `task_set` is a caller-composed identifier (a benchmark version name,
+    e.g. `"bench-v1"`), so it faces
+    `_validate_identifier` — shape gate plus the sensitivity-marker gate — the
+    same treatment `model_id` and `model_family` get, not
+    `_validate_carried_identifier`.
+
+    **`score` is `None` on a failed trial, never `0.0`.** A runner failure
+    (`acceptance_gate.py`'s injected callable raising mid-trial) produced no
+    score at all; recording `0.0` would indistinguishably mean "the runner
+    crashed" and "the runner ran and scored zero", and the acceptance gate's
+    "fails closed" rule depends on telling those apart. `success` and `score`
+    are validated together in `__post_init__` so the two can never disagree:
+    a successful trial must carry a score, a failed one must not.
+    """
+
+    KIND: ClassVar[str] = "replay_benchmark"
+
+    task_set: str
+    success: bool
+    score: float | None = None
+    run_id: str | None = None
+    timestamp: str = field(default_factory=_utc_timestamp)
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.task_set, "task_set")
+        _validate_flag(self.success, "success")
+        _validate_run_id(self.run_id, "run_id")
+        if self.success:
+            if self.score is None:
+                raise ValueError("a successful trial must carry a score")
+            _validate_amount(self.score, "score")
+        elif self.score is not None:
+            raise ValueError("a failed trial carries no score")
+        _validate_timestamp(self.timestamp)
+
+    def to_mapping(self) -> dict[str, object]:
+        """No `TaskLabel` to flatten — same shape as `ComplianceRecord.to_mapping`."""
+        return _wire_form(self)
+
+
 # The closed set of things that may be written to the journal. A `Protocol`
 # with a `to_mapping` method would have been the flexible choice and is
 # exactly wrong here: any dict-shaped object could then satisfy it, and "no
 # bare mappings as contracts" is the property this stream depends on. A caller
-# who wants a fifth record family adds it here, in a reviewed change, with its
+# who wants a sixth record family adds it here, in a reviewed change, with its
 # own validated schema.
 JournalRecord = (
-    WorkerExecutionRecord | OutcomeRecord | DialogueQualityRecord | ComplianceRecord
+    WorkerExecutionRecord
+    | OutcomeRecord
+    | DialogueQualityRecord
+    | ComplianceRecord
+    | ReplayBenchmarkRecord
 )
 
 
@@ -1320,7 +1388,7 @@ def extract_issue_codes(messages: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(codes))
 
 
-# --- the reader: the inverse of `to_mapping`, across all four families ---
+# --- the reader: the inverse of `to_mapping`, across all five families ---
 #
 # Lives here rather than in a consumer module because the schema knowledge
 # it needs — `TaskLabel`'s un-flattening, `DialogueRound`'s reconstruction,
@@ -1354,12 +1422,16 @@ def _filtered_fields(cls: type, mapping: Mapping[str, Any]) -> dict[str, Any]:
     discriminator, added to an existing family) is dropped rather than
     reaching the constructor as an unexpected keyword argument, which would
     otherwise turn `TypeError` into a lost record for every line carrying it.
-    A new record *family* (ticket 26's benchmark family) is a different case
-    entirely, handled upstream of this function by the `unknown_kind_lines`
-    path in `read_journal` — its records never reach a rehydrator, so they
-    never reach `_filtered_fields` either. `dataclasses.fields` never sees a
-    `ClassVar` (`KIND`) or a `@property` (`DialogueQualityRecord.rounds_run`),
-    so both are filtered out here for free rather than needing a special case.
+    A new record *family* is a different case entirely: for any reader that
+    predates it, it is handled upstream of this function by the
+    `unknown_kind_lines` path in `read_journal` — its records never reach a
+    rehydrator, so they never reach `_filtered_fields` either. Ticket 26's
+    `ReplayBenchmarkRecord` took exactly that path in every reader before this
+    one; once a family has an entry in `_REHYDRATE_BY_KIND`, its records flow
+    through this function like any other family's. `dataclasses.fields` never
+    sees a `ClassVar` (`KIND`) or a `@property`
+    (`DialogueQualityRecord.rounds_run`), so both are filtered out here for
+    free rather than needing a special case.
     """
     allowed = {declared.name for declared in dataclasses.fields(cls)}
     return {key: value for key, value in mapping.items() if key in allowed}
@@ -1453,6 +1525,7 @@ _DIALOGUE_QUALITY_REQUIRED_KEYS = (
     | frozenset({"rounds_run"})
 )
 _COMPLIANCE_REQUIRED_KEYS = _required_wire_keys(ComplianceRecord)
+_REPLAY_BENCHMARK_REQUIRED_KEYS = _required_wire_keys(ReplayBenchmarkRecord)
 
 
 def _check_required_keys(mapping: Mapping[str, Any], required: frozenset[str], kind: str) -> None:
@@ -1542,6 +1615,13 @@ def _rehydrate_compliance(mapping: dict[str, Any]) -> ComplianceRecord:
     return ComplianceRecord(**_filtered_fields(ComplianceRecord, mapping))
 
 
+def _rehydrate_replay_benchmark(mapping: dict[str, Any]) -> ReplayBenchmarkRecord:
+    _check_required_keys(
+        mapping, _REPLAY_BENCHMARK_REQUIRED_KEYS, ReplayBenchmarkRecord.KIND
+    )
+    return ReplayBenchmarkRecord(**_filtered_fields(ReplayBenchmarkRecord, mapping))
+
+
 # Every known `kind` value, mapped to the function that rebuilds its record.
 # A `kind` absent from this mapping is not this reader's schema problem — see
 # `read_journal`'s `unknown_kind_lines` handling — so this is deliberately
@@ -1551,6 +1631,7 @@ _REHYDRATE_BY_KIND: dict[str, Callable[[dict[str, Any]], Any]] = {
     OutcomeRecord.KIND: _rehydrate_outcome,
     DialogueQualityRecord.KIND: _rehydrate_dialogue_quality,
     ComplianceRecord.KIND: _rehydrate_compliance,
+    ReplayBenchmarkRecord.KIND: _rehydrate_replay_benchmark,
 }
 
 
@@ -1577,6 +1658,7 @@ class JournalRead:
     outcomes: tuple[OutcomeRecord, ...] = ()
     dialogues: tuple[DialogueQualityRecord, ...] = ()
     compliance: tuple[ComplianceRecord, ...] = ()
+    replay_benchmarks: tuple[ReplayBenchmarkRecord, ...] = ()
     unreadable_lines: int = 0
     unknown_kind_lines: int = 0
 
@@ -1726,6 +1808,7 @@ def read_journal(root_dir: Path) -> JournalRead:
     outcomes: list[OutcomeRecord] = []
     dialogues: list[DialogueQualityRecord] = []
     compliance: list[ComplianceRecord] = []
+    replay_benchmarks: list[ReplayBenchmarkRecord] = []
     unreadable_lines = 0
     unknown_kind_lines = 0
 
@@ -1789,14 +1872,17 @@ def read_journal(root_dir: Path) -> JournalRead:
             outcomes.append(record)
         elif isinstance(record, DialogueQualityRecord):
             dialogues.append(record)
-        else:
+        elif isinstance(record, ComplianceRecord):
             compliance.append(record)
+        else:
+            replay_benchmarks.append(record)
 
     return JournalRead(
         worker_executions=tuple(worker_executions),
         outcomes=tuple(outcomes),
         dialogues=tuple(dialogues),
         compliance=tuple(compliance),
+        replay_benchmarks=tuple(replay_benchmarks),
         unreadable_lines=unreadable_lines,
         unknown_kind_lines=unknown_kind_lines,
     )

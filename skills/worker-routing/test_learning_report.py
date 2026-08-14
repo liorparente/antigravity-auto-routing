@@ -79,7 +79,11 @@ _ALL_METRIC_NAMES = (
     "mean_benchmark_score",
 )
 
-_PERMANENT_NO_DATA_METRICS = ("escalation_rate", "mean_benchmark_score")
+# `escalation_rate` has no producer anywhere and is permanently no-data.
+# `mean_benchmark_score` has had a producer since ticket 26
+# (`acceptance_gate.py`'s `ReplayBenchmarkRecord`s) — it reads no-data below
+# only because this suite's fixtures carry none, not because it is permanent.
+_PERMANENTLY_NO_DATA_METRICS = ("escalation_rate",)
 
 
 def _line_for_metric(report: str, name: str) -> str:
@@ -451,7 +455,15 @@ class PopulatedWeekMetricTests(unittest.TestCase):
             line, "- escalation_rate (lower is better): no data — indeterminate (was no data)"
         )
 
-    def test_mean_benchmark_score_stays_permanently_no_data(self) -> None:
+    def test_mean_benchmark_score_is_no_data_when_this_fixtures_journal_carries_none(
+        self,
+    ) -> None:
+        """Not permanent: ticket 26 gave this family a producer
+        (`acceptance_gate.py`). It reads no-data here only because this
+        class's fixture journal carries no `ReplayBenchmarkRecord` — see
+        `test_learning_scoreboard.ReplayBenchmarkFamilyTests` for the
+        real-arithmetic case, which this renderer-only suite does not
+        duplicate."""
         line = _line_for_metric(self.report, "mean_benchmark_score")
 
         self.assertEqual(

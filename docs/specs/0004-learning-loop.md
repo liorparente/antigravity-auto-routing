@@ -97,9 +97,11 @@ A closed loop in four parts:
 
 **The LearningJournal is a new, separate stream.** One append-only JSONL journal beside the
 routing telemetry, with a record kind per signal family: worker-execution, outcome,
-dialogue-quality, and compliance. The audited telemetry stream is not extended — its record
-contract (including the `kind`-asymmetry that distinguishes advisory from council records) stays
-frozen. Records correlate across streams via TaskIdentity.
+dialogue-quality, compliance, and replay-benchmark. The audited telemetry stream is not extended —
+its record contract (including the `kind`-asymmetry that distinguishes advisory from council
+records) stays frozen. Records correlate across streams via TaskIdentity — except the
+replay-benchmark family, which grades the evaluator's own fixed task set rather than a development
+task and carries no TaskIdentity at all.
 
 **Record contents by family.**
 - *Worker-execution*: emitted on every worker invocation — duration, cost estimate, success or
@@ -114,6 +116,11 @@ frozen. Records correlate across streams via TaskIdentity.
   verdict sequence, engagement counts, canary results, degradation and independence flags.
 - *Compliance*: the post-session audit's violations, issue codes, and metrics, persisted per
   session instead of ending at stdout.
+- *Replay-benchmark*: one record per acceptance-gate trial — the task-set identifier, whether the
+  trial succeeded, and the score an injected benchmark runner returned. A failed trial is journaled
+  as failed rather than omitted, so the trend it feeds has no silent gaps; a fifth family exists for
+  it because the outcome family's closed verdict vocabulary has nowhere for a number to sit
+  (backlog ticket 26).
 
 **Redaction is structural.** The journal carries numbers, categories, and identifiers only. A
 coarse task-type tag (for example "bugfix", "refactor") is permitted on normal tasks;
