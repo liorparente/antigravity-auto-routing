@@ -1881,8 +1881,8 @@ _CLOCK_FINAL_ATTRS = {
 }
 
 
-def _find_forbidden_clock_calls(tree: ast.AST) -> list[tuple[str, ...]]:
-    """Find calls whose dotted attribute path reads a wall/monotonic clock.
+def _find_forbidden_clock_reads(tree: ast.AST) -> list[tuple[str, ...]]:
+    """Find attribute accesses whose dotted path reads a wall/monotonic clock.
 
     Matches on the resolved path's root name (`datetime`/`time`) and final
     attribute (a clock-reading method) — covers both a single-dot access
@@ -1892,15 +1892,23 @@ def _find_forbidden_clock_calls(tree: ast.AST) -> list[tuple[str, ...]]:
     (not "any attribute access ending in `.now`") keeps an unrelated
     `.now()` on some other object from false-positiving.
 
+    Matches every `ast.Attribute` node, not only ones that are a `Call`'s
+    `.func` — a bare reference (`x = datetime.now`) is how a clock read gets
+    deferred past a call-only check (e.g. stored as
+    `dataclasses.field(default_factory=datetime.now)` and invoked later
+    through a name this function cannot trace), so it is flagged too. A
+    call's `.func` is itself an `ast.Attribute` node, so calls are still
+    caught.
+
     Does NOT cover: an aliased import (`import time as t; t.time()`) — the
     bare root name is the alias `t`, not `time`, and this function does not
     track import bindings; or dynamic access (`getattr(datetime, "now")`).
     """
     found = []
     for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        if not isinstance(node, ast.Attribute):
             continue
-        path = _resolve_dotted_attribute_path(node.func)
+        path = _resolve_dotted_attribute_path(node)
         if path is None:
             continue
         if path[0] in _CLOCK_MODULE_ROOTS and path[-1] in _CLOCK_FINAL_ATTRS:
@@ -1912,7 +1920,7 @@ class NoClockTests(unittest.TestCase):
     def test_the_scoreboard_module_reads_no_clock(self) -> None:
         tree = ast.parse(LEARNING_SCOREBOARD_PATH.read_text(encoding="utf-8"))
 
-        self.assertEqual(_find_forbidden_clock_calls(tree), [])
+        self.assertEqual(_find_forbidden_clock_reads(tree), [])
 
     def test_the_no_clock_guard_catches_a_nested_datetime_module_now_call(self) -> None:
         # The gap a single-dot-only check misses: the outer `Attribute`'s
@@ -1921,7 +1929,7 @@ class NoClockTests(unittest.TestCase):
         # node entirely.
         tree = ast.parse("import datetime\ndatetime.datetime.now()\n")
 
-        self.assertEqual(_find_forbidden_clock_calls(tree), [("datetime", "datetime", "now")])
+        self.assertEqual(_find_forbidden_clock_reads(tree), [("datetime", "datetime", "now")])
 
     def test_the_no_clock_guard_catches_time_monotonic(self) -> None:
         # The gap a forbidden set of only now/utcnow/time/gmtime misses:
@@ -1930,7 +1938,36 @@ class NoClockTests(unittest.TestCase):
         # check's forbidden set.
         tree = ast.parse("import time\ntime.monotonic()\n")
 
-        self.assertEqual(_find_forbidden_clock_calls(tree), [("time", "monotonic")])
+        self.assertEqual(_find_forbidden_clock_reads(tree), [("time", "monotonic")])
+
+    def test_the_no_clock_guard_catches_an_uncalled_reference(self) -> None:
+        # A check gated on `isinstance(node, ast.Call)` skips a bare
+        # reference entirely, so a clock read deferred through one (e.g.
+        # `dataclasses.field(default_factory=datetime.now)`) goes uncaught.
+        tree = ast.parse("x = datetime.now\n")
+
+        self.assertEqual(_find_forbidden_clock_reads(tree), [("datetime", "now")])
+
+    def test_the_no_clock_guard_does_not_flag_an_unrelated_now_method(self) -> None:
+        # Root name is `journal`, not `datetime`/`time` — matching on the
+        # root keeps this from false-positiving on an unrelated `.now()`.
+        tree = ast.parse("journal.now()\n")
+
+        self.assertEqual(_find_forbidden_clock_reads(tree), [])
+
+    def test_the_no_clock_guard_does_not_flag_an_unrelated_final_attribute(self) -> None:
+        # Root matches (`datetime`) but the final attribute (`today`) is
+        # not in the forbidden set.
+        tree = ast.parse("import datetime\ndatetime.date.today()\n")
+
+        self.assertEqual(_find_forbidden_clock_reads(tree), [])
+
+    def test_the_no_clock_guard_does_not_flag_an_aliased_import(self) -> None:
+        # Documented gap: the bare root name is the alias `t`, not `time`,
+        # and this function does not track import bindings.
+        tree = ast.parse("import time as t\nt.time()\n")
+
+        self.assertEqual(_find_forbidden_clock_reads(tree), [])
 
 
 class NowGuardTests(unittest.TestCase):
