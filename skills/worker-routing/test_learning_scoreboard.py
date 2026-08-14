@@ -2899,5 +2899,422 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(board_a, board_b)
 
 
+def _comparison_board(
+    *,
+    window_days: int = learning_scoreboard.DEFAULT_WINDOW_DAYS,
+    **family_overrides: Any,
+) -> Any:
+    """A `Scoreboard` built directly through its public constructors, every
+    metric `MetricNoData` unless a family is overridden — for Slice 12's
+    comparison tests, which exercise `compare_scoreboards` against
+    directly-built boards rather than journal-derived ones. Reuses
+    `_no_data_family_kwargs`'s all-no-data base exactly as
+    `test_duplicate_metric_names_are_unconstructible` already does.
+    """
+    kwargs = _no_data_family_kwargs()
+    kwargs["window_days"] = window_days
+    kwargs.update(family_overrides)
+    return learning_scoreboard.Scoreboard(**kwargs)
+
+
+class ScoreboardComparisonTests(unittest.TestCase):
+    """Slice 12 — the comparison (implementation_plan.md Section 5.2, 5.3)."""
+
+    def test_a_rising_violation_rate_is_a_regression_not_an_improvement(self) -> None:
+        # The test this ticket exists to make impossible to fail silently: a
+        # bare `current.value > baseline.value` reads a rising lower-is-
+        # better metric as `improved`.
+        baseline = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=1.0,
+                    sample_size=3,
+                ),
+            ),
+        )
+        current = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=2.0,
+                    sample_size=3,
+                ),
+            ),
+        )
+
+        comparison = learning_scoreboard.compare_scoreboards(baseline, current)
+
+        self.assertIn("violations_per_session", comparison.regressed)
+        self.assertNotIn("violations_per_session", comparison.improved)
+
+    def test_a_falling_violation_rate_is_an_improvement(self) -> None:
+        baseline = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=2.0,
+                    sample_size=3,
+                ),
+            ),
+        )
+        current = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=1.0,
+                    sample_size=3,
+                ),
+            ),
+        )
+
+        comparison = learning_scoreboard.compare_scoreboards(baseline, current)
+
+        self.assertIn("violations_per_session", comparison.improved)
+        self.assertNotIn("violations_per_session", comparison.regressed)
+
+    def test_a_rising_canary_catch_rate_is_an_improvement(self) -> None:
+        # The opposite direction from test 59/60: a `>`-only implementation
+        # cannot pass both this test and test 59, since it would read every
+        # rise as an improvement regardless of direction.
+        baseline = _comparison_board(
+            critique_authenticity=learning_scoreboard.CritiqueAuthenticityMetrics(
+                canary_catch_rate=learning_scoreboard.MetricValue(
+                    name="canary_catch_rate",
+                    direction="higher_is_better",
+                    value=0.5,
+                    sample_size=4,
+                ),
+                mean_engagement_count=learning_scoreboard.MetricNoData(
+                    name="mean_engagement_count", direction="higher_is_better"
+                ),
+            ),
+        )
+        current = _comparison_board(
+            critique_authenticity=learning_scoreboard.CritiqueAuthenticityMetrics(
+                canary_catch_rate=learning_scoreboard.MetricValue(
+                    name="canary_catch_rate",
+                    direction="higher_is_better",
+                    value=0.8,
+                    sample_size=4,
+                ),
+                mean_engagement_count=learning_scoreboard.MetricNoData(
+                    name="mean_engagement_count", direction="higher_is_better"
+                ),
+            ),
+        )
+
+        comparison = learning_scoreboard.compare_scoreboards(baseline, current)
+
+        self.assertIn("canary_catch_rate", comparison.improved)
+        self.assertNotIn("canary_catch_rate", comparison.regressed)
+
+    def test_an_unchanged_metric_holds(self) -> None:
+        baseline = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=1.0,
+                    sample_size=3,
+                ),
+            ),
+        )
+        current = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=1.0,
+                    sample_size=9,
+                ),
+            ),
+        )
+
+        comparison = learning_scoreboard.compare_scoreboards(baseline, current)
+
+        self.assertIn("violations_per_session", comparison.held)
+
+    def test_no_data_on_either_side_is_indeterminate(self) -> None:
+        measured = learning_scoreboard.MetricValue(
+            name="violations_per_session", direction="lower_is_better", value=1.0, sample_size=1
+        )
+        no_data = learning_scoreboard.MetricNoData(
+            name="violations_per_session", direction="lower_is_better"
+        )
+        cases = {
+            "baseline_only_no_data": (no_data, measured),
+            "current_only_no_data": (measured, no_data),
+            "neither_has_data": (no_data, no_data),
+        }
+        for label, (baseline_metric, current_metric) in cases.items():
+            with self.subTest(case=label):
+                baseline = _comparison_board(
+                    discipline=learning_scoreboard.DisciplineMetrics(
+                        violations_per_session=baseline_metric
+                    ),
+                )
+                current = _comparison_board(
+                    discipline=learning_scoreboard.DisciplineMetrics(
+                        violations_per_session=current_metric
+                    ),
+                )
+
+                comparison = learning_scoreboard.compare_scoreboards(baseline, current)
+
+                self.assertIn("violations_per_session", comparison.indeterminate)
+                self.assertNotIn("violations_per_session", comparison.improved)
+                self.assertNotIn("violations_per_session", comparison.regressed)
+
+    def test_has_regression_is_true_when_exactly_one_metric_regressed(self) -> None:
+        baseline = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=1.0,
+                    sample_size=3,
+                ),
+            ),
+        )
+        current = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=2.0,
+                    sample_size=3,
+                ),
+            ),
+        )
+
+        comparison = learning_scoreboard.compare_scoreboards(baseline, current)
+
+        self.assertTrue(comparison.has_regression)
+        self.assertEqual(comparison.regressed, ("violations_per_session",))
+
+    def test_every_metric_appears_in_exactly_one_of_the_four_buckets(self) -> None:
+        # One metric each of regressed, improved, held; the remaining five
+        # stay all-no-data (indeterminate). Bucket sizes must sum to the
+        # board's full metric count, not merely each be non-empty, so no
+        # metric can be silently dropped from the comparison.
+        baseline = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=1.0,
+                    sample_size=1,
+                ),
+            ),
+            critique_authenticity=learning_scoreboard.CritiqueAuthenticityMetrics(
+                canary_catch_rate=learning_scoreboard.MetricValue(
+                    name="canary_catch_rate",
+                    direction="higher_is_better",
+                    value=0.5,
+                    sample_size=1,
+                ),
+                mean_engagement_count=learning_scoreboard.MetricValue(
+                    name="mean_engagement_count",
+                    direction="higher_is_better",
+                    value=3.0,
+                    sample_size=1,
+                ),
+            ),
+        )
+        current = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                # Regresses: lower_is_better, value rose.
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=2.0,
+                    sample_size=1,
+                ),
+            ),
+            critique_authenticity=learning_scoreboard.CritiqueAuthenticityMetrics(
+                # Improves: higher_is_better, value rose.
+                canary_catch_rate=learning_scoreboard.MetricValue(
+                    name="canary_catch_rate",
+                    direction="higher_is_better",
+                    value=0.8,
+                    sample_size=1,
+                ),
+                # Holds: unchanged value.
+                mean_engagement_count=learning_scoreboard.MetricValue(
+                    name="mean_engagement_count",
+                    direction="higher_is_better",
+                    value=3.0,
+                    sample_size=1,
+                ),
+            ),
+        )
+
+        comparison = learning_scoreboard.compare_scoreboards(baseline, current)
+
+        self.assertEqual(len(baseline.metrics), 8)
+        bucket_total = (
+            len(comparison.improved)
+            + len(comparison.held)
+            + len(comparison.regressed)
+            + len(comparison.indeterminate)
+        )
+        self.assertEqual(bucket_total, len(baseline.metrics))
+        self.assertEqual(comparison.regressed, ("violations_per_session",))
+        self.assertEqual(comparison.improved, ("canary_catch_rate",))
+        self.assertEqual(comparison.held, ("mean_engagement_count",))
+        self.assertEqual(len(comparison.indeterminate), 5)
+
+    def test_comparing_boards_of_different_windows_raises(self) -> None:
+        baseline = _comparison_board(window_days=7)
+        current = _comparison_board(window_days=30)
+
+        with self.assertRaises(ValueError):
+            learning_scoreboard.compare_scoreboards(baseline, current)
+
+    def test_comparing_boards_whose_metric_names_differ_raises(self) -> None:
+        baseline = _comparison_board()
+        current = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricNoData(
+                    # Not `violations_per_session` — the name set now differs
+                    # from `baseline`'s, without touching direction.
+                    name="extra_metric_name",
+                    direction="lower_is_better",
+                ),
+            ),
+        )
+
+        with self.assertRaises(ValueError):
+            learning_scoreboard.compare_scoreboards(baseline, current)
+
+    def test_comparing_boards_whose_metric_directions_differ_raises(self) -> None:
+        # Objection 9: the name-set guard alone lets this through, because
+        # both boards carry the same name set — only `violations_per_session`'s
+        # `direction` differs. Without this test, an implementation could
+        # ship only the name-set half of Section 5.3's guard and stay green.
+        baseline = _comparison_board()
+        current = _comparison_board(
+            discipline=learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricNoData(
+                    name="violations_per_session",
+                    direction="higher_is_better",
+                ),
+            ),
+        )
+
+        with self.assertRaises(ValueError):
+            learning_scoreboard.compare_scoreboards(baseline, current)
+
+
+def _write_fully_populated_journal(root: Path) -> None:
+    """One record feeding each of Slice 13's "fed" families, reused across
+    tests 69-71: discipline (a compliance record), critique authenticity (an
+    ordinary dialogue), and efficiency's `dialogue_non_consensus_rate`,
+    `mean_rework_per_task` (two runs of one task), and
+    `cost_per_completed_task_usd` (a `tests` outcome for a second task).
+    `escalation_rate` and `mean_benchmark_score` have no producer here or
+    anywhere — see implementation_plan.md Sections 3.2.1, 3.7 — and stay
+    `MetricNoData` by construction, not because this fixture forgot them.
+    """
+    records: tuple[Any, ...] = (
+        _compliance_record(
+            "session-e2e",
+            violation_count=2,
+            timestamp="2026-01-05T00:00:00Z",
+            session_last_activity="2026-01-05T00:00:00Z",
+        ),
+        _dialogue_record(
+            "task-dialogue-e2e",
+            rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=3),),
+            timestamp="2026-01-05T00:00:00Z",
+        ),
+        _worker_execution_record(
+            "task-rework-e2e", timestamp="2026-01-04T00:00:00Z", cost=1.0, run_id="run-1"
+        ),
+        _worker_execution_record(
+            "task-rework-e2e", timestamp="2026-01-05T00:00:00Z", cost=1.0, run_id="run-2"
+        ),
+        _worker_execution_record(
+            "task-cost-e2e", timestamp="2026-01-04T00:00:00Z", cost=3.0, run_id="run-cost"
+        ),
+        _outcome_record(
+            "task-cost-e2e",
+            ground_truth="tests",
+            verdict="pass",
+            timestamp="2026-01-05T00:00:00Z",
+            run_id="run-cost",
+        ),
+    )
+    for record in records:
+        assert learning_journal.append_journal_record(record, root_dir=root) is None
+
+
+class EndToEndTests(unittest.TestCase):
+    """Slice 13 — the replay benchmark and the end-to-end path."""
+
+    def test_the_replay_benchmark_family_is_no_data_until_ticket_26(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fully_populated_journal(root)
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        self.assertIsInstance(
+            board.replay_benchmark.mean_benchmark_score, learning_scoreboard.MetricNoData
+        )
+
+    def test_read_scoreboard_reaches_the_same_answer_as_read_then_compute(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fully_populated_journal(root)
+
+            via_read_scoreboard = learning_scoreboard.read_scoreboard(root, now=_NOW)
+
+            journal = learning_journal.read_journal(root)
+        via_read_then_compute = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        self.assertEqual(via_read_scoreboard, via_read_then_compute)
+
+    def test_a_populated_journal_produces_at_least_one_measured_metric_in_each_fed_family(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_fully_populated_journal(root)
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        self.assertIsInstance(
+            board.discipline.violations_per_session, learning_scoreboard.MetricValue
+        )
+        self.assertIsInstance(
+            board.critique_authenticity.mean_engagement_count, learning_scoreboard.MetricValue
+        )
+        self.assertIsInstance(
+            board.efficiency.dialogue_non_consensus_rate, learning_scoreboard.MetricValue
+        )
+        self.assertIsInstance(
+            board.efficiency.mean_rework_per_task, learning_scoreboard.MetricValue
+        )
+        self.assertIsInstance(
+            board.efficiency.cost_per_completed_task_usd, learning_scoreboard.MetricValue
+        )
+        # Excluded from "fed" by construction, not by omission — see
+        # `_write_fully_populated_journal`'s docstring.
+        self.assertIsInstance(
+            board.efficiency.escalation_rate, learning_scoreboard.MetricNoData
+        )
+        self.assertIsInstance(
+            board.replay_benchmark.mean_benchmark_score, learning_scoreboard.MetricNoData
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

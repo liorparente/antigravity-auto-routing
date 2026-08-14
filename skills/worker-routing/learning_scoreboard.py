@@ -9,17 +9,21 @@ snapshot, at one `now`, of eight named metrics grouped into four families
 `implementation_plan.md` (spec 0004 ticket 16) for the full design record;
 this docstring states only what a caller of this module needs to know.
 
-**Stage 2b of the ticket: six of the eight metrics are real arithmetic.**
-`escalation_rate` and `mean_benchmark_score` report `MetricNoData`
-unconditionally, each for its own permanent reason (Section 3.2.1's missing
-producer; Section 3.7's ticket-26 dependency) — every other metric is
-computed from `JournalRead`, cut first to the `<= now` prefix (Section 3
-rule 1) and, where its subject calls for it, further reduced to the
-trailing `window_days` window. `compute_scoreboard` is a total, pure
-function over any `JournalRead`, including an empty one, built on the type
-contract stage 2a established (`MetricValue`/`MetricNoData`, the four
-family dataclasses, the duplicate-name guard, the no-clock and naive-`now`
-guards).
+**Stage 2c of the ticket: the scoreboard is functionally complete.** Six of
+the eight metrics are real arithmetic; `escalation_rate` and
+`mean_benchmark_score` report `MetricNoData` unconditionally, each for its
+own permanent reason (Section 3.2.1's missing producer; Section 3.7's
+ticket-26 dependency) — every other metric is computed from `JournalRead`,
+cut first to the `<= now` prefix (Section 3 rule 1) and, where its subject
+calls for it, further reduced to the trailing `window_days` window.
+`compute_scoreboard` is a total, pure function over any `JournalRead`,
+including an empty one, built on the type contract stage 2a established
+(`MetricValue`/`MetricNoData`, the four family dataclasses, the
+duplicate-name guard, the no-clock and naive-`now` guards).
+`compare_scoreboards` closes the loop: it pairs two boards' metrics by name
+and classifies each one's movement, reading `direction` rather than a bare
+sign comparison, so a rising violation rate can never read as an
+improvement (Section 5).
 
 **No metric can be misread as a genuine zero.** `MetricNoData` carries only
 a `name` and a `direction` — there is no `value` attribute through which a
@@ -77,6 +81,12 @@ _COMPLETING_GROUND_TRUTHS: frozenset[str] = frozenset({"tests", "review"})
 MetricDirection = Literal["higher_is_better", "lower_is_better"]
 _METRIC_DIRECTIONS: frozenset[str] = frozenset(get_args(MetricDirection))
 
+# What a metric's movement between two boards means. `held` asserts a value
+# stayed the same, so it is never used when either side has no value —
+# that is `indeterminate` instead. See implementation_plan.md Section 5.2.
+ChangeStatus = Literal["improved", "held", "regressed", "indeterminate"]
+_CHANGE_STATUSES: frozenset[str] = frozenset(get_args(ChangeStatus))
+
 
 def _validate_metric_direction(value: object, field_name: str = "direction") -> None:
     """Enforce the two-member direction vocabulary at runtime.
@@ -109,6 +119,19 @@ def _validate_metric_value(value: object, field_name: str = "value") -> None:
         )
     if not math.isfinite(value):
         raise ValueError(f"{field_name} must be finite, got {value!r}")
+
+
+def _validate_change_status(value: object, field_name: str = "status") -> None:
+    """Enforce the four-member change-status vocabulary at runtime.
+
+    Same reasoning as `_validate_metric_direction`: `Literal` is erased at
+    runtime, so without this check a mistyped status would construct,
+    compare, and render as if it meant something.
+    """
+    if not isinstance(value, str) or value not in _CHANGE_STATUSES:
+        raise ValueError(
+            f"{field_name} must be one of {sorted(_CHANGE_STATUSES)}, got {value!r}"
+        )
 
 
 def _validate_sample_size(value: object, field_name: str = "sample_size") -> None:
@@ -611,6 +634,63 @@ class Scoreboard:
         )
 
 
+@dataclass(frozen=True)
+class MetricChange:
+    """One metric's movement between two boards — direction-aware, never a
+    delta.
+
+    Carries no `delta` field: a renderer wanting a numeric delta narrows
+    both `baseline` and `current` to `MetricValue` itself, reusing Section
+    4's no-data lock rather than this type reintroducing the same `x or
+    0.0` ambiguity a `delta: float | None` field would (implementation_plan.md
+    Section 5.2).
+    """
+
+    name: str
+    direction: MetricDirection
+    status: ChangeStatus
+    baseline: Metric
+    current: Metric
+
+    def __post_init__(self) -> None:
+        _validate_metric_direction(self.direction)
+        _validate_change_status(self.status)
+
+
+@dataclass(frozen=True)
+class ScoreboardComparison:
+    """Every metric's movement between two boards, in `Scoreboard.metrics`'s
+    own family-then-field order (implementation_plan.md Section 5.2, 5.3).
+    """
+
+    changes: tuple[MetricChange, ...]
+
+    @property
+    def improved(self) -> tuple[str, ...]:
+        return tuple(change.name for change in self.changes if change.status == "improved")
+
+    @property
+    def held(self) -> tuple[str, ...]:
+        return tuple(change.name for change in self.changes if change.status == "held")
+
+    @property
+    def regressed(self) -> tuple[str, ...]:
+        return tuple(change.name for change in self.changes if change.status == "regressed")
+
+    @property
+    def indeterminate(self) -> tuple[str, ...]:
+        return tuple(
+            change.name for change in self.changes if change.status == "indeterminate"
+        )
+
+    @property
+    def has_regression(self) -> bool:
+        """The single boolean ticket 18's gate needs: "no scoreboard metric
+        regresses" — computed here rather than re-derived by that ticket.
+        """
+        return len(self.regressed) > 0
+
+
 def compute_scoreboard(
     journal: learning_journal.JournalRead,
     *,
@@ -673,3 +753,83 @@ def read_scoreboard(
     """
     journal = learning_journal.read_journal(root_dir)
     return compute_scoreboard(journal, now=now, window_days=window_days)
+
+
+def _classify_change(baseline: Metric, current: Metric) -> ChangeStatus:
+    """`improved` iff `(delta > 0) == (direction == "higher_is_better")` —
+    never a bare `>` or `<` alone deciding the status. A bare `>` gets
+    `higher_is_better` right and inverts every `lower_is_better` metric, so a
+    rising violation rate would read as an improvement — the exact failure
+    this ticket exists to make impossible (implementation_plan.md Section
+    5.2).
+
+    Either side (or both) being `MetricNoData` is `indeterminate`, not
+    `held`: `held` asserts a value stayed the same, and there is no value to
+    compare. A family that had no data last week and has data this week
+    changed its *coverage*, not its performance — reading the arrival of the
+    first canary probe as an improvement, or its disappearance as a
+    regression, would be exactly the invented verdict the ticket forbids.
+    """
+    if isinstance(baseline, MetricNoData) or isinstance(current, MetricNoData):
+        return "indeterminate"
+    if current.value == baseline.value:
+        return "held"
+    moved_up = current.value > baseline.value
+    improved = moved_up == (baseline.direction == "higher_is_better")
+    return "improved" if improved else "regressed"
+
+
+def compare_scoreboards(baseline: Scoreboard, current: Scoreboard) -> ScoreboardComparison:
+    """Pair `baseline`'s and `current`'s metrics by name and classify each
+    movement per `_classify_change`. Clock-free: it takes no `now`, it
+    compares two already-computed boards.
+
+    Two guards, both `ValueError`, matching `learning_outcomes.
+    record_stalemate_resolution`'s refusal to silently map by `id` alone
+    (implementation_plan.md Section 5.3):
+
+    - the two boards' `window_days` differ — a 7-day rate and a 30-day rate
+      are not comparable;
+    - the two boards' metric name sets differ, or the same name carries a
+      different `direction` on each side — meaning the two boards came from
+      different code versions, and silently skipping the unmatched metric is
+      how a regression hides.
+    """
+    if baseline.window_days != current.window_days:
+        raise ValueError(
+            "cannot compare scoreboards computed with different window_days: "
+            f"baseline={baseline.window_days!r}, current={current.window_days!r}"
+        )
+
+    baseline_by_name = {metric.name: metric for metric in baseline.metrics}
+    current_by_name = {metric.name: metric for metric in current.metrics}
+
+    if baseline_by_name.keys() != current_by_name.keys():
+        raise ValueError(
+            "cannot compare scoreboards with different metric name sets: "
+            f"baseline only={sorted(baseline_by_name.keys() - current_by_name.keys())}, "
+            f"current only={sorted(current_by_name.keys() - baseline_by_name.keys())}"
+        )
+
+    mismatched_directions = sorted(
+        name
+        for name, baseline_metric in baseline_by_name.items()
+        if baseline_metric.direction != current_by_name[name].direction
+    )
+    if mismatched_directions:
+        raise ValueError(
+            "cannot compare scoreboards where a metric's direction differs between "
+            f"boards: {mismatched_directions}"
+        )
+
+    changes = tuple(
+        MetricChange(
+            name=name,
+            direction=baseline_metric.direction,
+            status=_classify_change(baseline_metric, current_by_name[name]),
+            baseline=baseline_metric,
+            current=current_by_name[name],
+        )
+        for name, baseline_metric in baseline_by_name.items()
+    )
+    return ScoreboardComparison(changes=changes)
