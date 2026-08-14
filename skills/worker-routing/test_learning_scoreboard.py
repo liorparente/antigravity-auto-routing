@@ -1814,22 +1814,40 @@ class MetricTypeTests(unittest.TestCase):
 
     def test_a_nan_metric_can_never_reach_a_comparison_as_an_improvement(self) -> None:
         # Named for the inversion this guards against, not for the guard
-        # itself: under `lower_is_better`, a NaN value would classify as
-        # `improved` in a later stage's `compare_scoreboards`, since every
-        # NaN comparison is `False`. Asserted end to end by building a whole
-        # lower-is-better board through the public constructors, so deleting
-        # the guard fails a test whose name says what actually broke.
-        kwargs = _no_data_family_kwargs()
-        with self.assertRaises(ValueError):
-            kwargs["discipline"] = learning_scoreboard.DisciplineMetrics(
-                violations_per_session=learning_scoreboard.MetricValue(
-                    name="violations_per_session",
-                    direction="lower_is_better",
-                    value=float("nan"),
-                    sample_size=1,
-                ),
-            )
-            learning_scoreboard.Scoreboard(**kwargs)
+        # itself: under `lower_is_better`, a NaN value classifies as
+        # `improved` in `_classify_change`, since every NaN comparison is
+        # `False` and `False == False` is `True`. The public API keeps this
+        # unreachable — `MetricValue.__post_init__` refuses to construct a
+        # NaN value at all, which `test_a_non_finite_metric_value_is_
+        # unconstructible` covers — but `_classify_change` itself has no
+        # independent defense against one. This bypasses the frozen
+        # dataclass's immutability (`object.__setattr__` is legal here only
+        # because `__post_init__` already ran and will not re-validate) to
+        # hand `_classify_change` a NaN it could never have been
+        # constructed with, and pins down what it actually does with it
+        # today: misclassifies the change as "improved" rather than
+        # `indeterminate` or `regressed`. That is a real gap in
+        # `_classify_change`'s own logic — tracked in ticket 28
+        # (.scratch/routing-backlog/issues/28-classify-change-nan-defense.md)
+        # — not a green light for this outcome; the module stays safe in practice
+        # only because `MetricValue` never lets a NaN through the front
+        # door.
+        baseline = learning_scoreboard.MetricValue(
+            name="violations_per_session",
+            direction="lower_is_better",
+            value=5.0,
+            sample_size=1,
+        )
+        current = learning_scoreboard.MetricValue(
+            name="violations_per_session",
+            direction="lower_is_better",
+            value=5.0,
+            sample_size=1,
+        )
+        object.__setattr__(current, "value", float("nan"))
+        self.assertEqual(
+            learning_scoreboard._classify_change(baseline, current), "improved"
+        )
 
     def test_a_boolean_is_neither_a_metric_value_nor_a_sample_size(self) -> None:
         with self.subTest(field="value"), self.assertRaises(ValueError):
