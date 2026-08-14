@@ -15,6 +15,7 @@ resolves because `learning_journal` is registered in `sys.modules` first.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import sys
@@ -27,6 +28,7 @@ from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("learning_journal.py")
 LEARNING_OUTCOMES_PATH = Path(__file__).with_name("learning_outcomes.py")
+LEARNING_SCOREBOARD_PATH = Path(__file__).with_name("learning_scoreboard.py")
 
 learning_journal_spec = importlib.util.spec_from_file_location("learning_journal", MODULE_PATH)
 assert learning_journal_spec is not None and learning_journal_spec.loader is not None
@@ -40,6 +42,22 @@ learning_outcomes_spec = importlib.util.spec_from_file_location(
 assert learning_outcomes_spec is not None and learning_outcomes_spec.loader is not None
 learning_outcomes = importlib.util.module_from_spec(learning_outcomes_spec)
 learning_outcomes_spec.loader.exec_module(learning_outcomes)
+
+# `learning_scoreboard` does a bare `import learning_journal` at module top
+# level, which only resolves because `learning_journal` is already registered
+# in `sys.modules` above — the same reasoning `test_production_invoker.py`
+# documents for `production_invoker`'s own `import learning_journal`.
+learning_scoreboard_spec = importlib.util.spec_from_file_location(
+    "learning_scoreboard", LEARNING_SCOREBOARD_PATH
+)
+assert learning_scoreboard_spec is not None and learning_scoreboard_spec.loader is not None
+learning_scoreboard = importlib.util.module_from_spec(learning_scoreboard_spec)
+sys.modules["learning_scoreboard"] = learning_scoreboard
+learning_scoreboard_spec.loader.exec_module(learning_scoreboard)
+
+# A shared, timezone-aware `now` for every stage-2 test below — never used to
+# derive a live clock reading, only as a fixed injected value.
+_NOW = datetime(2026, 1, 8, tzinfo=timezone.utc)
 
 
 def _worker_record(task_id: str, *, timestamp: str) -> Any:
@@ -1631,6 +1649,198 @@ class ReadJournalExplicitNullOptionalFieldTests(unittest.TestCase):
         self.assertEqual(len(read.compliance), 1)
         self.assertIsNone(read.compliance[0].session_last_activity)
         self.assertEqual(read.unreadable_lines, 0)
+
+
+def _no_data_family_kwargs() -> dict[str, Any]:
+    """Every family field as `MetricNoData`, keyed by field name.
+
+    A base a duplicate-name/NaN test overrides one entry of, so each test
+    states only the field it means to corrupt rather than re-deriving all
+    eight metric names and directions.
+    """
+    no_data = learning_scoreboard.MetricNoData
+    return {
+        "discipline": learning_scoreboard.DisciplineMetrics(
+            violations_per_session=no_data(
+                name="violations_per_session", direction="lower_is_better"
+            ),
+        ),
+        "critique_authenticity": learning_scoreboard.CritiqueAuthenticityMetrics(
+            canary_catch_rate=no_data(name="canary_catch_rate", direction="higher_is_better"),
+            mean_engagement_count=no_data(
+                name="mean_engagement_count", direction="higher_is_better"
+            ),
+        ),
+        "efficiency": learning_scoreboard.EfficiencyMetrics(
+            escalation_rate=no_data(name="escalation_rate", direction="lower_is_better"),
+            dialogue_non_consensus_rate=no_data(
+                name="dialogue_non_consensus_rate", direction="lower_is_better"
+            ),
+            mean_rework_per_task=no_data(
+                name="mean_rework_per_task", direction="lower_is_better"
+            ),
+            cost_per_completed_task_usd=no_data(
+                name="cost_per_completed_task_usd", direction="lower_is_better"
+            ),
+        ),
+        "replay_benchmark": learning_scoreboard.ReplayBenchmarkMetrics(
+            mean_benchmark_score=no_data(
+                name="mean_benchmark_score", direction="higher_is_better"
+            ),
+        ),
+        "window_days": learning_scoreboard.DEFAULT_WINDOW_DAYS,
+        "window_end": _NOW,
+        "unreadable_lines": 0,
+        "unknown_kind_lines": 0,
+    }
+
+
+class MetricTypeTests(unittest.TestCase):
+    """Slice 4 — the metric type's two locks (implementation_plan.md Section 4)."""
+
+    def test_metric_no_data_has_no_value_attribute(self) -> None:
+        metric = learning_scoreboard.MetricNoData(
+            name="violations_per_session", direction="lower_is_better"
+        )
+        with self.assertRaises(AttributeError):
+            _ = metric.value  # type: ignore[attr-defined]
+
+    def test_a_metric_value_with_an_empty_sample_is_unconstructible(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_scoreboard.MetricValue(
+                name="violations_per_session",
+                direction="lower_is_better",
+                value=0.0,
+                sample_size=0,
+            )
+
+    def test_a_metric_direction_outside_the_vocabulary_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_scoreboard.MetricNoData(
+                name="violations_per_session",
+                direction="sideways",  # type: ignore[arg-type]
+            )
+
+    def test_a_non_finite_metric_value_is_unconstructible(self) -> None:
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                learning_scoreboard.MetricValue(
+                    name="cost_per_completed_task_usd",
+                    direction="lower_is_better",
+                    value=value,
+                    sample_size=1,
+                )
+
+    def test_a_nan_metric_can_never_reach_a_comparison_as_an_improvement(self) -> None:
+        # Named for the inversion this guards against, not for the guard
+        # itself: under `lower_is_better`, a NaN value would classify as
+        # `improved` in a later stage's `compare_scoreboards`, since every
+        # NaN comparison is `False`. Asserted end to end by building a whole
+        # lower-is-better board through the public constructors, so deleting
+        # the guard fails a test whose name says what actually broke.
+        kwargs = _no_data_family_kwargs()
+        with self.assertRaises(ValueError):
+            kwargs["discipline"] = learning_scoreboard.DisciplineMetrics(
+                violations_per_session=learning_scoreboard.MetricValue(
+                    name="violations_per_session",
+                    direction="lower_is_better",
+                    value=float("nan"),
+                    sample_size=1,
+                ),
+            )
+            learning_scoreboard.Scoreboard(**kwargs)
+
+    def test_a_boolean_is_neither_a_metric_value_nor_a_sample_size(self) -> None:
+        with self.subTest(field="value"), self.assertRaises(ValueError):
+            learning_scoreboard.MetricValue(
+                name="mean_rework_per_task",
+                direction="lower_is_better",
+                value=True,  # type: ignore[arg-type]
+                sample_size=1,
+            )
+        with self.subTest(field="sample_size"), self.assertRaises(ValueError):
+            learning_scoreboard.MetricValue(
+                name="mean_rework_per_task",
+                direction="lower_is_better",
+                value=1.0,
+                sample_size=True,  # type: ignore[arg-type]
+            )
+
+
+class NoClockTests(unittest.TestCase):
+    def test_the_scoreboard_module_reads_no_clock(self) -> None:
+        tree = ast.parse(LEARNING_SCOREBOARD_PATH.read_text(encoding="utf-8"))
+        forbidden = {
+            ("datetime", "now"),
+            ("datetime", "utcnow"),
+            ("time", "time"),
+            ("time", "gmtime"),
+        }
+        found = [
+            (node.value.id, node.attr)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and (node.value.id, node.attr) in forbidden
+        ]
+        self.assertEqual(found, [])
+
+
+class NowGuardTests(unittest.TestCase):
+    def test_a_naive_now_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal = learning_journal.read_journal(root)
+
+        with self.assertRaises(ValueError):
+            # DTZ001: the naive value is the point of this test.
+            learning_scoreboard.compute_scoreboard(journal, now=datetime(2026, 1, 8))  # noqa: DTZ001
+
+
+class ScoreboardSkeletonTests(unittest.TestCase):
+    """Slice 5 — the empty board and determinism (criteria 2 and 4)."""
+
+    def test_an_empty_journal_produces_a_scoreboard_whose_every_metric_is_no_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        # Size asserted before type, so an empty `metrics` tuple could not
+        # pass by vacuous truth. Eight: 1 discipline + 2 critique
+        # authenticity + 4 efficiency + 1 replay benchmark.
+        self.assertEqual(len(board.metrics), 8)
+        for metric in board.metrics:
+            self.assertIsInstance(metric, learning_scoreboard.MetricNoData)
+
+    def test_the_same_journal_and_the_same_now_produce_equal_scoreboards(self) -> None:
+        # Populated, not empty: on an empty journal this would be satisfiable
+        # without a single metric having been computed.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record("task-determinism", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+            journal = learning_journal.read_journal(root)
+
+        self.assertEqual(len(journal.worker_executions), 1)
+
+        first = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        second = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        self.assertEqual(first, second)
+
+    def test_duplicate_metric_names_are_unconstructible(self) -> None:
+        kwargs = _no_data_family_kwargs()
+        kwargs["discipline"] = learning_scoreboard.DisciplineMetrics(
+            violations_per_session=learning_scoreboard.MetricNoData(
+                # Collides with critique_authenticity.canary_catch_rate below.
+                name="canary_catch_rate",
+                direction="lower_is_better",
+            ),
+        )
+        with self.assertRaises(ValueError):
+            learning_scoreboard.Scoreboard(**kwargs)
 
 
 if __name__ == "__main__":

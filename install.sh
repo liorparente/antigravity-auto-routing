@@ -35,7 +35,7 @@ LEGACY_MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
 # `ManagedFileClosureTests` parses this array and asserts the set is closed
 # under sibling imports, so the next module a ticket adds cannot be forgotten
 # here the way `learning_journal.py` and `learning_outcomes.py` were.
-MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py protocol.md)
+MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py protocol.md)
 
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
 TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-rollback.XXXXXX")"
