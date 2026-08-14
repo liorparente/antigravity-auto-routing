@@ -1848,23 +1848,89 @@ class MetricTypeTests(unittest.TestCase):
             )
 
 
+def _resolve_dotted_attribute_path(node: ast.Attribute) -> tuple[str, ...] | None:
+    """Resolve a (possibly nested) attribute chain to its full dotted path.
+
+    Walks `.value` until it hits a non-`Attribute` node. Returns `None`
+    unless that node is a bare `ast.Name` — a chain rooted in a call result
+    or a subscript (`foo().bar`, `x[0].bar`) is not a module-attribute
+    access and is out of scope for the clock-call check below.
+    """
+    parts = [node.attr]
+    current = node.value
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    parts.append(current.id)
+    return tuple(reversed(parts))
+
+
+_CLOCK_MODULE_ROOTS = {"datetime", "time"}
+_CLOCK_FINAL_ATTRS = {
+    "now",
+    "utcnow",
+    "time",
+    "gmtime",
+    "monotonic",
+    "monotonic_ns",
+    "perf_counter",
+    "perf_counter_ns",
+    "time_ns",
+}
+
+
+def _find_forbidden_clock_calls(tree: ast.AST) -> list[tuple[str, ...]]:
+    """Find calls whose dotted attribute path reads a wall/monotonic clock.
+
+    Matches on the resolved path's root name (`datetime`/`time`) and final
+    attribute (a clock-reading method) — covers both a single-dot access
+    (`datetime.now()`) and a nested one (`datetime.datetime.now()`), since
+    the path is resolved by walking the full `.value` chain rather than
+    matching one `Attribute` node in isolation. Matching on the *root* name
+    (not "any attribute access ending in `.now`") keeps an unrelated
+    `.now()` on some other object from false-positiving.
+
+    Does NOT cover: an aliased import (`import time as t; t.time()`) — the
+    bare root name is the alias `t`, not `time`, and this function does not
+    track import bindings; or dynamic access (`getattr(datetime, "now")`).
+    """
+    found = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        path = _resolve_dotted_attribute_path(node.func)
+        if path is None:
+            continue
+        if path[0] in _CLOCK_MODULE_ROOTS and path[-1] in _CLOCK_FINAL_ATTRS:
+            found.append(path)
+    return found
+
+
 class NoClockTests(unittest.TestCase):
     def test_the_scoreboard_module_reads_no_clock(self) -> None:
         tree = ast.parse(LEARNING_SCOREBOARD_PATH.read_text(encoding="utf-8"))
-        forbidden = {
-            ("datetime", "now"),
-            ("datetime", "utcnow"),
-            ("time", "time"),
-            ("time", "gmtime"),
-        }
-        found = [
-            (node.value.id, node.attr)
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and (node.value.id, node.attr) in forbidden
-        ]
-        self.assertEqual(found, [])
+
+        self.assertEqual(_find_forbidden_clock_calls(tree), [])
+
+    def test_the_no_clock_guard_catches_a_nested_datetime_module_now_call(self) -> None:
+        # The gap a single-dot-only check misses: the outer `Attribute`'s
+        # `.value` is itself an `Attribute` (`datetime.datetime`), not a
+        # bare `Name`, so a check that only matched `Name.attr` skipped this
+        # node entirely.
+        tree = ast.parse("import datetime\ndatetime.datetime.now()\n")
+
+        self.assertEqual(_find_forbidden_clock_calls(tree), [("datetime", "datetime", "now")])
+
+    def test_the_no_clock_guard_catches_time_monotonic(self) -> None:
+        # The gap a forbidden set of only now/utcnow/time/gmtime misses:
+        # `time.monotonic()` is a bare-`Name` attribute access, so it would
+        # have matched the old check's shape — it just wasn't in the old
+        # check's forbidden set.
+        tree = ast.parse("import time\ntime.monotonic()\n")
+
+        self.assertEqual(_find_forbidden_clock_calls(tree), [("time", "monotonic")])
 
 
 class NowGuardTests(unittest.TestCase):
