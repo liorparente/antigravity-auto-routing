@@ -18,13 +18,22 @@ while the trend it is supposed to move stays permanently at "no data".
 
 **Blocked by:** 16 (and pairs with 26, which journals what this runner returns)
 
-**Status:** ready-for-agent
+**Status:** done — commit `e934fcb` (`acceptance_gate.py`, `test_acceptance_gate.py`; landed together
+with ticket 26's schema and writer, per this ticket's own "land the two together" note). Acceptance
+requires every trial to individually clear `score_threshold` — never a mean — which is what makes a
+single winning run among losing ones reject on its own; `ScoreboardComparison.has_regression`
+(`learning_scoreboard.py`, already computed for ticket 16) rejects independently of the score, even
+an excellent one, including when the batch's own trials are what drags the replay-benchmark family's
+own trend down (see `acceptance_gate.py`'s module docstring and
+`ScoreboardRegressionRejectionTests.test_a_batch_that_drags_down_its_own_benchmark_trend_regresses_too`).
+A runner failure — raising, or returning a value `ReplayBenchmarkRecord` itself refuses — is caught
+per trial and journaled as `success=False`, never re-raised and never assumed good.
 
-- [ ] The gate runs the benchmark set a configured number of times through an injected runner.
-- [ ] A proposal is accepted only when the score meets threshold and no scoreboard metric regresses.
-- [ ] A single winning run among losing runs is rejected.
-- [ ] A regression in any one metric rejects, even when the benchmark score is excellent.
-- [ ] No code path lets a proposal's own output influence its score.
-- [ ] A runner failure mid-trial fails closed — the proposal is rejected, not assumed good.
-- [ ] Tests cover acceptance, single-lucky-run rejection, single-metric-regression rejection, and
+- [x] The gate runs the benchmark set a configured number of times through an injected runner.
+- [x] A proposal is accepted only when the score meets threshold and no scoreboard metric regresses.
+- [x] A single winning run among losing runs is rejected.
+- [x] A regression in any one metric rejects, even when the benchmark score is excellent.
+- [x] No code path lets a proposal's own output influence its score.
+- [x] A runner failure mid-trial fails closed — the proposal is rejected, not assumed good.
+- [x] Tests cover acceptance, single-lucky-run rejection, single-metric-regression rejection, and
       runner failure.

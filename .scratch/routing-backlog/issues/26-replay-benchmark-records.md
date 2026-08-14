@@ -29,14 +29,22 @@ shapes.
 
 **Blocked by:** 12 for the schema; 18 for the writer
 
-**Status:** ready-for-agent — the schema half can land now and unblocks 16's fourth family
+**Status:** done — commit `e934fcb`. Chose "a fifth record family" (`ReplayBenchmarkRecord`,
+`kind="replay_benchmark"`) over extending an existing one: the outcome family's `OUTCOME_VERDICTS`
+deliberately makes `("tests", "planner")` unconstructible, and a score has nowhere to sit in that
+shape without bending an unrelated family's schema around it. The writer lives in `acceptance_gate.py`
+(ticket 18), its sole caller. `learning_scoreboard.compute_scoreboard` now computes a real windowed
+mean over successful trials for `mean_benchmark_score`, `MetricNoData` only when the window holds
+none. The four-family enumeration was corrected in all three places named — `learning_journal.py`'s
+own module docstring, `CONTEXT.md`'s glossary, and `docs/specs/0004-learning-loop.md` — plus a fourth
+spot found in review, `learning_scoreboard._prefix_cut`'s docstring.
 
-- [ ] A journal record can carry a replay-benchmark score and the identity of the task set scored.
-- [ ] The four-family enumeration is left correct everywhere it is written down — glossary, module
+- [x] A journal record can carry a replay-benchmark score and the identity of the task set scored.
+- [x] The four-family enumeration is left correct everywhere it is written down — glossary, module
       docstring, spec — whether by keeping the count or by correcting every instance of it.
-- [ ] Each benchmark trial reaches the journal, and a trial that failed is recorded as failed rather
+- [x] Each benchmark trial reaches the journal, and a trial that failed is recorded as failed rather
       than omitted, so the trend has no silent gaps.
-- [ ] Ticket 16's replay-benchmark family reports "no data" until such records exist, and a real
+- [x] Ticket 16's replay-benchmark family reports "no data" until such records exist, and a real
       trend once they do.
-- [ ] The record is content-free and written beneath the injected root, like every other family.
-- [ ] Tests cover the record's schema, the no-data case, a multi-trial trend, and a failed trial.
+- [x] The record is content-free and written beneath the injected root, like every other family.
+- [x] Tests cover the record's schema, the no-data case, a multi-trial trend, and a failed trial.
