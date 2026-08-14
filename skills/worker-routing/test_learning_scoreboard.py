@@ -1651,6 +1651,87 @@ class ReadJournalExplicitNullOptionalFieldTests(unittest.TestCase):
         self.assertEqual(read.unreadable_lines, 0)
 
 
+def _worker_execution_record(
+    task_id: str, *, timestamp: str, cost: float = 0.0, run_id: str | None = None
+) -> Any:
+    """A `WorkerExecutionRecord` with a controllable cost and `run_id` — for
+    the rework and cost-per-completed-task metric tests, where `_worker_record`
+    above's fixed `cost=0.0`/`run_id=None` is not enough.
+    """
+    return learning_journal.WorkerExecutionRecord(
+        task=learning_journal.TaskLabel.for_task(task_id),
+        duration_ms=1,
+        cost_estimate_usd=cost,
+        success=True,
+        retry_count=0,
+        effort="low",
+        model_id="claude-sonnet-5",
+        model_family="claude",
+        run_id=run_id,
+        timestamp=timestamp,
+    )
+
+
+def _outcome_record(
+    task_id: str,
+    *,
+    ground_truth: str,
+    verdict: str,
+    timestamp: str,
+    run_id: str | None = None,
+) -> Any:
+    return learning_journal.OutcomeRecord(
+        task=learning_journal.TaskLabel.for_task(task_id),
+        ground_truth=ground_truth,  # type: ignore[arg-type]
+        verdict=verdict,  # type: ignore[arg-type]
+        run_id=run_id,
+        timestamp=timestamp,
+    )
+
+
+def _dialogue_record(
+    task_id: str,
+    *,
+    rounds: tuple[Any, ...],
+    timestamp: str,
+    canaries_planted: int = 0,
+    canaries_caught: int = 0,
+) -> Any:
+    return learning_journal.DialogueQualityRecord(
+        task=learning_journal.TaskLabel.for_task(task_id),
+        occasion="ambiguity",
+        topology="pair",
+        rounds=rounds,
+        canaries_planted=canaries_planted,
+        canaries_caught=canaries_caught,
+        timestamp=timestamp,
+    )
+
+
+def _compliance_record(
+    session_id: str,
+    *,
+    violation_count: int,
+    timestamp: str,
+    session_last_activity: str | None,
+    run_id: str | None = None,
+) -> Any:
+    return learning_journal.ComplianceRecord(
+        session_id=session_id,
+        total_writes=1,
+        code_writes=0,
+        routing_declarations=1,
+        worker_calls=0,
+        violation_count=violation_count,
+        declaration_drift_count=0,
+        calibration_markers=0,
+        code_write_count=0,
+        run_id=run_id,
+        session_last_activity=session_last_activity,
+        timestamp=timestamp,
+    )
+
+
 def _no_data_family_kwargs() -> dict[str, Any]:
     """Every family field as `MetricNoData`, keyed by field name.
 
@@ -1841,6 +1922,981 @@ class ScoreboardSkeletonTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             learning_scoreboard.Scoreboard(**kwargs)
+
+
+class WindowDaysGuardTests(unittest.TestCase):
+    """`window_days` must be a strictly positive, non-`bool` int.
+
+    Not in implementation_plan.md's numbered test list — required directly
+    by the mission brief for this stage, since an unvalidated `window_days`
+    makes the window run backwards or vanish silently.
+    """
+
+    def _journal(self) -> Any:
+        with tempfile.TemporaryDirectory() as tmp:
+            return learning_journal.read_journal(Path(tmp))
+
+    def test_a_negative_window_days_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_scoreboard.compute_scoreboard(self._journal(), now=_NOW, window_days=-5)
+
+    def test_a_zero_window_days_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_scoreboard.compute_scoreboard(self._journal(), now=_NOW, window_days=0)
+
+    def test_a_boolean_window_days_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_scoreboard.compute_scoreboard(
+                self._journal(), now=_NOW, window_days=True  # type: ignore[arg-type]
+            )
+
+
+class DisciplineMetricTests(unittest.TestCase):
+    """Slice 6 — discipline (implementation_plan.md Section 3.1)."""
+
+    def test_two_audits_of_one_session_count_as_one_session_and_the_later_verdict_wins(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = _compliance_record(
+                "session-repeat",
+                violation_count=5,
+                timestamp="2026-01-03T00:00:00Z",
+                session_last_activity="2026-01-03T00:00:00Z",
+                run_id="audit-1",
+            )
+            second = _compliance_record(
+                "session-repeat",
+                violation_count=1,
+                timestamp="2026-01-06T00:00:00Z",
+                session_last_activity="2026-01-06T00:00:00Z",
+                run_id="audit-2",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(first, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(second, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.discipline.violations_per_session
+        self.assertIsInstance(metric, learning_scoreboard.MetricValue)
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 1.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_compliance_record_without_session_last_activity_is_skipped_not_dated_by_its_audit_time(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            undatable = _compliance_record(
+                "session-undatable",
+                violation_count=100,
+                timestamp="2026-01-05T00:00:00Z",
+                session_last_activity=None,
+            )
+            datable = _compliance_record(
+                "session-datable",
+                violation_count=3,
+                timestamp="2026-01-05T00:00:00Z",
+                session_last_activity="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(undatable, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(datable, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.discipline.violations_per_session
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 3.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_violations_per_session_is_the_mean_over_reduced_sessions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for session_id, violations in (
+                ("session-a", 0),
+                ("session-b", 2),
+                ("session-c", 4),
+            ):
+                record = _compliance_record(
+                    session_id,
+                    violation_count=violations,
+                    timestamp="2026-01-05T00:00:00Z",
+                    session_last_activity="2026-01-05T00:00:00Z",
+                )
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.discipline.violations_per_session
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 2.0)
+        self.assertEqual(metric.sample_size, 3)
+
+    def test_discipline_is_no_data_with_no_datable_compliance_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _compliance_record(
+                "session-undatable-only",
+                violation_count=1,
+                timestamp="2026-01-05T00:00:00Z",
+                session_last_activity=None,
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.discipline.violations_per_session, learning_scoreboard.MetricNoData
+        )
+
+
+class CritiqueAuthenticityMetricTests(unittest.TestCase):
+    """Slice 7 — critique authenticity (implementation_plan.md Section 3.6)."""
+
+    def test_a_canary_probe_does_not_enter_the_engagement_mean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            probe = _dialogue_record(
+                "task-probe",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=99),),
+                timestamp="2026-01-05T00:00:00Z",
+                canaries_planted=1,
+                canaries_caught=1,
+            )
+            ordinary = _dialogue_record(
+                "task-ordinary",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=5),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(probe, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(ordinary, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.critique_authenticity.mean_engagement_count
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 5.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_the_catch_rate_is_computed_over_probes_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            probe_a = _dialogue_record(
+                "task-probe-a",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+                canaries_planted=2,
+                canaries_caught=1,
+            )
+            probe_b = _dialogue_record(
+                "task-probe-b",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+                canaries_planted=3,
+                canaries_caught=3,
+            )
+            ordinary = _dialogue_record(
+                "task-ordinary",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=50),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            for record in (probe_a, probe_b, ordinary):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.critique_authenticity.canary_catch_rate
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.8)
+        self.assertEqual(metric.sample_size, 5)
+
+    def test_the_catch_rate_is_no_data_when_no_probe_was_planted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ordinary = _dialogue_record(
+                "task-ordinary-only",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(ordinary, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.critique_authenticity.canary_catch_rate, learning_scoreboard.MetricNoData
+        )
+
+    def test_a_zero_round_dialogue_does_not_read_as_zero_engagement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zero_round = _dialogue_record(
+                "task-zero-round", rounds=(), timestamp="2026-01-05T00:00:00Z"
+            )
+            engaged = _dialogue_record(
+                "task-engaged",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=10),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(zero_round, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(engaged, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.critique_authenticity.mean_engagement_count
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 10.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_an_unparseable_round_is_counted_in_the_engagement_mean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _dialogue_record(
+                "task-unparseable",
+                rounds=(learning_journal.DialogueRound(verdict="unparseable", engagement_count=0),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.critique_authenticity.mean_engagement_count
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.0)
+        self.assertEqual(metric.sample_size, 1)
+
+
+class ReworkMetricTests(unittest.TestCase):
+    """Slice 8 — efficiency: rework (implementation_plan.md Section 3.4)."""
+
+    def test_rework_is_every_run_after_the_first(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            records = (
+                _worker_execution_record(
+                    "task-rework-basic", timestamp="2026-01-02T00:00:00Z", run_id="run-a"
+                ),
+                _worker_execution_record(
+                    "task-rework-basic", timestamp="2026-01-04T00:00:00Z", run_id="run-b"
+                ),
+                _worker_execution_record(
+                    "task-rework-basic", timestamp="2026-01-05T00:00:00Z", run_id="run-b"
+                ),
+            )
+            for record in records:
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.mean_rework_per_task
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 1.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_rework_is_not_retry_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = _worker_execution_record(
+                "task-not-retry", timestamp="2026-01-02T00:00:00Z", run_id="run-a"
+            )
+            second = _worker_execution_record(
+                "task-not-retry", timestamp="2026-01-05T00:00:00Z", run_id="run-b"
+            )
+            self.assertEqual(first.retry_count, 0)
+            self.assertEqual(second.retry_count, 0)
+            self.assertIsNone(learning_journal.append_journal_record(first, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(second, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.mean_rework_per_task
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 1.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_task_whose_executions_carry_no_run_id_is_excluded_not_counted_as_zero_rework(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ordinary = (
+                _worker_execution_record(
+                    "task-ordinary-rework", timestamp="2026-01-02T00:00:00Z", run_id="run-a"
+                ),
+                _worker_execution_record(
+                    "task-ordinary-rework", timestamp="2026-01-05T00:00:00Z", run_id="run-b"
+                ),
+            )
+            no_run_id = (
+                _worker_execution_record(
+                    "task-no-run-id", timestamp="2026-01-03T00:00:00Z", run_id=None
+                ),
+                _worker_execution_record(
+                    "task-no-run-id", timestamp="2026-01-05T00:00:00Z", run_id=None
+                ),
+            )
+            for record in (*ordinary, *no_run_id):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.mean_rework_per_task
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        # The wrong implementation reports 0.5 over sample_size == 2; both
+        # assertions together are what catches it and say why.
+        self.assertEqual(metric.value, 1.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_run_whose_only_prior_run_predates_the_window_is_still_rework(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            earlier = _worker_execution_record(
+                "task-straddle-prior", timestamp="2025-12-15T00:00:00Z", run_id="run-old"
+            )
+            later = _worker_execution_record(
+                "task-straddle-prior", timestamp="2026-01-04T00:00:00Z", run_id="run-new"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(earlier, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(later, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.mean_rework_per_task
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 1.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_straddling_repeat_is_rework_in_the_later_window_and_not_in_the_earlier_one(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_run = _worker_execution_record(
+                "task-straddle", timestamp="2025-12-28T00:00:00Z", run_id="run-first"
+            )
+            second_run = _worker_execution_record(
+                "task-straddle", timestamp="2026-01-05T00:00:00Z", run_id="run-second"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(first_run, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(second_run, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        early_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        later_now = _NOW
+
+        early_board = learning_scoreboard.compute_scoreboard(journal, now=early_now)
+        later_board = learning_scoreboard.compute_scoreboard(journal, now=later_now)
+
+        early_metric = early_board.efficiency.mean_rework_per_task
+        assert isinstance(early_metric, learning_scoreboard.MetricValue)
+        self.assertEqual(early_metric.value, 0.0)
+        self.assertEqual(early_metric.sample_size, 1)
+
+        later_metric = later_board.efficiency.mean_rework_per_task
+        assert isinstance(later_metric, learning_scoreboard.MetricValue)
+        self.assertEqual(later_metric.value, 1.0)
+        self.assertEqual(later_metric.sample_size, 1)
+
+
+class CompletionAndCostMetricTests(unittest.TestCase):
+    """Slice 9 — efficiency: completion and cost (implementation_plan.md Section 3.4).
+
+    Every assertion here reaches `efficiency.cost_per_completed_task_usd`
+    through the public interface — value, sample_size, or MetricNoData.
+    """
+
+    def test_a_plan_accepted_record_alone_does_not_complete_a_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-plan-only",
+                ground_truth="plan",
+                verdict="accepted",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            execution = _worker_execution_record(
+                "task-plan-only", timestamp="2026-01-05T00:00:00Z", cost=1.0
+            )
+            self.assertIsNone(learning_journal.append_journal_record(outcome, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(execution, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.efficiency.cost_per_completed_task_usd, learning_scoreboard.MetricNoData
+        )
+
+    def test_a_failing_test_record_completes_a_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-failing-tests",
+                ground_truth="tests",
+                verdict="fail",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            execution = _worker_execution_record(
+                "task-failing-tests", timestamp="2026-01-05T00:00:00Z", cost=2.5
+            )
+            self.assertIsNone(learning_journal.append_journal_record(outcome, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(execution, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.cost_per_completed_task_usd
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 2.5)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_review_verdict_completes_a_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-review",
+                ground_truth="review",
+                verdict="approved",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            execution = _worker_execution_record(
+                "task-review", timestamp="2026-01-05T00:00:00Z", cost=3.0
+            )
+            self.assertIsNone(learning_journal.append_journal_record(outcome, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(execution, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.cost_per_completed_task_usd
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 3.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_stalemate_resolution_alone_does_not_complete_a_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-stalemate-only",
+                ground_truth="stalemate_resolution",
+                verdict="human",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            execution = _worker_execution_record(
+                "task-stalemate-only", timestamp="2026-01-05T00:00:00Z", cost=4.0
+            )
+            self.assertIsNone(learning_journal.append_journal_record(outcome, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(execution, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.efficiency.cost_per_completed_task_usd, learning_scoreboard.MetricNoData
+        )
+
+    def test_a_task_with_no_outcome_record_is_not_completed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            execution = _worker_execution_record(
+                "task-no-outcome", timestamp="2026-01-05T00:00:00Z", cost=9.0
+            )
+            self.assertIsNone(learning_journal.append_journal_record(execution, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.efficiency.cost_per_completed_task_usd, learning_scoreboard.MetricNoData
+        )
+
+    def test_cost_sums_across_every_run_of_a_completed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-cost-sum",
+                ground_truth="tests",
+                verdict="pass",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            run_x = _worker_execution_record(
+                "task-cost-sum", timestamp="2026-01-03T00:00:00Z", cost=1.0, run_id="run-x"
+            )
+            run_y = _worker_execution_record(
+                "task-cost-sum", timestamp="2026-01-04T00:00:00Z", cost=2.0, run_id="run-y"
+            )
+            for record in (outcome, run_x, run_y):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.cost_per_completed_task_usd
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 3.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_cost_includes_an_execution_older_than_the_window_when_completion_falls_inside_it(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-old-execution",
+                ground_truth="tests",
+                verdict="pass",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            older = _worker_execution_record(
+                "task-old-execution", timestamp="2025-12-01T00:00:00Z", cost=1.0, run_id="run-old"
+            )
+            windowed = _worker_execution_record(
+                "task-old-execution", timestamp="2026-01-06T00:00:00Z", cost=2.0, run_id="run-new"
+            )
+            for record in (outcome, older, windowed):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.cost_per_completed_task_usd
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 3.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_cost_excludes_an_execution_stamped_after_now_so_a_historical_board_is_reproducible(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-future-execution",
+                ground_truth="tests",
+                verdict="pass",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            earlier = _worker_execution_record(
+                "task-future-execution",
+                timestamp="2026-01-03T00:00:00Z",
+                cost=1.00,
+                run_id="run-earlier",
+            )
+            future = _worker_execution_record(
+                "task-future-execution",
+                timestamp="2026-01-09T00:00:00Z",
+                cost=10.00,
+                run_id="run-future",
+            )
+            for record in (outcome, earlier, future):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.cost_per_completed_task_usd
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 1.00)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_recomputing_an_old_board_from_a_longer_journal_gives_the_same_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = _outcome_record(
+                "task-repro",
+                ground_truth="tests",
+                verdict="pass",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            earlier = _worker_execution_record(
+                "task-repro", timestamp="2026-01-03T00:00:00Z", cost=1.0, run_id="run-earlier"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(outcome, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(earlier, root_dir=root))
+
+            journal_before = learning_journal.read_journal(root)
+            board_before = learning_scoreboard.compute_scoreboard(journal_before, now=_NOW)
+
+            later_run = _worker_execution_record(
+                "task-repro", timestamp="2026-02-01T00:00:00Z", cost=99.0, run_id="run-later"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(later_run, root_dir=root))
+
+            journal_after = learning_journal.read_journal(root)
+            board_after = learning_scoreboard.compute_scoreboard(journal_after, now=_NOW)
+
+        self.assertEqual(board_before, board_after)
+
+    def test_a_completed_task_with_no_worker_execution_is_excluded_not_costed_at_zero(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            uncosted_outcome = _outcome_record(
+                "task-no-execution",
+                ground_truth="tests",
+                verdict="pass",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            costed_outcome = _outcome_record(
+                "task-with-execution",
+                ground_truth="tests",
+                verdict="pass",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            costed_execution = _worker_execution_record(
+                "task-with-execution", timestamp="2026-01-05T00:00:00Z", cost=5.0
+            )
+            for record in (uncosted_outcome, costed_outcome, costed_execution):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.cost_per_completed_task_usd
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 5.0)
+        self.assertEqual(metric.sample_size, 1)
+
+
+class DialogueNonConsensusRateTests(unittest.TestCase):
+    """Slice 10 — efficiency: dialogue non-consensus rate and the escalation
+    rate that has no source (implementation_plan.md Section 3.2).
+    """
+
+    def test_dialogue_non_consensus_rate_is_the_non_consensus_share_of_debated_dialogues(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            consensus = _dialogue_record(
+                "task-consensus",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            non_consensus = _dialogue_record(
+                "task-non-consensus",
+                rounds=(learning_journal.DialogueRound(verdict="revise", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(consensus, root_dir=root))
+            self.assertIsNone(
+                learning_journal.append_journal_record(non_consensus, root_dir=root)
+            )
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.dialogue_non_consensus_rate
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.5)
+        self.assertEqual(metric.sample_size, 2)
+
+    def test_a_dialogue_that_approves_after_revising_is_not_non_consensus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _dialogue_record(
+                "task-revise-then-approve",
+                rounds=(
+                    learning_journal.DialogueRound(verdict="revise", engagement_count=1),
+                    learning_journal.DialogueRound(verdict="approved", engagement_count=2),
+                ),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.dialogue_non_consensus_rate
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_canary_probe_is_in_neither_half_of_the_non_consensus_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            probe = _dialogue_record(
+                "task-probe-non-consensus-shaped",
+                rounds=(learning_journal.DialogueRound(verdict="revise", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+                canaries_planted=1,
+                canaries_caught=1,
+            )
+            ordinary = _dialogue_record(
+                "task-ordinary-consensus",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(probe, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(ordinary, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.dialogue_non_consensus_rate
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_a_zero_round_dialogue_is_in_neither_half_of_the_non_consensus_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            zero_round = _dialogue_record(
+                "task-zero-round-non-consensus", rounds=(), timestamp="2026-01-05T00:00:00Z"
+            )
+            ordinary = _dialogue_record(
+                "task-ordinary-consensus-2",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(zero_round, root_dir=root))
+            self.assertIsNone(learning_journal.append_journal_record(ordinary, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.efficiency.dialogue_non_consensus_rate
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.0)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_the_non_consensus_rate_is_no_data_when_no_dialogue_debated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.efficiency.dialogue_non_consensus_rate, learning_scoreboard.MetricNoData
+        )
+
+    def test_escalation_rate_is_no_data_even_over_a_journal_full_of_non_consensus_dialogues(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            consensus = _dialogue_record(
+                "task-consensus-53a",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            non_consensus = _dialogue_record(
+                "task-non-consensus-53a",
+                rounds=(learning_journal.DialogueRound(verdict="revise", engagement_count=1),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(consensus, root_dir=root))
+            self.assertIsNone(
+                learning_journal.append_journal_record(non_consensus, root_dir=root)
+            )
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(board.efficiency.escalation_rate, learning_scoreboard.MetricNoData)
+        self.assertIsInstance(
+            board.efficiency.dialogue_non_consensus_rate, learning_scoreboard.MetricValue
+        )
+        self.assertNotEqual(
+            board.efficiency.escalation_rate.name,
+            board.efficiency.dialogue_non_consensus_rate.name,
+        )
+
+
+class WindowTests(unittest.TestCase):
+    """Slice 11 — the window (implementation_plan.md Sections 3.5, 3.4)."""
+
+    def test_a_record_older_than_the_window_is_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _dialogue_record(
+                "task-older-than-window",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2025-12-01T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.critique_authenticity.mean_engagement_count, learning_scoreboard.MetricNoData
+        )
+
+    def test_a_record_stamped_after_now_is_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _dialogue_record(
+                "task-after-now",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-09T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.critique_authenticity.mean_engagement_count, learning_scoreboard.MetricNoData
+        )
+
+    def test_the_window_is_half_open_so_two_adjacent_windows_do_not_double_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            boundary = _dialogue_record(
+                "task-boundary",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=7),),
+                timestamp="2026-01-01T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(boundary, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        early_now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        late_now = _NOW
+
+        early_board = learning_scoreboard.compute_scoreboard(journal, now=early_now)
+        late_board = learning_scoreboard.compute_scoreboard(journal, now=late_now)
+
+        early_metric = early_board.critique_authenticity.mean_engagement_count
+        assert isinstance(early_metric, learning_scoreboard.MetricValue)
+        self.assertEqual(early_metric.value, 7.0)
+        self.assertEqual(early_metric.sample_size, 1)
+
+        self.assertIsInstance(
+            late_board.critique_authenticity.mean_engagement_count,
+            learning_scoreboard.MetricNoData,
+        )
+
+    def test_a_non_default_window_days_is_honoured_and_recorded_on_the_board(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _dialogue_record(
+                "task-window-span",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=9),),
+                timestamp="2026-01-03T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        narrow_board = learning_scoreboard.compute_scoreboard(journal, now=_NOW, window_days=3)
+        wide_board = learning_scoreboard.compute_scoreboard(journal, now=_NOW, window_days=7)
+
+        self.assertEqual(narrow_board.window_days, 3)
+        self.assertIsInstance(
+            narrow_board.critique_authenticity.mean_engagement_count,
+            learning_scoreboard.MetricNoData,
+        )
+
+        self.assertEqual(wide_board.window_days, 7)
+        wide_metric = wide_board.critique_authenticity.mean_engagement_count
+        assert isinstance(wide_metric, learning_scoreboard.MetricValue)
+        self.assertEqual(wide_metric.value, 9.0)
+        self.assertEqual(wide_metric.sample_size, 1)
+
+    def test_rework_counts_only_windowed_runs_while_cost_sums_the_whole_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            run_a = _worker_execution_record(
+                "task-asymmetry", timestamp="2025-12-18T00:00:00Z", cost=1.0, run_id="run-a"
+            )
+            run_b = _worker_execution_record(
+                "task-asymmetry", timestamp="2025-12-25T00:00:00Z", cost=2.0, run_id="run-b"
+            )
+            run_c = _worker_execution_record(
+                "task-asymmetry", timestamp="2026-01-05T00:00:00Z", cost=4.0, run_id="run-c"
+            )
+            outcome = _outcome_record(
+                "task-asymmetry",
+                ground_truth="tests",
+                verdict="pass",
+                timestamp="2026-01-06T00:00:00Z",
+            )
+            for record in (run_a, run_b, run_c, outcome):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+
+        rework = board.efficiency.mean_rework_per_task
+        assert isinstance(rework, learning_scoreboard.MetricValue)
+        self.assertEqual(rework.value, 1.0)
+        self.assertEqual(rework.sample_size, 1)
+
+        cost = board.efficiency.cost_per_completed_task_usd
+        assert isinstance(cost, learning_scoreboard.MetricValue)
+        self.assertEqual(cost.value, 7.0)
+        self.assertEqual(cost.sample_size, 1)
+
+    def test_the_prefix_cut_applies_to_every_family_not_only_to_the_windowed_metrics(
+        self,
+    ) -> None:
+        def _write_baseline(root: Path) -> None:
+            baseline = _dialogue_record(
+                "task-baseline",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=3),),
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            assert learning_journal.append_journal_record(baseline, root_dir=root) is None
+
+        with tempfile.TemporaryDirectory() as tmp_a:
+            root_a = Path(tmp_a)
+            _write_baseline(root_a)
+            journal_a = learning_journal.read_journal(root_a)
+
+        with tempfile.TemporaryDirectory() as tmp_b:
+            root_b = Path(tmp_b)
+            _write_baseline(root_b)
+
+            future = "2026-01-09T00:00:00Z"
+            future_worker = _worker_execution_record(
+                "task-future-worker", timestamp=future, cost=1.0, run_id="run-future"
+            )
+            future_outcome = _outcome_record(
+                "task-future-outcome", ground_truth="tests", verdict="pass", timestamp=future
+            )
+            future_dialogue = _dialogue_record(
+                "task-future-dialogue",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp=future,
+            )
+            future_compliance = _compliance_record(
+                "session-future",
+                violation_count=1,
+                timestamp=future,
+                session_last_activity=future,
+            )
+            for record in (
+                future_worker,
+                future_outcome,
+                future_dialogue,
+                future_compliance,
+            ):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root_b))
+
+            journal_b = learning_journal.read_journal(root_b)
+
+        board_a = learning_scoreboard.compute_scoreboard(journal_a, now=_NOW)
+        board_b = learning_scoreboard.compute_scoreboard(journal_b, now=_NOW)
+
+        self.assertEqual(board_a, board_b)
 
 
 if __name__ == "__main__":

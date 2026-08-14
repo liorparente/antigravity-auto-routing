@@ -9,15 +9,17 @@ snapshot, at one `now`, of eight named metrics grouped into four families
 `implementation_plan.md` (spec 0004 ticket 16) for the full design record;
 this docstring states only what a caller of this module needs to know.
 
-**Stage 2a of the ticket: the all-no-data skeleton.** Every metric this
-module constructs today reports `MetricNoData` unconditionally — no metric
-arithmetic lives here yet. That is not a stub standing in for the real
-thing: `compute_scoreboard` is already a total, pure function over any
-`JournalRead`, including an empty one, and the type contract this stage
-establishes (`MetricValue`/`MetricNoData`, the four family dataclasses, the
-duplicate-name guard, the no-clock and naive-`now` guards) is exactly the
-contract later stages compute against. Filling in one metric's arithmetic in
-a later stage will not need to touch a type declared here.
+**Stage 2b of the ticket: six of the eight metrics are real arithmetic.**
+`escalation_rate` and `mean_benchmark_score` report `MetricNoData`
+unconditionally, each for its own permanent reason (Section 3.2.1's missing
+producer; Section 3.7's ticket-26 dependency) — every other metric is
+computed from `JournalRead`, cut first to the `<= now` prefix (Section 3
+rule 1) and, where its subject calls for it, further reduced to the
+trailing `window_days` window. `compute_scoreboard` is a total, pure
+function over any `JournalRead`, including an empty one, built on the type
+contract stage 2a established (`MetricValue`/`MetricNoData`, the four
+family dataclasses, the duplicate-name guard, the no-clock and naive-`now`
+guards).
 
 **No metric can be misread as a genuine zero.** `MetricNoData` carries only
 a `name` and a `direction` — there is no `value` attribute through which a
@@ -48,9 +50,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
 import learning_journal
 
@@ -59,6 +61,15 @@ import learning_journal
 # gate) may want a different span; carried on `Scoreboard` itself so a
 # comparison can refuse to compare boards computed with different spans.
 DEFAULT_WINDOW_DAYS: int = 7
+
+# The two ground truths that complete a task (implementation_plan.md Section
+# 3.4). `plan` is excluded even on `accepted`: `advisory_consultation` writes
+# that record automatically the instant a plan-producing dialogue reaches
+# consensus, before implementation exists, and admitting it would mint a
+# completed task at consensus and average the cost of work that never
+# happened. `stalemate_resolution` is excluded too: it records how a
+# deadlock was broken, not that the task ended.
+_COMPLETING_GROUND_TRUTHS: frozenset[str] = frozenset({"tests", "review"})
 
 # Which way a metric moving is good news. Carried on every `Metric` — see
 # this module's docstring and implementation_plan.md Section 5.1 for why
@@ -221,15 +232,348 @@ def _require_aware_now(now: datetime) -> None:
         raise ValueError("now must be a timezone-aware datetime, got a naive value")
 
 
+def _validate_window_days(value: object, field_name: str = "window_days") -> None:
+    """A strictly positive, non-`bool` `int` — the shape of a day count.
+
+    `bool` is an `int` subclass, the same trap `learning_journal._validate_count`
+    guards against, so `isinstance` alone would admit `window_days=True`. Left
+    unvalidated, a negative or zero `window_days` makes the window run
+    backwards or vanish — silently, since a board carries no evidence of what
+    it summed, so the wrong answer looks exactly like the right one.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+            f"{field_name} must be an integer, got {type(value).__name__}"
+        )
+    if value <= 0:
+        raise ValueError(f"{field_name} must be > 0, got {value!r}")
+
+
+def _in_window(ts: datetime, *, window_start: datetime, now: datetime) -> bool:
+    """Half-open on the left, closed on the right: `window_start < ts <= now`.
+
+    So two adjacent windows partition without double-counting a boundary
+    record — with second-resolution wire timestamps, a boundary tie is
+    likely, not exotic. See implementation_plan.md Section 3.5.
+    """
+    return window_start < ts <= now
+
+
+def _prefix_cut(records: tuple[Any, ...], *, now: datetime) -> tuple[Any, ...]:
+    """The `<= now` prefix — Rule 1 of implementation_plan.md Section 3: no
+    metric, and no history a metric consults, ever sees a record whose
+    timestamp is after `now`. Applied once, to all four families, right
+    after the read, so no per-metric rule can forget it and a board stays
+    reproducible from a longer journal later (Round 3 objection R3-3). Every
+    record in a `JournalRead` has a parseable `timestamp`
+    (`learning_journal.JournalRead`'s own guarantee), so
+    `parse_wire_timestamp` here never raises.
+    """
+    return tuple(
+        record
+        for record in records
+        if learning_journal.parse_wire_timestamp(record.timestamp) <= now
+    )
+
+
+def _ratio(*, name: str, direction: MetricDirection, numerator: int, denominator: int) -> Metric:
+    """A `MetricValue` when `denominator` is positive, `MetricNoData` when it
+    is zero — the one place a ratio-shaped metric's no-data decision is
+    made. See implementation_plan.md Section 4.
+    """
+    if denominator <= 0:
+        return MetricNoData(name=name, direction=direction)
+    return MetricValue(
+        name=name,
+        direction=direction,
+        value=numerator / denominator,
+        sample_size=denominator,
+    )
+
+
+def _mean(*, name: str, direction: MetricDirection, values: list[float]) -> Metric:
+    """A `MetricValue` when `values` is non-empty, `MetricNoData` when it is
+    not — the mean-shaped sibling of `_ratio`, and the other of the two
+    construction sites Section 4 requires.
+    """
+    if not values:
+        return MetricNoData(name=name, direction=direction)
+    return MetricValue(
+        name=name,
+        direction=direction,
+        value=sum(values) / len(values),
+        sample_size=len(values),
+    )
+
+
+def _reduce_compliance(
+    compliance: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> dict[str, Any]:
+    """One verdict per `session_id`, honoring `ComplianceRecord`'s own
+    reduction contract (`learning_journal.py`): filter to records whose
+    `session_last_activity` falls in the window — a record with none is
+    skipped, never dated by its audit-time `timestamp` — then group by
+    `session_id` and let the last record in file order win. `compliance` is
+    already in file order (`JournalRead` never sorts), so a later dict
+    assignment for one `session_id` is exactly "the later record wins."
+    Same `session_id` and `run_id` (one audit written twice) needs no
+    separate dedupe pass: last-wins already picks one of two identical
+    records.
+    """
+    reduced: dict[str, Any] = {}
+    for record in compliance:
+        if record.session_last_activity is None:
+            continue
+        activity = learning_journal.parse_wire_timestamp(record.session_last_activity)
+        if not _in_window(activity, window_start=window_start, now=now):
+            continue
+        reduced[record.session_id] = record
+    return reduced
+
+
+def _discipline_metrics(
+    compliance: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> DisciplineMetrics:
+    reduced = _reduce_compliance(compliance, window_start=window_start, now=now)
+    violations = [float(record.violation_count) for record in reduced.values()]
+    return DisciplineMetrics(
+        violations_per_session=_mean(
+            name="violations_per_session", direction="lower_is_better", values=violations
+        )
+    )
+
+
+def _windowed_dialogues(
+    dialogues: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> tuple[Any, ...]:
+    return tuple(
+        record
+        for record in dialogues
+        if _in_window(
+            learning_journal.parse_wire_timestamp(record.timestamp),
+            window_start=window_start,
+            now=now,
+        )
+    )
+
+
+def _critique_authenticity_metrics(
+    dialogues: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> CritiqueAuthenticityMetrics:
+    """`canaries_planted == 0` is the filter for ordinary dialogue activity
+    and `>= 1` marks a probe whose single round's verdict was forced by a
+    fixture — `DialogueQualityRecord`'s own canary filter
+    (`learning_journal.py`). Blending them is the identical silent-blend
+    `AdvisoryTelemetryRecord` warns about.
+    """
+    windowed = _windowed_dialogues(dialogues, window_start=window_start, now=now)
+    probes = [record for record in windowed if record.canaries_planted >= 1]
+    ordinary = [record for record in windowed if record.canaries_planted == 0]
+
+    catch_rate = _ratio(
+        name="canary_catch_rate",
+        direction="higher_is_better",
+        numerator=sum(record.canaries_caught for record in probes),
+        denominator=sum(record.canaries_planted for record in probes),
+    )
+
+    # A zero-round dialogue (a budget-skipped run) contributes no rounds and
+    # therefore no values — never a zero engagement count for a dialogue
+    # that solicited none. `unparseable` rounds are included: a malformed
+    # Critic response is genuinely low engagement, and `RoundVerdict`
+    # deliberately keeps it distinct from `revise`.
+    engagement_values = [
+        float(round_.engagement_count) for record in ordinary for round_ in record.rounds
+    ]
+    engagement = _mean(
+        name="mean_engagement_count", direction="higher_is_better", values=engagement_values
+    )
+
+    return CritiqueAuthenticityMetrics(
+        canary_catch_rate=catch_rate, mean_engagement_count=engagement
+    )
+
+
+def _dialogue_non_consensus_rate(
+    dialogues: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> Metric:
+    """Windowed `dialogue_quality` records whose dialogue ended without
+    consensus, over windowed records that debated at all —
+    `DialogueQualityRecord`'s canary filter (`canaries_planted == 0`, the
+    same contract `_critique_authenticity_metrics` honors) plus a non-empty
+    `rounds`. A dialogue ended without consensus when its *last* round's
+    verdict is not `"approved"` — consensus is the only thing that ends a
+    dialogue at an approval, so the final round's verdict is the outcome.
+    """
+    windowed = _windowed_dialogues(dialogues, window_start=window_start, now=now)
+    debated = [record for record in windowed if record.canaries_planted == 0 and record.rounds]
+    non_consensus = [record for record in debated if record.rounds[-1].verdict != "approved"]
+    return _ratio(
+        name="dialogue_non_consensus_rate",
+        direction="lower_is_better",
+        numerator=len(non_consensus),
+        denominator=len(debated),
+    )
+
+
+def _first_ever_run_id(runs: dict[str, datetime]) -> str:
+    """The run with the earliest start; ties broken by `run_id` for
+    determinism when two runs share a start (second-resolution wire
+    timestamps can tie).
+    """
+    return min(runs.items(), key=lambda item: (item[1], item[0]))[0]
+
+
+def _task_run_starts(worker_executions: tuple[Any, ...]) -> dict[str, dict[str, datetime]]:
+    """`task_id -> {run_id: earliest timestamp among that run's executions}`.
+
+    A record with no `run_id` contributes to no task's runs at all —
+    `_validate_run_id`'s "uncountable rather than... one shared run"
+    (`learning_journal.py`): lumping run-less executions of one task
+    together would report a task retried five times as retried once. A task
+    all of whose executions omit `run_id` therefore never appears in the
+    returned mapping, which is what excludes it from
+    `_mean_rework_per_task` rather than scoring it a confident rework 0
+    (implementation_plan.md Section 3.4).
+    """
+    runs_by_task: dict[str, dict[str, datetime]] = {}
+    for record in worker_executions:
+        if record.run_id is None:
+            continue
+        ts = learning_journal.parse_wire_timestamp(record.timestamp)
+        task_runs = runs_by_task.setdefault(record.task.task_id, {})
+        if record.run_id not in task_runs or ts < task_runs[record.run_id]:
+            task_runs[record.run_id] = ts
+    return runs_by_task
+
+
+def _mean_rework_per_task(
+    worker_executions: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> Metric:
+    """`WorkerExecutionRecord`'s rework definition — "rework on a task =
+    distinct run_ids carrying that task_id, minus one" — restated as a
+    windowed count: a run counts toward rework when its start falls **in
+    the window** and it is **not the task's first-ever run**, with
+    "first-ever" decided against the task's whole `<= now` history (not the
+    window), so a repeat is counted whether or not its predecessor happens
+    to be visible in the same window (implementation_plan.md Section 3.4,
+    Round 3 objection 2). Numerator and denominator are keyed on the same
+    event — a run *starting* in the window — so a task enters the mean's
+    population exactly when it has a run (any run, first-ever or not)
+    starting there.
+    """
+    task_runs = _task_run_starts(worker_executions)
+    values: list[float] = []
+    for runs in task_runs.values():
+        if not runs:
+            continue
+        first_ever_run_id = _first_ever_run_id(runs)
+        started_in_window = False
+        rework_count = 0
+        for run_id, start in runs.items():
+            if not _in_window(start, window_start=window_start, now=now):
+                continue
+            started_in_window = True
+            if run_id != first_ever_run_id:
+                rework_count += 1
+        if started_in_window:
+            values.append(float(rework_count))
+    return _mean(name="mean_rework_per_task", direction="lower_is_better", values=values)
+
+
+def _completed_task_ids(
+    outcomes: tuple[Any, ...], *, window_start: datetime, now: datetime
+) -> frozenset[str]:
+    """Task ids with a windowed outcome whose `ground_truth` is `tests` or
+    `review` — see `_COMPLETING_GROUND_TRUTHS` for why those two and not the
+    other two.
+
+    No reduction runs over `outcomes` here — an outcome's `run_id` narrows
+    what it grades, and the `plan` family has two producers under one
+    `task_id`; any metric that reads *verdicts* rather than *membership*
+    must settle both before it reads one (`OutcomeRecord.run_id`'s
+    docstring, `learning_journal.py`). This function only asks membership,
+    which no ordering can change, so it settles nothing that question owns.
+    """
+    completed: set[str] = set()
+    for outcome in outcomes:
+        if outcome.ground_truth not in _COMPLETING_GROUND_TRUTHS:
+            continue
+        ts = learning_journal.parse_wire_timestamp(outcome.timestamp)
+        if not _in_window(ts, window_start=window_start, now=now):
+            continue
+        completed.add(outcome.task.task_id)
+    return frozenset(completed)
+
+
+def _cost_per_completed_task_usd(
+    worker_executions: tuple[Any, ...], completed_task_ids: frozenset[str]
+) -> Metric:
+    """A completed task's cost = sum of `cost_estimate_usd` over *every* one
+    of its worker executions, across every run — `WorkerExecutionRecord`'s
+    own "cost per completed task = sum over all of them" line
+    (`learning_journal.py`) — summed over the whole `<= now` prefix.
+    `worker_executions` here is already prefix-cut; the window only decided
+    which tasks are in `completed_task_ids`, never which executions of a
+    selected task are summed. A completed task with no worker-execution
+    record at all is excluded, not costed at zero: `production_invoker`
+    journals every invocation, so an unjournaled one is a bug, and costing
+    it as free would let that bug read as a cost improvement.
+    """
+    totals: dict[str, float] = {}
+    for record in worker_executions:
+        task_id = record.task.task_id
+        if task_id not in completed_task_ids:
+            continue
+        totals[task_id] = totals.get(task_id, 0.0) + record.cost_estimate_usd
+    return _mean(
+        name="cost_per_completed_task_usd",
+        direction="lower_is_better",
+        values=list(totals.values()),
+    )
+
+
+def _efficiency_metrics(
+    worker_executions: tuple[Any, ...],
+    outcomes: tuple[Any, ...],
+    dialogues: tuple[Any, ...],
+    *,
+    window_start: datetime,
+    now: datetime,
+) -> EfficiencyMetrics:
+    completed_task_ids = _completed_task_ids(outcomes, window_start=window_start, now=now)
+    return EfficiencyMetrics(
+        # No journal writer exists for a 2-failure routing escalation
+        # (`agent_council.ESCALATION_FAILURE_THRESHOLD`) — agent_council
+        # journals nothing at all — so this metric has no source until one
+        # exists. Do not substitute `dialogue_non_consensus_rate`: the two
+        # directions in which that substitution silently inverts are in
+        # implementation_plan.md Section 3.2 (a one-round `revise` under
+        # `max_rounds=1` is non-consensus without being a 2-failure
+        # escalation; a post-mortem after a real escalation can reach
+        # consensus).
+        escalation_rate=MetricNoData(name="escalation_rate", direction="lower_is_better"),
+        dialogue_non_consensus_rate=_dialogue_non_consensus_rate(
+            dialogues, window_start=window_start, now=now
+        ),
+        mean_rework_per_task=_mean_rework_per_task(
+            worker_executions, window_start=window_start, now=now
+        ),
+        cost_per_completed_task_usd=_cost_per_completed_task_usd(
+            worker_executions, completed_task_ids
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class Scoreboard:
     """A snapshot, at `window_end`, of every metric this ticket defines.
 
-    **Stage 2a: every metric is `MetricNoData`.** The four family fields and
-    the two skip counters (passed straight through from
-    `learning_journal.JournalRead`, unchanged — see implementation_plan.md
-    Section 2.4) are the whole of this stage's contract; a later stage fills
-    in the arithmetic behind `metrics` without touching this type.
+    Six of the eight metrics are real arithmetic as of stage 2b;
+    `escalation_rate` and `mean_benchmark_score` are `MetricNoData`
+    unconditionally and permanently (Sections 3.2.1, 3.7). The two skip
+    counters are passed straight through from `learning_journal.JournalRead`,
+    unchanged — see implementation_plan.md Section 2.4.
     """
 
     discipline: DisciplineMetrics
@@ -275,58 +619,34 @@ def compute_scoreboard(
 ) -> Scoreboard:
     """Compute a `Scoreboard` from an already-read journal. Pure; reads no clock.
 
-    **Stage 2a: every metric is `MetricNoData`, unconditionally, whatever
-    `journal` holds.** The metric arithmetic (implementation_plan.md
-    Sections 3.1-3.7) lands in later stages of this ticket; this stage makes
-    the type contract and the empty/no-data path real before any of it is
-    built, so that a later stage's arithmetic is added to an already-total
-    function rather than growing one.
-
-    Two of the eight metrics stay `MetricNoData` even once later stages
-    compute the other six, and for their own, permanent reasons rather than
-    this stage's temporary one: `escalation_rate` because the 2-failure
-    routing escalation it names has no journal writer at all
-    (`agent_council.py` calls `append_journal_record` zero times — Section
-    3.2.1); `mean_benchmark_score` because no record family carries a
-    benchmark score until ticket 26 (Section 3.7).
+    Every family is first cut to the `<= now` prefix (implementation_plan.md
+    Section 3, rule 1) — no metric, and no history a metric consults, ever
+    sees a record stamped after `now`. Six of the eight metrics are then
+    real arithmetic over that prefix, each reduced or windowed per Sections
+    3.1-3.6. Two stay `MetricNoData` unconditionally, for their own
+    permanent reasons: `escalation_rate` because the 2-failure routing
+    escalation it names has no journal writer at all (`agent_council.py`
+    calls `append_journal_record` zero times — Section 3.2.1);
+    `mean_benchmark_score` because no record family carries a benchmark
+    score until ticket 26 (Section 3.7).
     """
     _require_aware_now(now)
+    _validate_window_days(window_days)
+
+    worker_executions = _prefix_cut(journal.worker_executions, now=now)
+    outcomes = _prefix_cut(journal.outcomes, now=now)
+    dialogues = _prefix_cut(journal.dialogues, now=now)
+    compliance = _prefix_cut(journal.compliance, now=now)
+
+    window_start = now - timedelta(days=window_days)
+
     return Scoreboard(
-        discipline=DisciplineMetrics(
-            violations_per_session=MetricNoData(
-                name="violations_per_session", direction="lower_is_better"
-            ),
+        discipline=_discipline_metrics(compliance, window_start=window_start, now=now),
+        critique_authenticity=_critique_authenticity_metrics(
+            dialogues, window_start=window_start, now=now
         ),
-        critique_authenticity=CritiqueAuthenticityMetrics(
-            canary_catch_rate=MetricNoData(
-                name="canary_catch_rate", direction="higher_is_better"
-            ),
-            mean_engagement_count=MetricNoData(
-                name="mean_engagement_count", direction="higher_is_better"
-            ),
-        ),
-        efficiency=EfficiencyMetrics(
-            # No journal writer exists for a 2-failure routing escalation
-            # (`agent_council.ESCALATION_FAILURE_THRESHOLD`) — agent_council
-            # journals nothing at all — so this metric has no source until
-            # one exists. Do not substitute `dialogue_non_consensus_rate`:
-            # implementation_plan.md Section 3.2 states the two directions in
-            # which that substitution silently inverts (a one-round `revise`
-            # under `max_rounds=1` is non-consensus without being a
-            # 2-failure escalation; a post-mortem after a real escalation can
-            # reach consensus).
-            escalation_rate=MetricNoData(
-                name="escalation_rate", direction="lower_is_better"
-            ),
-            dialogue_non_consensus_rate=MetricNoData(
-                name="dialogue_non_consensus_rate", direction="lower_is_better"
-            ),
-            mean_rework_per_task=MetricNoData(
-                name="mean_rework_per_task", direction="lower_is_better"
-            ),
-            cost_per_completed_task_usd=MetricNoData(
-                name="cost_per_completed_task_usd", direction="lower_is_better"
-            ),
+        efficiency=_efficiency_metrics(
+            worker_executions, outcomes, dialogues, window_start=window_start, now=now
         ),
         replay_benchmark=ReplayBenchmarkMetrics(
             # No record family carries a benchmark score until ticket 26.
