@@ -93,7 +93,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar, Literal, get_args
+from typing import Any, ClassVar, Literal, get_args, get_type_hints
 
 # The journal lives beside `routing_telemetry.jsonl` under the same `.ralph`
 # directory — close enough for an operator to find both, separate enough that
@@ -496,12 +496,40 @@ def _validate_timestamp(value: object, field_name: str = "timestamp") -> None:
     `field_name` is a parameter because more than one field is a timestamp
     now (`ComplianceRecord.session_last_activity`), and a rejection naming
     the wrong field sends a reader to the wrong line.
+
+    Two checks, not one: shape (`TIMESTAMP_RE`) and calendar validity
+    (`strptime`). `"2026-99-99T99:99:99Z"` matches the regex — it has the
+    right digit counts in the right places — but names no real instant, and
+    `strptime` is what catches that a shape check cannot. Both live here,
+    at construction, rather than the calendar check living only in
+    `parse_wire_timestamp`, because of this module's own rule, stated at the
+    top of the file: "A malformed record **raises**. It is a programming
+    error at the call site — the value being journaled was never fit to
+    journal — and it must be loud." A record built from a
+    calendar-invalid timestamp was never fit to journal either, and every one
+    of the four record types below calls this function from `__post_init__`
+    — so a calendar check that lived only downstream, in
+    `parse_wire_timestamp`, would let `WorkerExecutionRecord`,
+    `OutcomeRecord`, `DialogueQualityRecord`, and `ComplianceRecord` all
+    construct successfully from a value that `read_journal` — this module's
+    own reader — later discards as unreadable. A record accepted at
+    construction must not vanish on read.
     """
     text = _require_str(value, field_name)
     if not TIMESTAMP_RE.fullmatch(text):
         raise ValueError(
             f"{field_name} must match {TIMESTAMP_RE.pattern}, got {_echoable(text)}"
         )
+    try:
+        # DTZ007: the wire format is always UTC ("Z"); parsed value discarded
+        # here — this function only validates, `parse_wire_timestamp` returns
+        # the parsed `datetime`.
+        datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ")  # noqa: DTZ007
+    except ValueError as exc:
+        raise ValueError(
+            f"{field_name} matches {TIMESTAMP_RE.pattern} but names no real "
+            f"instant: {_echoable(text)}"
+        ) from exc
 
 
 def parse_wire_timestamp(value: str) -> datetime:
@@ -514,20 +542,17 @@ def parse_wire_timestamp(value: str) -> datetime:
     Raises `ValueError` on two distinct shapes of bad input: one
     `TIMESTAMP_RE` itself refuses, and one it accepts but the calendar does
     not — `"2026-99-99T99:99:99Z"` matches the regex and `strptime` refuses
-    it. It raises rather than returning `None` because its two callers want
-    opposite things: `read_journal` catches it and counts the line (see that
-    function), while a caller reached any other way is holding a value it
-    had no right to hold, and `None` would make that failure silent.
+    it. Both checks now live in `_validate_timestamp`, which this function
+    calls before parsing; see that function for why. It raises rather than
+    returning `None` because its two callers want opposite things:
+    `read_journal` catches it and counts the line (see that function), while
+    a caller reached any other way is holding a value it had no right to
+    hold, and `None` would make that failure silent.
     """
     _validate_timestamp(value, "timestamp")
-    try:
-        # DTZ007: the wire format is always UTC ("Z"); made aware below.
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")  # noqa: DTZ007
-    except ValueError as exc:
-        raise ValueError(
-            f"timestamp matches {TIMESTAMP_RE.pattern} but names no real "
-            f"instant: {_echoable(value)}"
-        ) from exc
+    # DTZ007: the wire format is always UTC ("Z"); made aware below.
+    # `_validate_timestamp` above already proved this parses cleanly.
+    parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")  # noqa: DTZ007
     return parsed.replace(tzinfo=timezone.utc)
 
 
@@ -991,7 +1016,14 @@ class DialogueQualityRecord:
     `rounds_run` is a derived property, not a field, for the same reason
     `AdvisoryDebateResult.consensus_reached` is: a record must not be able to
     claim a round count its own round sequence does not back. The count is
-    written to the wire form by `to_mapping`, so a reader still sees it.
+    written to the wire form by `to_mapping`, so a reader still sees it —
+    and because `to_mapping` writes it unconditionally, `read_journal`
+    treats it as required on the wire and rejects a line whose `rounds_run`
+    contradicts its own `rounds` list, rather than trusting or silently
+    recomputing a value the writer never actually promised to get right on
+    the read side (see `_rehydrate_dialogue_quality`). The property itself
+    stays the single source of truth for any in-process `DialogueQualityRecord`
+    — only a value that arrived over the wire can disagree with it at all.
 
     Both flags are named for their healthy state being `True`/`False`
     respectively, because a flag whose polarity a reader has to guess is a
@@ -1052,7 +1084,12 @@ class DialogueQualityRecord:
         mapping = _flatten(self, self.task)
         # `rounds_run` is a property, so `dataclasses.asdict` cannot see it.
         # Added explicitly because a reader of the stream needs the count
-        # without recomputing it, and pinned by a schema test.
+        # without recomputing it, and pinned by a schema test. Always added,
+        # never conditionally: `_optional_wire_fields`/`_required_wire_keys`
+        # cannot see a property either, so `read_journal` treats this key as
+        # required by hand (`_DIALOGUE_QUALITY_REQUIRED_KEYS`) — that
+        # requirement is only honest because this line has no branch that
+        # could omit it.
         mapping["rounds_run"] = self.rounds_run
         return mapping
 
@@ -1293,16 +1330,36 @@ def extract_issue_codes(messages: Iterable[str]) -> tuple[str, ...]:
 # `implementation_plan.md` Section 1 for the full argument.
 
 
+def _reject_non_finite_json_constant(constant: str) -> float:
+    """`parse_constant` hook: refuse `NaN`/`Infinity`/`-Infinity` outright.
+
+    `json.loads` accepts these three non-standard tokens by default, anywhere
+    in a line — including inside a field this reader does not yet know about
+    and would otherwise silently drop via `_filtered_fields`. A value that
+    can only be discarded this way still made the line parse as valid JSON,
+    which it is not per the wire format's own contract (`_append_jsonl_locked`
+    writes with `json.dumps`, which never emits these tokens for a value this
+    module's own validators would have accepted — see `_validate_amount`).
+    Raising here makes such a line unreadable exactly like any other invalid
+    JSON, instead of only when the token happens to land in a validated
+    field.
+    """
+    raise ValueError(f"non-finite JSON constant {constant!r} is not valid JSON")
+
+
 def _filtered_fields(cls: type, mapping: Mapping[str, Any]) -> dict[str, Any]:
     """Restrict `mapping` to `cls`'s declared dataclass field names.
 
-    The forward-compatibility lock: a field this reader predates (ticket 26's
-    benchmark family, ticket 27's discriminator) is dropped rather than
+    The forward-compatibility lock: a field this reader predates (ticket 27's
+    discriminator, added to an existing family) is dropped rather than
     reaching the constructor as an unexpected keyword argument, which would
-    otherwise turn `TypeError` into a lost record for every line of that
-    family. `dataclasses.fields` never sees a `ClassVar` (`KIND`) or a
-    `@property` (`DialogueQualityRecord.rounds_run`), so both are filtered
-    out here for free rather than needing a special case.
+    otherwise turn `TypeError` into a lost record for every line carrying it.
+    A new record *family* (ticket 26's benchmark family) is a different case
+    entirely, handled upstream of this function by the `unknown_kind_lines`
+    path in `read_journal` — its records never reach a rehydrator, so they
+    never reach `_filtered_fields` either. `dataclasses.fields` never sees a
+    `ClassVar` (`KIND`) or a `@property` (`DialogueQualityRecord.rounds_run`),
+    so both are filtered out here for free rather than needing a special case.
     """
     allowed = {declared.name for declared in dataclasses.fields(cls)}
     return {key: value for key, value in mapping.items() if key in allowed}
@@ -1311,12 +1368,15 @@ def _filtered_fields(cls: type, mapping: Mapping[str, Any]) -> dict[str, Any]:
 def _pop_task_label(mapping: dict[str, Any]) -> TaskLabel:
     """Un-flatten a task-bearing record's three top-level keys back into a `TaskLabel`.
 
-    Mirrors `TaskLabel.to_mapping`. A missing `task_type` key defaults to
-    `None` (untagged) — never confused with a present-but-null one, which
-    `to_mapping` never writes in the first place. `TaskLabel.__post_init__`
-    re-runs both of its locks on the rebuilt object, so a corrupt line
-    claiming both `sensitivity_halted` and a `task_type` is rejected on read
-    exactly as it would be on write.
+    Mirrors `TaskLabel.to_mapping`. A missing `task_type` key and an explicit
+    `{"task_type": null}` both pop to `None` (untagged) here — `dict.pop`
+    with a default cannot tell "absent" from "present but null" apart, and
+    this reader does not try to: see `read_journal`'s docstring for why a
+    wire `null` on an optional field is accepted as absence rather than
+    rejected as damage. `TaskLabel.__post_init__` re-runs both of its locks
+    on the rebuilt object, so a corrupt line claiming both
+    `sensitivity_halted` and a `task_type` is rejected on read exactly as it
+    would be on write.
     """
     return TaskLabel(
         task_id=mapping.pop("task_id", None),
@@ -1325,33 +1385,157 @@ def _pop_task_label(mapping: dict[str, Any]) -> TaskLabel:
     )
 
 
+def _optional_wire_fields(cls: type) -> frozenset[str]:
+    """Field names whose annotation admits `None` — the only ones a wire
+    record may legitimately omit.
+
+    Mirrors the write side exactly: `_wire_form` (and `TaskLabel.to_mapping`)
+    drop a field from the wire *iff its value is `None`*, never because a
+    dataclass default happened to apply. So a field can be honestly absent
+    from a real record only if its type allows `None` in the first place —
+    everything else is written every time, whatever value it holds,
+    including a falsy or default one (`degraded=False`, `issue_codes=()`).
+    Derived from resolved type hints, not a hardcoded field list, so a future
+    field defaults to *required on the wire* unless its own annotation opts
+    it out — the same way a future field defaults to *dropped* by
+    `_filtered_fields` unless it is declared on the dataclass.
+    """
+    hints = get_type_hints(cls)
+    return frozenset(
+        declared.name
+        for declared in dataclasses.fields(cls)
+        if type(None) in get_args(hints.get(declared.name))
+    )
+
+
+def _required_wire_keys(cls: type, *, exclude: frozenset[str] = frozenset()) -> frozenset[str]:
+    """Every wire key `cls` always writes, per `_optional_wire_fields`.
+
+    `exclude` drops fields that never appear under their own name on the
+    wire: `task` is flattened into `TaskLabel`'s own keys (see `_flatten`),
+    and a `@property` such as `DialogueQualityRecord.rounds_run` is not a
+    `dataclasses.field` at all, so it is already absent from
+    `dataclasses.fields(cls)` without needing to be named here.
+    """
+    optional = _optional_wire_fields(cls)
+    return frozenset(
+        declared.name for declared in dataclasses.fields(cls) if declared.name not in optional
+    ) - exclude
+
+
+# One rule, verified against every family's `to_mapping` rather than a
+# hand-enumerated field list: a wire key is required unless its field's own
+# type admits `None`. Computed once, after every record class is declared, so
+# a FIELD added later to an already-registered family is picked up here with
+# no line added — but a new record FAMILY is not: it still needs its own
+# required-key constant below, its own `_rehydrate_*` function, and its own
+# `_REHYDRATE_BY_KIND` entry, none of which follow from merely declaring the
+# dataclass. `TaskLabel`'s own required keys (`task_id`, `sensitivity_halted`
+# — `task_type` is the one field on that class typed `X | None`) are unioned
+# into each task-bearing family's set, because those two names are what
+# `task` flattens onto the wire; `task` itself is excluded from the record's
+# own set since it never appears under that name. `rounds_run` is the one
+# exception to "verified against `to_mapping`" itself: it is a `@property`,
+# not a `dataclasses.field`, so `_required_wire_keys` cannot discover it, and
+# it is unioned in by hand below where `_DIALOGUE_QUALITY_REQUIRED_KEYS` is
+# built.
+_TASK_LABEL_REQUIRED_KEYS = _required_wire_keys(TaskLabel)
+_WORKER_EXECUTION_REQUIRED_KEYS = (
+    _required_wire_keys(WorkerExecutionRecord, exclude=frozenset({"task"}))
+    | _TASK_LABEL_REQUIRED_KEYS
+)
+_OUTCOME_REQUIRED_KEYS = (
+    _required_wire_keys(OutcomeRecord, exclude=frozenset({"task"})) | _TASK_LABEL_REQUIRED_KEYS
+)
+_DIALOGUE_QUALITY_REQUIRED_KEYS = (
+    _required_wire_keys(DialogueQualityRecord, exclude=frozenset({"task"}))
+    | _TASK_LABEL_REQUIRED_KEYS
+    | frozenset({"rounds_run"})
+)
+_COMPLIANCE_REQUIRED_KEYS = _required_wire_keys(ComplianceRecord)
+
+
+def _check_required_keys(mapping: Mapping[str, Any], required: frozenset[str], kind: str) -> None:
+    """Raise if `mapping` — the raw wire object, before any un-flattening —
+    lacks a key that `to_mapping` always writes for `kind`.
+
+    Runs before any `.pop`/`.get` in a rehydrate function touches `mapping`,
+    so a default reached later in that function (a dataclass
+    `default_factory`, or a rehydrator's own `.get(key, fallback)`) can never
+    stand in for a key the wire form never actually omitted. That is the
+    entire bug this closes: a constructor default is a write-side
+    convenience for a caller who has no opinion on a field, not a statement
+    that the field may be silently reconstructed from nothing on the read
+    side.
+    """
+    missing = required - mapping.keys()
+    if missing:
+        raise ValueError(f"{kind} record missing required wire key(s): {sorted(missing)}")
+
+
 def _rehydrate_worker_execution(mapping: dict[str, Any]) -> WorkerExecutionRecord:
+    _check_required_keys(mapping, _WORKER_EXECUTION_REQUIRED_KEYS, WorkerExecutionRecord.KIND)
     mapping["task"] = _pop_task_label(mapping)
     return WorkerExecutionRecord(**_filtered_fields(WorkerExecutionRecord, mapping))
 
 
 def _rehydrate_outcome(mapping: dict[str, Any]) -> OutcomeRecord:
+    _check_required_keys(mapping, _OUTCOME_REQUIRED_KEYS, OutcomeRecord.KIND)
     mapping["task"] = _pop_task_label(mapping)
     return OutcomeRecord(**_filtered_fields(OutcomeRecord, mapping))
 
 
 def _rehydrate_dialogue_quality(mapping: dict[str, Any]) -> DialogueQualityRecord:
+    _check_required_keys(
+        mapping, _DIALOGUE_QUALITY_REQUIRED_KEYS, DialogueQualityRecord.KIND
+    )
     mapping["task"] = _pop_task_label(mapping)
-    rounds_raw = mapping.get("rounds", ())
+    # `_check_required_keys` above already guarantees "rounds" is present —
+    # unlike the removed `mapping.get("rounds", ())`, nothing here may
+    # substitute a fallback for an absent key.
+    rounds_raw = mapping["rounds"]
     if not isinstance(rounds_raw, (list, tuple)):
-        raise TypeError(f"rounds must be a list on the wire, got {type(rounds_raw).__name__}")
-    mapping["rounds"] = tuple(DialogueRound(**entry) for entry in rounds_raw)
-    # `rounds_run` is on the wire (`to_mapping` writes it explicitly) but is
-    # a derived property, not a field, so `_filtered_fields` drops it rather
-    # than the constructor choking on an unexpected keyword argument.
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see the note above
+            f"rounds must be a list on the wire, got {type(rounds_raw).__name__}"
+        )
+    rounds: list[DialogueRound] = []
+    for entry in rounds_raw:
+        if not isinstance(entry, dict):
+            raise ValueError(  # noqa: TRY004 - one rejection contract; see the note above
+                f"each round must be an object on the wire, got {type(entry).__name__}"
+            )
+        # `_filtered_fields`, not a bare `DialogueRound(**entry)`: a nested
+        # round from a schema this reader predates (a future per-round
+        # field) must be forward-compatibility-filtered exactly like the
+        # top-level record is, or one unknown key inside one round makes the
+        # entire dialogue unreadable rather than just that round's addition.
+        rounds.append(DialogueRound(**_filtered_fields(DialogueRound, entry)))
+    mapping["rounds"] = tuple(rounds)
+    # `rounds_run` is on the wire — `to_mapping` always writes it, so by the
+    # rule the rest of this reader applies (an always-emitted key is
+    # required) it is in `_DIALOGUE_QUALITY_REQUIRED_KEYS` and
+    # `_check_required_keys` above already guarantees its presence. Popped
+    # and checked here, rather than left for `_filtered_fields` to silently
+    # drop: it is a derived property, not a `dataclasses.field`, so nothing
+    # would otherwise notice a value that contradicts the round sequence it
+    # is supposed to describe — exactly the gap that let a line whose
+    # `rounds_run` disagreed with `len(rounds)` through before this check.
+    rounds_run_raw = mapping.pop("rounds_run")
+    _validate_count(rounds_run_raw, "rounds_run")
+    if rounds_run_raw != len(rounds):
+        raise ValueError(
+            f"rounds_run ({rounds_run_raw!r}) does not match len(rounds) "
+            f"({len(rounds)}) — the wire record is internally inconsistent"
+        )
     return DialogueQualityRecord(**_filtered_fields(DialogueQualityRecord, mapping))
 
 
 def _rehydrate_compliance(mapping: dict[str, Any]) -> ComplianceRecord:
+    _check_required_keys(mapping, _COMPLIANCE_REQUIRED_KEYS, ComplianceRecord.KIND)
     issue_codes_raw = mapping.get("issue_codes")
     if issue_codes_raw is not None:
         if not isinstance(issue_codes_raw, (list, tuple)):
-            raise TypeError(
+            raise ValueError(
                 f"issue_codes must be a list on the wire, got {type(issue_codes_raw).__name__}"
             )
         mapping["issue_codes"] = tuple(issue_codes_raw)
@@ -1405,6 +1589,23 @@ def read_journal(root_dir: Path) -> JournalRead:
     rather than an error" structural rather than a special case bolted onto
     a consumer.
 
+    **Detected by catching `FileNotFoundError` from `open()` itself, never by
+    a `Path.exists()` pre-check.** An earlier version of this function called
+    `path.exists()` before opening the file, and that was the exact back door
+    the whole-file-failure guarantee below exists to close: `exists()`
+    reports `False` for at least some `OSError`s raised while stat-ing the
+    path (a permission error on the path or a parent directory among them),
+    which is indistinguishable from a genuinely absent file — the silent
+    "no data" the module docstring forbids, reappearing through a check that
+    looks like a harmless guard clause. A separate pre-check is also a race
+    on its own terms, independent of what it swallows: a file present at the
+    `exists()` call and deleted before the `open()` call two lines later
+    would still need `open()`'s own `FileNotFoundError` handled regardless of
+    what `exists()` had said moments earlier. Asking `open()` once and
+    reacting to what it actually raises removes both problems at once —
+    there is no longer a window in which the two calls can disagree, because
+    there is only one call.
+
     **A line is malformed** — skipped and counted in `unreadable_lines`,
     never raised — when: it is not valid JSON; it parses to something other
     than a JSON object; it has no `kind` key; re-hydration raises (a missing
@@ -1416,6 +1617,37 @@ def read_journal(root_dir: Path) -> JournalRead:
     calendar-invalid timestamp is counted unreadable rather than raising
     three modules downstream). A torn final line — the ordinary artifact of a
     crash or full disk mid-write — is exactly this case, not an exotic one.
+
+    **A blank or whitespace-only line is not one of the above, and is
+    skipped without incrementing `unreadable_lines` — DECIDE, resolved
+    toward "skip".** Section 1.3 calls a line malformed when it is not valid
+    JSON, and an empty string is not valid JSON, so this could have gone
+    either way. It is skipped rather than counted because a blank line
+    carries no record and loses no evidence: unlike a torn JSON line, there
+    was never a record here to fail to read. Counting it would also make
+    `unreadable_lines` sensitive to a fact about the filesystem rather than
+    about the journal's health — a file hand-edited to add a separating
+    blank line would otherwise report damage that is not there.
+
+    **An explicit wire `null` on an optional field (`run_id`, `task_type`,
+    `session_last_activity`) is accepted as absence, not rejected as
+    damage — DECIDE, resolved toward "accept".** `_wire_form` and
+    `TaskLabel.to_mapping` never emit `null` — an absent optional field is
+    dropped from the mapping entirely — so by the rule the rest of this
+    reader applies elsewhere ("a shape this module's own writer would never
+    produce is damage", the reasoning behind the `rounds_run` consistency
+    check and every required-key check above) a present `null` looks like it
+    should fail the same way. It is let through instead, because unlike
+    those other cases the two readings of `null` are not merely similar but
+    identical the moment they cross this function's return boundary: every
+    optional field here is typed `X | None`, so a rehydrated record holds
+    exactly `None` whether the wire said nothing or said `null` — nothing
+    downstream of `read_journal` ever sees the raw mapping to tell the two
+    apart, only the typed `JournalRead` dataclasses this function returns.
+    Rejecting `null` would add a check whose only effect is guarding a
+    distinction no code in this repository can observe. If a future consumer
+    is ever handed the raw wire mapping instead of a rehydrated record, this
+    decision needs revisiting before that ships, not after.
 
     **A record of an unknown `kind`** — a family this reader predates — is
     skipped and counted separately, in `unknown_kind_lines`. Two different
@@ -1431,15 +1663,62 @@ def read_journal(root_dir: Path) -> JournalRead:
     mirroring `_append_jsonl_locked`'s `LOCK_EX`. This makes a *concurrent*
     torn line impossible rather than merely tolerated; the tolerance above
     remains for lines already on disk from a past crash — both, not either.
+
+    **A whole-file failure — `open` or `flock` raising — propagates, and
+    that is a decision, not an oversight.** A missing file is not a failure
+    (see above, and note that "missing" means `FileNotFoundError` and
+    nothing broader); a file that exists but cannot be opened (a
+    `PermissionError` — the exact failure a `Path.exists()` pre-check risked
+    swallowing, see above) or locked is a different fact than a damaged
+    line: the caller asked to
+    look at the journal and this call could not attempt to, rather than
+    attempting and finding damage. Returning an empty `JournalRead` for that
+    would be silent in exactly the sense the module docstring forbids — an
+    empty read is indistinguishable from an honest empty journal, so a
+    scoreboard built on it would report "no data" when the truth is "could
+    not look". That module docstring also gives the rule for *which* of its
+    two failure modes applies here: a writer invoked as a side effect of
+    some other operation catches and reports, but "a writer... invoked
+    *directly* to record something... lets the... error propagate, which is
+    this contract's plain form." `read_journal` has **no production caller
+    today** — `learning_outcomes.py` never calls it; grep confirms it — so
+    there is nothing yet for it to be a side effect of. Its first caller will
+    be stage 2's scoreboard, and reading the journal is that caller's
+    *primary operation*, not a side effect of something else it must not
+    disturb — the same distinction that lets a reader propagate where a
+    writer, whose primary operation is something else entirely, must not.
+    `read_journal` therefore takes the writer family's "invoked directly"
+    form rather than growing a second, swallow-and-report path this module
+    reserves for side-effecting writers.
+
+    **`UnicodeDecodeError` is deliberately carved out of that propagation
+    and handled per line instead.** A byte sequence that is not valid UTF-8
+    partway through the file is not "the journal could not be looked at" —
+    it is the identical shape as a torn final JSON line: the ordinary
+    artifact of a crash or full disk mid-write, this time tearing a
+    multi-byte UTF-8 sequence instead of a JSON token. Section 1.3's
+    per-line tolerance already exists for exactly that artifact, so the file
+    is read as bytes and decoded one line at a time — a bad line is counted
+    in `unreadable_lines` and its neighbours still read — rather than
+    decoding the whole file at once and letting one torn line anywhere in it
+    take down every record after it.
     """
     path = journal_path(root_dir)
-    if not path.exists():
+    try:
+        # SIM115 wants `open()` directly in a `with` — but the `except`
+        # below must catch only `open()`'s own `FileNotFoundError`, never
+        # one raised later by `flock`/`readlines` inside the block (see this
+        # function's docstring on the whole-file-failure guarantee), and a
+        # single `with open(...) as stream:` cannot narrow its own `except`
+        # to just the open call. The two-step form is what keeps that scope
+        # narrow; `stream` is still closed via the `with` below.
+        stream = open(path, "rb")  # noqa: SIM115
+    except FileNotFoundError:
         return JournalRead()
-
-    with open(path, encoding="utf-8") as stream:
+    with stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_SH)
         try:
-            lines = stream.readlines()
+            raw_lines = stream.readlines()
         finally:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
@@ -1450,14 +1729,24 @@ def read_journal(root_dir: Path) -> JournalRead:
     unreadable_lines = 0
     unknown_kind_lines = 0
 
-    for line in lines:
-        text = line.strip()
+    for raw_line in raw_lines:
+        try:
+            text = raw_line.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            unreadable_lines += 1
+            continue
         if not text:
             continue
 
         try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
+            payload = json.loads(text, parse_constant=_reject_non_finite_json_constant)
+        except ValueError:
+            # `json.JSONDecodeError` (malformed JSON) and the plain
+            # `ValueError` `_reject_non_finite_json_constant` raises for a
+            # `NaN`/`Infinity`/`-Infinity` token are both "this line is not
+            # valid JSON" — `JSONDecodeError` is itself a `ValueError`
+            # subclass, so one except clause covers both without treating
+            # them as different failure modes.
             unreadable_lines += 1
             continue
 
@@ -1465,7 +1754,19 @@ def read_journal(root_dir: Path) -> JournalRead:
             unreadable_lines += 1
             continue
 
-        rehydrate = _REHYDRATE_BY_KIND.get(payload["kind"])
+        kind = payload["kind"]
+        if not isinstance(kind, str):
+            # A non-string `kind` (a list, a number, `null`) is not "a family
+            # this reader predates" — every real family name is a str — so it
+            # belongs in `unreadable_lines`, not `unknown_kind_lines`. It also
+            # cannot reach `_REHYDRATE_BY_KIND.get` at all: a `list` there
+            # raises `TypeError: unhashable type`, which would break this
+            # function's own per-line tolerance contract before the tolerant
+            # `try` below even starts.
+            unreadable_lines += 1
+            continue
+
+        rehydrate = _REHYDRATE_BY_KIND.get(kind)
         if rehydrate is None:
             unknown_kind_lines += 1
             continue

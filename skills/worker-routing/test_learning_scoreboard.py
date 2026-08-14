@@ -20,9 +20,10 @@ import json
 import sys
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("learning_journal.py")
 LEARNING_OUTCOMES_PATH = Path(__file__).with_name("learning_outcomes.py")
@@ -66,6 +67,87 @@ def _append_raw_line(root: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as stream:
         stream.write(text + "\n")
+
+
+def _append_raw_bytes(root: Path, data: bytes) -> None:
+    """Append raw bytes to the journal — for a line that is not valid UTF-8."""
+    path = learning_journal.journal_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "ab") as stream:
+        stream.write(data)
+
+
+# Hand-built wire mappings, one per family, matching exactly what each
+# family's real `to_mapping()` emits for a minimal record — every key a real
+# writer always includes, and none of the three (`run_id`, `task_type`,
+# `session_last_activity`) it includes only when set. Used as a base a test
+# mutates (deletes one key, or sets an optional one) rather than constructing
+# a real record and re-deriving its wire form, since these tests are about
+# the wire contract itself, not about round-tripping a Python object.
+def _valid_worker_execution_wire(task_id: str, *, timestamp: str) -> dict[str, Any]:
+    return {
+        "kind": "worker_execution",
+        "task_id": task_id,
+        "sensitivity_halted": False,
+        "duration_ms": 500,
+        "cost_estimate_usd": 0.05,
+        "success": True,
+        "retry_count": 0,
+        "effort": "medium",
+        "model_id": "claude-sonnet-5",
+        "model_family": "claude",
+        "timestamp": timestamp,
+    }
+
+
+def _valid_outcome_wire(task_id: str, *, timestamp: str) -> dict[str, Any]:
+    return {
+        "kind": "outcome",
+        "task_id": task_id,
+        "sensitivity_halted": False,
+        "ground_truth": "tests",
+        "verdict": "pass",
+        "timestamp": timestamp,
+    }
+
+
+def _valid_dialogue_quality_wire(task_id: str, *, timestamp: str) -> dict[str, Any]:
+    # `rounds_run` must agree with `len(rounds)` — it is now a required,
+    # cross-validated wire key (learning_journal.py `_rehydrate_dialogue_quality`).
+    # A test that overrides `rounds` on the dict this returns must also
+    # override `rounds_run` to match, or the line becomes unreadable for a
+    # reason unrelated to what that test means to exercise.
+    return {
+        "kind": "dialogue_quality",
+        "task_id": task_id,
+        "sensitivity_halted": False,
+        "occasion": "ambiguity",
+        "topology": "pair",
+        "rounds": [{"verdict": "approved", "engagement_count": 1}],
+        "rounds_run": 1,
+        "canaries_planted": 0,
+        "canaries_caught": 0,
+        "degraded": False,
+        "independent": True,
+        "timestamp": timestamp,
+    }
+
+
+def _valid_compliance_wire(session_id: str, *, timestamp: str) -> dict[str, Any]:
+    return {
+        "kind": "compliance",
+        "session_id": session_id,
+        "total_writes": 1,
+        "code_writes": 0,
+        "routing_declarations": 1,
+        "worker_calls": 0,
+        "violation_count": 0,
+        "declaration_drift_count": 0,
+        "calibration_markers": 0,
+        "code_write_count": 0,
+        "issue_codes": [],
+        "timestamp": timestamp,
+    }
 
 
 class ReadJournalEmptyTests(unittest.TestCase):
@@ -207,7 +289,14 @@ class ReadJournalRoundTripTests(unittest.TestCase):
         self.assertEqual(read.dialogues[0], dialogue_record)
         self.assertEqual(read.compliance[0], compliance_record)
 
-    def test_an_absent_run_id_reads_back_as_none_never_as_a_shared_run(self) -> None:
+    def test_an_absent_run_id_reads_back_as_none(self) -> None:
+        # Narrowed to what this test can actually observe: an absent
+        # `run_id` reads back as `None`. It used to also assert the two
+        # records' task ids were unequal, which the two distinct input task
+        # ids satisfy on their own — that assertion would stay green even if
+        # "absent run_id is never a shared run" were deleted. That
+        # non-grouping behaviour belongs to the stage-2 reducer test, where
+        # two records can actually share one task_id.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             first = _worker_record("task-no-run-1", timestamp="2026-01-01T00:00:00Z")
@@ -220,11 +309,6 @@ class ReadJournalRoundTripTests(unittest.TestCase):
         self.assertEqual(len(read.worker_executions), 2)
         self.assertIsNone(read.worker_executions[0].run_id)
         self.assertIsNone(read.worker_executions[1].run_id)
-        # Two distinct records, not one shared run: an absent run_id must
-        # never make the reader collapse or alias them.
-        self.assertNotEqual(
-            read.worker_executions[0].task.task_id, read.worker_executions[1].task.task_id
-        )
 
     def test_an_untagged_task_label_reads_back_untagged_and_a_tagged_one_tagged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -284,13 +368,129 @@ class ParseWireTimestampTests(unittest.TestCase):
     def test_parse_wire_timestamp_returns_an_aware_utc_datetime(self) -> None:
         parsed = learning_journal.parse_wire_timestamp("2026-03-05T12:30:00Z")
 
-        self.assertEqual(parsed.year, 2026)
-        self.assertIsNotNone(parsed.tzinfo)
-        self.assertEqual(parsed.utcoffset(), timedelta(0))
+        # The complete value, not just year/tzinfo/utcoffset — asserting
+        # only those three stays green even if month/day/time parsing were
+        # deleted.
+        self.assertEqual(parsed, datetime(2026, 3, 5, 12, 30, 0, tzinfo=timezone.utc))
 
     def test_parse_wire_timestamp_raises_on_a_calendar_invalid_value(self) -> None:
         with self.assertRaises(ValueError):
             learning_journal.parse_wire_timestamp("2026-99-99T99:99:99Z")
+
+
+class ConstructionTimeCalendarValidationTests(unittest.TestCase):
+    """`_validate_timestamp` now checks calendar validity, not just shape.
+
+    Regression coverage for the fix: every one of the four record types
+    calls `_validate_timestamp` from `__post_init__`, so a calendar-invalid
+    timestamp like `"2026-99-99T99:99:99Z"` — which matches `TIMESTAMP_RE`
+    but names no real instant — must now be rejected by the constructor
+    itself, never only by `read_journal` three modules downstream. Each test
+    here calls the constructor directly (never `read_journal`) so a
+    regression that moved the check back out of `_validate_timestamp` would
+    fail these tests even though the reader's own tolerance tests
+    (`ReadJournalToleranceTests`) would stay green.
+    """
+
+    BAD_TIMESTAMP = "2026-99-99T99:99:99Z"
+
+    def test_worker_execution_record_rejects_calendar_invalid_timestamp(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_journal.WorkerExecutionRecord(
+                task=learning_journal.TaskLabel.for_task("task-bad-ts-worker"),
+                duration_ms=1,
+                cost_estimate_usd=0.0,
+                success=True,
+                retry_count=0,
+                effort="low",
+                model_id="claude-sonnet-5",
+                model_family="claude",
+                timestamp=self.BAD_TIMESTAMP,
+            )
+
+    def test_outcome_record_rejects_calendar_invalid_timestamp(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_journal.OutcomeRecord(
+                task=learning_journal.TaskLabel.for_task("task-bad-ts-outcome"),
+                ground_truth="tests",
+                verdict="pass",
+                timestamp=self.BAD_TIMESTAMP,
+            )
+
+    def test_dialogue_quality_record_rejects_calendar_invalid_timestamp(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_journal.DialogueQualityRecord(
+                task=learning_journal.TaskLabel.for_task("task-bad-ts-dialogue"),
+                occasion="ambiguity",
+                topology="pair",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp=self.BAD_TIMESTAMP,
+            )
+
+    def test_compliance_record_rejects_calendar_invalid_timestamp(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_journal.ComplianceRecord(
+                session_id="session-bad-ts-compliance",
+                total_writes=1,
+                code_writes=0,
+                routing_declarations=1,
+                worker_calls=0,
+                violation_count=0,
+                declaration_drift_count=0,
+                calibration_markers=0,
+                code_write_count=0,
+                timestamp=self.BAD_TIMESTAMP,
+            )
+
+    def test_compliance_record_rejects_calendar_invalid_session_last_activity(self) -> None:
+        with self.assertRaises(ValueError):
+            learning_journal.ComplianceRecord(
+                session_id="session-bad-activity-compliance",
+                total_writes=1,
+                code_writes=0,
+                routing_declarations=1,
+                worker_calls=0,
+                violation_count=0,
+                declaration_drift_count=0,
+                calibration_markers=0,
+                code_write_count=0,
+                session_last_activity=self.BAD_TIMESTAMP,
+                timestamp="2026-01-01T00:00:00Z",
+            )
+
+    def test_a_calendar_invalid_timestamp_cannot_be_written_before_it_can_vanish_on_read(
+        self,
+    ) -> None:
+        # The write-read symmetry the finding was about: constructing a
+        # record with a calendar-invalid timestamp must fail *before*
+        # `append_journal_record` is ever reached, so the round trip can no
+        # longer produce a record that was accepted at construction and then
+        # silently discarded by `read_journal` on the way back out.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with mock.patch.object(
+                learning_journal, "append_journal_record"
+            ) as mock_append:
+                with self.assertRaises(ValueError):
+                    learning_journal.WorkerExecutionRecord(
+                        task=learning_journal.TaskLabel.for_task("task-never-written"),
+                        duration_ms=1,
+                        cost_estimate_usd=0.0,
+                        success=True,
+                        retry_count=0,
+                        effort="low",
+                        model_id="claude-sonnet-5",
+                        model_family="claude",
+                        timestamp=self.BAD_TIMESTAMP,
+                    )
+                mock_append.assert_not_called()
+
+            # Nothing reached the journal file at all.
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(read.worker_executions, ())
+        self.assertEqual(read.unreadable_lines, 0)
 
 
 class ReadJournalToleranceTests(unittest.TestCase):
@@ -318,6 +518,68 @@ class ReadJournalToleranceTests(unittest.TestCase):
         self.assertEqual(
             {record.task.task_id for record in read.worker_executions},
             {"task-good-1", "task-good-2"},
+        )
+        self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_line_that_is_not_valid_utf8_is_skipped_and_its_neighbours_survive(self) -> None:
+        # A byte sequence that is not valid UTF-8 mid-file is the same
+        # artifact as a torn JSON line — a crash or full disk mid-write —
+        # so it is per-line tolerance, not a whole-file failure.
+        #
+        # The bad byte is inserted *inside* an otherwise-valid record's
+        # `future_field` string — a key `_filtered_fields` discards once the
+        # line is decoded — rather than inside `task_id`. `b"\xff\xfe not
+        # valid utf-8\n"` used to be the payload here, but that text is
+        # independently invalid JSON with or without the bad bytes, so the
+        # test could not tell strict UTF-8 decoding apart from a decode that
+        # silently drops bad bytes (`errors="ignore"`) and then fails to
+        # parse for an unrelated reason — it would stay green either way.
+        # A later revision moved the byte into `task_id` to fix exactly
+        # that, but that still could not isolate the claim: had decoding
+        # been loosened to `errors="replace"`, the resulting garbled
+        # `task_id` would fail *its own* validator
+        # (`_validate_carried_identifier`), and the line would still read as
+        # unreadable — for a field-validation reason unrelated to decoding
+        # strictness. `future_field` closes that gap too: nothing validates
+        # it (`_filtered_fields` drops it outright, whatever it contains),
+        # so under `errors="replace"` this line would parse as valid JSON
+        # and rehydrate into a real record. Only strict UTF-8 decoding
+        # rejects it. Removing the one inserted byte reconstructs `line`
+        # exactly, so a decoder using `errors="ignore"` would parse this
+        # into a real record instead of skipping it — isolating the
+        # decoding behaviour this test exists to check.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = _worker_record(
+                "task-good-before-bad-bytes", timestamp="2026-01-01T00:00:00Z"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(first, root_dir=root))
+
+            wire = _valid_worker_execution_wire(
+                "task-otherwise-valid-record", timestamp="2026-01-01T00:00:01Z"
+            )
+            wire["future_field"] = "unknown-field-marker"
+            line = json.dumps(wire)
+            encoded = line.encode("utf-8")
+            marker = b"unknown-field-marker"
+            insert_at = encoded.index(marker) + 4
+            # 0xFF is never a valid byte anywhere in a UTF-8 sequence
+            # (leading or continuation), so this is guaranteed to raise
+            # `UnicodeDecodeError` under strict decoding.
+            corrupted = encoded[:insert_at] + b"\xff" + encoded[insert_at:]
+            self.assertEqual(corrupted.decode("utf-8", errors="ignore"), line)
+            _append_raw_bytes(root, corrupted + b"\n")
+
+            second = _worker_record(
+                "task-good-after-bad-bytes", timestamp="2026-01-01T00:00:02Z"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(second, root_dir=root))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(
+            {record.task.task_id for record in read.worker_executions},
+            {"task-good-before-bad-bytes", "task-good-after-bad-bytes"},
         )
         self.assertEqual(read.unreadable_lines, 1)
 
@@ -375,43 +637,188 @@ class ReadJournalToleranceTests(unittest.TestCase):
         self.assertEqual(read.unreadable_lines, 0)
         self.assertEqual(read.unknown_kind_lines, 0)
 
-    def test_a_known_kind_missing_a_required_key_is_unreadable_not_a_crash(self) -> None:
+    def test_a_non_finite_constant_inside_a_filtered_field_makes_the_line_unreadable(
+        self,
+    ) -> None:
+        # F3: `json.loads` accepts the non-standard `NaN`/`Infinity`/
+        # `-Infinity` tokens by default, anywhere in the line — including
+        # inside a field this reader does not know about and would
+        # otherwise silently drop via `_filtered_fields`. That must not let
+        # the line through: the wire format's own contract
+        # (`_append_jsonl_locked`) never emits these tokens for anything a
+        # real writer's validators accept, so a line carrying one anywhere
+        # is not valid JSON per that contract and must count as unreadable
+        # exactly like malformed JSON does.
+        #
+        # Deliberately placed inside `future_field` — a key
+        # `_filtered_fields` discards once the line is decoded — rather than
+        # inside a validated field like `cost_estimate_usd`: a non-finite
+        # value in a validated field already fails today via that field's
+        # own validator (`_validate_amount`), so that case is not evidence
+        # that non-finite tokens are rejected during parsing itself. Only a
+        # filtered/unknown field isolates that claim.
+        for constant, raw_token in (
+            (float("nan"), "NaN"),
+            (float("inf"), "Infinity"),
+            (float("-inf"), "-Infinity"),
+        ):
+            with self.subTest(raw_token=raw_token):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    neighbour = _worker_record(
+                        f"task-non-finite-{raw_token}-neighbour",
+                        timestamp="2026-01-01T00:00:00Z",
+                    )
+                    self.assertIsNone(
+                        learning_journal.append_journal_record(neighbour, root_dir=root)
+                    )
+                    wire = _valid_worker_execution_wire(
+                        f"task-non-finite-{raw_token}", timestamp="2026-01-01T00:00:01Z"
+                    )
+                    wire["future_field"] = constant
+                    line = json.dumps(wire)
+                    # `json.dumps` writes the bare, unquoted token for a
+                    # non-finite float by default — confirming the payload
+                    # actually contains the non-standard constant this test
+                    # means to exercise, not a quoted string that merely
+                    # looks like one.
+                    self.assertIn(raw_token, line)
+                    _append_raw_line(root, line)
+
+                    read = learning_journal.read_journal(root)
+
+                self.assertEqual(len(read.worker_executions), 1)
+                self.assertEqual(
+                    read.worker_executions[0].task.task_id,
+                    f"task-non-finite-{raw_token}-neighbour",
+                )
+                self.assertEqual(read.unreadable_lines, 1)
+
+    def test_an_unrecognised_key_nested_inside_a_round_still_reads(self) -> None:
+        # `_filtered_fields` must apply *inside* each round, not just at the
+        # dialogue's top level — otherwise one future field nested in one
+        # round makes the entire dialogue record unreadable.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             wire = {
-                "kind": "worker_execution",
-                "task_id": "task-missing-field",
+                "kind": "dialogue_quality",
+                "task_id": "task-future-round-field",
                 "sensitivity_halted": False,
-                # duration_ms is missing.
-                "cost_estimate_usd": 0.05,
-                "success": True,
-                "retry_count": 0,
-                "effort": "medium",
-                "model_id": "claude-sonnet-5",
-                "model_family": "claude",
+                "occasion": "ambiguity",
+                "topology": "pair",
+                "rounds": [
+                    {
+                        "verdict": "approved",
+                        "engagement_count": 2,
+                        "future_round_field": "from a ticket that does not exist yet",
+                    }
+                ],
+                "rounds_run": 1,
+                "canaries_planted": 0,
+                "canaries_caught": 0,
+                "degraded": False,
+                "independent": True,
                 "timestamp": "2026-01-01T00:00:00Z",
             }
             _append_raw_line(root, json.dumps(wire))
 
             read = learning_journal.read_journal(root)
 
-        self.assertEqual(len(read.worker_executions), 0)
-        self.assertEqual(read.unreadable_lines, 1)
+        self.assertEqual(len(read.dialogues), 1)
+        self.assertEqual(read.dialogues[0].task.task_id, "task-future-round-field")
+        self.assertEqual(
+            read.dialogues[0].rounds,
+            (learning_journal.DialogueRound(verdict="approved", engagement_count=2),),
+        )
+        self.assertEqual(read.unreadable_lines, 0)
+        self.assertEqual(read.unknown_kind_lines, 0)
 
-    def test_records_are_returned_in_file_order(self) -> None:
+    def test_a_round_missing_a_required_key_reaches_argument_binding_as_a_type_error(
+        self,
+    ) -> None:
+        # F3: `_check_required_keys` only guards the top-level wire keys a
+        # rehydrator reads before construction — nothing plays that role
+        # for the objects nested inside `rounds`, so a round missing
+        # `verdict` or `engagement_count` reaches `DialogueRound(**...)`
+        # itself and fails there with a `TypeError` for a missing required
+        # positional argument, not a `ValueError` from any validator. This
+        # is `read_journal`'s documented `except (ValueError, TypeError)`
+        # actually being exercised by a `TypeError` rather than merely
+        # promised: every other malformed-input test in this file reaches a
+        # `_check_required_keys`/validator `ValueError` first, so without a
+        # case like this the `TypeError` branch could be deleted and every
+        # test here would stay green.
+        cases = (
+            ("verdict", {"engagement_count": 2}),
+            ("engagement_count", {"verdict": "approved"}),
+        )
+        for missing_key, round_wire in cases:
+            with self.subTest(missing_key=missing_key):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    neighbour = learning_journal.DialogueQualityRecord(
+                        task=learning_journal.TaskLabel.for_task(
+                            f"task-round-missing-{missing_key}-neighbour"
+                        ),
+                        occasion="ambiguity",
+                        topology="pair",
+                        rounds=(
+                            learning_journal.DialogueRound(
+                                verdict="approved", engagement_count=1
+                            ),
+                        ),
+                        timestamp="2026-01-01T00:00:00Z",
+                    )
+                    self.assertIsNone(
+                        learning_journal.append_journal_record(neighbour, root_dir=root)
+                    )
+                    wire = _valid_dialogue_quality_wire(
+                        f"task-round-missing-{missing_key}",
+                        timestamp="2026-01-01T00:00:01Z",
+                    )
+                    wire["rounds"] = [round_wire]
+                    wire["rounds_run"] = 1
+                    _append_raw_line(root, json.dumps(wire))
+
+                    read = learning_journal.read_journal(root)
+
+                self.assertEqual(len(read.dialogues), 1)
+                self.assertEqual(
+                    read.dialogues[0].task.task_id,
+                    f"task-round-missing-{missing_key}-neighbour",
+                )
+                self.assertEqual(read.unreadable_lines, 1)
+
+    # F4: the exhaustive, per-key, all-four-families sweep this single-family
+    # test used to be lives in `ReadJournalRequiredWireKeyTests` now, as
+    # `test_every_required_key_of_every_task_bearing_family_makes_its_line_unreadable`
+    # and `test_every_required_key_of_compliance_makes_its_line_unreadable` —
+    # one table covering every family rather than a single-family test that
+    # made every other family's required-key enforcement untested by
+    # omission. The "why `sensitivity_halted`/`timestamp` count as required
+    # despite carrying a constructor default" reasoning this comment used to
+    # carry moved there with it.
+
+    def test_records_are_returned_in_file_order_not_sorted_by_id_or_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for index in range(3):
-                record = _worker_record(
-                    f"task-order-{index}", timestamp=f"2026-01-01T00:00:0{index}Z"
-                )
+            # Insertion order (b, c, a) deliberately conflicts with both a
+            # sort by task_id (a, b, c) and a sort by timestamp (c, a, b),
+            # so an implementation that secretly sorted by either would fail
+            # this test rather than passing it by accident.
+            records = [
+                _worker_record("task-order-b", timestamp="2026-01-01T00:00:03Z"),
+                _worker_record("task-order-c", timestamp="2026-01-01T00:00:01Z"),
+                _worker_record("task-order-a", timestamp="2026-01-01T00:00:02Z"),
+            ]
+            for record in records:
                 self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
 
             read = learning_journal.read_journal(root)
 
         self.assertEqual(
             [record.task.task_id for record in read.worker_executions],
-            ["task-order-0", "task-order-1", "task-order-2"],
+            ["task-order-b", "task-order-c", "task-order-a"],
         )
 
     def test_a_timestamp_that_passes_the_regex_but_names_no_instant_is_unreadable(self) -> None:
@@ -458,6 +865,13 @@ class ReadJournalToleranceTests(unittest.TestCase):
                 "declaration_drift_count": 0,
                 "calibration_markers": 0,
                 "code_write_count": 0,
+                # `issue_codes` is required on the wire (it is not typed
+                # `X | None`) and is included here so this line fails for
+                # exactly the reason this test names — a bad
+                # `session_last_activity` — rather than incidentally
+                # failing the required-key check first for an unrelated,
+                # unasserted reason.
+                "issue_codes": [],
                 "timestamp": "2026-01-01T00:00:00Z",
                 "session_last_activity": "2026-99-99T99:99:99Z",
             }
@@ -467,6 +881,756 @@ class ReadJournalToleranceTests(unittest.TestCase):
 
         self.assertEqual(len(read.compliance), 0)
         self.assertEqual(read.unreadable_lines, 1)
+
+
+class ReadJournalRequiredWireKeyTests(unittest.TestCase):
+    """A wire key is required unless its field's own type admits `None`.
+
+    `_wire_form` (and `TaskLabel.to_mapping`) omit a key *iff* its value is
+    `None` — never because the value happens to equal a constructor default.
+    So the rehydrators must not treat a missing key as "use the default" the
+    way a constructor would: a missing `timestamp` used to be silently
+    stamped with the *read* time via `default_factory`, and a missing
+    `rounds` used to fall back to `()` via the rehydrator's own
+    `mapping.get("rounds", ())` — both indistinguishable from a real record
+    and both corrupting every trend built on them. Exactly three fields
+    anywhere in this module are typed `X | None` — `run_id`, `task_type`,
+    `session_last_activity` — and those three are the only ones a real line
+    may honestly omit.
+
+    `dialogue_quality`'s `rounds_run` is required by the same "always
+    emitted, so always required" rule, but by a different mechanism: it is a
+    `@property`, not a field, so nothing in its type annotation could mark it
+    optional in the first place — see `_DIALOGUE_QUALITY_REQUIRED_KEYS` in
+    `learning_journal.py`. It is also the one required key that is not just
+    checked for presence but cross-validated against another key
+    (`len(rounds)`); see the mismatch test below.
+    """
+
+    def test_a_line_missing_timestamp_is_unreadable_for_every_family(self) -> None:
+        cases = (
+            ("worker_execution", _valid_worker_execution_wire),
+            ("outcome", _valid_outcome_wire),
+            ("dialogue_quality", _valid_dialogue_quality_wire),
+        )
+        for kind, wire_factory in cases:
+            with self.subTest(kind=kind):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    # A valid neighbour of the *same* family that must
+                    # still be read — proof the damaged line is skipped
+                    # rather than taking the whole family down with it.
+                    neighbour = _worker_record(
+                        f"task-{kind}-timestamp-neighbour", timestamp="2026-01-01T00:00:00Z"
+                    )
+                    self.assertIsNone(
+                        learning_journal.append_journal_record(neighbour, root_dir=root)
+                    )
+                    wire = wire_factory(
+                        f"task-{kind}-missing-timestamp", timestamp="2026-01-01T00:00:01Z"
+                    )
+                    del wire["timestamp"]
+                    _append_raw_line(root, json.dumps(wire))
+
+                    read = learning_journal.read_journal(root)
+
+                self.assertEqual(len(read.worker_executions), 1)
+                self.assertEqual(len(read.outcomes), 0)
+                self.assertEqual(len(read.dialogues), 0)
+                self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_compliance_line_missing_timestamp_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbour = _worker_record(
+                "task-compliance-timestamp-neighbour", timestamp="2026-01-01T00:00:00Z"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(neighbour, root_dir=root))
+            wire = _valid_compliance_wire(
+                "session-missing-timestamp", timestamp="2026-01-01T00:00:01Z"
+            )
+            del wire["timestamp"]
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.worker_executions), 1)
+        self.assertEqual(len(read.compliance), 0)
+        self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_dialogue_line_missing_rounds_is_unreadable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbour = learning_journal.DialogueQualityRecord(
+                task=learning_journal.TaskLabel.for_task("task-rounds-neighbour"),
+                occasion="ambiguity",
+                topology="pair",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-01T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(neighbour, root_dir=root))
+            wire = _valid_dialogue_quality_wire(
+                "task-missing-rounds", timestamp="2026-01-01T00:00:01Z"
+            )
+            del wire["rounds"]
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        # A missing `rounds` key must not read as the legitimate zero-round
+        # state (a budget-skipped run) that a real writer's `rounds: []`
+        # describes — those are two different facts, and only presence with
+        # an empty list may claim the second one. See the positive control
+        # below.
+        self.assertEqual(len(read.dialogues), 1)
+        self.assertEqual(read.dialogues[0].task.task_id, "task-rounds-neighbour")
+        self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_dialogue_line_with_an_explicit_empty_rounds_list_still_reads_as_zero_rounds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wire = _valid_dialogue_quality_wire("task-zero-rounds", timestamp="2026-01-01T00:00:00Z")
+            wire["rounds"] = []
+            wire["rounds_run"] = 0
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.dialogues), 1)
+        self.assertEqual(read.dialogues[0].rounds, ())
+        self.assertEqual(read.unreadable_lines, 0)
+
+    def test_a_line_missing_only_run_id_task_type_or_session_last_activity_still_reads(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker_wire = _valid_worker_execution_wire(
+                "task-no-run-id-or-type", timestamp="2026-01-01T00:00:00Z"
+            )
+            # A real writer never includes these two when they are unset in
+            # the first place (`TaskLabel.to_mapping`, `_wire_form`) — this
+            # confirms the base fixture already matches that, so the
+            # assertions below exercise real absence, not an accidental
+            # `null`.
+            self.assertNotIn("run_id", worker_wire)
+            self.assertNotIn("task_type", worker_wire)
+            _append_raw_line(root, json.dumps(worker_wire))
+
+            compliance_wire = _valid_compliance_wire(
+                "session-no-last-activity", timestamp="2026-01-01T00:00:01Z"
+            )
+            self.assertNotIn("session_last_activity", compliance_wire)
+            _append_raw_line(root, json.dumps(compliance_wire))
+
+            # `run_id` is optional on every task-bearing family, not just
+            # `worker_execution` — the deletion sweep below proves each
+            # family's `run_id` is *required when the writer sets it*, and
+            # this is that check's positive counterpart for the other two
+            # families: absent is fine everywhere it is legitimately absent.
+            outcome_wire = _valid_outcome_wire(
+                "task-outcome-no-run-id", timestamp="2026-01-01T00:00:02Z"
+            )
+            self.assertNotIn("run_id", outcome_wire)
+            _append_raw_line(root, json.dumps(outcome_wire))
+
+            dialogue_wire = _valid_dialogue_quality_wire(
+                "task-dialogue-no-run-id", timestamp="2026-01-01T00:00:03Z"
+            )
+            self.assertNotIn("run_id", dialogue_wire)
+            _append_raw_line(root, json.dumps(dialogue_wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(read.unreadable_lines, 0)
+        self.assertEqual(len(read.worker_executions), 1)
+        self.assertIsNone(read.worker_executions[0].run_id)
+        self.assertIsNone(read.worker_executions[0].task.task_type)
+        self.assertEqual(len(read.compliance), 1)
+        self.assertIsNone(read.compliance[0].run_id)
+        self.assertIsNone(read.compliance[0].session_last_activity)
+        self.assertEqual(len(read.outcomes), 1)
+        self.assertIsNone(read.outcomes[0].run_id)
+        self.assertEqual(len(read.dialogues), 1)
+        self.assertIsNone(read.dialogues[0].run_id)
+
+    def test_a_dialogue_lines_rounds_run_contradicting_len_rounds_is_unreadable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbour = learning_journal.DialogueQualityRecord(
+                task=learning_journal.TaskLabel.for_task("task-rounds-run-mismatch-neighbour"),
+                occasion="ambiguity",
+                topology="pair",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-01T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(neighbour, root_dir=root))
+            wire = _valid_dialogue_quality_wire(
+                "task-rounds-run-mismatch", timestamp="2026-01-01T00:00:01Z"
+            )
+            # One round on the wire, but `rounds_run` lies about it — the
+            # exact contradiction `to_mapping`'s inverse must never accept,
+            # since `rounds_run` is derived from `rounds` and must always
+            # agree with it (see `DialogueQualityRecord.rounds_run` and
+            # `_rehydrate_dialogue_quality` in learning_journal.py).
+            wire["rounds_run"] = 5
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.dialogues), 1)
+        self.assertEqual(
+            read.dialogues[0].task.task_id, "task-rounds-run-mismatch-neighbour"
+        )
+        self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_bool_rounds_run_is_unreadable_even_though_it_equals_len_rounds(self) -> None:
+        # F2: `True == 1` in Python, so a bare `rounds_run_raw != len(rounds)`
+        # check lets `rounds_run=true` slip through as if it correctly named
+        # one round. `rounds_run` must be type-validated (rejecting `bool`,
+        # exactly as every other count field in this module already does via
+        # `_validate_count`) before the equality comparison ever runs.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbour = learning_journal.DialogueQualityRecord(
+                task=learning_journal.TaskLabel.for_task("task-rounds-run-bool-neighbour"),
+                occasion="ambiguity",
+                topology="pair",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-01T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(neighbour, root_dir=root))
+            wire = _valid_dialogue_quality_wire(
+                "task-rounds-run-bool", timestamp="2026-01-01T00:00:01Z"
+            )
+            # One round on the wire; `rounds_run=True` would pass a bare
+            # `!= len(rounds)` check since `True == 1`.
+            wire["rounds_run"] = True
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.dialogues), 1)
+        self.assertEqual(read.dialogues[0].task.task_id, "task-rounds-run-bool-neighbour")
+        self.assertEqual(read.unreadable_lines, 1)
+
+    def test_a_float_rounds_run_is_unreadable_even_though_it_equals_len_rounds(self) -> None:
+        # F2: same hole, `1.0 == 1` in Python. `rounds_run` must be rejected
+        # as a non-int before the equality comparison, not accepted because
+        # it happens to compare equal to the real round count.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbour = learning_journal.DialogueQualityRecord(
+                task=learning_journal.TaskLabel.for_task("task-rounds-run-float-neighbour"),
+                occasion="ambiguity",
+                topology="pair",
+                rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp="2026-01-01T00:00:00Z",
+            )
+            self.assertIsNone(learning_journal.append_journal_record(neighbour, root_dir=root))
+            wire = _valid_dialogue_quality_wire(
+                "task-rounds-run-float", timestamp="2026-01-01T00:00:01Z"
+            )
+            wire["rounds_run"] = 1.0
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.dialogues), 1)
+        self.assertEqual(read.dialogues[0].task.task_id, "task-rounds-run-float-neighbour")
+        self.assertEqual(read.unreadable_lines, 1)
+
+    def test_every_required_key_of_every_task_bearing_family_makes_its_line_unreadable(
+        self,
+    ) -> None:
+        # F4: `test_a_known_kind_missing_a_required_key_is_unreadable_not_a_crash`
+        # used to run this sweep for `worker_execution` alone. Every other
+        # family's required-key enforcement was therefore reachable only by
+        # accident — dropping the check for `outcome.verdict` or
+        # `dialogue_quality.topology` would have stayed green. One table,
+        # every task-bearing family, every key `to_mapping` always emits.
+        # `compliance` is not task-bearing (no `TaskLabel`, so no
+        # `task_id`/`sensitivity_halted` to union in) and gets its own test
+        # below rather than being forced into this table's shape.
+        families = (
+            (
+                "worker_execution",
+                _valid_worker_execution_wire,
+                (
+                    "task_id",
+                    "sensitivity_halted",
+                    "duration_ms",
+                    "cost_estimate_usd",
+                    "success",
+                    "retry_count",
+                    "effort",
+                    "model_id",
+                    "model_family",
+                    "timestamp",
+                ),
+            ),
+            (
+                "outcome",
+                _valid_outcome_wire,
+                ("task_id", "sensitivity_halted", "ground_truth", "verdict", "timestamp"),
+            ),
+            (
+                "dialogue_quality",
+                _valid_dialogue_quality_wire,
+                (
+                    "task_id",
+                    "sensitivity_halted",
+                    "occasion",
+                    "topology",
+                    "rounds",
+                    "rounds_run",
+                    "canaries_planted",
+                    "canaries_caught",
+                    "degraded",
+                    "independent",
+                    "timestamp",
+                ),
+            ),
+        )
+        for kind, wire_factory, required_keys in families:
+            for missing_key in required_keys:
+                with self.subTest(kind=kind, missing_key=missing_key):
+                    with tempfile.TemporaryDirectory() as tmp:
+                        root = Path(tmp)
+                        # A neighbour of the *same* family, proving the
+                        # damaged line is skipped rather than taking the
+                        # whole family down with it.
+                        neighbour_wire = wire_factory(
+                            f"task-{kind}-{missing_key}-neighbour",
+                            timestamp="2026-01-01T00:00:00Z",
+                        )
+                        _append_raw_line(root, json.dumps(neighbour_wire))
+                        wire = wire_factory(
+                            f"task-{kind}-{missing_key}-missing",
+                            timestamp="2026-01-01T00:00:01Z",
+                        )
+                        del wire[missing_key]
+                        _append_raw_line(root, json.dumps(wire))
+
+                        read = learning_journal.read_journal(root)
+
+                    counts = {
+                        "worker_execution": len(read.worker_executions),
+                        "outcome": len(read.outcomes),
+                        "dialogue_quality": len(read.dialogues),
+                    }
+                    self.assertEqual(counts[kind], 1)
+                    self.assertEqual(read.unreadable_lines, 1)
+
+    def test_every_required_key_of_compliance_makes_its_line_unreadable(self) -> None:
+        required_keys = (
+            "session_id",
+            "total_writes",
+            "code_writes",
+            "routing_declarations",
+            "worker_calls",
+            "violation_count",
+            "declaration_drift_count",
+            "calibration_markers",
+            "code_write_count",
+            "issue_codes",
+            "timestamp",
+        )
+        for missing_key in required_keys:
+            with self.subTest(missing_key=missing_key):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    neighbour_wire = _valid_compliance_wire(
+                        f"session-{missing_key}-neighbour", timestamp="2026-01-01T00:00:00Z"
+                    )
+                    _append_raw_line(root, json.dumps(neighbour_wire))
+                    wire = _valid_compliance_wire(
+                        f"session-{missing_key}-missing", timestamp="2026-01-01T00:00:01Z"
+                    )
+                    del wire[missing_key]
+                    _append_raw_line(root, json.dumps(wire))
+
+                    read = learning_journal.read_journal(root)
+
+                self.assertEqual(len(read.compliance), 1)
+                self.assertEqual(read.unreadable_lines, 1)
+
+
+class ReadJournalKindTypeTests(unittest.TestCase):
+    """A non-string `kind` must not reach the dispatch lookup.
+
+    It must count as damage (`unreadable_lines`), never as a family this
+    reader predates (`unknown_kind_lines`) — a `list` there raises
+    `TypeError: unhashable type` before any tolerance applies, and
+    `None`/a number are real values a damaged record can carry, not a real
+    family name.
+    """
+
+    def _assert_bad_kind_is_unreadable_not_unknown(self, bad_kind: Any) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            neighbour = _worker_record(
+                "task-good-kind-neighbour", timestamp="2026-01-01T00:00:00Z"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(neighbour, root_dir=root))
+            _append_raw_line(root, json.dumps({"kind": bad_kind, "task_id": "task-bad-kind"}))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.worker_executions), 1)
+        self.assertEqual(read.worker_executions[0].task.task_id, "task-good-kind-neighbour")
+        self.assertEqual(read.unreadable_lines, 1)
+        self.assertEqual(read.unknown_kind_lines, 0)
+
+    def test_a_list_kind_is_unreadable_not_a_crash(self) -> None:
+        self._assert_bad_kind_is_unreadable_not_unknown([])
+
+    def test_a_dict_kind_is_unreadable_not_a_crash(self) -> None:
+        self._assert_bad_kind_is_unreadable_not_unknown({})
+
+    def test_a_numeric_kind_is_unreadable_not_unknown(self) -> None:
+        self._assert_bad_kind_is_unreadable_not_unknown(1)
+
+    def test_a_null_kind_is_unreadable_not_unknown(self) -> None:
+        self._assert_bad_kind_is_unreadable_not_unknown(None)
+
+
+class ReadJournalWholeFileFailureTests(unittest.TestCase):
+    """`open`/`flock` failures propagate; the shared lock is actually taken."""
+
+    def test_a_whole_file_open_failure_propagates_rather_than_reading_as_empty(self) -> None:
+        # This is F1's "inaccessible path propagates" case: the journal
+        # exists and has real content, `open()` fails with `PermissionError`
+        # (not `FileNotFoundError`), so the "missing journal reads as empty"
+        # branch must not apply. Before the fix this path went through
+        # `Path.exists()` first, which can itself observe a permission
+        # failure and report `False` — masking exactly this error as an
+        # empty journal. There is no separate `exists()` call left to do
+        # that, so this failure has only one place left to be swallowed:
+        # nowhere.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record("task-open-failure", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            with (
+                mock.patch("builtins.open", side_effect=PermissionError("simulated failure")),
+                self.assertRaises(PermissionError),
+            ):
+                learning_journal.read_journal(root)
+
+    def test_open_raising_file_not_found_reads_as_empty_even_though_the_file_exists(
+        self,
+    ) -> None:
+        # F1's deletion-race case: the journal genuinely exists on disk (a
+        # real record was appended to it), but `open()` itself is made to
+        # raise `FileNotFoundError` — simulating the file vanishing between
+        # any check and the open call. `read_journal` no longer performs a
+        # separate `path.exists()` check at all, so there is no earlier call
+        # whose answer this could contradict; only `open()`'s own exception
+        # decides "missing", and this is that exception.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record("task-exists-race", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            with mock.patch("builtins.open", side_effect=FileNotFoundError()):
+                read = learning_journal.read_journal(root)
+
+        self.assertEqual(read.worker_executions, ())
+        self.assertEqual(read.unreadable_lines, 0)
+
+    def test_a_flock_failure_propagates_rather_than_reading_as_empty(self) -> None:
+        # Only `open` was ever patched to fail before this test. A reader
+        # that swallowed an `OSError` from `fcntl.flock` and fell through to
+        # an empty read would stay green against that gap — this exercises
+        # the lock call itself failing against a journal that is not empty,
+        # so a false "no data" read is distinguishable from a real one.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record("task-flock-failure", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            sentinel = OSError("simulated flock failure")
+            real_flock = learning_journal.fcntl.flock
+
+            def _failing_flock(fd: int, operation: int) -> None:
+                if operation == learning_journal.fcntl.LOCK_SH:
+                    raise sentinel
+                real_flock(fd, operation)
+
+            with (
+                mock.patch.object(learning_journal.fcntl, "flock", side_effect=_failing_flock),
+                self.assertRaises(OSError) as ctx,
+            ):
+                learning_journal.read_journal(root)
+
+        # The exact error, not merely "some `OSError`" — proof the
+        # propagation reaches the caller unmodified rather than being
+        # caught and re-raised as a different, coincidentally-also-OSError
+        # failure.
+        self.assertIs(ctx.exception, sentinel)
+
+    def test_a_readlines_failure_propagates_rather_than_reading_as_empty(self) -> None:
+        # F6: a mid-read failure (a disk error surfacing while `readlines()`
+        # is still consuming the file, distinct from `open()` or `flock`
+        # failing before any bytes are read) must not be swallowed into an
+        # empty journal either. Wraps the real file object returned by
+        # `open()`, exactly as `test_read_journal_holds_the_lock_across_the_read_not_just_around_it`
+        # already does to observe `readlines()`, but replaces the call with
+        # one that raises instead of merely recording that it ran.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record("task-readlines-failure", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            sentinel = OSError("simulated readlines failure")
+            real_open = open
+            journal_file = learning_journal.journal_path(root)
+
+            def _open_with_failing_readlines(
+                file: Any, mode: str = "r", *args: Any, **kwargs: Any
+            ) -> Any:
+                opened = real_open(file, mode, *args, **kwargs)
+                if mode == "rb" and Path(str(file)) == journal_file:
+
+                    def _failing_readlines(hint: int = -1) -> list[bytes]:
+                        raise sentinel
+
+                    opened.readlines = _failing_readlines  # type: ignore[method-assign]
+                return opened
+
+            with (
+                mock.patch("builtins.open", side_effect=_open_with_failing_readlines),
+                self.assertRaises(OSError) as ctx,
+            ):
+                learning_journal.read_journal(root)
+
+        # The exact error, for the same reason the flock test above checks
+        # `assertIs` rather than merely `assertRaises(OSError)`: proof this
+        # is unmodified propagation, not a caught-and-rethrown coincidence.
+        self.assertIs(ctx.exception, sentinel)
+
+    def test_a_file_not_found_error_from_readlines_propagates_rather_than_reading_as_empty(
+        self,
+    ) -> None:
+        # F1: the "missing journal reads as empty" branch must catch
+        # `FileNotFoundError` only from `open()` itself, not from anything
+        # inside the `with` block. A `FileNotFoundError` raised by
+        # `readlines()` — the file was present when `open()` succeeded and
+        # vanished before it was read, e.g. deleted mid-read or an
+        # NFS unlink-on-open pattern — is a whole-file failure like any
+        # other, not "the file was absent at open", and must propagate
+        # exactly like the generic `OSError` case above rather than being
+        # silently read as an empty journal.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record(
+                "task-readlines-file-not-found", timestamp="2026-01-01T00:00:00Z"
+            )
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            sentinel = FileNotFoundError("simulated deletion mid-read")
+            real_open = open
+            journal_file = learning_journal.journal_path(root)
+
+            def _open_with_vanishing_readlines(
+                file: Any, mode: str = "r", *args: Any, **kwargs: Any
+            ) -> Any:
+                opened = real_open(file, mode, *args, **kwargs)
+                if mode == "rb" and Path(str(file)) == journal_file:
+
+                    def _vanishing_readlines(hint: int = -1) -> list[bytes]:
+                        raise sentinel
+
+                    opened.readlines = _vanishing_readlines  # type: ignore[method-assign]
+                return opened
+
+            with (
+                mock.patch("builtins.open", side_effect=_open_with_vanishing_readlines),
+                self.assertRaises(FileNotFoundError) as ctx,
+            ):
+                learning_journal.read_journal(root)
+
+        # The exact error, not a fresh empty read — proof the file-absent-at-
+        # open branch does not also catch this.
+        self.assertIs(ctx.exception, sentinel)
+
+    def test_read_journal_takes_a_shared_lock_before_reading_and_releases_it_after(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record("task-lock", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            operations: list[int] = []
+            real_flock = learning_journal.fcntl.flock
+
+            def _tracking_flock(fd: int, operation: int) -> None:
+                operations.append(operation)
+                real_flock(fd, operation)
+
+            with mock.patch.object(learning_journal.fcntl, "flock", side_effect=_tracking_flock):
+                read = learning_journal.read_journal(root)
+
+        # Deleting both `flock` calls leaves this list empty; a reader that
+        # dropped only the release would leave it with one entry. Either
+        # failure mode is caught by asserting the exact pair, in order.
+        self.assertEqual(
+            operations,
+            [learning_journal.fcntl.LOCK_SH, learning_journal.fcntl.LOCK_UN],
+        )
+        self.assertEqual(len(read.worker_executions), 1)
+
+    def test_read_journal_holds_the_lock_across_the_read_not_just_around_it(self) -> None:
+        # The previous version of this test asserted only
+        # `[LOCK_SH, LOCK_UN]` — the two lock calls in order relative to each
+        # other. That stays green even if `LOCK_UN` moved to immediately
+        # before `readlines()`, which breaks the actual contract: the lock
+        # must be held *during* the read, not merely requested and released
+        # somewhere around it. Folding `readlines()` into the same timeline
+        # is what makes that reachable: the assertion below fails if the
+        # unlock is reordered ahead of the read, not just if a lock call is
+        # dropped entirely.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = _worker_record("task-lock-ordering", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            events: list[object] = []
+            real_flock = learning_journal.fcntl.flock
+            real_open = open
+            journal_file = learning_journal.journal_path(root)
+
+            def _tracking_flock(fd: int, operation: int) -> None:
+                events.append(operation)
+                real_flock(fd, operation)
+
+            def _open_and_track(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
+                opened = real_open(file, mode, *args, **kwargs)
+                if mode == "rb" and Path(str(file)) == journal_file:
+                    real_readlines = opened.readlines
+
+                    def _tracking_readlines(hint: int = -1) -> list[bytes]:
+                        events.append("readlines")
+                        return real_readlines(hint)
+
+                    opened.readlines = _tracking_readlines  # type: ignore[method-assign]
+                return opened
+
+            with (
+                mock.patch.object(learning_journal.fcntl, "flock", side_effect=_tracking_flock),
+                mock.patch("builtins.open", side_effect=_open_and_track),
+            ):
+                read = learning_journal.read_journal(root)
+
+        self.assertEqual(
+            events,
+            [
+                learning_journal.fcntl.LOCK_SH,
+                "readlines",
+                learning_journal.fcntl.LOCK_UN,
+            ],
+        )
+        self.assertEqual(len(read.worker_executions), 1)
+
+
+class ReadJournalBlankLineTests(unittest.TestCase):
+    """DECIDE D1 (worker-routing.md Spec 0004 review, iteration 3): a blank
+    or whitespace-only line is skipped without incrementing
+    `unreadable_lines` rather than counted as damage. See `read_journal`'s
+    docstring for the full reasoning; this is that decision's test.
+    """
+
+    def test_a_blank_line_between_two_records_is_skipped_without_counting_as_unreadable(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = _worker_record("task-before-blank", timestamp="2026-01-01T00:00:00Z")
+            self.assertIsNone(learning_journal.append_journal_record(first, root_dir=root))
+            _append_raw_line(root, "")
+            _append_raw_line(root, "   ")
+            second = _worker_record("task-after-blank", timestamp="2026-01-01T00:00:01Z")
+            self.assertIsNone(learning_journal.append_journal_record(second, root_dir=root))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(
+            {record.task.task_id for record in read.worker_executions},
+            {"task-before-blank", "task-after-blank"},
+        )
+        self.assertEqual(read.unreadable_lines, 0)
+
+    def test_an_all_blank_journal_reads_as_empty_not_damaged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _append_raw_line(root, "")
+            _append_raw_line(root, "   ")
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(read.worker_executions, ())
+        self.assertEqual(read.unreadable_lines, 0)
+
+
+class ReadJournalExplicitNullOptionalFieldTests(unittest.TestCase):
+    """DECIDE D2 (worker-routing.md Spec 0004 review, iteration 3): an
+    explicit wire `null` on an optional field (`run_id`, `task_type`,
+    `session_last_activity`) is accepted as absence rather than rejected as
+    damage. See `read_journal`'s docstring for the full reasoning; this is
+    that decision's test.
+    """
+
+    def test_an_explicit_null_run_id_reads_back_as_none_not_as_damage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wire = _valid_worker_execution_wire(
+                "task-explicit-null-run-id", timestamp="2026-01-01T00:00:00Z"
+            )
+            wire["run_id"] = None
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.worker_executions), 1)
+        self.assertIsNone(read.worker_executions[0].run_id)
+        self.assertEqual(read.unreadable_lines, 0)
+
+    def test_an_explicit_null_task_type_reads_back_as_untagged_not_as_damage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wire = _valid_worker_execution_wire(
+                "task-explicit-null-task-type", timestamp="2026-01-01T00:00:00Z"
+            )
+            wire["task_type"] = None
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.worker_executions), 1)
+        self.assertIsNone(read.worker_executions[0].task.task_type)
+        self.assertEqual(read.unreadable_lines, 0)
+
+    def test_an_explicit_null_session_last_activity_reads_back_as_none_not_as_damage(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            wire = _valid_compliance_wire(
+                "session-explicit-null-last-activity", timestamp="2026-01-01T00:00:00Z"
+            )
+            wire["session_last_activity"] = None
+            _append_raw_line(root, json.dumps(wire))
+
+            read = learning_journal.read_journal(root)
+
+        self.assertEqual(len(read.compliance), 1)
+        self.assertIsNone(read.compliance[0].session_last_activity)
+        self.assertEqual(read.unreadable_lines, 0)
 
 
 if __name__ == "__main__":
