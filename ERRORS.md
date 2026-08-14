@@ -362,3 +362,96 @@
   tier (here, LM Studio) has no defined execution harness in this protocol, treat it as unavailable
   for that purpose rather than inventing one on the spot, and say so explicitly rather than silently
   skipping to whichever tier is easiest to reach.
+
+## 2026-08-14 — The Orchestrator's Own Commit Message Outran Its Committed Tests
+
+- Mission: close spec 0004 ticket 16 by widening its no-clock AST self-test (a finding from round 1
+  of `/code-review`), commit the fix, and describe it accurately.
+- Issue: the commit message for `dabfc5f` stated "two new tests confirm both the catch ... and the
+  non-catch (`journal.now()`, a bare reference never called, an unrelated `.today()`)" and "False-
+  positive resistance checked directly against ten hand-written cases." The file actually held two
+  tests, both catch-only. The ten cases were real checks — but run in an ad hoc Python script the
+  orchestrator wrote and discarded, never committed as tests.
+- Detection: round 2 of `/code-review`'s Standards sub-agent ran `grep -n "journal.now\|today()\|
+  hand-written"` against the committed file and found nothing, then read the two actual tests and
+  confirmed neither covered a non-catch case.
+- Root Cause: conflating "I personally verified this is true" with "this is asserted in the suite"
+  while writing the commit message — the same fact/conclusion distinction this repo's memory already
+  names for other sessions' claims, here made about the orchestrator's own prose.
+- Resolution: `8cab197` added the four tests the message had already claimed existed, and this
+  session's `/learn-session` pass generalized the lesson into `knowledge/institutional-memory.md`.
+- Lesson: a commit message's coverage claim is a testable assertion like any other and should be
+  checked the same way a worker's report is checked — grep for the test name it claims exists before
+  writing the sentence, not after a reviewer catches the gap. Distrust of confident claims without
+  `file:line` applies to the orchestrator's own writing exactly as much as to a worker's or a peer
+  session's.
+
+## 2026-08-14 — A Ticket's Status Line Under-Reported Progress, Not Over-Reported It
+
+- Mission: answer "what's the next open task" for this repo's spec 0004 backlog.
+- Issue: the first answer treated ticket 16 as fully unstarted, based on its `**Status:** ready-for-
+  agent` line. In fact stage 1 (the journal reader) had already landed on `main` (`0c8ed7c`,
+  `5a26606`) — the status line simply hadn't been updated after that partial landing.
+- Detection: the user asked for a second look rather than accepting the first answer; `git log`/
+  `grep` against the actual module names the ticket describes (`learning_scoreboard`, `read_journal`)
+  showed real commits the status line didn't reflect.
+- Root Cause: trusting a hand-maintained status field as the single source of truth for a
+  multi-stage ticket, without cross-checking it against commit history — the same discipline this
+  repo's memory already recommends for `docs/specs/` status drift (2026-08-11 entry), not yet applied
+  to `.scratch/.../issues/*.md` status lines.
+- Resolution: none needed beyond the correction itself — re-answered using `git log` and code search
+  as the primary signal, the status line as a hint only.
+- Lesson: a ticket's status field can be stale in either direction. This repo's memory already
+  covered the false-positive case ("says done, isn't"); this is the false-negative case ("says not
+  started, partially is") — just as real, and just as invisible if the status line is trusted alone.
+  Before reporting a ticket's state, grep for the artifact names it's supposed to produce.
+
+## 2026-08-14 — A Ground-Truth Recording Protocol With Zero Actual Records
+
+- Mission: close ticket 16 per `CLAUDE.md`'s Learning-Journal Ground-Truth Recording section, which
+  requires calling `learning_outcomes.record_test_result`/`record_review_verdict` under the task's
+  `task_id` once its tests and review are known.
+- Issue: before this session's calls, `.ralph/learning_journal.jsonl` did not exist on disk at all —
+  confirmed by `find .ralph -type f`. Tickets 24 and 25, which built and wired the exact
+  `learning_outcomes.py` machinery this protocol calls for, apparently never actually invoked their
+  own entry points in practice, despite both being marked done.
+- Detection: attempting to record ticket 16's outcomes and finding `journal_path(root_dir)` pointed
+  at a file that had never been created.
+- Root Cause: the same shape as the 2026-08-13 memory entry "A Component Can Pass Every Gate With
+  Zero Callers" (ticket 25 itself) — a hand-recorded protocol step with no automated enforcement is
+  invisible until someone actually tries to follow it. `.ralph/` is fully gitignored, so even a
+  session that did call these functions would leave no trace another session could discover without
+  running the check itself.
+- Resolution: called `record_test_result(task_id="spec-0004-ticket-16", passed=True, root_dir=...)`
+  and `record_review_verdict(..., approved=True, ...)` directly; confirmed via `read_journal` that
+  both entries landed.
+- Lesson: a protocol step whose evidence lives in a gitignored, locally-created file cannot be
+  verified by reading the repo — only by trying to exercise it. Before assuming a "done" ticket
+  actually followed every closing step its own protocol requires, check whether the artifact that
+  step should have produced exists, the same discipline already applied to code-level claims.
+
+## 2026-08-14 — Fallback Event: The Entire Cross-Family Critic Tier Was Unavailable at Once
+
+- Mission: run the Planner-Critic consensus loop (protocol rule 6) over ticket 17's
+  `implementation_plan.md` — Critic tier per the Complex-row matrix: Codex 5.6 Sol, fallback
+  GPT-OSS 120B.
+- Issue, in fallback order: (1) `codex exec --model gpt-5.6-sol` exited 1 on the same account-level
+  usage limit recorded above (retry window opens Aug 20th); (2) LM Studio was reachable but
+  `GPT-OSS 120B` is not among its downloaded models at all (`/api/v0/models` lists only
+  `qwen3-coder-next-mlx`, `gemma-4-e4b-it-mlx`, and two embedding models); (3) `agy` advertises
+  `gpt-oss-120b-medium` and `gemini-3.1-pro-high` in `agy models`, but print mode ignores
+  `--model` entirely — two separate probes asking the session to name its own model both answered
+  `Gemini 3.5 Flash (High)` regardless of the flag, and the first full critique invocation also
+  returned a non-sequitur (answered a question that was never asked) instead of engaging the
+  mission.
+- Detection: read every worker's actual captured output rather than trusting exit codes — the agy
+  runs exited 0 while doing the wrong thing twice over (wrong model, wrong task), exactly the
+  failure mode the "Completed Background Task" entry above documents.
+- Fallback taken: same-family Critic — `claude -p --model claude-opus-5 --effort high` — with an
+  explicit degraded-independence flag in `.scratch/planning_debate.md`, per map ticket 04's own
+  decision ("degraded-independence flag instead of silent same-family fallback"). Planner is
+  Claude Fable 5, Critic is Claude Opus 5: different models, same vendor, flagged as such.
+- Lesson: `agy models` listing a model id is not evidence `agy -p --model <id>` will run it —
+  print mode pins the IDE session's default model and silently ignores the flag. Probe with a
+  "name your own model" one-liner before trusting any agy model routing, and treat a worker that
+  answers a question you never asked as a failed invocation even at exit 0.
