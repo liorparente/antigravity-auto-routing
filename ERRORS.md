@@ -327,3 +327,38 @@
 - Root Cause: a worker's report of "verification passed" was accepted as equivalent to verification having happened, without checking *what ran it*. The 2026-08-11 lesson ("A Worker's Report About Files It Does Not Own Is a Guess") covered a worker's claims about files it never touched; this is the same failure one layer down — a worker's claim about a *check* it did run, using tooling it could not have known was known-bad.
 - Resolution: none needed beyond re-running the gate, which was already the habit for this session. Recorded so the habit does not lapse: every worker's "tests pass" / "linter clean" claim is re-run independently before being trusted, every time, regardless of how the worker phrases its confidence.
 - Lesson: "I ran it and it passed" is not the same claim as "it passed." A verification report is only as good as the tool it ran through, and a worker cannot be expected to know this repo's own known-broken corners unless told. Re-running the gate yourself costs seconds; trusting a broken report costs a shipped defect with a clean-looking paper trail.
+
+## 2026-08-14 — A "Completed" Background Task Can Report Success on a Command That Never Ran
+
+- Mission: launch two axis-specific (Standards vs. Spec) code reviews of ticket 16's journal-reader diff, each needing its own tailored prompt, via `codex review --base <commit>`.
+- Issue: `codex review --base <BRANCH>` does not accept a custom `[PROMPT]` argument alongside `--base` — it errors immediately with `the argument '--base <BRANCH>' cannot be used with '[PROMPT]'`. But the process still exited with code 0, so the harness's own task-notification reported both background commands as "completed (exit code 0)." Nothing about the notification distinguished a review that ran from a review that failed its own argument parsing before doing anything.
+- Detection: reading the actual captured output rather than trusting the completion notification — both files contained only the CLI's usage-error text, no review content at all.
+- Root Cause: treating a background task's "completed, exit code 0" status as proof of a successful review, when exit code 0 only proves the process terminated without crashing — it says nothing about whether the command it was given was even valid.
+- Resolution: relaunched both reviews via `codex exec` instead, with the prompt itself instructing the model to run `git diff <base>..HEAD` as its own first step, since `codex exec` accepts an arbitrary prompt with no `--base`-style conflict.
+- Lesson: an exit code of 0 is not evidence a command did what it was asked to do — only that it did not crash. Always read a worker's actual captured output before treating a "completed" notification as a signal the underlying work happened, especially for any CLI invocation whose flag combinations have not been exercised before in this repo. See `knowledge/institutional-memory.md`'s 2026-08-13 entry making the same point about a worker's "all green" report.
+
+## 2026-08-14 — Fallback Event: Codex 5.6 Terra Unavailable (Usage Limit)
+
+- Mission: route a Simple-complexity fix (widen ticket 16's no-clock AST self-test to close a
+  confirmed coverage gap) to `codex exec --model gpt-5.6-terra`, per the matrix's Simple-complexity
+  row.
+- Issue: `codex exec` exited 1 with `ERROR: You've hit your usage limit. ... try again at Aug 20th,
+  2026 7:47 AM.` — an account-level quota, not a flag or config error. `command -v codex` and
+  `codex --version` had both succeeded moments earlier (the rule 1 availability check only proves the
+  binary is reachable, not that the account behind it has quota left).
+- Detection: the background task notification reported "failed with exit code 1"; reading the
+  captured output showed the usage-limit message, not a crash or bad-argument error like the
+  `--base`/`[PROMPT]` conflict recorded above.
+- Fallback taken: checked LM Studio's local endpoint (`curl -s http://127.0.0.1:1234/v1/models`) per
+  rule 1.5 — reachable, with `qwen3-coder-next-mlx` loaded. Did not route there: this protocol
+  documents no agentic CLI harness for LM Studio capable of multi-file edit + verify + report (only a
+  "Sensitive" gate doing local validation), and improvising one — feeding it the prompt and applying
+  its output myself — would be self-execution wearing a routing label, not routing to a worker. Fell
+  through to the next tier the fallback chain names for Execution (Trivial/Simple): Claude Sonnet 5,
+  already proven reliable for this exact module across three prior stages in this same session.
+- Lesson: a reachable binary is not the same claim as a usable quota. The rule 1 availability check
+  (`command -v` / a health-curl) should be read as "the worker exists," never as "the worker has
+  capacity" — a CLI can pass both and still fail on the first real call. When a documented fallback
+  tier (here, LM Studio) has no defined execution harness in this protocol, treat it as unavailable
+  for that purpose rather than inventing one on the spot, and say so explicitly rather than silently
+  skipping to whichever tier is easiest to reach.
