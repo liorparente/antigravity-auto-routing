@@ -1064,7 +1064,25 @@ class ConcurrentAdoptTests(unittest.TestCase):
                 )
                 for doc, content in (("memory", "M2"), ("briefs", "B2"))
             ]
-            outcomes = [(p.wait(timeout=60), p.communicate()[1]) for p in processes]
+            # `communicate(timeout=...)` rather than `wait(timeout=...)`, and
+            # inside `try/finally`. `Popen.wait` on expiry raises
+            # `TimeoutExpired` *without* killing the child, so a hung writer
+            # would be leaked still holding `.lock`'s flock — and the
+            # comprehension this replaced aborted before reaching the second
+            # process, leaking that one too. A test for a locking bug that
+            # can strand a lock holder is the wrong test to leave lying
+            # around. `communicate` also drains the pipes, which `wait`
+            # alone can deadlock on once a child fills its stderr buffer.
+            outcomes = []
+            try:
+                for process in processes:
+                    _, stderr = process.communicate(timeout=60)
+                    outcomes.append((process.returncode, stderr))
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
 
             for code, stderr in outcomes:
                 self.assertEqual(
