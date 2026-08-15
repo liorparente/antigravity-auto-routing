@@ -13,6 +13,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -47,7 +48,7 @@ acceptance_gate_spec.loader.exec_module(acceptance_gate)
 _NOW = datetime(2026, 1, 8, tzinfo=timezone.utc)
 
 
-def _scripted_runner(scores: list[float]) -> object:
+def _scripted_runner(scores: list[float]) -> Callable[[], float]:
     """A runner that returns each of `scores` in order, one per call."""
     remaining = iter(scores)
     return lambda: next(remaining)
@@ -187,7 +188,11 @@ class ScoreboardRegressionRejectionTests(unittest.TestCase):
             )
 
         self.assertTrue(decision.threshold_met, "the benchmark score itself is excellent")
-        self.assertTrue(decision.comparison.has_regression)
+        self.assertEqual(
+            decision.comparison.regressed,
+            ("violations_per_session",),
+            "the concurrent compliance record is what regressed, not the benchmark",
+        )
         self.assertFalse(
             decision.accepted,
             "a regressed scoreboard metric rejects even when the score is excellent",
@@ -224,8 +229,7 @@ class ScoreboardRegressionRejectionTests(unittest.TestCase):
             )
 
         self.assertTrue(decision.threshold_met, "every trial individually cleared 0.8")
-        regressed_names = [c.name for c in decision.comparison.changes if c.status == "regressed"]
-        self.assertEqual(regressed_names, ["mean_benchmark_score"])
+        self.assertEqual(decision.comparison.regressed, ("mean_benchmark_score",))
         self.assertFalse(decision.accepted)
 
 
@@ -442,7 +446,19 @@ class InputValidationTests(unittest.TestCase):
 
 
 class JournalWriteFailureTests(unittest.TestCase):
-    def test_a_journal_write_failure_is_reported_and_never_flips_the_decision(self) -> None:
+    def test_a_journal_write_failure_rejects_a_batch_that_otherwise_passed(self) -> None:
+        """Every trial scores 0.9 against a 0.8 bar and no metric regresses,
+        so the only thing standing between this batch and acceptance is that
+        none of its records reached the disk.
+
+        The three assertions below are what make this fail-closed rather than
+        merely false: `threshold_met` is `True` and `has_regression` is
+        `False`, which rules out both of the other two rejection causes, so
+        `accepted is False` can only have come from `journal_complete`. The
+        on-disk check is the point of the rule — an accepted proposal whose
+        evidence is an empty journal is indistinguishable, afterwards, from
+        one backed by five excellent trials.
+        """
         reported: list[str] = []
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -470,12 +486,48 @@ class JournalWriteFailureTests(unittest.TestCase):
                 )
             finally:
                 path.chmod(0o644)
+            journalled = learning_journal.read_journal(root).replay_benchmarks
 
-        self.assertTrue(decision.accepted)
+        self.assertTrue(decision.threshold_met, "every trial cleared the bar")
+        self.assertFalse(
+            decision.comparison.has_regression, "no metric moved — nothing was written"
+        )
+        self.assertFalse(decision.journal_complete)
+        self.assertFalse(
+            decision.accepted,
+            "a gate that could not record why it opened must not open",
+        )
+        self.assertEqual(journalled, (), "the batch's evidence never reached the disk")
         self.assertEqual(len(decision.trial_records), 2)
         self.assertEqual(len(reported), 2)
         for message in reported:
             self.assertIn("failed to write learning journal record", message)
+
+    def test_a_journalled_batch_still_reports_the_journal_as_complete(self) -> None:
+        """The other side of the same switch, and what keeps the assertion
+        above from passing for the wrong reason: an identical batch against a
+        writable journal accepts, `journal_complete` is `True`, and both
+        records are on disk. Without this, `accepted is False` above would
+        also be satisfied by a gate that rejected everything.
+        """
+        reported: list[str] = []
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = acceptance_gate.evaluate_proposal(
+                _scripted_runner([0.9, 0.9]),
+                task_set="bench-v1",
+                root_dir=root,
+                now=_NOW,
+                trials=2,
+                report_journal_error=reported.append,
+            )
+            journalled = learning_journal.read_journal(root).replay_benchmarks
+
+        self.assertTrue(decision.journal_complete)
+        self.assertTrue(decision.accepted)
+        self.assertEqual(reported, [])
+        self.assertEqual(len(journalled), 2)
 
 
 if __name__ == "__main__":

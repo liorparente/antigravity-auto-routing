@@ -69,6 +69,26 @@ behaviour the ticket asks for. Neither the exception nor the rejected value
 is re-raised or inspected — a benchmark runner's failure mode is not this
 gate's business, only the fact that it failed is.
 
+**A journal write that fails rejects too.** Constructing `trials` records is
+not the same as landing them: `append_journal_record` returns its error
+rather than raising, so a full disk or an unwritable `.ralph` leaves the
+batch's evidence in memory and nowhere else. `current` is then read back
+from that same disk and sees none of it, so `compare_scoreboards` finds
+nothing moved, `has_regression` is `False`, and — before this rule —
+`accepted` came back `True` for a proposal whose entire benchmark evidence
+had just evaporated. That is precisely the silent gap ticket 26's "each
+trial reaches the journal ... so the trend has no silent gaps" forbids, and
+it is undetectable after the fact: an acceptance backed by five excellent
+trials and one backed by five vanished ones are indistinguishable once the
+process exits, and ticket 21's auto-revert is left with no post-adoption
+trend to compare against. A disk that cannot be written to is indeed an
+environment failure rather than evidence about the proposal — but a gate
+that cannot record why it opened must not open, and that is what fail-closed
+means here. The cost is the honest one: an environment failure defers a good
+proposal to the next run, loudly, rather than applying an unrecorded one
+quietly. `GateDecision.journal_complete` reports which of the two happened,
+so a caller never has to infer it from the rejection.
+
 **This module owns no clock.** `now` is always injected, matching
 `learning_scoreboard.py` and `learning_report.py`'s own guarantee. Every
 `ReplayBenchmarkRecord` this module writes is stamped from `now`, not from
@@ -164,11 +184,19 @@ class GateDecision:
     without re-deriving it. `threshold_met` is kept as its own field rather
     than folded silently into `accepted`, so a caller asking "did the
     benchmark itself pass, independent of any scoreboard regression" has an
-    answer without recomputing it from `trial_records`.
+    answer without recomputing it from `trial_records`. `journal_complete` is
+    there for the same reason and one further one: of the three causes that
+    can reject a proposal it is the only one a caller can *act* on — a
+    rejection carrying `threshold_met=True` and `journal_complete=False` says
+    the proposal was never really judged, only that the disk refused its
+    evidence, and the response is to fix the disk and re-run rather than to
+    abandon the proposal. It cannot be recovered from `trial_records`, which
+    look identical whether or not the append succeeded.
     """
 
     accepted: bool
     threshold_met: bool
+    journal_complete: bool
     trial_records: tuple[learning_journal.ReplayBenchmarkRecord, ...]
     comparison: learning_scoreboard.ScoreboardComparison
 
@@ -207,9 +235,12 @@ def evaluate_proposal(
     returns rather than raises for it, and that returned message is handed to
     `report_journal_error` — one stderr line in production, a collector a
     test can inspect — exactly as `production_invoker.
-    make_journaled_invoke_worker` does for the same failure. It never affects
-    `accepted`: a disk that cannot be written to is an environment failure,
-    not evidence about the proposal.
+    make_journaled_invoke_worker` does for the same failure. Unlike there, it
+    also clears `journal_complete` and so rejects the proposal: that module
+    journals telemetry *about* work whose result it returns regardless, while
+    here the record is the evidence and the return value is permission to
+    mutate the routing table. See this module's docstring on why a gate that
+    cannot record why it opened must not open.
     """
     _require_aware_now(now)
     _validate_trials(trials, "trials")
@@ -222,6 +253,7 @@ def evaluate_proposal(
     baseline = learning_scoreboard.read_scoreboard(root_dir, now=now, window_days=window_days)
 
     records: list[learning_journal.ReplayBenchmarkRecord] = []
+    journal_complete = True
     for _ in range(trials):
         # One `try` around both the call and the success record's
         # construction, not just the call: a runner that returns instead of
@@ -247,6 +279,11 @@ def evaluate_proposal(
             )
         error = learning_journal.append_journal_record(record, root_dir=root_dir)
         if error is not None:
+            # Every remaining trial still runs and is still attempted: one
+            # unwritable record already decides the verdict, but stopping
+            # here would also stop the trials that might yet land, and a
+            # partially-written batch is more evidence than an abandoned one.
+            journal_complete = False
             report_journal_error(error)
         records.append(record)
 
@@ -259,8 +296,9 @@ def evaluate_proposal(
     )
 
     return GateDecision(
-        accepted=threshold_met and not comparison.has_regression,
+        accepted=threshold_met and journal_complete and not comparison.has_regression,
         threshold_met=threshold_met,
+        journal_complete=journal_complete,
         trial_records=tuple(records),
         comparison=comparison,
     )

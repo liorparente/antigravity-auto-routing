@@ -369,12 +369,19 @@ def _discipline_metrics(
     )
 
 
-def _windowed_dialogues(
-    dialogues: tuple[Any, ...], *, window_start: datetime, now: datetime
+def _windowed(
+    records: tuple[Any, ...], *, window_start: datetime, now: datetime
 ) -> tuple[Any, ...]:
+    """Every record whose `timestamp` falls inside the trailing window.
+
+    Family-agnostic on purpose: it reads only `.timestamp`, which every
+    record family carries, so the dialogue and replay-benchmark families —
+    and the next one a ticket adds — share one implementation rather than a
+    per-family copy that can drift in its window arithmetic.
+    """
     return tuple(
         record
-        for record in dialogues
+        for record in records
         if _in_window(
             learning_journal.parse_wire_timestamp(record.timestamp),
             window_start=window_start,
@@ -392,7 +399,7 @@ def _critique_authenticity_metrics(
     (`learning_journal.py`). Blending them is the identical silent-blend
     `AdvisoryTelemetryRecord` warns about.
     """
-    windowed = _windowed_dialogues(dialogues, window_start=window_start, now=now)
+    windowed = _windowed(dialogues, window_start=window_start, now=now)
     probes = [record for record in windowed if record.canaries_planted >= 1]
     ordinary = [record for record in windowed if record.canaries_planted == 0]
 
@@ -431,7 +438,7 @@ def _dialogue_non_consensus_rate(
     verdict is not `"approved"` — consensus is the only thing that ends a
     dialogue at an approval, so the final round's verdict is the outcome.
     """
-    windowed = _windowed_dialogues(dialogues, window_start=window_start, now=now)
+    windowed = _windowed(dialogues, window_start=window_start, now=now)
     debated = [record for record in windowed if record.canaries_planted == 0 and record.rounds]
     non_consensus = [record for record in debated if record.rounds[-1].verdict != "approved"]
     return _ratio(
@@ -559,20 +566,6 @@ def _cost_per_completed_task_usd(
     )
 
 
-def _windowed_replay_benchmarks(
-    replay_benchmarks: tuple[Any, ...], *, window_start: datetime, now: datetime
-) -> tuple[Any, ...]:
-    return tuple(
-        record
-        for record in replay_benchmarks
-        if _in_window(
-            learning_journal.parse_wire_timestamp(record.timestamp),
-            window_start=window_start,
-            now=now,
-        )
-    )
-
-
 def _replay_benchmark_metrics(
     replay_benchmarks: tuple[Any, ...], *, window_start: datetime, now: datetime
 ) -> ReplayBenchmarkMetrics:
@@ -586,7 +579,7 @@ def _replay_benchmark_metrics(
     `MetricNoData` when the window holds no successful trial, matching every
     other `_mean`-shaped metric's no-data rule.
     """
-    windowed = _windowed_replay_benchmarks(replay_benchmarks, window_start=window_start, now=now)
+    windowed = _windowed(replay_benchmarks, window_start=window_start, now=now)
     scores = [record.score for record in windowed if record.success]
     return ReplayBenchmarkMetrics(
         mean_benchmark_score=_mean(

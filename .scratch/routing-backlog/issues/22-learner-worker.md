@@ -15,6 +15,15 @@ Two cadences:
 The modules own no clock: cadence comes from the existing scheduler, and the current time is an
 input.
 
+**This ticket owns the acceptance gate's configuration.** Ticket 18 asks for a benchmark run "several
+times — the count is configuration", and `acceptance_gate.evaluate_proposal` provides that as
+`trials` / `score_threshold` keyword arguments over `DEFAULT_TRIAL_COUNT` / `DEFAULT_SCORE_THRESHOLD`.
+Nothing reads `routing-config.json` for them, deliberately: the gate is a leaf with no caller until
+this ticket, and a config read inside it would be a second source for a value its caller already
+passes. The deep weekly run is that caller, so reading the values here — the way
+`advisory_consultation._load_dialogue_budget_config` reads `dialogue_budget.session_dialogue_cap` —
+is what finishes ticket 18's "configuration" requirement rather than leaving it at a Python default.
+
 **Blocked by:** 17, 18, 20
 
 **Status:** ready-for-agent
@@ -26,4 +35,6 @@ input.
       orchestrator path itself writes no learned state.
 - [ ] Both cadences take the current time as an input rather than reading the clock.
 - [ ] Proposals reach the tiering from ticket 20 and are never applied by the learner directly.
+- [ ] The acceptance gate's trial count and score threshold are read from `routing-config.json` and
+      passed in, not left at `acceptance_gate.py`'s module defaults.
 - [ ] Tests drive both cadences offline through the injected worker callable.

@@ -37,7 +37,11 @@ shape without bending an unrelated family's schema around it. The writer lives i
 mean over successful trials for `mean_benchmark_score`, `MetricNoData` only when the window holds
 none. The four-family enumeration was corrected in all three places named — `learning_journal.py`'s
 own module docstring, `CONTEXT.md`'s glossary, and `docs/specs/0004-learning-loop.md` — plus a fourth
-spot found in review, `learning_scoreboard._prefix_cut`'s docstring.
+spot found in review, `learning_scoreboard._prefix_cut`'s docstring. "No silent gaps" is enforced at
+both ends: a failed trial is journaled as `success=False` rather than omitted, and a trial whose
+*write* fails clears `GateDecision.journal_complete` and rejects the proposal, so the gate can never
+open on a batch the trend never received. `task_set` is carried by the record as this ticket requires
+but is still not read by any consumer — ticket 29 owns that.
 
 - [x] A journal record can carry a replay-benchmark score and the identity of the task set scored.
 - [x] The four-family enumeration is left correct everywhere it is written down — glossary, module

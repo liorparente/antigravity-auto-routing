@@ -27,7 +27,13 @@ an excellent one, including when the batch's own trials are what drags the repla
 own trend down (see `acceptance_gate.py`'s module docstring and
 `ScoreboardRegressionRejectionTests.test_a_batch_that_drags_down_its_own_benchmark_trend_regresses_too`).
 A runner failure — raising, or returning a value `ReplayBenchmarkRecord` itself refuses — is caught
-per trial and journaled as `success=False`, never re-raised and never assumed good.
+per trial and journaled as `success=False`, never re-raised and never assumed good. A *journal write*
+failure rejects too (`GateDecision.journal_complete`): the batch's evidence exists only in memory, the
+`current` board read back from disk sees none of it, so nothing regresses and the gate would otherwise
+open on evidence that no longer exists. Two follow-on tickets were filed rather than resolved here —
+29 (`mean_benchmark_score` blends task sets) and 30 (the regression check compares the batch against
+its own trials); 30 revisits the "deliberately" in the paragraph above and should be read alongside
+it.
 
 - [x] The gate runs the benchmark set a configured number of times through an injected runner.
 - [x] A proposal is accepted only when the score meets threshold and no scoreboard metric regresses.
