@@ -996,6 +996,50 @@ class DocumentChangeValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             learned_state.DocumentChange(document="memory", content=123)  # type: ignore[arg-type]
 
+    def test_rejects_a_string_that_cannot_be_encoded_as_utf8(self) -> None:
+        """`str` is not the same as "writable". An unpaired surrogate is an
+        ordinary `str` — `json.loads`, `os.fsdecode` and `surrogateescape`
+        decoding all produce them — that `content.encode("utf-8")` cannot
+        encode at all.
+
+        Unguarded, such a value survived construction and raised
+        `UnicodeEncodeError` out of `_digest` during `adopt`. That was
+        *already* a `ValueError` (`UnicodeEncodeError` → `UnicodeError` →
+        `ValueError`), so this is not a rejection-contract fix and nothing
+        was escaping — it is a fix to where and when the refusal happens,
+        and to a message that named a hashing step instead of the bad
+        argument.
+
+        Which is why the assertion below is on the message rather than on
+        the exception type: `assertRaises(ValueError)` alone passes just as
+        happily against the unguarded code, since the codec error is a
+        `ValueError` too. Asserting the type here would be a test that
+        cannot fail for the reason it names.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            learned_state.DocumentChange(document="memory", content="\ud800")
+        self.assertIn("must be encodable as UTF-8", str(ctx.exception))
+
+    def test_a_non_encodable_content_leaves_the_store_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "good")], root_dir=root, now=_NOW)
+
+            with self.assertRaises(ValueError):
+                learned_state.adopt(
+                    [learned_state.DocumentChange(document="briefs", content="\ud800")],
+                    root_dir=root,
+                    now=_NOW,
+                )
+
+            self.assertEqual(
+                sorted(p.name for p in (root / "learned-state" / "versions").iterdir()),
+                ["v0001"],
+                "the refusal must write no new version directory",
+            )
+            self.assertEqual(len(learned_state.read_history(root)), 1)
+            self.assertEqual(learned_state.read_current(root), {"memory": "good"})
+
 
 class DocumentDeltaValidationTests(unittest.TestCase):
     def test_rejects_an_unknown_document(self) -> None:

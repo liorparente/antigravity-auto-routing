@@ -380,6 +380,44 @@ def _validate_timestamp(value: object, field_name: str = "timestamp") -> None:
         ) from exc
 
 
+def _validate_content(value: object, field_name: str = "content") -> None:
+    """A string this module can actually put on disk.
+
+    `str` alone is not enough. Every byte this store writes, and every
+    digest it computes, goes through `content.encode("utf-8")` — and a
+    `str` holding an unpaired surrogate (`"\\ud800"`, reachable from
+    `json.loads`, `os.fsdecode`, or `surrogateescape` decoding) is a
+    perfectly ordinary `str` that cannot be encoded at all.
+
+    **This is not a rejection-contract fix, and an earlier draft of this
+    docstring wrongly said it was.** `UnicodeEncodeError` subclasses
+    `UnicodeError`, which subclasses `ValueError` — checked, not assumed —
+    so a caller catching `ValueError` already caught the unguarded failure.
+    Nothing escaped, unlike the `KeyError`/`TypeError`/`AttributeError`
+    cases closed in `_mapping_to_entry`, which genuinely did.
+
+    What this buys is smaller and still worth having: *where* and *when* the
+    refusal happens. Unguarded, the raise came out of `_digest` during
+    `adopt`, reporting a codec failure at a hashing step the caller never
+    invoked and cannot locate. Here it names the argument that is wrong, at
+    the moment it is supplied, which is what this module's design asks for
+    everywhere else — a malformed value should be unconstructible rather
+    than merely unwritable. The store was never at risk either way:
+    `_diff_snapshots` digests before `_write_snapshot` writes, so the
+    failure always landed with nothing on disk. That ordering is asserted by
+    `test_a_non_encodable_content_leaves_the_store_untouched` so a future
+    reordering of `adopt` cannot quietly turn it into a partial write.
+    """
+    text = _require_str(value, field_name)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            f"{field_name} must be encodable as UTF-8; it holds a character that is not "
+            f"(at position {exc.start})"
+        ) from exc
+
+
 def _digest(content: str) -> str:
     """The sha256 hex digest over `content`'s UTF-8 bytes.
 
@@ -404,7 +442,7 @@ class DocumentChange:
 
     def __post_init__(self) -> None:
         _validate_choice(self.document, LEARNED_DOCUMENTS, "document")
-        _require_str(self.content, "content")
+        _validate_content(self.content, "content")
 
 
 @dataclass(frozen=True)
