@@ -598,7 +598,23 @@ def _exclusive_store_lock(root_dir: Path) -> Iterator[None]:
     """
     path = _lock_path(root_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as stream:
+    try:
+        stream = open(path, "a")  # noqa: SIM115 - the narrow except below needs the two-step form
+    except OSError as exc:
+        # Every other on-disk anomaly this module meets is rewritten as a
+        # descriptive `ValueError` — a stray `vNNNN` entry, a missing
+        # snapshot, an unreadable document. This `open()` was the one place
+        # the convention was not applied, and it is the newest code here:
+        # making `.lock` a directory raised a bare `IsADirectoryError` out
+        # of `adopt`, and an unwritable `learned-state/` would raise
+        # `PermissionError` the same way.
+        raise ValueError(
+            f"learned-state cannot be locked for writing: {path} could not be opened "
+            f"({type(exc).__name__}). This file is this store's cross-process mutex and "
+            "holds no content, so removing it is safe if something has taken its name; "
+            "otherwise the directory is not writable by this process."
+        ) from exc
+    with stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         try:
             yield
@@ -700,11 +716,22 @@ def _read_snapshot_contents(root_dir: Path, version: int) -> dict[str, str]:
     """
     directory = _version_dir(root_dir, version)
     if not directory.is_dir():
+        # Absent and occupied are different faults and need different
+        # sentences — the same distinction `_read_documents` draws one layer
+        # down, which an earlier draft of this guard failed to draw one layer
+        # up: it tested `is_dir()` and then said "does not exist" for both,
+        # so a version path replaced by a *file* was reported as missing
+        # while it demonstrably existed.
+        what = (
+            "is not a directory"
+            if directory.exists() or directory.is_symlink()
+            else "does not exist"
+        )
         raise ValueError(
             f"learned-state is damaged: history.jsonl names version {version} but "
-            f"{directory} does not exist. Nothing here can restore it — the bytes are "
-            "the only copy. Recover that directory (it is git-tracked, so a checkout "
-            "of it is the usual answer) before adopting or rolling back again."
+            f"{directory} {what}. Nothing here can restore it — the bytes are the only "
+            "copy. Recover that directory (it is git-tracked, so a checkout of it is "
+            "the usual answer) before adopting or rolling back again."
         )
     return _read_documents(directory)
 

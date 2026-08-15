@@ -987,6 +987,28 @@ class GitTrackingTests(unittest.TestCase):
             "path that is not ignored, 0 for one that is)",
         )
 
+    def test_the_lock_file_is_gitignored(self) -> None:
+        """The other half of the same rule, and the half nothing checked.
+
+        `_exclusive_store_lock`'s mutex lives inside the very directory the
+        test above requires stay tracked. Only "content must be tracked" was
+        asserted, so deleting the `.gitignore` line would have left an empty
+        coordination file eligible for commit with the whole suite green.
+        """
+        probe = learned_state.LEARNED_STATE_RELATIVE_PATH / ".lock"
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", str(probe)],
+            cwd=REPO_ROOT,
+            check=False,
+        )
+
+        self.assertEqual(
+            result.returncode,
+            0,
+            "learned-state/.lock must be gitignored: it is process coordination "
+            "holding no content, inside a directory that is otherwise tracked",
+        )
+
 
 class ConcurrentAdoptTests(unittest.TestCase):
     """Two processes adopting different documents at once must both survive.
@@ -1143,6 +1165,43 @@ class MissingSnapshotTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as ctx:
                     learned_state.read_current(root)
                 self.assertIn("learned-state is damaged", str(ctx.exception))
+
+    def test_a_version_path_occupied_by_a_file_says_so_rather_than_missing(self) -> None:
+        """Absent and occupied need different sentences.
+
+        Every other case in this class deletes the directory, so the guard's
+        message was only ever read against a genuinely missing path. Replace
+        `v0002` with a plain file and the message claimed it "does not
+        exist" while `Path.exists()` returned `True` — the same absent-vs-
+        unreadable conflation `_read_documents` fixes one layer down,
+        recurring one layer up in the sentence rather than in the logic.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "v1")], root_dir=root, now=_NOW)
+            learned_state.adopt([_change("memory", "v2")], root_dir=root, now=_NOW)
+            version_path = root / "learned-state" / "versions" / "v0002"
+            shutil.rmtree(version_path)
+            version_path.write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.read_current(root)
+            self.assertIn("is not a directory", str(ctx.exception))
+            self.assertNotIn("does not exist", str(ctx.exception))
+
+    def test_a_lock_path_that_cannot_be_opened_is_refused_with_a_value_error(self) -> None:
+        """`_exclusive_store_lock`'s `open()` was the one on-disk anomaly
+        this module did not rewrite as a `ValueError` — and it was the
+        newest code in the file. Occupying `.lock` with a directory raised a
+        bare `IsADirectoryError` straight out of `adopt`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "learned-state").mkdir(parents=True)
+            (root / "learned-state" / ".lock").mkdir()
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.adopt([_change("memory", "x")], root_dir=root, now=_NOW)
+            self.assertIn("cannot be locked for writing", str(ctx.exception))
 
     def test_a_version_legitimately_missing_a_document_still_reads(self) -> None:
         """The absent case the guard must not swallow: v0001 holds only
