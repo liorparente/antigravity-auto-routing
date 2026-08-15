@@ -78,12 +78,11 @@ _ALL_METRIC_NAMES = (
     "cost_per_completed_task_usd",
     "mean_benchmark_score",
 )
-
-# `escalation_rate` has no producer anywhere and is permanently no-data.
-# `mean_benchmark_score` has had a producer since ticket 26
-# (`acceptance_gate.py`'s `ReplayBenchmarkRecord`s) — it reads no-data below
-# only because this suite's fixtures carry none, not because it is permanent.
-_PERMANENTLY_NO_DATA_METRICS = ("escalation_rate",)
+# Where a metric below reads no-data, that is a property of this suite's
+# fixtures and not of the metric — except `escalation_rate`, which has no
+# producer anywhere. `learning_scoreboard.py`'s module docstring is the one
+# place that distinction is recorded; a second copy here as a constant no
+# assertion reads would only be a thing to keep in step.
 
 
 def _line_for_metric(report: str, name: str) -> str:
@@ -759,6 +758,32 @@ class QuietWeekBoundaryTests(unittest.TestCase):
         report = learning_report.render_weekly_report(journal, now=_NOW)
 
         self.assertNotIn("**No activity dated in this window.**", report)
+
+    def test_a_replay_benchmark_record_suppresses_the_notice_too(self) -> None:
+        """Regression test: `_is_quiet_week`'s family tuple was never
+        extended when ticket 26 added `ReplayBenchmarkRecord`, so a window
+        fed only by acceptance-gate trials rendered "No activity dated in
+        this window" directly above a real, non-empty `mean_benchmark_score`
+        line — the banner and the metric beside it contradicting each
+        other."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1",
+                success=True,
+                score=0.9,
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            assert learning_journal.append_journal_record(record, root_dir=root) is None
+            journal = learning_journal.read_journal(root)
+
+        report = learning_report.render_weekly_report(journal, now=_NOW)
+
+        self.assertNotIn("**No activity dated in this window.**", report)
+        line = _line_for_metric(report, "mean_benchmark_score")
+        self.assertEqual(
+            line, "- mean_benchmark_score (higher is better): 0.9 (n=1) — indeterminate (was no data)"
+        )
 
     def test_a_compliance_record_with_no_session_last_activity_does_not_suppress_the_notice(
         self,

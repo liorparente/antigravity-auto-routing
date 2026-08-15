@@ -278,7 +278,7 @@ def _has_window_timestamp(
 def _is_quiet_week(
     journal: learning_journal.JournalRead, *, window_start: datetime, now: datetime
 ) -> bool:
-    """Zero records across all four families with a window-relevant
+    """Zero records across all five families with a window-relevant
     timestamp in `(window_start, now]`. Compliance records date by
     `session_last_activity`; a record with none is windowless and cannot
     make a week non-quiet. See implementation_plan.md Section 7.
@@ -288,6 +288,7 @@ def _is_quiet_week(
         (journal.outcomes, lambda record: record.timestamp),
         (journal.dialogues, lambda record: record.timestamp),
         (journal.compliance, lambda record: record.session_last_activity),
+        (journal.replay_benchmarks, lambda record: record.timestamp),
     )
     for records, timestamp_of in families:
         if _has_window_timestamp(
