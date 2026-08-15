@@ -597,22 +597,32 @@ def _exclusive_store_lock(root_dir: Path) -> Iterator[None]:
     self-healing allocation in Decision 2.
     """
     path = _lock_path(root_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # `mkdir` is inside the `try`, not above it. An earlier version of
+        # this guard wrapped only the `open()` — and every test for it
+        # occupied `.lock` itself, so nothing exercised the anomaly one
+        # directory higher. Occupying `learned-state/` with a plain file
+        # then raised a bare `FileExistsError` from this `mkdir`, walking
+        # straight past a guard written to prevent exactly that. Same
+        # absent-versus-occupied mistake as the two it replaced, one level
+        # up from where they looked.
+        path.parent.mkdir(parents=True, exist_ok=True)
         stream = open(path, "a")  # noqa: SIM115 - the narrow except below needs the two-step form
     except OSError as exc:
         # Every other on-disk anomaly this module meets is rewritten as a
         # descriptive `ValueError` — a stray `vNNNN` entry, a missing
-        # snapshot, an unreadable document. This `open()` was the one place
-        # the convention was not applied, and it is the newest code here:
-        # making `.lock` a directory raised a bare `IsADirectoryError` out
-        # of `adopt`, and an unwritable `learned-state/` would raise
-        # `PermissionError` the same way.
+        # snapshot, an unreadable document. This was the one place the
+        # convention was not applied: making `.lock` a directory raised a
+        # bare `IsADirectoryError` out of `adopt`, and an unwritable
+        # `learned-state/` raised `PermissionError` the same way.
         raise ValueError(
-            f"learned-state cannot be locked for writing: {path} could not be opened "
-            f"({type(exc).__name__}). This file is this store's cross-process mutex and "
-            "holds no content, so removing it is safe if something has taken its name; "
-            "otherwise the directory is not writable by this process."
+            f"learned-state cannot be locked for writing: {path} could not be prepared "
+            f"({type(exc).__name__}). Two things have to work here and either can be the "
+            f"one that failed — {path.parent} must be a directory this process can write "
+            f"to, and {path.name} must be openable within it. That file is this store's "
+            "cross-process mutex and holds no content, so removing it is safe if "
+            "something has taken its name; a non-directory or an unwritable directory at "
+            "the path above is the other cause."
         ) from exc
     with stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_EX)

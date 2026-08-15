@@ -1203,6 +1203,24 @@ class MissingSnapshotTests(unittest.TestCase):
                 learned_state.adopt([_change("memory", "x")], root_dir=root, now=_NOW)
             self.assertIn("cannot be locked for writing", str(ctx.exception))
 
+    def test_a_store_directory_occupied_by_a_file_is_refused_with_a_value_error(self) -> None:
+        """The anomaly one directory higher than the test above.
+
+        The first version of the lock guard wrapped only `open()`, and every
+        test for it occupied `.lock` itself — so the shape held constant was
+        "the anomaly sits at the lock's own path". Occupying `learned-state/`
+        instead makes the *`mkdir`* fail, one line earlier, and a bare
+        `FileExistsError` walked straight past a guard written to prevent
+        exactly that.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "learned-state").write_text("occupied by a file", encoding="utf-8")
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.adopt([_change("memory", "x")], root_dir=root, now=_NOW)
+            self.assertIn("cannot be locked for writing", str(ctx.exception))
+
     def test_a_version_legitimately_missing_a_document_still_reads(self) -> None:
         """The absent case the guard must not swallow: v0001 holds only
         `memory`, so `briefs` has nothing at its path and is simply not in
