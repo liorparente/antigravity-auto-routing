@@ -74,11 +74,15 @@ is that property, not a list of the instances anyone happened to think of.
 Three drafts of this paragraph enumerated instances and each undercounted;
 the property cannot.
 
-Worked examples of each half, all confirmed by running them: failing
-`is_dir()` — a **file** named `v0001` under `versions/`, a symlink pointing
-at a file, or a dangling symlink, any of which leaves `adopt` allocating
-version 1 and colliding identically, forever (a symlink to a *directory*
-passes `is_dir()` and is counted, so it does not collide). Failing the
+Worked examples of each half, all confirmed by running them: failing the
+directory test — a **file** named `v0001` under `versions/`, a symlink
+pointing at a file, or a dangling symlink, any of which leaves `adopt`
+allocating version 1 and colliding identically, forever. A symlink to a
+*reachable* directory is counted like any other version and does not
+collide; one whose target sits behind an unreadable ancestor is neither —
+the scan cannot know what it is, so it raises rather than guessing, which
+is why the entry test is `os.stat` and not `Path.is_dir()` (that predicate
+answered `False` for the unreachable case and quietly undercounted). Failing the
 regex — a directory named with different case, e.g. `V0001`, on a
 case-insensitive filesystem (macOS's default), where the filesystem
 resolves `V0001` and `v0001` to one path for `mkdir`'s purposes while the
@@ -714,7 +718,25 @@ def _highest_version_on_disk(root_dir: Path) -> int:
     with _filesystem_damage_is_a_value_error(f"listing {versions_dir}"):
         entries = sorted(versions_dir.iterdir())
     for entry in entries:
-        if not entry.is_dir():
+        # `os.stat`, not `entry.is_dir()`, for the reason `_read_snapshot_
+        # contents` gives at length: `is_dir()` swallows `PermissionError`
+        # and answers `False`, so an entry whose *target* sits behind an
+        # unreadable ancestor — a `v0009` symlink into a mode-000 tree —
+        # was counted as absent, and this function returned a number too
+        # low with nothing raised. `read_history` cannot shield this one:
+        # it never touches `versions/`, so a fault scoped to a single entry
+        # under it is invisible until here.
+        try:
+            node = os.stat(entry)
+        except FileNotFoundError:
+            # A dangling symlink, or an entry deleted since the listing.
+            # Genuinely absent, and skipping it is the documented behaviour
+            # (see Decision 2's worked examples: it defeats the scan and
+            # collides, loudly, at `_write_snapshot`).
+            continue
+        except OSError as exc:
+            raise _damage_error(f"inspecting {entry}", exc) from exc
+        if not stat.S_ISDIR(node.st_mode):
             continue
         match = _VERSION_DIRNAME_RE.fullmatch(entry.name)
         if match is None:

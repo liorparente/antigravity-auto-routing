@@ -1097,6 +1097,51 @@ class FilesystemDamageTests(unittest.TestCase):
     its own remedy).
     """
 
+    def test_a_version_entry_whose_target_is_unreachable_refuses_rather_than_undercounting(
+        self,
+    ) -> None:
+        """`read_history` cannot shield the version scan from this one.
+
+        Round 15's argument for leaving `entry.is_dir()` alone was that
+        `read_history` fails first on the same fault. That holds only when
+        the fault covers `learned-state/` as a whole — `read_history` never
+        touches `versions/`, so a fault scoped to a single entry under it is
+        invisible until the scan reaches it. A `v0009` symlink into a
+        mode-000 tree made `is_dir()` answer `False`, so the scan returned a
+        highest-version number too low with nothing raised.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            versions = root / "learned-state" / "versions"
+            versions.mkdir(parents=True)
+            (versions / "v0003").mkdir()
+            blocked = root / "blocked"
+            blocked.mkdir()
+            (blocked / "real").mkdir()
+            (versions / "v0009").symlink_to(blocked / "real", target_is_directory=True)
+            blocked.chmod(0o000)
+            try:
+                self.assertEqual(
+                    learned_state.read_history(root), (), "history is readable here"
+                )
+                with self.assertRaises(ValueError) as ctx:
+                    learned_state._highest_version_on_disk(root)
+                self.assertIn("damaged or unusable", str(ctx.exception))
+            finally:
+                blocked.chmod(0o755)
+
+    def test_a_version_entry_symlinked_to_a_reachable_directory_is_counted(self) -> None:
+        """The other half, so the fix cannot be "raise on every symlink"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            versions = root / "learned-state" / "versions"
+            versions.mkdir(parents=True)
+            target = root / "elsewhere"
+            target.mkdir()
+            (versions / "v0009").symlink_to(target, target_is_directory=True)
+
+            self.assertEqual(learned_state._highest_version_on_disk(root), 9)
+
     def test_an_unlistable_version_directory_refuses_rather_than_reading_as_empty(
         self,
     ) -> None:
