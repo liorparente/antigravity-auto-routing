@@ -1341,6 +1341,49 @@ class MissingSnapshotTests(unittest.TestCase):
                 learned_state.adopt([_change("memory", "x")], root_dir=root, now=_NOW)
             self.assertIn("cannot be locked for writing", str(ctx.exception))
 
+    def test_an_unknowable_version_path_is_not_reported_as_missing(self) -> None:
+        """There are three states, not two: present, absent, and unknowable.
+
+        `Path.is_dir()`/`.exists()`/`.is_symlink()` collapse the third into
+        the second — each swallows `PermissionError` and answers `False`. So
+        removing the search bit from `versions/` produced "does not exist"
+        for a version directory that was completely intact, and sent the
+        operator to `git checkout` to recover data that was never lost, over
+        a permission bit git does not track on directories. `os.stat` raises
+        instead, so the unknowable case is described as what it is.
+
+        The assertion is on the message, not the exception type: every one
+        of the four states raises `ValueError`, so asserting the type would
+        pass identically against the bug.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "hello")], root_dir=root, now=_NOW)
+            versions = root / "learned-state" / "versions"
+            versions.chmod(0o000)
+            try:
+                with self.assertRaises(ValueError) as ctx:
+                    learned_state.read_current(root)
+                self.assertNotIn("does not exist", str(ctx.exception))
+                self.assertIn("damaged or unusable", str(ctx.exception))
+            finally:
+                versions.chmod(0o755)
+
+            # And the data really was intact all along.
+            self.assertEqual(learned_state.read_current(root), {"memory": "hello"})
+
+    def test_a_version_path_that_is_a_dangling_symlink_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "hello")], root_dir=root, now=_NOW)
+            version_path = root / "learned-state" / "versions" / "v0001"
+            shutil.rmtree(version_path)
+            version_path.symlink_to(root / "nowhere")
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.read_current(root)
+            self.assertIn("dangling symlink", str(ctx.exception))
+
     def test_a_version_legitimately_missing_a_document_still_reads(self) -> None:
         """The absent case the guard must not swallow: v0001 holds only
         `memory`, so `briefs` has nothing at its path and is simply not in

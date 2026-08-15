@@ -218,6 +218,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -810,25 +811,36 @@ def _read_snapshot_contents(root_dir: Path, version: int) -> dict[str, str]:
     and it now fails the same way.
     """
     directory = _version_dir(root_dir, version)
-    if not directory.is_dir():
-        # Absent and occupied are different faults and need different
-        # sentences — the same distinction `_read_documents` draws one layer
-        # down, which an earlier draft of this guard failed to draw one layer
-        # up: it tested `is_dir()` and then said "does not exist" for both,
-        # so a version path replaced by a *file* was reported as missing
-        # while it demonstrably existed.
+    # `os.stat`, not `Path.is_dir()`, and that is the whole point. There are
+    # *three* states here, not two: the version is there, it is genuinely
+    # absent, or the answer is unknowable — and `Path.is_dir()`/`.exists()`/
+    # `.is_symlink()` collapse the third into the second, because every one
+    # of them swallows `PermissionError` and returns `False`. Removing the
+    # search bit from `versions/` therefore produced "does not exist" for a
+    # directory that was entirely intact, sending an operator to `git
+    # checkout` to recover data that was never lost, for a permission bit
+    # git does not track on directories. `os.stat` raises instead, so the
+    # unknowable case reaches the damage converter and is described as what
+    # it is.
+    try:
+        node = os.stat(directory)
+    except FileNotFoundError:
         what = (
-            "is not a directory"
-            if directory.exists() or directory.is_symlink()
-            else "does not exist"
+            "is a dangling symlink" if os.path.islink(directory) else "does not exist"
         )
-        raise ValueError(
-            f"learned-state is damaged: history.jsonl names version {version} but "
-            f"{directory} {what}. Nothing here can restore it — the bytes are the only "
-            "copy. Recover that directory (it is git-tracked, so a checkout of it is "
-            "the usual answer) before adopting or rolling back again."
-        )
-    return _read_documents(directory)
+    except OSError as exc:
+        raise _damage_error(f"inspecting {directory}", exc) from exc
+    else:
+        if stat.S_ISDIR(node.st_mode):
+            return _read_documents(directory)
+        what = "is not a directory"
+
+    raise ValueError(
+        f"learned-state is damaged: history.jsonl names version {version} but "
+        f"{directory} {what}. Nothing here can restore it — the bytes are the only "
+        "copy. Recover that directory (it is git-tracked, so a checkout of it is "
+        "the usual answer) before adopting or rolling back again."
+    )
 
 
 def _write_snapshot(root_dir: Path, version: int, documents: Mapping[str, str]) -> None:
