@@ -12,6 +12,10 @@
 
 **Blocked by:** 18, 19
 
+**Note:** `learned_state.adopt` refuses (with a `ValueError`) a change identical to the document's
+current content — tier application must treat that refusal as a successful no-op, not a failure,
+since the intended state was already current.
+
 **Status:** ready-for-agent
 
 - [ ] A memory lesson applies without a gate and appears in the report.

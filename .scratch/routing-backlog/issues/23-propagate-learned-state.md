@@ -10,7 +10,9 @@ it does not get a second, parallel one.
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent
+**Status:** ready-for-agent. `learned_state.current_version_dir` returns a `pathlib.Path`, and
+`install.sh` is pure bash with nothing bridging Python to shell yet; this ticket owns resolving the
+current version from a shell script.
 
 - [ ] Adopted learned state is synchronized by the existing install mechanism.
 - [ ] The install's atomicity holds: a failure mid-sync rolls back every touched file, learned state
