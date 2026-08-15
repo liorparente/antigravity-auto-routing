@@ -10,7 +10,8 @@ it does not get a second, parallel one.
 
 **Blocked by:** 20
 
-**Status:** ready-for-agent. `learned_state.current_version_dir` returns a `pathlib.Path`, and
+**Status:** ready-for-agent. `learned_state.current_version_dir` returns a `pathlib.Path | None` —
+`None` when nothing has ever been adopted, which the sync must handle rather than assume — and
 `install.sh` is pure bash with nothing bridging Python to shell yet; this ticket owns resolving the
 current version from a shell script.
 

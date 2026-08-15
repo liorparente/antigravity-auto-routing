@@ -80,14 +80,21 @@ hand-created stray entry, so severity is low, but each reproduces the exact
 permanent-brick shape the self-heal above exists to prevent, entering by a
 side door. What remains genuinely unreachable in ordinary operation is a
 numbering bug in this module itself, or direct tampering with a `vNNNN`
-name that *does* match the regex; for all three cases alike,
+name that *does* match the regex. In every one of these cases
 `_write_snapshot` never overwrites — a collision on `mkdir` raises, and the
 raise is a `ValueError`, not a bare `FileExistsError` naming an absolute
-path with no guidance: it says plainly that something already occupies this
-version's directory name, that the store cannot allocate past it, and that
-a human must inspect and remove the offending entry by hand — never
-automatically, for the same forensics reason the orphan case above is left
-in place.
+path with no guidance.
+
+What that `ValueError` must not do is give one instruction for causes that
+need two. Removing the offending entry is right when it is junk — a stray
+file, a case-variant name — because nothing adopted it and nothing refers
+to it. It is wrong when the collision came from a numbering bug here,
+because then the directory in the way is a *legitimate* snapshot
+`history.jsonl` names, and deleting it destroys adopted history to work
+around a fault that only a code change actually fixes. That would be the
+same "deletes data on a guess" the orphan case above is deliberately
+written to avoid. So the message distinguishes the two, and this module
+still removes nothing on its own in either.
 
 **Decision 3 — `roll_back` undoes the most recent adoption that has not
 already been undone.** The tempting alternative, "restore version N-1",
@@ -442,8 +449,8 @@ class VersionEntry:
     no clock (see the module docstring's no-clock guarantee), so a default
     that silently read a live clock would be exactly the leak that
     guarantee forbids. Every `VersionEntry` this module builds passes all
-    six fields explicitly, always derived from the caller's own injected
-    `now`.
+    six fields explicitly, and the one field a clock could ever supply —
+    `timestamp` — is always rendered from the caller's own injected `now`.
     """
 
     kind: Literal["adopt", "rollback"]
@@ -543,9 +550,14 @@ def _write_snapshot(root_dir: Path, version: int, documents: Mapping[str, str]) 
         raise ValueError(
             f"cannot adopt version {version}: {directory} already exists. "
             "Something already occupies this version's directory name, so "
-            "the store cannot allocate past it. This is permanent until a "
-            "human inspects the directory and removes it — nothing in this "
-            "module deletes it automatically."
+            "the store cannot allocate past it and a retry will collide "
+            "identically. Nothing is removed automatically, and what should "
+            "be removed depends on what the entry is: a stray file, or a "
+            "version name differing only in case, is junk and can be "
+            "deleted. A directory that `history.jsonl` actually names is a "
+            "real adopted snapshot — deleting it destroys adopted history, "
+            "and the fault is then a version-numbering bug in this module "
+            "rather than anything on disk."
         ) from exc
     for document, content in documents.items():
         (directory / document).write_bytes(content.encode("utf-8"))
