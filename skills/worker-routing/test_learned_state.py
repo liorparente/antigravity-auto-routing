@@ -821,6 +821,33 @@ class ReadHistoryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 learned_state.read_history(root)
 
+    def test_read_history_raises_a_value_error_on_a_line_that_is_valid_json_but_not_an_object(
+        self,
+    ) -> None:
+        """The outer case of a guard the inner case already had.
+
+        `_mapping_to_entry` checked that each `documents` *item* was a
+        `Mapping` from the day it was written, but never checked the line
+        itself. Confirmed by experiment before this fix: every one of these
+        shapes is valid JSON, so `json.loads` succeeded and
+        `_check_required_keys` then died on `mapping.keys()` with an
+        `AttributeError` — a third incidental exception type escaping this
+        module's one rejection contract, after the `KeyError` and
+        `TypeError` already closed above. Seven review rounds passed over
+        this reader without noticing, because every corrupted-line test
+        written for it had until now started from a JSON *object*.
+        """
+        for line in ("null", "42", '"a string"', "true", "[1, 2, 3]"):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                history_path = root / "learned-state" / "history.jsonl"
+                history_path.parent.mkdir(parents=True)
+                history_path.write_text(line + "\n", encoding="utf-8")
+
+                with self.assertRaises(ValueError) as ctx:
+                    learned_state.read_history(root)
+                self.assertIn("must be an object on the wire", str(ctx.exception))
+
     def test_read_history_raises_a_value_error_on_a_documents_item_that_is_a_bare_string(
         self,
     ) -> None:

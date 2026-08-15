@@ -686,20 +686,35 @@ def _entry_to_mapping(entry: VersionEntry) -> dict[str, object]:
     }
 
 
-def _mapping_to_entry(mapping: Mapping[str, object]) -> VersionEntry:
-    """Rehydrate one raw wire object (one parsed `history.jsonl` line) into
+def _mapping_to_entry(mapping: object) -> VersionEntry:
+    """Rehydrate one raw wire value (one parsed `history.jsonl` line) into
     a `VersionEntry`.
 
-    `_check_required_keys` runs first, on `mapping` itself and then on each
-    item of its `documents` list, before any `[...]` subscript below can
-    raise the wrong exception type for a hand-corrupted line — a `KeyError`
-    for a missing top-level key, or a `TypeError` for a `documents` item
-    that is not an object at all (`item["document"]` on a bare string).
-    Both are wrong under this module's one rejection contract: every
+    Three checks run before any `[...]` subscript or attribute access can
+    raise the wrong exception type for a hand-corrupted line: that the line
+    parsed to an object at all, that the object carries every required key,
+    and the same pair again for each item of its `documents` list. Without
+    the first, a line that is valid JSON but not an object — `null`, `42`,
+    `"text"`, `true`, `[1,2,3]` — reached `_check_required_keys` and died on
+    `mapping.keys()` with an `AttributeError`; without the second, a missing
+    key raised `KeyError`; without the third, a `documents` item that is a
+    bare string raised `TypeError` from `item["document"]`.
+
+    All three are wrong under this module's one rejection contract: every
     validator in this file raises `ValueError`, and a caller catching that
-    contract should not have to also catch two more exception types this
-    reader alone happens to produce.
+    contract should not have to also catch three more exception types this
+    reader alone happens to produce. The object-shape check existed for
+    `documents` items from the start and simply had no counterpart for the
+    line itself — the outer case of a guard the inner case already had. It
+    is also the one `learning_journal.read_journal` names explicitly among
+    the malformed-line shapes it handles ("it parses to something other
+    than a JSON object"), which this reader mirrors in spirit while
+    answering loudly rather than skipping.
     """
+    if not isinstance(mapping, Mapping):
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+            f"a history entry must be an object on the wire, got {type(mapping).__name__}"
+        )
     _check_required_keys(mapping, _ENTRY_REQUIRED_KEYS, "history entry")
 
     raw_documents = mapping["documents"]
