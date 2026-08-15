@@ -1,5 +1,26 @@
 # Worker Routing Fallbacks
 
+## 2026-08-15 — Voting Quota Paradox (Banzhaf Power Collapse in Multi-Agent Ensembles)
+
+- Mission: Design weighted multi-agent jury system for Council Review with Claude Opus (45%), Codex Sol (45%), and Gemini Pro (10%).
+- Failure: Game-theoretic mathematical analysis proved that under simple binary majority ($q=0.50$), $(0.45, 0.45, 0.10)$ yields a Banzhaf Power Index of $(1/3, 1/3, 1/3)$, giving Gemini (10%) equal voting power to Claude and Codex. Under supermajority ($q \ge 0.60$), Gemini becomes a 0% power Dummy Player.
+- Resolution: Adopted baseline weights of $(0.40, 0.40, 0.20)$ combined with continuous Soft-Confidence Scoring ($s_i \in [-1.0, +1.0]$) and asymmetric loss multiplier ($1.5\times$ on negative scores).
+- Lesson: Never use naive binary majority thresholds for asymmetric model weightings. Always verify Banzhaf power distributions or use continuous soft-confidence aggregation.
+
+## 2026-08-15 — Subprocess Zombie Process Leak in Asyncio Process Calls
+
+- Mission: Implement live CLI adapters for Council Review providers with timeout deadlines.
+- Failure: In `provider_adapters.py`, calling `proc.kill()` upon `asyncio.TimeoutError` failed to reap child process exit status, leaving zombie processes in macOS process table.
+- Resolution: Appended mandatory `await proc.wait()` immediately following `proc.kill()`.
+- Lesson: In Python `asyncio.subprocess`, `proc.kill()` sends `SIGKILL` but does not reap the process table entry; always pair `proc.kill()` with `await proc.wait()`.
+
+## 2026-08-15 — LM Studio MLX Thinking Mode Token Budget Starvation
+
+- Mission: Generate full-page landing page code locally with `lmstudio-community/Qwen3.8-27B-MLX-6bit`.
+- Failure: Model reasoning chains in thinking mode consumed thousands of tokens, exhausting small `max_tokens` limits (3,000–6,000) before emitting `<!DOCTYPE html>`.
+- Resolution: Required `max_tokens >= 16384` for code generation with thinking enabled, or setting `reasoning_effort="low"` / instructing direct code output.
+- Lesson: For reasoning-enabled local models in agent pipelines, allocate ample token budget for internal chain-of-thought overhead.
+
 ## 2026-07-25 — `agy` deep-research worker unavailable
 
 - Mission: ultra-high-effort review of the external `implementation_plan.md`.
