@@ -7974,6 +7974,44 @@ class ManagedFileClosureTests(unittest.TestCase):
                         f"harness that import raises ModuleNotFoundError",
                     )
 
+    def test_every_production_module_in_the_skill_directory_is_managed(self) -> None:
+        """Closure under imports is not enough on its own: it can only see a
+        module something already imports.
+
+        A *leaf* module — one shipped before the ticket that calls it — has no
+        managed importer, so the test above walks straight past it and the
+        installer omits it silently. That is exactly how `acceptance_gate.py`
+        (ticket 18) shipped unmanaged: its eventual caller is ticket 22's
+        learner-worker, still unwritten, so nothing in the directory imported
+        it yet. `learning_report.py` had reached the same gap one ticket
+        earlier for the same reason.
+
+        The invariant that actually holds is simpler than closure and does not
+        depend on who imports whom: every non-test module here is production
+        code, and production code that the installer does not copy does not
+        exist on an installed harness. A module deliberately kept out of an
+        install would have to be excluded here explicitly — which is the
+        point, since writing that exclusion is a decision, and forgetting a
+        line in a bash array is not.
+        """
+        managed = set(self._managed())
+        present = {
+            path.name
+            for path in SKILL_DIR.glob("*.py")
+            if not path.name.startswith("test_")
+        }
+        self.assertTrue(present, "no production modules found to check")
+
+        for name in sorted(present):
+            with self.subTest(module=name):
+                self.assertIn(
+                    name,
+                    managed,
+                    f"{name} is production code in {SKILL_DIR.name}/ but "
+                    f"install.sh's MANAGED_FILES does not propagate it — it "
+                    f"will be absent from every installed harness",
+                )
+
     def test_uninstall_removes_every_file_install_manages(self) -> None:
         """The mirror image, and the same drift in the other direction: a
         module added to `MANAGED_FILES` and forgotten in `uninstall.sh` is

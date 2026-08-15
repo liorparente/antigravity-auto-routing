@@ -39,7 +39,7 @@ CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 # forgotten here is visible; `test_routing.py`'s `ManagedFileClosureTests`
 # additionally asserts this list covers every managed file, so the drift that
 # left `learning_journal.py` behind cannot recur silently in either script.
-INSTALLED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py protocol.md routing-config.json)
+INSTALLED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py acceptance_gate.py protocol.md routing-config.json)
 
 # Same versionless sentinel markers install.sh writes/looks for.
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
