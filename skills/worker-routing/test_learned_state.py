@@ -1077,6 +1077,77 @@ class ConcurrentAdoptTests(unittest.TestCase):
             )
 
 
+class FilesystemDamageTests(unittest.TestCase):
+    """Every path level, every entry point: an `OSError` is a `ValueError`.
+
+    Six review rounds found this same defect six times, each at whatever
+    path level that round happened to look at — a document, a version
+    directory, the lock file, the lock file's parent, `versions/`,
+    `learned-state/` itself — and each fix closed one level while the next
+    round found the one above it. The enumeration was not going to
+    terminate: seven paths under `root_dir`, each able to be absent,
+    occupied by the wrong kind of node, or unreadable, through four public
+    entry points.
+
+    So `_filesystem_damage_is_a_value_error` states the property instead,
+    and this class drives the cells that were still bare when it was
+    written. Two failures are deliberately *not* damage and are asserted
+    elsewhere: a missing `history.jsonl` (an empty store) and a version
+    directory that already exists (`_write_snapshot`'s collision, which has
+    its own remedy).
+    """
+
+    def _read_paths_refuse(self, root: Path) -> None:
+        for name, call in (
+            ("read_current", learned_state.read_current),
+            ("read_history", learned_state.read_history),
+            ("current_version_dir", learned_state.current_version_dir),
+        ):
+            with self.subTest(entry_point=name), self.assertRaises(ValueError):
+                call(root)
+
+    def test_a_store_directory_occupied_by_a_file_refuses_on_every_read_path(self) -> None:
+        """`adopt`/`roll_back` were guarded through the lock; the read-only
+        entry points never went through it, so the identical fault raised a
+        bare `NotADirectoryError` there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "learned-state").write_text("occupied by a file", encoding="utf-8")
+            self._read_paths_refuse(root)
+
+    def test_a_versions_directory_occupied_by_a_file_refuses_on_adopt(self) -> None:
+        """`NotADirectoryError` is a *sibling* of `FileExistsError` under
+        `OSError`, not a subclass, so `_write_snapshot`'s collision clause
+        never saw this one."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "learned-state").mkdir(parents=True)
+            (root / "learned-state" / "versions").write_text("occupied", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                learned_state.adopt([_change("memory", "x")], root_dir=root, now=_NOW)
+
+    def test_an_unreadable_document_file_refuses_rather_than_raising_permission_error(
+        self,
+    ) -> None:
+        """`is_file()` answers what kind of node it is, never whether it can
+        be read. A mode-000 regular file passed it and then `read_bytes()`
+        raised a bare `PermissionError` — while the docstring above it
+        claimed to convert "exists but is not a readable file"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "x")], root_dir=root, now=_NOW)
+            document = root / "learned-state" / "versions" / "v0001" / "memory"
+            document.chmod(0o000)
+            try:
+                with self.assertRaises(ValueError):
+                    learned_state.read_current(root)
+            finally:
+                # Restore, or TemporaryDirectory's cleanup fails on some
+                # platforms and masks the result of the test above.
+                document.chmod(0o644)
+
+
 class MissingSnapshotTests(unittest.TestCase):
     """A snapshot `history.jsonl` names, gone from disk.
 

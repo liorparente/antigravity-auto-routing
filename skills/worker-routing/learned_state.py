@@ -555,6 +555,59 @@ def _version_dir(root_dir: Path, version: int) -> Path:
     return _versions_dir(root_dir) / f"v{version:04d}"
 
 
+@contextmanager
+def _filesystem_damage_is_a_value_error(doing: str) -> Iterator[None]:
+    """Convert any `OSError` from the store's own filesystem into this
+    module's rejection contract.
+
+    **This exists because patching the levels one at a time did not work.**
+    Six review rounds found the same defect six times — a bare OS exception,
+    or a message that named the wrong fault, at whichever path level that
+    round happened to look at: a document, a version directory, the lock
+    file, the lock file's parent, `versions/`, `learned-state/` itself. Each
+    fix closed the level it was written for and the next round found the
+    next level up. The enumeration was never going to terminate, because
+    every one of the seven paths under `root_dir` can independently be
+    absent, be occupied by the wrong kind of node, or be unreadable, through
+    any of four public entry points.
+
+    So this stops enumerating and states the property instead, the same
+    move Decision 2 makes for the version scan: **every `OSError` raised
+    while touching this store's own files is damage, and damage is a
+    `ValueError` here.** A new path level, or a failure mode nobody has
+    thought of, is covered the moment its access goes through this — there
+    is no list to keep in step.
+
+    The exceptions to that rule are the two failures that are *not* damage
+    and are handled before this ever sees them: a missing `history.jsonl`
+    (an empty store, which `read_history` answers with `()`), and a version
+    directory that already exists (`_write_snapshot`'s collision, which has
+    its own message because the remedy is specific). Both are caught
+    upstream of this converter deliberately.
+    """
+    try:
+        yield
+    except OSError as exc:
+        raise _damage_error(doing, exc) from exc
+
+
+def _damage_error(doing: str, exc: OSError) -> ValueError:
+    """The one sentence every filesystem failure in this store produces.
+
+    A plain function as well as the context manager above, because
+    `read_history` has to tell one `OSError` apart from the rest before
+    converting (a missing file is an empty store, not damage) and reads
+    better with a direct `raise` than with a re-raise inside a `with`.
+    """
+    return ValueError(
+        f"learned-state is damaged or unusable: {doing} failed "
+        f"({type(exc).__name__}: {exc}). Something under this store's directory is "
+        "missing, is the wrong kind of file, or cannot be read or written by this "
+        "process. The versions are git-tracked, so a checkout is the usual repair; "
+        "nothing here is deleted or recreated automatically."
+    )
+
+
 def _lock_path(root_dir: Path) -> Path:
     return _learned_state_dir(root_dir) / _LOCK_FILENAME
 
@@ -649,7 +702,9 @@ def _highest_version_on_disk(root_dir: Path) -> int:
     if not versions_dir.is_dir():
         return 0
     highest = 0
-    for entry in versions_dir.iterdir():
+    with _filesystem_damage_is_a_value_error(f"listing {versions_dir}"):
+        entries = sorted(versions_dir.iterdir())
+    for entry in entries:
         if not entry.is_dir():
             continue
         match = _VERSION_DIRNAME_RE.fullmatch(entry.name)
@@ -685,7 +740,13 @@ def _read_documents(directory: Path) -> dict[str, str]:
     for name in sorted(LEARNED_DOCUMENTS):
         path = directory / name
         if path.is_file():
-            documents[name] = path.read_bytes().decode("utf-8")
+            # `is_file()` answers what kind of node it is, never whether it
+            # can be read: a mode-000 regular file passes it and then
+            # `read_bytes()` raises `PermissionError`. This docstring used
+            # to claim it turned "exists but is not a readable file" into a
+            # `ValueError` while covering only the type half of that.
+            with _filesystem_damage_is_a_value_error(f"reading {path}"):
+                documents[name] = path.read_bytes().decode("utf-8")
         elif path.exists() or path.is_symlink():
             # `is_symlink()` as well as `exists()`: a dangling symlink is
             # not "nothing there", but `exists()` follows the link and says
@@ -769,8 +830,15 @@ def _write_snapshot(root_dir: Path, version: int, documents: Mapping[str, str]) 
             "is a stray entry and removing it lets the store allocate "
             "again."
         ) from exc
+    except OSError as exc:
+        # `FileExistsError` is the one collision with its own remedy; every
+        # other `OSError` here is ordinary damage. `NotADirectoryError` is
+        # its sibling under `OSError`, not its subclass, so `versions/`
+        # occupied by a plain file escaped the clause above entirely.
+        raise _damage_error(f"creating {directory}", exc) from exc
     for document, content in documents.items():
-        (directory / document).write_bytes(content.encode("utf-8"))
+        with _filesystem_damage_is_a_value_error(f"writing {directory / document}"):
+            (directory / document).write_bytes(content.encode("utf-8"))
 
 
 def _diff_snapshots(before: Mapping[str, str], after: Mapping[str, str]) -> tuple[DocumentDelta, ...]:
@@ -953,7 +1021,13 @@ def read_history(root_dir: Path) -> tuple[VersionEntry, ...]:
     try:
         stream = open(path, "rb")  # noqa: SIM115 - narrow except below needs the two-step form
     except FileNotFoundError:
+        # The one `OSError` here that is not damage: no history file means
+        # no version has ever been adopted. Every other one — an unreadable
+        # file, a `learned-state/` occupied by a plain file so this path has
+        # a non-directory component — is damage and goes to the converter.
         return ()
+    except OSError as exc:
+        raise _damage_error(f"opening {path}", exc) from exc
     with stream:
         fcntl.flock(stream.fileno(), fcntl.LOCK_SH)
         try:
