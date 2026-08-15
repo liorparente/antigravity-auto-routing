@@ -573,9 +573,11 @@ def _replay_benchmark_metrics(
     trials' scores. A failed trial (`success=False`, `score=None`) is real
     evidence the gate must not lose — it is what makes a runner failure
     "fails closed" rather than "silently absent" — but it has no score to
-    average in; excluding it from this mean is not the same as discarding it,
-    since `learning_report.py` renders `sample_size` from the same window and
-    a future metric is free to read the excluded trials for a failure rate.
+    average in. Excluding it is not the same as discarding it: the record
+    stays in the journal, and a future metric is free to read the excluded
+    trials for a failure rate. `sample_size` is no help there — `_mean` sets
+    it from the values it averaged, so it counts successes only, and the
+    rendered line is identical whether or not a failed trial sat beside them.
     `MetricNoData` when the window holds no successful trial, matching every
     other `_mean`-shaped metric's no-data rule.
     """

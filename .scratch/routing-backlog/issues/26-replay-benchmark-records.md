@@ -35,9 +35,14 @@ deliberately makes `("tests", "planner")` unconstructible, and a score has nowhe
 shape without bending an unrelated family's schema around it. The writer lives in `acceptance_gate.py`
 (ticket 18), its sole caller. `learning_scoreboard.compute_scoreboard` now computes a real windowed
 mean over successful trials for `mean_benchmark_score`, `MetricNoData` only when the window holds
-none. The four-family enumeration was corrected in all three places named — `learning_journal.py`'s
-own module docstring, `CONTEXT.md`'s glossary, and `docs/specs/0004-learning-loop.md` — plus a fourth
-spot found in review, `learning_scoreboard._prefix_cut`'s docstring. "No silent gaps" is enforced at
+none. The four-family enumeration was corrected in the three places this ticket
+named — `learning_journal.py`'s own module docstring, `CONTEXT.md`'s glossary, and
+`docs/specs/0004-learning-loop.md` — and in roughly seven more that review kept turning up: inside
+`learning_journal.py` alone the `GroundTruth` comment, `_validate_timestamp`'s and `TaskLabel`'s
+docstrings, the `JournalRecord` comment and the reader's section header, plus
+`learning_scoreboard._prefix_cut`, `learning_report._is_quiet_week`, and two sites in
+`test_routing.py`. Treat the three-site list as the ticket's starting guess, not a checklist: a sixth
+family should grep, not read this line. "No silent gaps" is enforced at
 both ends: a failed trial is journaled as `success=False` rather than omitted, and a trial whose
 *write* fails clears `GateDecision.journal_complete` and rejects the proposal, so the gate can never
 open on a batch the trend never received. `task_set` is carried by the record as this ticket requires

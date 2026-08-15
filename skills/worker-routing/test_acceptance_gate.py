@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("learning_journal.py")
@@ -408,7 +408,11 @@ class InputValidationTests(unittest.TestCase):
     def test_a_non_finite_score_threshold_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            for bad_threshold in (float("nan"), float("inf"), "0.8"):
+            # `True` for the same reason `_validate_trials`' own test carries
+            # it: `bool` is an `int` subclass, so without the explicit
+            # `isinstance(value, bool)` rejection a threshold of `True`
+            # silently means 1.0 — a bar no ordinary trial clears.
+            for bad_threshold in (float("nan"), float("inf"), "0.8", True):
                 with self.subTest(score_threshold=bad_threshold), self.assertRaises(ValueError):
                     acceptance_gate.evaluate_proposal(
                         _scripted_runner([0.9]),
@@ -462,6 +466,49 @@ class InputValidationTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls["count"], 0)
+
+
+class NonUtcNowTests(unittest.TestCase):
+    def test_trials_are_stamped_in_utc_and_land_inside_their_own_window(self) -> None:
+        """`_wire_timestamp`'s `.astimezone(timezone.utc)`, which every other
+        test leaves a no-op by injecting a `now` that is already UTC.
+
+        The conversion is not cosmetic. `read_scoreboard` cuts the journal to
+        the records at or before `now` (`_prefix_cut`), and it compares wire
+        timestamps — so a batch stamped with the caller's local wall clock
+        instead of its UTC instant reads as *later* than the `now` that
+        produced it, for any positive offset, and the gate's own trials are
+        cut from the `current` board it just wrote them for. This is the
+        failure `acceptance_gate.py`'s docstring names ("a caller testing
+        with a fixed, non-current `now` would find its own just-written
+        trials excluded from the 'current' scoreboard's `<= now` prefix
+        cut"), and until this test nothing asserted it: dropping the
+        conversion left all nineteen other gate tests green, because a
+        vanished batch moves no metric and so regresses nothing.
+        """
+        now = datetime(2026, 1, 8, 10, 0, tzinfo=timezone(timedelta(hours=2)))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = acceptance_gate.evaluate_proposal(
+                _scripted_runner([0.9, 0.9]),
+                task_set="bench-v1",
+                root_dir=root,
+                now=now,
+                trials=2,
+            )
+            board = learning_scoreboard.read_scoreboard(root, now=now)
+
+        for record in decision.trial_records:
+            self.assertEqual(record.timestamp, "2026-01-08T08:00:00Z")
+        metric = board.replay_benchmark.mean_benchmark_score
+        self.assertIsInstance(metric, learning_scoreboard.MetricValue)
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(
+            metric.sample_size,
+            2,
+            "the batch's own trials must be inside the window it just wrote them into",
+        )
 
 
 class JournalWriteFailureTests(unittest.TestCase):
