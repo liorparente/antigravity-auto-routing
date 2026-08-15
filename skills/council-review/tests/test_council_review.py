@@ -13,25 +13,21 @@ if SCRIPTS_DIR not in sys.path:
 from council_review import (
     ReviewCouncil,
     ReviewRequest,
-    ReviewOutcome,
     PrivacyMode,
-    ConsensusTable,
     SecurityVetoHandler,
-    SecurityVeto,
 )
 from provider_adapters import (
     FakeReviewerAdapter,
     ClaudeAdapter,
     CodexAdapter,
     AgyAdapter,
-    LMStudioAdapter,
 )
 
 POLICY_PATH = str(Path(__file__).resolve().parent.parent / "references" / "council-policy.json")
 
 
 class CouncilReviewTDDTests(unittest.TestCase):
-    def setUp(self):
+    def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.workspace_root = self.temp_dir.name
         self.cal_dir = os.path.join(self.workspace_root, ".ralph", "cache")
@@ -40,11 +36,11 @@ class CouncilReviewTDDTests(unittest.TestCase):
         with open(self.cal_key, "w") as f:
             f.write("test_secret_key_12345")
 
-    def tearDown(self):
+    def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    # Slice 1: Security Veto execution
-    def test_unilateral_security_veto_halts_review(self):
+    # Slice 1: Security Veto execution with uppercase severity support
+    def test_unilateral_security_veto_halts_review(self) -> None:
         veto_handler = SecurityVetoHandler(
             veto_severities=["critical", "high"],
             security_threshold=0.80,
@@ -53,7 +49,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         votes = [
             {"provider": "claude", "vote": "approve", "confidence": 1.0},
             {"provider": "codex", "vote": "block", "confidence": "0.95", "findings": [
-                {"id": "SEC-01", "severity": "critical", "claim": "SQL injection in auth", "confidence": "0.90"}
+                {"id": "SEC-01", "severity": "CRITICAL", "claim": "SQL injection in auth", "confidence": "0.90"}
             ]},
             {"provider": "gemini", "vote": "approve", "confidence": 0.8},
         ]
@@ -63,7 +59,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertEqual(veto.finding["id"], "SEC-01")
 
     # Slice 2: Dynamic Weights Bounds and Unknown Provider Filtering
-    def test_dynamic_weights_clamping_and_filtering(self):
+    def test_dynamic_weights_clamping_and_filtering(self) -> None:
         council = ReviewCouncil(POLICY_PATH)
         weights_file = os.path.join(self.workspace_root, ".ralph", "council_weights.json")
         os.makedirs(os.path.dirname(weights_file), exist_ok=True)
@@ -81,7 +77,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertEqual(weights["codex"], 0.40)  # Default preserved
 
     # Slice 3: CLI Adapters non-interactive tokens and flags
-    def test_cli_adapters_arguments_and_worker_tokens(self):
+    def test_cli_adapters_arguments_and_worker_tokens(self) -> None:
         claude = ClaudeAdapter("claude-opus-5", "high")
         codex = CodexAdapter("gpt-5.6-sol", "high")
         agy = AgyAdapter("gemini-3.1-pro", "high")
@@ -100,7 +96,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", " ".join(agy_args))
 
     # Slice 4: Privacy Mode Local-Only Enforcement
-    def test_local_only_privacy_mode_enforcement(self):
+    def test_local_only_privacy_mode_enforcement(self) -> None:
         council = ReviewCouncil(POLICY_PATH)
         req = ReviewRequest(
             objective="Sensitive task review",
@@ -112,20 +108,33 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertEqual(len(adapters), 1)
         self.assertEqual(adapters[0].provider_id, "lm-studio")
 
-    # Slice 5: Secret Key Resolution
-    def test_hmac_secret_resolution_fallback(self):
+        # Verify async review passes with local adapter without zero-weight lockout
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+        self.assertEqual(outcome.status, "UNANIMOUS")
+
+    # Slice 5: Secret Key Resolution with AGY_CALIBRATION_SECRET & Fallback
+    def test_hmac_secret_resolution_fallback(self) -> None:
         council = ReviewCouncil(POLICY_PATH)
-        # Clear env var if set
-        old_env = os.environ.pop("COUNCIL_REVIEW_SECRET", None)
+        # Clear env vars if set
+        old_agy = os.environ.pop("AGY_CALIBRATION_SECRET", None)
+        old_council = os.environ.pop("COUNCIL_REVIEW_SECRET", None)
         try:
+            # Test file fallback
             secret = council._resolve_secret(self.workspace_root)
             self.assertEqual(secret, b"test_secret_key_12345")
+
+            # Test AGY_CALIBRATION_SECRET env
+            os.environ["AGY_CALIBRATION_SECRET"] = "env_secret_999"
+            secret_env = council._resolve_secret(self.workspace_root)
+            self.assertEqual(secret_env, b"env_secret_999")
         finally:
-            if old_env:
-                os.environ["COUNCIL_REVIEW_SECRET"] = old_env
+            if old_agy:
+                os.environ["AGY_CALIBRATION_SECRET"] = old_agy
+            if old_council:
+                os.environ["COUNCIL_REVIEW_SECRET"] = old_council
 
     # Slice 6: End-to-End Async Review with Custom Adapters (Unanimous Approval)
-    def test_async_review_unanimous_approval(self):
+    def test_async_review_unanimous_approval(self) -> None:
         council = ReviewCouncil(POLICY_PATH)
         req = ReviewRequest(
             objective="Feature implementation plan",
@@ -141,7 +150,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertTrue(os.path.isfile(outcome.manifest_path))
 
     # Slice 7: End-to-End Async Review with Security Veto Halt
-    def test_async_review_security_veto_halt(self):
+    def test_async_review_security_veto_halt(self) -> None:
         council = ReviewCouncil(POLICY_PATH)
         req = ReviewRequest(
             objective="Feature implementation with vulnerability",
@@ -153,7 +162,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
                 "provider": "codex",
                 "vote": "block",
                 "confidence": 1.0,
-                "findings": [{"id": "CWE-89", "severity": "critical", "confidence": 1.0, "claim": "SQLi in query"}]
+                "findings": [{"id": "CWE-89", "severity": "CRITICAL", "confidence": 1.0, "claim": "SQLi in query"}]
             }] * 3),
             FakeReviewerAdapter("gemini", [{"provider": "gemini", "vote": "approve", "confidence": 1.0}] * 3),
         ]

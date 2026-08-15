@@ -4,10 +4,10 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 # Add skills/worker-routing to path if available
-WORKER_ROUTING_DIR = str(Path(__file__).resolve().parent.parent.parent.parent / "skills" / "worker-routing")
+WORKER_ROUTING_DIR = str(Path(__file__).resolve().parent.parent.parent / "worker-routing")
 if WORKER_ROUTING_DIR not in sys.path:
     sys.path.insert(0, WORKER_ROUTING_DIR)
 
@@ -19,15 +19,15 @@ except ImportError:
 
 
 class ReviewerAdapter:
-    def __init__(self, provider_id: str):
+    def __init__(self, provider_id: str) -> None:
         self.provider_id = provider_id
 
-    async def review(self, envelope: str, round_spec: int, deadline: int) -> dict:
+    async def review(self, envelope: str, round_spec: int, deadline: int) -> Dict[str, Any]:
         raise NotImplementedError
 
 
 class CLIReviewerAdapter(ReviewerAdapter):
-    def __init__(self, provider_id: str, model: str, effort: str, executable: str):
+    def __init__(self, provider_id: str, model: str, effort: str, executable: str) -> None:
         super().__init__(provider_id)
         self.model = model
         self.effort = effort
@@ -36,8 +36,8 @@ class CLIReviewerAdapter(ReviewerAdapter):
     def _get_args(self, prompt: str) -> List[str]:
         raise NotImplementedError
 
-    def _parse_output(self, raw_output: str) -> dict:
-        result = {
+    def _parse_output(self, raw_output: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
             "provider": self.provider_id,
             "vote": "approve",
             "confidence": 1.0,
@@ -99,11 +99,12 @@ class CLIReviewerAdapter(ReviewerAdapter):
         except asyncio.TimeoutError:
             try:
                 proc.kill()
+                await proc.wait()  # Reap child process to prevent zombie leak
             except ProcessLookupError:
                 pass
             raise TimeoutError(f"{self.provider_id} exceeded deadline of {deadline}s")
 
-    async def review(self, envelope: str, round_spec: int, deadline: int) -> dict:
+    async def review(self, envelope: str, round_spec: int, deadline: int) -> Dict[str, Any]:
         prompt = f"Round {round_spec} review for proposal:\n{envelope}"
         args = self._get_args(prompt)
         try:
@@ -114,7 +115,7 @@ class CLIReviewerAdapter(ReviewerAdapter):
 
 
 class ClaudeAdapter(CLIReviewerAdapter):
-    def __init__(self, model: str, effort: str):
+    def __init__(self, model: str, effort: str) -> None:
         super().__init__("claude", model, effort, "claude")
 
     def _get_args(self, prompt: str) -> List[str]:
@@ -131,7 +132,7 @@ class ClaudeAdapter(CLIReviewerAdapter):
 
 
 class CodexAdapter(CLIReviewerAdapter):
-    def __init__(self, model: str, effort: str):
+    def __init__(self, model: str, effort: str) -> None:
         super().__init__("codex", model, effort, "codex")
 
     def _get_args(self, prompt: str) -> List[str]:
@@ -145,7 +146,7 @@ class CodexAdapter(CLIReviewerAdapter):
 
 
 class AgyAdapter(CLIReviewerAdapter):
-    def __init__(self, model: str, effort: str):
+    def __init__(self, model: str, effort: str) -> None:
         super().__init__("gemini", model, effort, "agy")
 
     def _get_args(self, prompt: str) -> List[str]:
@@ -153,12 +154,12 @@ class AgyAdapter(CLIReviewerAdapter):
 
 
 class LMStudioAdapter(ReviewerAdapter):
-    def __init__(self, model: str, effort: str):
+    def __init__(self, model: str, effort: str) -> None:
         super().__init__("lm-studio")
         self.model = model
         self.effort = effort
 
-    async def review(self, envelope: str, round_spec: int, deadline: int) -> dict:
+    async def review(self, envelope: str, round_spec: int, deadline: int) -> Dict[str, Any]:
         # Local LM Studio endpoint invocation
         return {
             "provider": self.provider_id,
@@ -170,12 +171,12 @@ class LMStudioAdapter(ReviewerAdapter):
 
 
 class FakeReviewerAdapter(ReviewerAdapter):
-    def __init__(self, provider_id: str, fixed_responses: List[dict]):
+    def __init__(self, provider_id: str, fixed_responses: List[Dict[str, Any]]) -> None:
         super().__init__(provider_id)
         self.fixed_responses = fixed_responses
         self.call_count = 0
 
-    async def review(self, envelope: str, round_spec: int, deadline: int) -> dict:
+    async def review(self, envelope: str, round_spec: int, deadline: int) -> Dict[str, Any]:
         if self.call_count < len(self.fixed_responses):
             resp = self.fixed_responses[self.call_count]
             self.call_count += 1
@@ -183,10 +184,10 @@ class FakeReviewerAdapter(ReviewerAdapter):
         return {"provider": self.provider_id, "vote": "abstain", "confidence": 0.0}
 
 
-def build_adapter(config: dict) -> ReviewerAdapter:
-    pid = config.get("id", "")
-    model = config.get("model", "")
-    effort = config.get("effort_mapping", {}).get("high", "high")
+def build_adapter(config: Dict[str, Any]) -> ReviewerAdapter:
+    pid = str(config.get("id", ""))
+    model = str(config.get("model", ""))
+    effort = str(config.get("effort_mapping", {}).get("high", "high"))
 
     if pid == "claude":
         return ClaudeAdapter(model, effort)
