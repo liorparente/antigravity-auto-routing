@@ -15,6 +15,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -985,6 +986,77 @@ class GitTrackingTests(unittest.TestCase):
             "learned-state/ must not be gitignored (git check-ignore exits 1 for a "
             "path that is not ignored, 0 for one that is)",
         )
+
+
+class MissingSnapshotTests(unittest.TestCase):
+    """A snapshot `history.jsonl` names, gone from disk.
+
+    The mirror image of `OrphanedSnapshotRecoveryTests`: there, a directory
+    exists that history does not name, and the store self-heals. Here,
+    history names a directory that does not exist, and the store must stop.
+
+    Before this was guarded, every one of these paths answered silently and
+    two of them destroyed data: `read_current` returned `{}` — the identical
+    answer it gives for a store nobody has ever used — and the next `adopt`
+    read that `{}` as the state to carry forward, so documents the deleted
+    version held simply stopped existing in the new one, with no error
+    anywhere. `roll_back` restored an empty state just as quietly. That is
+    the exact failure ticket 19's "the state after a rollback matches the
+    prior version exactly, byte for byte" exists to prevent.
+    """
+
+    def _store_with_a_deleted_current_snapshot(self, root: Path) -> None:
+        learned_state.adopt(
+            [_change("memory", "lesson"), _change("briefs", "brief")],
+            root_dir=root,
+            now=_NOW,
+        )
+        learned_state.adopt([_change("routing_table", "table")], root_dir=root, now=_NOW)
+        shutil.rmtree(root / "learned-state" / "versions" / "v0002")
+
+    def test_read_current_raises_rather_than_reporting_an_empty_store(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._store_with_a_deleted_current_snapshot(root)
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.read_current(root)
+            self.assertIn("learned-state is damaged", str(ctx.exception))
+
+    def test_adopt_refuses_rather_than_silently_dropping_the_documents_it_cannot_read(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._store_with_a_deleted_current_snapshot(root)
+
+            with self.assertRaises(ValueError):
+                learned_state.adopt([_change("memory", "new")], root_dir=root, now=_NOW)
+
+            self.assertEqual(
+                sorted(p.name for p in (root / "learned-state" / "versions").iterdir()),
+                ["v0001"],
+                "the refusal must write no new version",
+            )
+            self.assertEqual(
+                len(learned_state.read_history(root)),
+                2,
+                "the refusal must append no history line",
+            )
+
+    def test_roll_back_refuses_rather_than_restoring_an_empty_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._store_with_a_deleted_current_snapshot(root)
+
+            with self.assertRaises(ValueError):
+                learned_state.roll_back(root_dir=root, now=_NOW)
+
+    def test_an_empty_store_still_reads_as_empty_rather_than_damaged(self) -> None:
+        """The legitimate `{}` the guard must not swallow: no version has
+        ever been adopted, so there is no snapshot to be missing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(learned_state.read_current(Path(tmp)), {})
 
 
 class DocumentChangeValidationTests(unittest.TestCase):

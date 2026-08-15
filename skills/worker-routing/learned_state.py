@@ -597,7 +597,39 @@ def _read_documents(directory: Path) -> dict[str, str]:
 
 
 def _read_snapshot_contents(root_dir: Path, version: int) -> dict[str, str]:
-    return _read_documents(_version_dir(root_dir, version))
+    """The documents of a version `history.jsonl` names — which must exist.
+
+    Every caller of this function has just read a version number out of
+    history, so the directory is not optional: history naming a snapshot
+    that is not on disk is a damaged store, not an empty one. Saying so is
+    the whole point of this function existing separately from
+    `_read_documents`, whose "a missing directory reads as no documents"
+    rule is correct only for the genuinely-absent case (no version adopted
+    yet) and catastrophic here.
+
+    Confirmed by experiment before this check existed: deleting a current
+    snapshot while leaving history intact made `read_current` return `{}`
+    silently, and the next `adopt` then carried *nothing* forward — a store
+    holding `memory`, `briefs` and `routing_table` came back holding only
+    the one document that `adopt` call named, with the other two gone from
+    the new version and no error raised anywhere. `roll_back` restored an
+    empty state just as quietly. That is exactly the failure the ticket's
+    "the state after a rollback matches the prior version exactly, byte for
+    byte" exists to make impossible, and this module already promises loud
+    failure for the other half of the same store (see the module docstring
+    on `history.jsonl` having one writer and a corrupted line raising
+    rather than being skipped). A missing snapshot is that same damage,
+    and it now fails the same way.
+    """
+    directory = _version_dir(root_dir, version)
+    if not directory.is_dir():
+        raise ValueError(
+            f"learned-state is damaged: history.jsonl names version {version} but "
+            f"{directory} does not exist. Nothing here can restore it — the bytes are "
+            "the only copy. Recover that directory (it is git-tracked, so a checkout "
+            "of it is the usual answer) before adopting or rolling back again."
+        )
+    return _read_documents(directory)
 
 
 def _write_snapshot(root_dir: Path, version: int, documents: Mapping[str, str]) -> None:
@@ -841,15 +873,26 @@ def current_version_dir(root_dir: Path) -> Path | None:
 def read_current(root_dir: Path) -> dict[LearnedDocument, str]:
     """The full content of every document the current version holds.
 
-    `{}` when no version has ever been adopted. The `cast` below is sound
-    rather than merely convenient: every key this function can possibly
-    return came from `_read_documents` iterating `LEARNED_DOCUMENTS` itself,
-    so every key is already a member of that vocabulary by construction.
+    `{}` when no version has ever been adopted — and *only* then. If history
+    names a current version whose directory is missing, this raises rather
+    than returning `{}`: the two states are indistinguishable in the return
+    value and could not be further apart in meaning, one being a store
+    nobody has used yet and the other a store whose contents have been
+    destroyed. See `_read_snapshot_contents`, which is why this goes through
+    it rather than calling `_read_documents` on the directory directly.
+
+    The `cast` below is sound rather than merely convenient: every key this
+    function can possibly return came from `_read_documents` iterating
+    `LEARNED_DOCUMENTS` itself, so every key is already a member of that
+    vocabulary by construction.
     """
-    directory = current_version_dir(root_dir)
-    if directory is None:
+    history = read_history(root_dir)
+    if not history:
         return {}
-    return cast("dict[LearnedDocument, str]", _read_documents(directory))
+    return cast(
+        "dict[LearnedDocument, str]",
+        _read_snapshot_contents(root_dir, history[-1].version),
+    )
 
 
 def _validate_changes(changes: object) -> tuple[DocumentChange, ...]:
