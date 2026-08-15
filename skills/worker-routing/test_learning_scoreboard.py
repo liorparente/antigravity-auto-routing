@@ -1712,7 +1712,9 @@ class ReadJournalExplicitNullOptionalFieldTests(unittest.TestCase):
     `success: true` line whose `score` is an explicit `null` reads back as
     absence here and is then refused by `ReplayBenchmarkRecord.__post_init__`'s
     success/score agreement check, which is a different rule and a different
-    test (`test_every_required_key_of_replay_benchmark_makes_its_line_unreadable`).
+    test (`test_a_successful_replay_benchmark_line_missing_its_score_is_unreadable`
+    — not the required-key sweep beside it, which deliberately excludes
+    `score` for exactly this reason).
     """
 
     def test_an_explicit_null_run_id_reads_back_as_none_not_as_damage(self) -> None:

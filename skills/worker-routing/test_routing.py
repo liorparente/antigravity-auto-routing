@@ -6435,6 +6435,41 @@ class LearningJournalTests(unittest.TestCase):
                     "the single-sourced list",
                 )
 
+    def test_ci_checks_every_python_file_in_the_skill_directory(self) -> None:
+        """The other direction, and the one that actually goes missing.
+
+        The test above asserts every *listed* path exists; nothing asserted
+        every existing path is listed, so a module omitted here is simply
+        never linted or type-checked — silently, since the steps still pass.
+        Removing `acceptance_gate.py` from `PYTHON_MODULES` left the whole
+        suite green.
+
+        This is the same omission `test_every_production_module_in_the_skill_
+        directory_is_managed` closes for `install.sh`, and it went unnoticed
+        for the same reason: adding a module means adding it to four lists
+        (`MANAGED_FILES`, `INSTALLED_FILES`, `PYTHON_MODULES`, and — for a
+        test file — `PYTHON_TESTS`), and until now only three of the four
+        were guarded in this direction. Test files are included: CI lints and
+        type-checks them too, and `PYTHON_MODULES` already names every one.
+        """
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
+        )
+        listed = set(self._workflow_list(workflow, "PYTHON_MODULES"))
+        present = {
+            f"skills/worker-routing/{path.name}" for path in SKILL_DIR.glob("*.py")
+        }
+        self.assertTrue(present, "no Python files found to check")
+
+        for module in sorted(present):
+            with self.subTest(module=module):
+                self.assertIn(
+                    module,
+                    listed,
+                    f"{module} exists but CI's PYTHON_MODULES does not name it — "
+                    f"ruff and mypy never see it, and both steps still pass",
+                )
+
     def test_ci_runs_every_test_file_it_checks(self) -> None:
         """Being linted and type-checked is not being run.
 

@@ -16,6 +16,7 @@ import unittest
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 MODULE_PATH = Path(__file__).with_name("learning_journal.py")
 LEARNING_SCOREBOARD_PATH = Path(__file__).with_name("learning_scoreboard.py")
@@ -466,6 +467,61 @@ class InputValidationTests(unittest.TestCase):
                 )
 
         self.assertEqual(calls["count"], 0)
+
+
+class WindowDaysTests(unittest.TestCase):
+    def test_a_custom_window_reaches_both_boards_and_changes_the_verdict(self) -> None:
+        """`window_days` has to reach *both* `read_scoreboard` calls.
+
+        `compare_scoreboards` refuses two boards computed over different
+        spans, so dropping the argument from either read turns every
+        non-default call into a `ValueError` — and no test passed a
+        non-default `window_days` at all, so the whole parameter was
+        unexercised and that mutation stayed green.
+
+        Asserting "it did not raise" would be enough to catch that and would
+        prove nothing about the window itself, so this drives the span until
+        it changes the answer: one 0.98 trial ten days old sits inside a
+        14-day window and outside the default 7-day one. At 14 it is the
+        baseline the batch is measured against, and two merely-adequate 0.81
+        trials drag the mean below it — a regression, so the proposal is
+        rejected. At 7 that history is invisible, the baseline has no data,
+        and the identical batch is accepted.
+        """
+        older = _NOW - timedelta(days=10)
+
+        def run(window_days: int) -> Any:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                record = learning_journal.ReplayBenchmarkRecord(
+                    task_set="bench-v1",
+                    success=True,
+                    score=0.98,
+                    timestamp=older.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+                self.assertIsNone(
+                    learning_journal.append_journal_record(record, root_dir=root)
+                )
+                return acceptance_gate.evaluate_proposal(
+                    _scripted_runner([0.81, 0.81]),
+                    task_set="bench-v1",
+                    root_dir=root,
+                    now=_NOW,
+                    trials=2,
+                    score_threshold=0.8,
+                    window_days=window_days,
+                )
+
+        wide = run(14)
+        narrow = run(acceptance_gate.DEFAULT_WINDOW_DAYS)
+
+        self.assertTrue(wide.threshold_met, "every trial cleared 0.8 either way")
+        self.assertEqual(wide.comparison.regressed, ("mean_benchmark_score",))
+        self.assertFalse(wide.accepted, "the ten-day-old 0.98 is inside a 14-day window")
+
+        self.assertTrue(narrow.threshold_met)
+        self.assertEqual(narrow.comparison.regressed, ())
+        self.assertTrue(narrow.accepted, "and outside the default 7-day one")
 
 
 class NonUtcNowTests(unittest.TestCase):
