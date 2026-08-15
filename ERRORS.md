@@ -455,3 +455,52 @@
   print mode pins the IDE session's default model and silently ignores the flag. Probe with a
   "name your own model" one-liner before trusting any agy model routing, and treat a worker that
   answers a question you never asked as a failed invocation even at exit 0.
+
+## 2026-08-14 — A Fix For One Critic Objection Introduced Two More, Twice
+
+- Mission: run a 3-round Planner-Critic consensus loop over `implementation_plan.md` (ticket 17),
+  then a 3-round `/iterative-fix-review` loop over the resulting implementation.
+- Issue: in both loops, the round that verified a prior round's fixes did not just confirm
+  "objection addressed" — it re-checked each fix's actual mechanism against source and found new
+  defects the fix itself had introduced. Planning: round 1 raised 8 objections; round 2, verifying
+  the fixes, found 2 only partially closed and 3 entirely new defects in the fixes themselves (an
+  unspecified family-join mechanism, an unpinned timestamp format, an overclaimed "no second place
+  to update" statement). Post-implementation review: the fix for a broken `NaN` test (round 1's
+  finding) shipped with a comment claiming the underlying `_classify_change` gap was "flagged
+  separately" — round 2 found no artifact backed that claim.
+- Detection: in both cases, a dedicated verification round that read the fix's diff against the
+  cited source file, rather than accepting the round-1 finding's own description of what "fixed"
+  would look like.
+- Root Cause: a fix is itself new code (or new prose), and new code/prose carries the same risk of
+  defects as the code it replaces — "the objection was addressed" describes intent, not a checked
+  fact, until something re-verifies the fix's mechanism specifically.
+- Resolution: both loops ran a genuine extra round rather than declaring convergence on the first
+  "fixed" claim; both closed clean only after the second round found nothing further.
+- Lesson: a fix-then-review loop's verification step must check the fix's mechanism against source
+  again, every round — never accept "addressed" from the fixing step's own self-report, since the
+  fix is exactly as likely to need a review as the original code was.
+
+## 2026-08-14 — A Byproduct Discovery Nearly Got "Flagged Separately" Instead of Actually Tracked
+
+- Mission: fix a Standards-axis finding — a test named `test_a_nan_metric_can_never_reach_a_
+  comparison_as_an_improvement` whose `assertRaises` block raised before the code under test ever
+  ran, making it a silent duplicate of an existing test.
+- Issue: fixing the test properly (bypassing the frozen `MetricValue` dataclass post-construction
+  to hand `_classify_change` a real NaN) surfaced, as a pure byproduct, that `_classify_change`
+  actually misclassifies a NaN metric as `"improved"` under `lower_is_better` — a real defense-in-
+  depth gap in already-shipped, already-tested ticket 16 code, currently unexploitable only because
+  the public constructor blocks NaN. The fix's own comment described this as "flagged separately"
+  with no ticket, no ERRORS.md entry, nothing — the identical shape as this file's own "commit
+  message outran its committed tests" entry above, this time in a code comment instead of a commit
+  message.
+- Detection: a second `/code-review` round grepped `ERRORS.md`, `CONTEXT.md`,
+  `knowledge/institutional-memory.md`, and every `.scratch/routing-backlog/issues/*.md` for any
+  trace of the claimed tracking and found none.
+- Root Cause: writing "flagged separately" felt like tracking while writing it, the same way a
+  confident commit-message claim feels true while writing it — neither is checked against an
+  artifact until something else demands the artifact exist.
+- Resolution: filed `.scratch/routing-backlog/issues/28-classify-change-nan-defense.md` as the real
+  artifact, and updated the test's comment to cite it by path instead of the vague claim.
+- Lesson: "flagged separately," "tracked elsewhere," or any similar phrase in a comment or commit
+  message is not itself tracking — it is a promise. Before writing it, either file the real ticket
+  or ERRORS.md entry it refers to, or don't write the phrase at all.
