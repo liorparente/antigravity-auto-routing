@@ -10,8 +10,9 @@ is the failure mode this ticket exists to prevent.
 **Blocked by:** 12
 
 **Status:** done — commit `b0a8946` (`learned_state.py`, `test_learned_state.py`; the five settled
-design decisions are restated in the module's own docstring), plus nine fix commits from a seventeen-
-round `/iterative-fix-review` loop that ends at `5921ab2`. Those commits are why the module is far
+design decisions are restated in the module's own docstring), plus the `fix(learned-state)` commits
+that follow it, from an `/iterative-fix-review` loop — `git log b0a8946..HEAD -- learned_state.py`
+lists them, which is a count that cannot go stale the way the two numbers written here first did. Those commits are why the module is far
 larger than this ticket's six criteria suggest, and the reason is worth stating here rather than
 leaving to be reverse-engineered: the loop kept reproducing **silent** failures of criterion 4 ("the
 state after a rollback matches the prior version exactly, byte for byte"). Two concurrent `adopt`

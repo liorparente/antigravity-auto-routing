@@ -822,7 +822,18 @@ def _read_documents(directory: Path) -> dict[str, str]:
         if name not in present:
             continue
         path = directory / name
-        if not path.is_file():
+        # `os.stat`, not `path.is_file()` — which sat here directly beneath
+        # the comment above asserting this module never asks a question that
+        # cannot fail, and quietly answered `False` for an ordinary file
+        # whose *directory* had lost its search bit. `os.listdir` still
+        # succeeds in that state (the name is right there in the listing),
+        # so the module reported a perfectly good regular file as "not a
+        # readable file" — the wrong diagnosis, for a fault one level up.
+        try:
+            node = os.stat(path)
+        except OSError as exc:
+            raise _damage_error(f"inspecting {path}", exc) from exc
+        if not stat.S_ISREG(node.st_mode):
             raise ValueError(
                 f"learned-state is damaged: {path} exists but is not a readable file, "
                 "so the document it should hold cannot be read. Recover or remove it "

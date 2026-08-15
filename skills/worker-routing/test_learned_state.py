@@ -1243,6 +1243,36 @@ class FilesystemDamageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 learned_state._append_history(root, entry)
 
+    def test_a_document_behind_a_non_searchable_directory_is_not_called_unreadable(
+        self,
+    ) -> None:
+        """A directory that is readable but not searchable (mode 644).
+
+        `os.listdir` still succeeds — the name is right there in the listing
+        — while `os.stat` on the child fails. `Path.is_file()` swallowed
+        that and answered `False`, so the module reported a perfectly
+        ordinary regular file as "exists but is not a readable file": the
+        wrong diagnosis, for a fault one level up. Distinct from the
+        mode-000-on-the-file case, where `is_file()` correctly answers
+        `True` and the read itself fails through the converter.
+
+        The assertion is on which message comes back, since both branches
+        raise `ValueError`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "hello")], root_dir=root, now=_NOW)
+            version_dir = root / "learned-state" / "versions" / "v0001"
+            version_dir.chmod(0o644)
+            try:
+                with self.assertRaises(ValueError) as ctx:
+                    learned_state.read_current(root)
+                message = str(ctx.exception)
+                self.assertIn("damaged or unusable", message)
+                self.assertNotIn("is not a readable file", message)
+            finally:
+                version_dir.chmod(0o755)
+
     def test_a_document_that_is_not_valid_utf8_names_the_file_it_cannot_decode(
         self,
     ) -> None:
