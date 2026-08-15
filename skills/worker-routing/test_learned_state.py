@@ -1119,6 +1119,40 @@ class MissingSnapshotTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 learned_state.roll_back(root_dir=root, now=_NOW)
 
+    def test_a_document_that_exists_but_is_not_a_readable_file_raises(self) -> None:
+        """The same silent drop as the missing version directory, one level
+        down. Confirmed by experiment before this was guarded: replacing
+        `v0001/memory` with a directory — or with a dangling symlink — made
+        `read_current` report only `briefs`, and the next `adopt` would have
+        written a version with `memory` gone. Absent and unreadable are
+        different answers; only absent is legitimate.
+        """
+        for label, tamper in (
+            ("directory", lambda p: (p.unlink(), p.mkdir())),
+            ("dangling symlink", lambda p: (p.unlink(), p.symlink_to(p.parent / "nope"))),
+        ):
+            with self.subTest(kind=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                learned_state.adopt(
+                    [_change("memory", "lesson"), _change("briefs", "brief")],
+                    root_dir=root,
+                    now=_NOW,
+                )
+                tamper(root / "learned-state" / "versions" / "v0001" / "memory")
+
+                with self.assertRaises(ValueError) as ctx:
+                    learned_state.read_current(root)
+                self.assertIn("learned-state is damaged", str(ctx.exception))
+
+    def test_a_version_legitimately_missing_a_document_still_reads(self) -> None:
+        """The absent case the guard must not swallow: v0001 holds only
+        `memory`, so `briefs` has nothing at its path and is simply not in
+        that version yet."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "lesson")], root_dir=root, now=_NOW)
+            self.assertEqual(learned_state.read_current(root), {"memory": "lesson"})
+
     def test_an_empty_store_still_reads_as_empty_rather_than_damaged(self) -> None:
         """The legitimate `{}` the guard must not swallow: no version has
         ever been adopted, so there is no snapshot to be missing."""

@@ -642,15 +642,34 @@ def _read_documents(directory: Path) -> dict[str, str]:
     Iterates the closed `LEARNED_DOCUMENTS` vocabulary rather than the
     directory's own listing, so a stray file (a `.DS_Store`, a hand-dropped
     editor swap file) is silently invisible to this store instead of being
-    read as document content or crashing on a decode error. `directory` may
-    not exist at all — every `Path.is_file()` check below is simply `False`
-    for a missing directory, no exception to catch.
+    read as document content or crashing on a decode error.
+
+    Absent and unreadable are different answers, and conflating them is the
+    silent-drop bug this module has now been bitten by twice — once for a
+    whole version directory (see `_read_snapshot_contents`) and once here.
+    A document name with nothing at that path is legitimately absent: the
+    version simply predates it. A document name that *exists* but is not a
+    plain file — a directory, a dangling symlink — is damage, and returning
+    it as absent hands `adopt` a carry-forward map with the document
+    missing, which writes the next version without it. Confirmed by
+    experiment before this check: replacing `v0001/memory` with a directory
+    made `read_current` report only `briefs`, with no error anywhere.
     """
     documents: dict[str, str] = {}
     for name in sorted(LEARNED_DOCUMENTS):
         path = directory / name
         if path.is_file():
             documents[name] = path.read_bytes().decode("utf-8")
+        elif path.exists() or path.is_symlink():
+            # `is_symlink()` as well as `exists()`: a dangling symlink is
+            # not "nothing there", but `exists()` follows the link and says
+            # it is.
+            raise ValueError(
+                f"learned-state is damaged: {path} exists but is not a readable file, "
+                "so the document it should hold cannot be read. Recover or remove it "
+                "before adopting or rolling back again — carrying on would write the "
+                "next version without that document."
+            )
     return documents
 
 
