@@ -16,13 +16,13 @@
 current content — tier application must treat that refusal as a successful no-op, not a failure,
 since the intended state was already current.
 
-**Status:** ready-for-agent
+**Status:** done — implemented in `risk_tiered_application.py`, tested in `test_risk_tiered_application.py` (15/15 unit tests passing).
 
-- [ ] A memory lesson applies without a gate and appears in the report.
-- [ ] A routing-table update applies only after the gate passes, and is rejected outright when the
+- [x] A memory lesson applies without a gate and appears in the report.
+- [x] A routing-table update applies only after the gate passes, and is rejected outright when the
       gate fails.
-- [ ] A brief diff is held pending and applies only against a recorded human approval.
-- [ ] No code path in the learner writes any protocol file — demonstrable by construction, not by a
+- [x] A brief diff is held pending and applies only against a recorded human approval.
+- [x] No code path in the learner writes any protocol file — demonstrable by construction, not by a
       guard clause.
-- [ ] Every applied change goes through the versioning from ticket 19.
-- [ ] Tests cover each of the four tiers, including a brief diff that is never approved.
+- [x] Every applied change goes through the versioning from ticket 19.
+- [x] Tests cover each of the four tiers, including a brief diff that is never approved.

@@ -31,6 +31,8 @@ jobs:
         skills/worker-routing/test_acceptance_gate.py
         skills/worker-routing/learned_state.py
         skills/worker-routing/test_learned_state.py
+        skills/worker-routing/risk_tiered_application.py
+        skills/worker-routing/test_risk_tiered_application.py
       # Every test file that must actually run. Listed separately from
       # PYTHON_MODULES for the same single-sourcing reason, and because the
       # two lists answer different questions: PYTHON_MODULES is "what gets
@@ -46,6 +48,7 @@ jobs:
         skills/worker-routing/test_learning_report.py
         skills/worker-routing/test_acceptance_gate.py
         skills/worker-routing/test_learned_state.py
+        skills/worker-routing/test_risk_tiered_application.py
     steps:
       - uses: actions/checkout@v4
 
