@@ -14,7 +14,13 @@ worker callable is `advisory_consultation.InvokeWorker`/
 `production_invoker.make_journaled_invoke_worker`. `evaluate_proposal`'s
 `runner` parameter is the last one: a zero-argument callable that returns one
 trial's score in production (driving the real evaluator) and a scripted
-value in tests. No fourth seam is added here.
+value in tests. No fourth seam is added here. `report_journal_error` is
+injected too, and is deliberately not counted as one: a seam in the ticket's
+sense is a place *evidence enters* — swap it and the verdict changes — while
+this parameter is where a failure *leaves*, the observability sink
+`production_invoker.py` already established for this exact append failure.
+Nothing handed to it is ever read back; `journal_complete` alone carries
+that fact into the decision.
 
 **The learner never grades its own proposal.** Every score in a `GateDecision`
 came from `runner()` and nowhere else — there is no code path in this module,

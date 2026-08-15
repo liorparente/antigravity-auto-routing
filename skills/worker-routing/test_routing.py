@@ -5199,7 +5199,7 @@ class LearningJournalTests(unittest.TestCase):
         `ground_truth`, each carrying the identity of the decision it grades.
 
         The field is not called `signal`: CONTEXT.md spends "signal family" on
-        the journal's four *record* families, and a subdivision inside one of
+        the journal's five *record* families, and a subdivision inside one of
         them cannot wear the same word at a finer granularity without turning
         the glossary into a trap. See `test_signal_names_exactly_one_granularity`.
         """
