@@ -315,20 +315,26 @@ class VersionNumberingTests(unittest.TestCase):
         self,
     ) -> None:
         """`_write_snapshot`'s own `mkdir(..., exist_ok=False)` integrity
-        check, exercised directly against the private function for the case
-        it exists to catch: a version-numbering bug in this module, or
-        direct tampering with a `vNNNN` directory that *does* match
-        `_VERSION_DIRNAME_RE`.
+        check, exercised directly against the private function for the one
+        case that reaches it this way: a version-numbering bug in this
+        module.
 
-        This particular directory-already-a-directory collision is not
-        reachable through the public `adopt()`: `adopt` now allocates one
-        past the highest version number used by *either* `history.jsonl`
-        *or* a `vNNNN` directory actually present under `versions/` (see
-        `OrphanedSnapshotRecoveryTests` below), so handing `adopt` a stray
-        directory at the number it would otherwise have picked no longer
-        collides — it gets skipped instead. So this test calls
-        `_write_snapshot` directly, the same way a numbering bug or
-        tampering would reach it.
+        Tampering with a `vNNNN` directory that *does* match
+        `_VERSION_DIRNAME_RE` is deliberately **not** named here, though an
+        earlier draft of this docstring did: `_highest_version_on_disk`
+        counts any matching directory, so `adopt` allocates past a
+        fabricated one instead of colliding with it (see the module
+        docstring's Decision 2, which rules this out explicitly).
+
+        That is also why this particular directory-already-a-directory
+        collision is not reachable through the public `adopt()`: it
+        allocates one past the highest version number used by *either*
+        `history.jsonl` *or* a `vNNNN` directory actually present under
+        `versions/` (see `OrphanedSnapshotRecoveryTests` below), so handing
+        `adopt` a stray directory at the number it would otherwise have
+        picked no longer collides — it gets skipped instead. So this test
+        calls `_write_snapshot` directly, the same way a numbering bug
+        would reach it.
 
         `test_a_file_named_like_a_version_directory_makes_adopt_raise_a_value_error`
         below drives this same underlying check through the *public* path —
@@ -384,6 +390,56 @@ class VersionNumberingTests(unittest.TestCase):
                 stray_file.read_bytes(),
                 b"not a directory",
                 "the stray file must be left untouched",
+            )
+
+    def test_a_symlink_to_a_file_collides_but_a_symlink_to_a_directory_does_not(
+        self,
+    ) -> None:
+        """The discriminator is `entry.is_dir()`, not "file versus
+        directory" — and `is_dir()` follows symlinks.
+
+        The module docstring's Decision 2 states the property that defeats
+        self-healing (an entry the scan cannot count, because `is_dir()` is
+        false *or* the name misses the case-sensitive regex) rather than
+        listing instances, because three earlier drafts listed instances and
+        every one of them undercounted — symlinks were the case they all
+        missed. This test is what stops that claim from being prose nobody
+        checked: both halves of the symlink case are driven here, and they
+        land on opposite sides.
+
+        A symlink pointing at a file fails `is_dir()`, so the scan skips it
+        and `adopt` collides exactly as it does with a plain stray file. A
+        symlink pointing at a *directory* passes `is_dir()`, is counted like
+        any real version directory, and `adopt` allocates past it instead.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            versions_dir = root / "learned-state" / "versions"
+            versions_dir.mkdir(parents=True)
+            target_file = root / "target-file"
+            target_file.write_bytes(b"not a directory")
+            (versions_dir / "v0001").symlink_to(target_file)
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.adopt([_change("memory", "v1")], root_dir=root, now=_NOW)
+            self.assertIn("already exists", str(ctx.exception))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            versions_dir = root / "learned-state" / "versions"
+            versions_dir.mkdir(parents=True)
+            target_dir = root / "target-dir"
+            target_dir.mkdir()
+            (versions_dir / "v0001").symlink_to(target_dir, target_is_directory=True)
+
+            entry = learned_state.adopt(
+                [_change("memory", "v1")], root_dir=root, now=_NOW
+            )
+            self.assertEqual(
+                entry.version,
+                2,
+                "a symlinked directory passes is_dir(), so the scan counts it "
+                "as version 1 and adopt must allocate past it",
             )
 
 

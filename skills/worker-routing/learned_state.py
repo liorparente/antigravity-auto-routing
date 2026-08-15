@@ -66,22 +66,31 @@ operator who finds one is told it is safe to remove once confirmed absent
 from `history.jsonl`.
 
 Self-healing only works when `_highest_version_on_disk` can actually see
-the stray entry, and it looks for exactly one shape: a directory whose name
-matches `_VERSION_DIRNAME_RE` case-sensitively. Two hand-made inputs defeat
-that, and both are genuinely reachable rather than exotic corner cases: a
-**file** (not a directory) named `v0001` under `versions/`, which
-`entry.is_dir()` skips, so `adopt` keeps allocating version 1 and colliding
-with it, identically, forever; and a directory named with different case,
-e.g. `V0001`, on a case-insensitive filesystem (macOS's default) — the
-filesystem resolves `V0001` and `v0001` to the same path for `mkdir`'s
-purposes, but the case-sensitive `_VERSION_DIRNAME_RE` does not match
-`V0001`, so `_highest_version_on_disk` never counts it either. Both need a
-hand-created stray entry, so severity is low, but each reproduces the exact
-permanent-brick shape the self-heal above exists to prevent, entering by a
-side door. Hand-made tampering that *does* match the regex is not a third
-case: a fabricated `v0009` directory is counted like any other, so `adopt`
-allocates past it rather than colliding with it. The only other way to
-arrive here is a version-numbering bug in this module itself. In every one
+the stray entry, and it counts one only when **both** of its tests pass:
+`entry.is_dir()` is true, *and* the name matches `_VERSION_DIRNAME_RE`
+case-sensitively. Anything failing either test is invisible to the scan and
+therefore collides — and the durable statement of what defeats self-healing
+is that property, not a list of the instances anyone happened to think of.
+Three drafts of this paragraph enumerated instances and each undercounted;
+the property cannot.
+
+Worked examples of each half, all confirmed by running them: failing
+`is_dir()` — a **file** named `v0001` under `versions/`, a symlink pointing
+at a file, or a dangling symlink, any of which leaves `adopt` allocating
+version 1 and colliding identically, forever (a symlink to a *directory*
+passes `is_dir()` and is counted, so it does not collide). Failing the
+regex — a directory named with different case, e.g. `V0001`, on a
+case-insensitive filesystem (macOS's default), where the filesystem
+resolves `V0001` and `v0001` to one path for `mkdir`'s purposes while the
+case-sensitive pattern matches neither. All need a hand-created stray
+entry, so severity is low, but each reproduces the exact permanent-brick
+shape the self-heal above exists to prevent, entering by a side door.
+
+Hand-made tampering that satisfies *both* tests is not among them: a
+fabricated `v0009` directory is counted like any other, so `adopt`
+allocates past it rather than colliding with it. The only way to reach the
+collision without defeating the scan is a version-numbering bug in this
+module itself. In every one
 of these cases `_write_snapshot` never overwrites — a collision on `mkdir`
 raises, and the raise is a `ValueError`, not a bare `FileExistsError`
 naming an absolute path with no guidance.
