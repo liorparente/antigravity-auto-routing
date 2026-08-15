@@ -10,7 +10,19 @@ is the failure mode this ticket exists to prevent.
 **Blocked by:** 12
 
 **Status:** done — commit `b0a8946` (`learned_state.py`, `test_learned_state.py`; the five settled
-design decisions are restated in the module's own docstring). "Git-tracked" resolved to "sits under a
+design decisions are restated in the module's own docstring), plus nine fix commits from a seventeen-
+round `/iterative-fix-review` loop that ends at `5921ab2`. Those commits are why the module is far
+larger than this ticket's six criteria suggest, and the reason is worth stating here rather than
+leaving to be reverse-engineered: the loop kept reproducing **silent** failures of criterion 4 ("the
+state after a rollback matches the prior version exactly, byte for byte"). Two concurrent `adopt`
+calls lost a committed write in six trials of six; a snapshot deleted while its history line survived
+made `read_current` answer `{}` and the next `adopt` carry that emptiness forward; a version
+directory the process could not list did the same. Each was a rollback that "mostly" restored the
+previous state — the failure mode this ticket's opening paragraph names — arriving by a route the
+criteria do not enumerate. The resulting rule, and the one to read before adding code here, is in the
+module docstring: every question this store asks the filesystem is asked in a form that can *fail*,
+because `Path.is_dir()`/`.exists()` swallow `PermissionError` and answer `False`, and a call that
+cannot fail is an assumption rather than a question. "Git-tracked" resolved to "sits under a
 tracked directory and is never gitignored" — checked against the repository's real `.gitignore`, not
 merely asserted — with the module never
 shelling out to `git` itself, since a worker sandbox that locks `.git/` would deadlock a `git commit`
