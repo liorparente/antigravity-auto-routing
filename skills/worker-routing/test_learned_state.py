@@ -1097,6 +1097,55 @@ class FilesystemDamageTests(unittest.TestCase):
     its own remedy).
     """
 
+    def test_an_unlistable_version_directory_refuses_rather_than_reading_as_empty(
+        self,
+    ) -> None:
+        """The silent drop a *third* time, and the one no `OSError`
+        converter could have caught.
+
+        `Path.is_file()` and `Path.exists()` look like questions about the
+        filesystem, but they are questions that cannot fail: both swallow
+        `PermissionError` and answer `False`. Probing each vocabulary name
+        with them meant a version directory at mode 000 reported every
+        document as absent — `read_current` returned `{}` and `adopt` would
+        have carried that emptiness forward, with nothing raised anywhere
+        for a converter to convert. `os.listdir` asks the same question in a
+        form that fails loudly.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt(
+                [_change("memory", "m"), _change("briefs", "b")], root_dir=root, now=_NOW
+            )
+            version_dir = root / "learned-state" / "versions" / "v0001"
+            version_dir.chmod(0o000)
+            try:
+                with self.assertRaises(ValueError):
+                    learned_state.read_current(root)
+            finally:
+                version_dir.chmod(0o755)
+
+    def test_an_append_that_cannot_reach_the_history_file_refuses(self) -> None:
+        """The last step of `adopt`/`roll_back`, reached after a brand-new
+        version's documents are already durably on disk — the highest-stakes
+        call site in the module, and the one that was still outside the
+        converter."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "learned-state").mkdir(parents=True)
+            (root / "learned-state" / "history.jsonl").mkdir()
+            entry = learned_state.VersionEntry(
+                kind="adopt",
+                version=1,
+                replaces=None,
+                documents=(),
+                change_id=None,
+                timestamp="2026-08-15T12:00:00Z",
+            )
+
+            with self.assertRaises(ValueError):
+                learned_state._append_history(root, entry)
+
     def _read_paths_refuse(self, root: Path) -> None:
         for name, call in (
             ("read_current", learned_state.read_current),

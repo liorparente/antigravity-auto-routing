@@ -216,6 +216,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import os
 import re
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -678,11 +679,18 @@ def _exclusive_store_lock(root_dir: Path) -> Iterator[None]:
             "the path above is the other cause."
         ) from exc
     with stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        # Only the `flock` calls go through the converter, never the `yield`:
+        # wrapping the body would recast every `OSError` raised by the
+        # *caller's* work — an unrelated failure deep inside `adopt` — as
+        # damage to this store's own files, which is a different claim and
+        # usually a false one.
+        with _filesystem_damage_is_a_value_error(f"locking {path}"):
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+            with _filesystem_damage_is_a_value_error(f"unlocking {path}"):
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _history_path(root_dir: Path) -> Path:
@@ -736,27 +744,43 @@ def _read_documents(directory: Path) -> dict[str, str]:
     experiment before this check: replacing `v0001/memory` with a directory
     made `read_current` report only `briefs`, with no error anywhere.
     """
+    # The listing is read once, up front, and that is load-bearing. Probing
+    # each vocabulary name with `Path.is_file()`/`Path.exists()` looks like
+    # asking the filesystem a question, but they are questions that *cannot
+    # fail*: both swallow `PermissionError` and answer `False`. A version
+    # directory at mode 000 therefore reported every document as absent,
+    # `read_current` returned `{}`, and `adopt` would have carried that
+    # emptiness forward — the silent drop a third time, and one no `OSError`
+    # converter could catch, because nothing raised. `os.listdir` asks the
+    # same question in a form that fails loudly.
+    #
+    # Intersecting the listing with the closed vocabulary keeps what the
+    # per-name probing was written for: a stray file (a `.DS_Store`, an
+    # editor swap file) stays invisible rather than being read as content.
+    # A dangling symlink needs no special case now either — it is a
+    # directory entry, so it is present, and present-but-not-a-readable-file
+    # is damage.
+    with _filesystem_damage_is_a_value_error(f"listing {directory}"):
+        present = set(os.listdir(directory))
+
     documents: dict[str, str] = {}
     for name in sorted(LEARNED_DOCUMENTS):
+        if name not in present:
+            continue
         path = directory / name
-        if path.is_file():
-            # `is_file()` answers what kind of node it is, never whether it
-            # can be read: a mode-000 regular file passes it and then
-            # `read_bytes()` raises `PermissionError`. This docstring used
-            # to claim it turned "exists but is not a readable file" into a
-            # `ValueError` while covering only the type half of that.
-            with _filesystem_damage_is_a_value_error(f"reading {path}"):
-                documents[name] = path.read_bytes().decode("utf-8")
-        elif path.exists() or path.is_symlink():
-            # `is_symlink()` as well as `exists()`: a dangling symlink is
-            # not "nothing there", but `exists()` follows the link and says
-            # it is.
+        if not path.is_file():
             raise ValueError(
                 f"learned-state is damaged: {path} exists but is not a readable file, "
                 "so the document it should hold cannot be read. Recover or remove it "
                 "before adopting or rolling back again — carrying on would write the "
                 "next version without that document."
             )
+        # `is_file()` answers what kind of node it is, never whether it can
+        # be read: a mode-000 regular file passes it and then `read_bytes()`
+        # raises `PermissionError`, which the converter turns into this
+        # module's contract.
+        with _filesystem_damage_is_a_value_error(f"reading {path}"):
+            documents[name] = path.read_bytes().decode("utf-8")
     return documents
 
 
@@ -877,16 +901,26 @@ def _append_jsonl_locked(path: Path, record: dict[str, object]) -> None:
 
     Duplicates `learning_journal._append_jsonl_locked`'s locking discipline
     rather than importing it. See this module's docstring for why.
+
+    The whole body is inside the damage converter, and this is the site
+    where that matters most: it is the last step of `adopt` and
+    `roll_back`, reached after `_write_snapshot` has already durably written
+    a brand-new version's documents. A failure here — a full disk on
+    `write`/`flush` is the realistic one — is precisely the crash-window
+    Decision 2 describes, and it used to escape as a bare `OSError` while
+    every neighbouring call had been converted. `flock` is inside too: it
+    can fail on its own (`EINTR`, `ENOLCK`), and had the same gap.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(record, sort_keys=True) + "\n"
-    with open(path, "a", encoding="utf-8") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-        try:
-            stream.write(line)
-            stream.flush()
-        finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+    with _filesystem_damage_is_a_value_error(f"appending to {path}"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as stream:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+            try:
+                stream.write(line)
+                stream.flush()
+            finally:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 # The wire keys `_entry_to_mapping` always writes for a history line, and
@@ -1028,7 +1062,10 @@ def read_history(root_dir: Path) -> tuple[VersionEntry, ...]:
         return ()
     except OSError as exc:
         raise _damage_error(f"opening {path}", exc) from exc
-    with stream:
+    with stream, _filesystem_damage_is_a_value_error(f"reading {path}"):
+        # `flock` and `readlines` can each fail on their own — a lock table
+        # exhausted, an I/O error mid-file — and were the last calls in this
+        # function still outside the converter.
         fcntl.flock(stream.fileno(), fcntl.LOCK_SH)
         try:
             raw_lines = stream.readlines()
