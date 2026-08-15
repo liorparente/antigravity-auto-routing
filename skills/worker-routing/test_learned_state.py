@@ -1243,6 +1243,34 @@ class FilesystemDamageTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 learned_state._append_history(root, entry)
 
+    def test_a_document_that_is_not_valid_utf8_names_the_file_it_cannot_decode(
+        self,
+    ) -> None:
+        """The mirror image of `_validate_content`'s write-side guard.
+
+        Reachable by the crash window Decision 2 is mostly about: a
+        `write_bytes` interrupted partway leaves a truncated multi-byte
+        sequence. Unguarded, the codec reported a byte offset and no file,
+        in a store whose every other fault names the path and the remedy.
+
+        As on the write side, this is not a rejection-contract fix —
+        `UnicodeDecodeError` subclasses `UnicodeError` subclasses
+        `ValueError`, so a caller catching the contract already caught it.
+        Which is why the assertion is on the message: asserting the
+        exception type would pass identically against the unguarded code.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "hello")], root_dir=root, now=_NOW)
+            document = root / "learned-state" / "versions" / "v0001" / "memory"
+            document.write_bytes("héllo".encode()[:2])
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.read_current(root)
+            message = str(ctx.exception)
+            self.assertIn("not valid UTF-8", message)
+            self.assertIn(str(document), message)
+
     def _read_paths_refuse(self, root: Path) -> None:
         for name, call in (
             ("read_current", learned_state.read_current),

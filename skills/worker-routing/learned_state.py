@@ -834,7 +834,31 @@ def _read_documents(directory: Path) -> dict[str, str]:
         # raises `PermissionError`, which the converter turns into this
         # module's contract.
         with _filesystem_damage_is_a_value_error(f"reading {path}"):
-            documents[name] = path.read_bytes().decode("utf-8")
+            raw = path.read_bytes()
+        try:
+            documents[name] = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # Not folded into the `OSError` converter: a decode failure is
+            # not a filesystem fault, and saying "cannot be read or written
+            # by this process" about bytes that read back perfectly would be
+            # the wrong diagnosis — the class of error three rounds were
+            # spent removing from this module's messages.
+            #
+            # It is reachable, and by the crash window Decision 2 is mostly
+            # about: `_write_snapshot`'s `write_bytes` interrupted partway
+            # leaves a truncated multi-byte sequence. Like the write-side
+            # case in `_validate_content`, this is not a rejection-contract
+            # fix — `UnicodeDecodeError` subclasses `UnicodeError`
+            # subclasses `ValueError` — it is the same argument that
+            # docstring makes about *where* a refusal happens: unguarded,
+            # the codec named a byte offset and no file, in a store whose
+            # every other fault names the path and the remedy.
+            raise ValueError(
+                f"learned-state is damaged: {path} is not valid UTF-8 "
+                f"({exc.reason} at byte {exc.start}), so the document it holds cannot be "
+                "read. A write interrupted partway leaves exactly this; the versions are "
+                "git-tracked, so a checkout of that file is the usual repair."
+            ) from exc
     return documents
 
 
