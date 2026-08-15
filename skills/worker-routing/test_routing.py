@@ -5716,8 +5716,9 @@ class LearningJournalTests(unittest.TestCase):
         (as `advisory_consultation` does) but never the secret around it.
 
         The gate covers exactly the identifiers a caller *composes* for a
-        record — `model_id` and `model_family`, built out of the caller's own
-        vocabulary. The identifiers a caller merely *carries in* (`task_id`,
+        record — `model_id`, `model_family`, and ticket 26's `task_set`, all
+        built out of the caller's own vocabulary. The identifiers a caller
+        merely *carries in* (`task_id`,
         `session_id`, `run_id`) are deliberately not among them: each names a
         thing that already exists and was already named elsewhere, so refusing
         one here cannot un-name it and can only drop the record. See
@@ -5736,6 +5737,7 @@ class LearningJournalTests(unittest.TestCase):
                 for build in (
                     lambda v=value: self._worker_execution_record(model_id=v),
                     lambda v=value: self._worker_execution_record(model_family=v),
+                    lambda v=value: self._replay_benchmark_record(task_set=v),
                 ):
                     with self.assertRaises(ValueError) as caught:
                         build()
@@ -5749,19 +5751,23 @@ class LearningJournalTests(unittest.TestCase):
         """The line the gate is drawn on, stated as a property of the two
         validators rather than of a field list.
 
-        `model_id` and `model_family` are composed here, so they face
-        `_validate_identifier` (shape *and* markers). `task_id`, `session_id`
-        and `run_id` are carried in, so they face
+        `model_id`, `model_family` and `task_set` are composed here, so they
+        face `_validate_identifier` (shape *and* markers). `task_id`,
+        `session_id` and `run_id` are carried in, so they face
         `_validate_carried_identifier` (shape only). Stating it this way is
         the point: `session_id` sat behind the marker gate unnoticed for a
         whole ticket because the rule was remembered as a list of field names
-        instead of as a rule about where a string came from.
+        instead of as a rule about where a string came from — and `task_set`
+        arrived with ticket 26 on the composed side of that rule, where the
+        field list would again have missed it.
         """
         marked = "sk-live-9f3c1d7b"
 
         for descriptor in ("model_id", "model_family"):
             with self.subTest(composed=descriptor), self.assertRaises(ValueError):
                 self._worker_execution_record(**{descriptor: marked})
+        with self.subTest(composed="task_set"), self.assertRaises(ValueError):
+            self._replay_benchmark_record(task_set=marked)
 
         self.assertEqual(learning_journal.TaskLabel.for_task(marked).task_id, marked)
         carried = (
@@ -5775,6 +5781,8 @@ class LearningJournalTests(unittest.TestCase):
              lambda: self._outcome_record(run_id=marked)),
             ("dialogue_quality.run_id", "run_id",
              lambda: self._dialogue_quality_record(run_id=marked)),
+            ("replay_benchmark.run_id", "run_id",
+             lambda: self._replay_benchmark_record(run_id=marked)),
         )
         for label, field_name, build in carried:
             with self.subTest(carried=label):

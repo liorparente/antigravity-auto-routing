@@ -424,7 +424,7 @@ class ParseWireTimestampTests(unittest.TestCase):
 class ConstructionTimeCalendarValidationTests(unittest.TestCase):
     """`_validate_timestamp` now checks calendar validity, not just shape.
 
-    Regression coverage for the fix: every one of the four record types
+    Regression coverage for the fix: every one of the five record types
     calls `_validate_timestamp` from `__post_init__`, so a calendar-invalid
     timestamp like `"2026-99-99T99:99:99Z"` — which matches `TIMESTAMP_RE`
     but names no real instant — must now be rejected by the constructor
@@ -467,6 +467,21 @@ class ConstructionTimeCalendarValidationTests(unittest.TestCase):
                 occasion="ambiguity",
                 topology="pair",
                 rounds=(learning_journal.DialogueRound(verdict="approved", engagement_count=1),),
+                timestamp=self.BAD_TIMESTAMP,
+            )
+
+    def test_replay_benchmark_record_rejects_calendar_invalid_timestamp(self) -> None:
+        """Ticket 26's fifth family, which this class predates. Without it the
+        docstring's "every one of the five record types" was an enumeration
+        no assertion backed — and `acceptance_gate.py` stamps every trial from
+        an injected `now`, so a caller handing it a malformed instant is the
+        one path that reaches this constructor with a bad timestamp.
+        """
+        with self.assertRaises(ValueError):
+            learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1",
+                success=True,
+                score=0.82,
                 timestamp=self.BAD_TIMESTAMP,
             )
 

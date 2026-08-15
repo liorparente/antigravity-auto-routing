@@ -160,11 +160,11 @@ _TOKEN_SEPARATOR_RE = re.compile(r"[^A-Za-z0-9]+")
 # Which fields face this gate is itself a decision, and the line is
 # *composed descriptor* vs *carried identifier*, not "string that looks like
 # an identifier" (see `_validate_carried_identifier` for the other half).
-# Only `model_id` and `model_family` face it: a caller builds those two out of
-# its own vocabulary, so the check stays knowingly over-broad there, since a
-# caller renames a descriptor in seconds while a credential written into a
-# stream a learner later mines cannot be un-leaked. `task_id`, `session_id`,
-# and `run_id` do not face it. Each names a thing that already exists and was
+# `model_id`, `model_family`, and `task_set` face it: a caller builds all
+# three out of its own vocabulary, so the check stays knowingly over-broad
+# there, since a caller renames a descriptor in seconds while a credential
+# written into a stream a learner later mines cannot be un-leaked. `task_id`,
+# `session_id`, and `run_id` do not face it. Each names a thing that already exists and was
 # already named elsewhere — a task the audited telemetry stream has accepted,
 # a conversation directory, an execution — so refusing one here un-names
 # nothing and only drops the record.
@@ -432,10 +432,10 @@ def _validate_run_id(value: object, field_name: str) -> None:
 def _validate_identifier(value: object, field_name: str) -> None:
     """Reject any string that is not a bare, secret-free identifier.
 
-    The gate for the identifiers a caller *composes* for a record — `model_id`
-    and `model_family` — as opposed to the ones it carries over from
-    somewhere that already named them (`_validate_carried_identifier`). Two
-    checks, and both matter:
+    The gate for the identifiers a caller *composes* for a record — `model_id`,
+    `model_family`, and `ReplayBenchmarkRecord.task_set` — as opposed to the
+    ones it carries over from somewhere that already named them
+    (`_validate_carried_identifier`). Two checks, and both matter:
 
     - `TASK_ID_RE`: no spaces, no slashes, no punctuation beyond `_.-`. A task
       description, a prompt, a log excerpt, and a file path all fail on shape
@@ -1221,9 +1221,12 @@ class ReplayBenchmarkRecord:
     unconstructible, and a number has nowhere to sit in that shape. Extending
     `WorkerExecutionRecord` or `DialogueQualityRecord` instead would have bent
     an unrelated family's schema around a value neither one is about. A fifth
-    family costs updating the "how many families" count in three places
-    (this module's own docstring, `CONTEXT.md`, `docs/specs/0004-learning-loop.md`)
-    and is otherwise the shape ticket 26 itself calls the obvious one.
+    family costs updating the "how many families" count wherever it is
+    written down — ticket 26 named three sites (this module's own docstring,
+    `CONTEXT.md`, `docs/specs/0004-learning-loop.md`) and review kept finding
+    more in test and sibling-module prose, which is the real reason that count
+    is a cost rather than a formality — and is otherwise the shape ticket 26
+    itself calls the obvious one.
 
     **No `TaskLabel`.** The replay benchmark scores a fixed, versioned task
     set the evaluator owns — not a development task, the way three of this
