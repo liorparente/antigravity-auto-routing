@@ -1130,6 +1130,40 @@ class FilesystemDamageTests(unittest.TestCase):
             finally:
                 blocked.chmod(0o755)
 
+    def test_an_unknowable_versions_directory_refuses_rather_than_counting_zero(
+        self,
+    ) -> None:
+        """The container half of the test below, left behind when the
+        per-entry check was converted two lines away.
+
+        `versions/` symlinked behind an unreadable ancestor made
+        `Path.is_dir()` answer `False`, so the scan returned 0 — "no version
+        has ever been written" — when the true answer is "I cannot tell".
+        Same mistake as the entry-level one, one level up, which is the
+        fifth path level this module has made it at.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "learned-state").mkdir(parents=True)
+            blocked = root / "blocked"
+            blocked.mkdir()
+            (blocked / "versions").mkdir()
+            (root / "learned-state" / "versions").symlink_to(
+                blocked / "versions", target_is_directory=True
+            )
+            blocked.chmod(0o000)
+            try:
+                with self.assertRaises(ValueError) as ctx:
+                    learned_state._highest_version_on_disk(root)
+                self.assertIn("damaged or unusable", str(ctx.exception))
+            finally:
+                blocked.chmod(0o755)
+
+    def test_a_store_with_no_versions_directory_yet_counts_zero(self) -> None:
+        """The absent case the guard above must not swallow."""
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(learned_state._highest_version_on_disk(Path(tmp)), 0)
+
     def test_a_version_entry_symlinked_to_a_reachable_directory_is_counted(self) -> None:
         """The other half, so the fix cannot be "raise on every symlink"."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1522,6 +1556,92 @@ class DocumentDeltaValidationTests(unittest.TestCase):
     def test_rejects_two_none_digests(self) -> None:
         with self.assertRaises(ValueError):
             learned_state.DocumentDelta(document="memory", before_digest=None, after_digest=None)
+
+
+class VersionEntryDuplicateDeltaTests(unittest.TestCase):
+    """The read side of the rule `_validate_changes` states for the write side.
+
+    `adopt` and `roll_back` cannot produce two deltas for one document —
+    `_diff_snapshots` walks a set union — so this only arrives from a
+    hand-corrupted `history.jsonl`, which this module answers loudly by
+    design. It used to round-trip such a line without complaint, leaving
+    nothing to say which of the two deltas described the version.
+    """
+
+    @staticmethod
+    # No return annotation: the module is loaded by path, so mypy cannot
+    # resolve `learned_state.DocumentDelta` as a type. Same reason `_change`
+    # at the top of this file has none.
+    def _delta(before: str | None, after: str | None):
+        return learned_state.DocumentDelta(
+            document="memory", before_digest=before, after_digest=after
+        )
+
+    def test_two_deltas_for_one_document_are_refused(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            learned_state.VersionEntry(
+                kind="adopt",
+                version=1,
+                replaces=None,
+                documents=(self._delta(None, "a" * 64), self._delta("b" * 64, "c" * 64)),
+                change_id=None,
+                timestamp="2026-08-15T12:00:00Z",
+            )
+        self.assertIn("more than once", str(ctx.exception))
+
+    def test_read_history_refuses_a_line_carrying_two_deltas_for_one_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_path = root / "learned-state" / "history.jsonl"
+            history_path.parent.mkdir(parents=True)
+            history_path.write_text(
+                json.dumps(
+                    {
+                        "kind": "adopt",
+                        "version": 1,
+                        "replaces": None,
+                        "documents": [
+                            {
+                                "document": "memory",
+                                "before_digest": None,
+                                "after_digest": "a" * 64,
+                            },
+                            {
+                                "document": "memory",
+                                "before_digest": "b" * 64,
+                                "after_digest": "c" * 64,
+                            },
+                        ],
+                        "change_id": None,
+                        "timestamp": "2026-08-15T12:00:00Z",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                learned_state.read_history(root)
+
+    def test_deltas_for_different_documents_are_accepted(self) -> None:
+        """The legitimate case the guard must not swallow — one adopt
+        touching two documents produces exactly this."""
+        entry = learned_state.VersionEntry(
+            kind="adopt",
+            version=1,
+            replaces=None,
+            documents=(
+                learned_state.DocumentDelta(
+                    document="memory", before_digest=None, after_digest="a" * 64
+                ),
+                learned_state.DocumentDelta(
+                    document="briefs", before_digest=None, after_digest="b" * 64
+                ),
+            ),
+            change_id=None,
+            timestamp="2026-08-15T12:00:00Z",
+        )
+        self.assertEqual(len(entry.documents), 2)
 
 
 class VersionEntryValidationTests(unittest.TestCase):

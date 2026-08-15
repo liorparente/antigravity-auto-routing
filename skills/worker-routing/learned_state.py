@@ -502,11 +502,24 @@ def _validate_document_deltas(value: object, field_name: str) -> None:
         raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
             f"{field_name} must be a tuple, got {type(value).__name__}"
         )
+    seen: set[str] = set()
     for index, item in enumerate(value):
         if not isinstance(item, DocumentDelta):
             raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
                 f"{field_name}[{index}] must be a DocumentDelta, got {type(item).__name__}"
             )
+        # The read side of the rule `_validate_changes` states for the write
+        # side: two deltas for one document leave nothing to say which won.
+        # `adopt` and `roll_back` cannot produce it — `_diff_snapshots`
+        # walks a set union — so this catches a hand-corrupted
+        # `history.jsonl` line, which this module answers loudly by design
+        # rather than round-tripping without complaint.
+        if item.document in seen:
+            raise ValueError(
+                f"{field_name} names document {item.document!r} more than once; "
+                "nothing defines which delta would win"
+            )
+        seen.add(item.document)
 
 
 @dataclass(frozen=True)
@@ -712,7 +725,25 @@ def _highest_version_on_disk(root_dir: Path) -> int:
     Decision 2 for the full reasoning and its known limits.
     """
     versions_dir = _versions_dir(root_dir)
-    if not versions_dir.is_dir():
+    # `os.stat` here for the same reason as the per-entry test below — and
+    # this guard was left on `Path.is_dir()` when that one was converted,
+    # two lines apart, which is the container-versus-contents version of
+    # the mistake this module has now made at five different path levels.
+    # A `versions/` symlinked behind an unreadable ancestor answered
+    # `False` and this function returned 0: not "no versions yet" but "I
+    # cannot tell", reported as the former.
+    try:
+        node = os.stat(versions_dir)
+    except FileNotFoundError:
+        # Genuinely absent: no version has ever been written. The one
+        # answer here that is not damage.
+        return 0
+    except OSError as exc:
+        raise _damage_error(f"inspecting {versions_dir}", exc) from exc
+    if not stat.S_ISDIR(node.st_mode):
+        # Occupied by something else. Nothing to scan, and `_write_snapshot`
+        # raises on the same fault a moment later with the remedy attached
+        # (`test_a_versions_directory_occupied_by_a_file_refuses_on_adopt`).
         return 0
     highest = 0
     with _filesystem_damage_is_a_value_error(f"listing {versions_dir}"):
