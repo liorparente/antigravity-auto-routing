@@ -337,6 +337,44 @@ class EveryTrialReachesTheJournalTests(unittest.TestCase):
             self.assertEqual(record.task_set, "bench-v1")
             self.assertEqual(record.run_id, "run-eval-1")
 
+    def test_a_failed_trial_carries_the_same_identity_and_the_injected_now(self) -> None:
+        """The `except` arm builds a second `ReplayBenchmarkRecord`, and every
+        field it carries has to be passed there too.
+
+        The test above drives a runner that always succeeds, so it never
+        reaches that arm — and each of the three fields could be dropped from
+        it with the whole suite staying green. `timestamp` is the one that
+        matters most: omitting it falls back to `learning_journal`'s live
+        clock, so a failed trial is stamped with the wall time instead of the
+        injected `now`, lands after it, and is cut from the `current` board by
+        `_prefix_cut` — the same disappearance `_wire_timestamp`'s missing UTC
+        conversion caused on the success path, on the one path that exists to
+        prove a runner failure is never silently absent.
+        """
+        def always_raises() -> float:
+            raise RuntimeError("evaluator crashed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            decision = acceptance_gate.evaluate_proposal(
+                always_raises,
+                task_set="bench-v1",
+                root_dir=root,
+                now=_NOW,
+                trials=2,
+                run_id="run-eval-1",
+            )
+            journal = learning_journal.read_journal(root)
+
+        self.assertFalse(decision.accepted)
+        self.assertEqual(len(journal.replay_benchmarks), 2)
+        for record in journal.replay_benchmarks:
+            self.assertFalse(record.success)
+            self.assertIsNone(record.score)
+            self.assertEqual(record.task_set, "bench-v1")
+            self.assertEqual(record.run_id, "run-eval-1")
+            self.assertEqual(record.timestamp, "2026-01-08T00:00:00Z")
+
 
 class MultiTrialTrendTests(unittest.TestCase):
     def test_the_batchs_trials_feed_a_real_mean_benchmark_score(self) -> None:
@@ -539,8 +577,8 @@ class NonUtcNowTests(unittest.TestCase):
         with a fixed, non-current `now` would find its own just-written
         trials excluded from the 'current' scoreboard's `<= now` prefix
         cut"), and until this test nothing asserted it: dropping the
-        conversion left all nineteen other gate tests green, because a
-        vanished batch moves no metric and so regresses nothing.
+        conversion left every other gate test green, because a vanished batch
+        moves no metric and so regresses nothing.
         """
         now = datetime(2026, 1, 8, 10, 0, tzinfo=timezone(timedelta(hours=2)))
 
