@@ -988,6 +988,73 @@ class GitTrackingTests(unittest.TestCase):
         )
 
 
+class ConcurrentAdoptTests(unittest.TestCase):
+    """Two processes adopting different documents at once must both survive.
+
+    Every other test in this file is single-process, which is exactly why
+    this gap lasted: the store looked safe because `_append_jsonl_locked`
+    holds a lock, but that lock covers only the final append, and the append
+    is not what needed protecting. `adopt` *decides* what to write from a
+    read of the store — current version, its documents, highest version
+    used — so two processes interleaving inside that read-decide-write
+    window could both return successfully while one of the two changes was
+    simply absent from the version left current.
+
+    Reproduced before the fix with real OS processes: 6 trials out of 6 lost
+    a committed write. `_exclusive_store_lock` now spans the whole critical
+    section and the same reproduction loses none.
+
+    Subprocesses rather than threads, because the lock is `flock` and the
+    bug is between processes; the GIL would hide it.
+    """
+
+    _ADOPT_SNIPPET = (
+        "import sys; sys.path.insert(0, {skill!r});\n"
+        "import learned_state as ls;\n"
+        "from datetime import datetime, timezone;\n"
+        "from pathlib import Path;\n"
+        "ls.adopt([ls.DocumentChange(document={doc!r}, content={content!r})],"
+        " root_dir=Path({root!r}),"
+        " now=datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc))\n"
+    )
+
+    def test_two_processes_adopting_different_documents_lose_neither_change(self) -> None:
+        skill_dir = str(Path(__file__).resolve().parent)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt(
+                [_change("memory", "seed-m"), _change("briefs", "seed-b")],
+                root_dir=root,
+                now=_NOW,
+            )
+
+            processes = [
+                subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        self._ADOPT_SNIPPET.format(
+                            skill=skill_dir, doc=doc, content=content, root=str(root)
+                        ),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                for doc, content in (("memory", "M2"), ("briefs", "B2"))
+            ]
+            outcomes = [(p.wait(timeout=60), p.communicate()[1]) for p in processes]
+
+            for code, stderr in outcomes:
+                self.assertEqual(
+                    code, 0, f"a concurrent adopt failed: {stderr.decode('utf-8')[-400:]}"
+                )
+            self.assertEqual(
+                learned_state.read_current(root),
+                {"memory": "M2", "briefs": "B2"},
+                "one process's committed change was lost by the other's stale read",
+            )
+
+
 class MissingSnapshotTests(unittest.TestCase):
     """A snapshot `history.jsonl` names, gone from disk.
 

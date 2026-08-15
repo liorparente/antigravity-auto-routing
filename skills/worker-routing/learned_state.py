@@ -217,7 +217,8 @@ import fcntl
 import hashlib
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -236,6 +237,12 @@ LEARNED_STATE_RELATIVE_PATH = Path("learned-state")
 
 _VERSIONS_DIRNAME = "versions"
 _HISTORY_FILENAME = "history.jsonl"
+
+# Process coordination, never learned state: see `_exclusive_store_lock`.
+# `.gitignore`d, because a version of an empty lock file would mean nothing
+# to restore and it is the one thing under `learned-state/` that is not
+# content this store is responsible for.
+_LOCK_FILENAME = ".lock"
 
 # The two things a version transition can be. Not exported as a named
 # `Literal` alias: nothing outside this module constructs a `VersionEntry`
@@ -546,6 +553,57 @@ def _versions_dir(root_dir: Path) -> Path:
 
 def _version_dir(root_dir: Path, version: int) -> Path:
     return _versions_dir(root_dir) / f"v{version:04d}"
+
+
+def _lock_path(root_dir: Path) -> Path:
+    return _learned_state_dir(root_dir) / _LOCK_FILENAME
+
+
+@contextmanager
+def _exclusive_store_lock(root_dir: Path) -> Iterator[None]:
+    """Serialize one whole `adopt` or `roll_back` against other processes.
+
+    `_append_jsonl_locked`'s lock covers only the final append, which is not
+    the operation that needs protecting. Both writers *decide* what to write
+    from a read of the store — the current version, its documents, the
+    highest version number used — and then write. Two processes interleaving
+    inside that read-decide-write window produce two failures, both
+    reproduced by running real concurrent processes against one `root_dir`:
+
+    - The common one: both compute the same next version number (the scan
+      that would have seen the other's directory runs before either has
+      created one), so the loser's `mkdir(..., exist_ok=False)` collides and
+      raises. Loud, and safe.
+    - The narrow one, and the reason this lock exists: a writer whose reads
+      land *between* the other's `_write_snapshot` and its `_append_history`
+      sees the other's directory but not its history line. It allocates past
+      the directory, so no collision — and carries forward documents read
+      from the older version, so the other writer's change is absent from
+      the version that ends up current. Both calls return successfully.
+      Nothing raises. That is a lost update, and the loser has no way to
+      learn it happened.
+
+    A dedicated lock file rather than `history.jsonl` itself, because
+    `flock` associates a lock with an open file *description*: this
+    function's exclusive lock and the one `_append_jsonl_locked` takes
+    inside it come from two separate `open()` calls, so taking both on one
+    path would have each operation deadlock against itself. The lock file
+    holds no content and is `.gitignore`d — it is process coordination, not
+    learned state, and a version of it would mean nothing to restore.
+
+    A POSIX advisory lock is released by the kernel when the holding process
+    exits, so a crash mid-adopt leaves no stale lock to clear by hand — the
+    orphaned *snapshot* such a crash leaves is handled separately, by the
+    self-healing allocation in Decision 2.
+    """
+    path = _lock_path(root_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _history_path(root_dir: Path) -> Path:
@@ -960,39 +1018,45 @@ def adopt(
     validated_changes = _validate_changes(changes)
     _validate_change_id(change_id)
 
-    history = read_history(root_dir)
-    current_version = history[-1].version if history else None
-    highest_version_used = max(
-        max((entry.version for entry in history), default=0),
-        _highest_version_on_disk(root_dir),
-    )
-
-    previous_documents = (
-        _read_snapshot_contents(root_dir, current_version) if current_version is not None else {}
-    )
-    new_documents = dict(previous_documents)
-    for change in validated_changes:
-        new_documents[change.document] = change.content
-
-    deltas = _diff_snapshots(previous_documents, new_documents)
-    if not deltas:
-        raise ValueError(
-            "changes describe no actual difference from the current version — "
-            "adopting nothing is not a version"
+    # Everything from here to the append is one critical section: the whole
+    # point is that what gets written is decided from a read no other writer
+    # can invalidate in between. See `_exclusive_store_lock`.
+    with _exclusive_store_lock(root_dir):
+        history = read_history(root_dir)
+        current_version = history[-1].version if history else None
+        highest_version_used = max(
+            max((entry.version for entry in history), default=0),
+            _highest_version_on_disk(root_dir),
         )
 
-    new_version = highest_version_used + 1
-    _write_snapshot(root_dir, new_version, new_documents)
+        previous_documents = (
+            _read_snapshot_contents(root_dir, current_version)
+            if current_version is not None
+            else {}
+        )
+        new_documents = dict(previous_documents)
+        for change in validated_changes:
+            new_documents[change.document] = change.content
 
-    entry = VersionEntry(
-        kind="adopt",
-        version=new_version,
-        replaces=current_version,
-        documents=deltas,
-        change_id=change_id,
-        timestamp=_wire_timestamp(now),
-    )
-    _append_history(root_dir, entry)
+        deltas = _diff_snapshots(previous_documents, new_documents)
+        if not deltas:
+            raise ValueError(
+                "changes describe no actual difference from the current version — "
+                "adopting nothing is not a version"
+            )
+
+        new_version = highest_version_used + 1
+        _write_snapshot(root_dir, new_version, new_documents)
+
+        entry = VersionEntry(
+            kind="adopt",
+            version=new_version,
+            replaces=current_version,
+            documents=deltas,
+            change_id=change_id,
+            timestamp=_wire_timestamp(now),
+        )
+        _append_history(root_dir, entry)
     return entry
 
 
@@ -1029,45 +1093,50 @@ def roll_back(*, root_dir: Path, now: datetime, change_id: str | None = None) ->
     """
     _require_aware_now(now)
 
-    history = read_history(root_dir)
-    if not history:
-        raise ValueError("cannot roll back: no version has ever been adopted")
+    # One critical section, for the same reason `adopt` needs one: which
+    # adoption is "most recent and not yet undone" is decided from a read of
+    # history, and an append landing between that read and this one's own
+    # would make the answer wrong. See `_exclusive_store_lock`.
+    with _exclusive_store_lock(root_dir):
+        history = read_history(root_dir)
+        if not history:
+            raise ValueError("cannot roll back: no version has ever been adopted")
 
-    current_version = history[-1].version
+        current_version = history[-1].version
 
-    skip = 0
-    target_entry: VersionEntry | None = None
-    for entry in reversed(history):
-        if entry.kind == "rollback":
-            skip += 1
-            continue
-        if skip > 0:
-            skip -= 1
-            continue
-        target_entry = entry
-        break
+        skip = 0
+        target_entry: VersionEntry | None = None
+        for entry in reversed(history):
+            if entry.kind == "rollback":
+                skip += 1
+                continue
+            if skip > 0:
+                skip -= 1
+                continue
+            target_entry = entry
+            break
 
-    if target_entry is None:
-        raise ValueError("cannot roll back: every adoption has already been undone")
-    if target_entry.replaces is None:
-        raise ValueError(
-            "cannot roll back the first adoption — the state before it is the "
-            "un-learned system, which this store does not model"
+        if target_entry is None:
+            raise ValueError("cannot roll back: every adoption has already been undone")
+        if target_entry.replaces is None:
+            raise ValueError(
+                "cannot roll back the first adoption — the state before it is the "
+                "un-learned system, which this store does not model"
+            )
+
+        target_version = target_entry.replaces
+        current_documents = _read_snapshot_contents(root_dir, current_version)
+        target_documents = _read_snapshot_contents(root_dir, target_version)
+
+        entry = VersionEntry(
+            kind="rollback",
+            version=target_version,
+            replaces=current_version,
+            documents=_diff_snapshots(current_documents, target_documents),
+            change_id=change_id,
+            timestamp=_wire_timestamp(now),
         )
-
-    target_version = target_entry.replaces
-    current_documents = _read_snapshot_contents(root_dir, current_version)
-    target_documents = _read_snapshot_contents(root_dir, target_version)
-
-    entry = VersionEntry(
-        kind="rollback",
-        version=target_version,
-        replaces=current_version,
-        documents=_diff_snapshots(current_documents, target_documents),
-        change_id=change_id,
-        timestamp=_wire_timestamp(now),
-    )
-    _append_history(root_dir, entry)
+        _append_history(root_dir, entry)
     return entry
 
 

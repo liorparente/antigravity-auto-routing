@@ -31,3 +31,9 @@ __pycache__/
 /AGENTS.md
 /CLAUDE.md
 *.bak
+
+# learned_state.py's cross-process mutex (see `_exclusive_store_lock`). The
+# directory around it stays tracked on purpose — that is what "git-tracked
+# version" means for ticket 19 — but this one file is process coordination
+# holding no content, so a committed version of it would restore nothing.
+learned-state/.lock
