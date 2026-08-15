@@ -111,6 +111,17 @@ entry already hands an operator who finds an orphan, so the two pieces of
 guidance key on one question rather than two rules that could drift apart.
 This module removes nothing on its own under either answer.
 
+The message deliberately carries **no list of what a stray entry can be**,
+and that absence is load-bearing rather than an omission to be helpfully
+filled in later. It once read "a stray entry (a file, or a name differing
+only in case)", which undercounted the moment the paragraph above learned
+about symlinks — the enumeration failure repeating one level down, in the
+one piece of prose an operator actually reads at runtime. The list also
+bought nothing: the action is identical whatever kind of entry it is, so
+naming the kinds only creates a second thing to keep in step with the
+scan's two tests. If a future case is discovered, it belongs in the
+worked examples above and changes nothing here.
+
 **Decision 3 — `roll_back` undoes the most recent adoption that has not
 already been undone.** The tempting alternative, "restore version N-1",
 oscillates: a second `roll_back` would restore N-2, re-applying whatever the
@@ -571,8 +582,8 @@ def _write_snapshot(root_dir: Path, version: int, documents: Mapping[str, str]) 
             "If it does, the occupant is a real adopted snapshot: do not "
             "delete it — the fault is in this module's version numbering, "
             "and only a code change fixes it. If it does not, the occupant "
-            "is a stray entry (a file, or a name differing only in case) "
-            "and removing it lets the store allocate again."
+            "is a stray entry and removing it lets the store allocate "
+            "again."
         ) from exc
     for document, content in documents.items():
         (directory / document).write_bytes(content.encode("utf-8"))
