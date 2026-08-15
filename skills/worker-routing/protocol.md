@@ -178,7 +178,7 @@ Supported Active IDE Models:
 2. **If worker is unreachable:** HALT. Report which worker is down and the fix. Do NOT silently self-execute.
 3. **Audit trail:** Every response that involves any action must start with `[ROUTING: {worker} — complexity: {level} — effort: {effort} — reason: {why}]` or `[ROUTING: Direct — reason: {allowed exception}]`.
 3.5. **Fallback Chain (on worker unavailability):**
-    - **Sensitive tasks**: Local models only (Gemma 4 E4B -> Qwen3-Coder-Next) -> fail closed immediately.
+    - **Sensitive tasks**: Local models only (Gemma 4 E4B -> Qwen3.8-27B) -> fail closed immediately.
     - **Context/Search**: Gemini 3.6 Flash (High) -> Gemini 3.1 Pro (High) -> agy -> codex read-only.
     - **Execution (Trivial/Simple)**: Gemini 3.6 Flash (Medium) -> codex Luna/Terra -> GPT-OSS 120B -> Claude Sonnet -> Local models.
     - **Complex/Planning**: Claude Opus 5 (Thinking) -> Claude Fable/Opus 4.8 -> codex Sol (high/ultra) -> manual.

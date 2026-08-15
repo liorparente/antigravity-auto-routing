@@ -504,3 +504,63 @@
 - Lesson: "flagged separately," "tracked elsewhere," or any similar phrase in a comment or commit
   message is not itself tracking — it is a promise. Before writing it, either file the real ticket
   or ERRORS.md entry it refers to, or don't write the phrase at all.
+
+## 2026-08-15 — Nine Review Rounds Found One Dead Guard At A Time; One Mutation Sweep Found The Rest
+
+- Mission: run `/iterative-fix-review` over tickets 18 and 26 (`acceptance_gate.py`,
+  `ReplayBenchmarkRecord`, a real `mean_benchmark_score`) until both `/code-review` axes return zero.
+- Issue: the loop plateaued. Rounds 4 through 7 each returned exactly one real coverage gap plus a
+  pile of stale prose, and never fewer — findings per round ran 1, 2, 9, 3, 4, 3, 4, 3, 2. Three of
+  those single findings were the same defect class in three different guards, all of them green in
+  CI and invisible to review-by-reading: `_require_aware_now` mirroring `learning_scoreboard`'s guard
+  with a byte-identical message raised one statement later (so `assertRaises` could not tell which
+  fired, and neither could `assertRaisesRegex`); `window_days`, a parameter no test ever passed a
+  non-default value for, so dropping it from one of two `read_scoreboard` calls stayed green;
+  `_wire_timestamp`'s `.astimezone(timezone.utc)`, a no-op in every test because every test injected
+  a `now` that was already UTC.
+- Detection: not reading. Each was found only by deleting or inverting the production line the test
+  named and running the suite. The plateau broke when round 8 stopped sampling one guard per round
+  and instead enumerated every guard, validator, branch and conversion the diff introduced and
+  mutated each — 36 in total — surfacing the last three survivors at once. Round 9 repeated the sweep
+  (22 mutations) and found one more, then the Spec axis returned zero twice running.
+- Root Cause: a reviewer reading a guard sees what it is *meant* to do and moves on; nothing in
+  reading reveals that a collaborator already does the same thing one statement later, or that the
+  parameter carrying a behaviour is never given a value that would expose it. Sampling one guard per
+  round makes the loop's cost linear in the number of guards while its yield stays at one.
+- Resolution: every survivor fixed with a test verified by mutation before committing. The
+  mirrored-guard fix is worth noting: rather than change the message so a test could tell the two
+  apart — which would break the mirror idiom this repo uses deliberately — the test stubs the
+  collaborator to raise if reached, asserting the property the mirror actually provides (refusal at
+  the front door, before the collaborator is called at all).
+- Lesson: when a fix-and-review loop shows the plateau signature — one real finding plus stale prose,
+  round after round — stop sampling and budget one systematic mutation sweep. Enumerate every guard,
+  validator, branch and conversion the change introduced, mutate each, and treat a test as binding
+  only when it goes red. Two shapes recur here: a guard mirroring a collaborator's identical guard,
+  and a parameter no test passes a non-default value for.
+
+## 2026-08-15 — The Same Install-List Gap A Third Time, Plus A Fourth List Nobody Was Guarding
+
+- Mission: wire ticket 18's new `acceptance_gate.py` into the repo the way every sibling module is.
+- Issue: it was missing from `install.sh`'s `MANAGED_FILES` and `uninstall.sh`'s `INSTALLED_FILES` —
+  the third recurrence of one gap (`learning_journal.py`, then `learning_report.py` in ticket 17,
+  now this). `ManagedFileClosureTests` exists precisely to stop that and could not: it asserts only
+  that a *managed* file's sibling imports are themselves managed, so a leaf module nothing imports
+  yet is invisible to it — and a module landing one ticket ahead of its caller is exactly that.
+  Separately, CI's `PYTHON_MODULES` was asserted only in the list-to-files direction, never
+  files-to-list, so removing a module from it left the suite green and the module silently unlinted
+  and untype-checked.
+- Detection: a Standards-axis review round caught the install lists; the CI list was caught two
+  rounds later by mutation, after the install fix had already established what the missing direction
+  looked like.
+- Root Cause: the closure test encoded a rule about imports when the rule that actually holds is
+  about existence — every non-test module in the directory is production code, and production code
+  the installer does not copy does not exist on an installed harness. Adding a module touches four
+  lists (`MANAGED_FILES`, `INSTALLED_FILES`, `PYTHON_MODULES`, `PYTHON_TESTS`) and only three were
+  guarded in the direction that catches an omission.
+- Resolution: `test_every_production_module_in_the_skill_directory_is_managed` and
+  `test_ci_checks_every_python_file_in_the_skill_directory` now assert the existence-side invariant
+  for both lists. Both verified by removing the entry and watching them fail.
+- Lesson: a closure test that walks a dependency edge can only see nodes something already points
+  at. When the real invariant is "everything here must appear there", assert it directly and in both
+  directions — and count the lists: this repo has four, and a fix that guards one says nothing about
+  the other three.

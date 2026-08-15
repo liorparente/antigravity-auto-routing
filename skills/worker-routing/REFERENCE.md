@@ -57,16 +57,16 @@ IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effor
 # 1. Verify if a model is currently loaded
 curl -s http://127.0.0.1:1234/v1/models | jq '.data[0].id'
 
-# 2. Load model (qwen/qwen3-coder-30b or gemma-4-e4b-it-mlx) if not already active
+# 2. Load model (qwen3.8-27b-mlx or gemma-4-e4b-it-mlx) if not already active
 curl -s -X POST http://127.0.0.1:1234/api/v1/models/load \
   -H "Content-Type: application/json" \
-  -d '{"model": "qwen/qwen3-coder-30b"}' > /dev/null
+  -d '{"model": "qwen3.8-27b-mlx"}' > /dev/null
 
 # 3. Run inference
 curl -s http://127.0.0.1:1234/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "qwen/qwen3-coder-30b",
+    "model": "qwen3.8-27b-mlx",
     "messages": [{"role": "user", "content": "Write a TypeScript debounce function with full type signatures"}],
     "temperature": 0.1
   }' | jq -r '.choices[0].message.content'
@@ -74,5 +74,5 @@ curl -s http://127.0.0.1:1234/v1/chat/completions \
 # 4. Unload model (mandatory)
 curl -s -X POST http://127.0.0.1:1234/api/v1/models/unload \
   -H "Content-Type: application/json" \
-  -d '{"instance_id": "qwen/qwen3-coder-30b"}' > /dev/null
+  -d '{"instance_id": "qwen3.8-27b-mlx"}' > /dev/null
 ```

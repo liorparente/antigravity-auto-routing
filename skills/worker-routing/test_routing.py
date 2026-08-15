@@ -3024,7 +3024,7 @@ class ModelFamilyClassifierTests(unittest.TestCase):
         own family" — two different local checkpoints must classify to two
         different families, and neither may collide with a cloud family."""
         gemma = advisory_consultation.classify_model_family("Gemma 4 E4B")
-        qwen = advisory_consultation.classify_model_family("Qwen3-Coder-Next")
+        qwen = advisory_consultation.classify_model_family("Qwen3.8-27B-MLX-6bit")
         self.assertNotEqual(gemma, qwen)
         cloud_families = {
             advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
@@ -3229,7 +3229,7 @@ class RosterResolutionTests(unittest.TestCase):
                     {
                         "roster_topology": {
                             "role_fallback_chains": {
-                                "planner": ["Qwen3-Coder-Next"],
+                                "planner": ["Qwen3.8-27B-MLX-6bit"],
                                 "critic_a": ["Gemma 4 E4B"],
                                 "critic_b": ["Claude Opus 5 (Thinking)"],
                             }
@@ -3244,7 +3244,7 @@ class RosterResolutionTests(unittest.TestCase):
             )
         planner = next(a for a in roster.assignments if a.role == "planner")
         critic_a = next(a for a in roster.assignments if a.role == "critic_a")
-        self.assertEqual(planner.model, "Qwen3-Coder-Next")
+        self.assertEqual(planner.model, "Qwen3.8-27B-MLX-6bit")
         self.assertEqual(critic_a.model, "Gemma 4 E4B")
 
     def test_missing_roster_topology_section_falls_back_to_defaults(self) -> None:
@@ -9831,7 +9831,7 @@ class IsLocalFamilyTests(unittest.TestCase):
             "Gemini 3.1 Pro (High)",
             "Gemini 3.6 Flash",
         )
-        local_models = ("Gemma 4 E4B", "Qwen3-Coder-Next")
+        local_models = ("Gemma 4 E4B", "Qwen3.8-27B-MLX-6bit")
         for model in cloud_models:
             with self.subTest(model=model):
                 self.assertFalse(

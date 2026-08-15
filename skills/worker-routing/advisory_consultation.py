@@ -412,7 +412,7 @@ DEFAULT_ROSTER_FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
         "GPT-OSS 120B (Medium)",
         "Gemini 3.6 Flash (High)",
         "Claude Opus 5 (Thinking)",
-        "Qwen3-Coder-Next",
+        "Qwen3.8-27B-MLX-6bit",
     ),
     "critic_b": (
         "Gemini 3.6 Flash",
