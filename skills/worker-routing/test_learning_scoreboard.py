@@ -97,8 +97,10 @@ def _append_raw_bytes(root: Path, data: bytes) -> None:
 
 # Hand-built wire mappings, one per family, matching exactly what each
 # family's real `to_mapping()` emits for a minimal record — every key a real
-# writer always includes, and none of the three (`run_id`, `task_type`,
-# `session_last_activity`) it includes only when set. Used as a base a test
+# writer always includes, and none of the ones it includes only when set
+# (`run_id`, `task_type`, `session_last_activity`). `score` is optional by
+# type too, but a successful trial always carries one, so the
+# replay-benchmark fixture below does include it. Used as a base a test
 # mutates (deletes one key, or sets an optional one) rather than constructing
 # a real record and re-deriving its wire form, since these tests are about
 # the wire contract itself, not about round-tripping a Python object.
@@ -951,10 +953,10 @@ class ReadJournalRequiredWireKeyTests(unittest.TestCase):
     stamped with the *read* time via `default_factory`, and a missing
     `rounds` used to fall back to `()` via the rehydrator's own
     `mapping.get("rounds", ())` — both indistinguishable from a real record
-    and both corrupting every trend built on them. Exactly three fields
+    and both corrupting every trend built on them. Exactly four fields
     anywhere in this module are typed `X | None` — `run_id`, `task_type`,
-    `session_last_activity` — and those three are the only ones a real line
-    may honestly omit.
+    `session_last_activity`, and ticket 26's `score` — and those four are the
+    only ones a real line may honestly omit.
 
     `dialogue_quality`'s `rounds_run` is required by the same "always
     emitted, so always required" rule, but by a different mechanism: it is a
@@ -1319,7 +1321,7 @@ class ReadJournalRequiredWireKeyTests(unittest.TestCase):
 
     def test_every_required_key_of_replay_benchmark_makes_its_line_unreadable(self) -> None:
         """`score` is deliberately absent from this list: it is one of the
-        three fields typed `X | None` (`_optional_wire_fields`), so a missing
+        four fields typed `X | None` (`_optional_wire_fields`), so a missing
         `score` is not a required-key violation at all. A successful trial
         missing its score still becomes unreadable, but through
         `ReplayBenchmarkRecord.__post_init__`'s own success/score agreement
@@ -1702,9 +1704,15 @@ class ReadJournalBlankLineTests(unittest.TestCase):
 class ReadJournalExplicitNullOptionalFieldTests(unittest.TestCase):
     """DECIDE D2 (worker-routing.md Spec 0004 review, iteration 3): an
     explicit wire `null` on an optional field (`run_id`, `task_type`,
-    `session_last_activity`) is accepted as absence rather than rejected as
-    damage. See `read_journal`'s docstring for the full reasoning; this is
-    that decision's test.
+    `session_last_activity`, and ticket 26's `score`) is accepted as absence
+    rather than rejected as damage. See `read_journal`'s docstring for the
+    full reasoning; this is that decision's test.
+
+    `score` is the one where accepting absence does not end the matter: a
+    `success: true` line whose `score` is an explicit `null` reads back as
+    absence here and is then refused by `ReplayBenchmarkRecord.__post_init__`'s
+    success/score agreement check, which is a different rule and a different
+    test (`test_every_required_key_of_replay_benchmark_makes_its_line_unreadable`).
     """
 
     def test_an_explicit_null_run_id_reads_back_as_none_not_as_damage(self) -> None:

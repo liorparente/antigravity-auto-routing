@@ -363,15 +363,34 @@ class MultiTrialTrendTests(unittest.TestCase):
 
 class InputValidationTests(unittest.TestCase):
     def test_a_naive_now_is_refused(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with self.assertRaises(ValueError):
-                acceptance_gate.evaluate_proposal(
-                    _scripted_runner([0.9]),
-                    task_set="bench-v1",
-                    root_dir=root,
-                    now=datetime(2026, 1, 8),  # noqa: DTZ001 - the value under test
-                )
+        """The gate's own `_require_aware_now` fires, not the identical guard
+        inside `read_scoreboard` one statement later.
+
+        Asserting `ValueError` alone cannot tell the two apart — the messages
+        are byte-identical, so even `assertRaisesRegex` could not — and
+        deleting the gate's mirror entirely left this test green. The
+        collaborator is stubbed to fail if reached, which is the property the
+        mirror actually provides: a naive `now` is refused at the front door,
+        before `_wire_timestamp` has silently reinterpreted a local wall
+        clock as UTC and stamped every trial with it.
+        """
+        def _unreachable(*args: object, **kwargs: object) -> object:
+            raise AssertionError("read_scoreboard was reached despite a naive now")
+
+        real_read_scoreboard = acceptance_gate.learning_scoreboard.read_scoreboard
+        acceptance_gate.learning_scoreboard.read_scoreboard = _unreachable
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                with self.assertRaises(ValueError):
+                    acceptance_gate.evaluate_proposal(
+                        _scripted_runner([0.9]),
+                        task_set="bench-v1",
+                        root_dir=root,
+                        now=datetime(2026, 1, 8),  # noqa: DTZ001 - the value under test
+                    )
+        finally:
+            acceptance_gate.learning_scoreboard.read_scoreboard = real_read_scoreboard
 
     def test_a_non_positive_or_boolean_trial_count_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

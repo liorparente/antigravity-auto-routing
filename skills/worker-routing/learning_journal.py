@@ -1715,8 +1715,8 @@ def read_journal(root_dir: Path) -> JournalRead:
     blank line would otherwise report damage that is not there.
 
     **An explicit wire `null` on an optional field (`run_id`, `task_type`,
-    `session_last_activity`) is accepted as absence, not rejected as
-    damage — DECIDE, resolved toward "accept".** `_wire_form` and
+    `session_last_activity`, and ticket 26's `score`) is accepted as absence,
+    not rejected as damage — DECIDE, resolved toward "accept".** `_wire_form` and
     `TaskLabel.to_mapping` never emit `null` — an absent optional field is
     dropped from the mapping entirely — so by the rule the rest of this
     reader applies elsewhere ("a shape this module's own writer would never
