@@ -78,23 +78,29 @@ purposes, but the case-sensitive `_VERSION_DIRNAME_RE` does not match
 `V0001`, so `_highest_version_on_disk` never counts it either. Both need a
 hand-created stray entry, so severity is low, but each reproduces the exact
 permanent-brick shape the self-heal above exists to prevent, entering by a
-side door. What remains genuinely unreachable in ordinary operation is a
-numbering bug in this module itself, or direct tampering with a `vNNNN`
-name that *does* match the regex. In every one of these cases
-`_write_snapshot` never overwrites — a collision on `mkdir` raises, and the
-raise is a `ValueError`, not a bare `FileExistsError` naming an absolute
-path with no guidance.
+side door. Hand-made tampering that *does* match the regex is not a third
+case: a fabricated `v0009` directory is counted like any other, so `adopt`
+allocates past it rather than colliding with it. The only other way to
+arrive here is a version-numbering bug in this module itself. In every one
+of these cases `_write_snapshot` never overwrites — a collision on `mkdir`
+raises, and the raise is a `ValueError`, not a bare `FileExistsError`
+naming an absolute path with no guidance.
 
-What that `ValueError` must not do is give one instruction for causes that
-need two. Removing the offending entry is right when it is junk — a stray
-file, a case-variant name — because nothing adopted it and nothing refers
-to it. It is wrong when the collision came from a numbering bug here,
-because then the directory in the way is a *legitimate* snapshot
-`history.jsonl` names, and deleting it destroys adopted history to work
-around a fault that only a code change actually fixes. That would be the
-same "deletes data on a guess" the orphan case above is deliberately
-written to avoid. So the message distinguishes the two, and this module
-still removes nothing on its own in either.
+What that `ValueError` must not do is tell the operator what the occupying
+entry *is*. Under a numbering bug the fault's location is by definition
+unknown — it could be in `_highest_version_on_disk`'s own scan — so the
+occupant might be a real adopted snapshot or might be a stray one, and any
+sentence asserting which is a guess dressed as a diagnosis. What the
+message gives instead is the question the operator can actually answer, and
+whose two answers partition the space: does `history.jsonl` name this
+version? If it does, the occupant is adopted history and deleting it
+destroys real data to work around a fault only a code change fixes — the
+same "deletes data on a guess" the orphan case above is written to avoid.
+If it does not, the occupant is a stray entry and removing it lets the
+store allocate again. That is the same test `CONTEXT.md`'s `LearnedState`
+entry already hands an operator who finds an orphan, so the two pieces of
+guidance key on one question rather than two rules that could drift apart.
+This module removes nothing on its own under either answer.
 
 **Decision 3 — `roll_back` undoes the most recent adoption that has not
 already been undone.** The tempting alternative, "restore version N-1",
@@ -551,13 +557,13 @@ def _write_snapshot(root_dir: Path, version: int, documents: Mapping[str, str]) 
             f"cannot adopt version {version}: {directory} already exists. "
             "Something already occupies this version's directory name, so "
             "the store cannot allocate past it and a retry will collide "
-            "identically. Nothing is removed automatically, and what should "
-            "be removed depends on what the entry is: a stray file, or a "
-            "version name differing only in case, is junk and can be "
-            "deleted. A directory that `history.jsonl` actually names is a "
-            "real adopted snapshot — deleting it destroys adopted history, "
-            "and the fault is then a version-numbering bug in this module "
-            "rather than anything on disk."
+            "identically. Nothing is removed automatically. To decide what "
+            f"to do, check whether history.jsonl names version {version}. "
+            "If it does, the occupant is a real adopted snapshot: do not "
+            "delete it — the fault is in this module's version numbering, "
+            "and only a code change fixes it. If it does not, the occupant "
+            "is a stray entry (a file, or a name differing only in case) "
+            "and removing it lets the store allocate again."
         ) from exc
     for document, content in documents.items():
         (directory / document).write_bytes(content.encode("utf-8"))
