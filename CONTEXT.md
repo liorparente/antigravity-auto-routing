@@ -135,3 +135,9 @@ A unilateral, non-majority override mechanism where any single reviewer emitting
 
 ### ConsensusTable
 The deterministic aggregator that evaluates reviewer vote records against weighted quorum thresholds and candidate hashes, resolving outcomes into UNANIMOUS, QUALIFIED, MATERIAL_DISAGREEMENT, or SECURITY_HALT.
+
+### RiskTieredApplication
+The four-tier safety mechanism that governs how proposed updates from the [[LearningLoop]] are applied to system documents based on their blast radius: Tier 1 memory lessons auto-apply to [[LearnedState]], Tier 2 routing-table updates auto-apply only after clearing the [[AcceptanceGate]], Tier 3 brief diffs are held as [[PendingProposal]]s awaiting explicit human approval, and Tier 4 protocol files are unreachable by construction via the closed `LearnedDocument` vocabulary (`{"memory", "routing_table", "briefs"}`). Spec 0004 ticket 20.
+
+### PendingProposal
+A staged change to worker briefs held in `.ralph/pending_proposals.jsonl` under an exclusive file lock, awaiting explicit human approval before being adopted into [[LearnedState]]. Spec 0004 ticket 20.

@@ -1,5 +1,19 @@
 # Worker Routing Fallbacks
 
+## 2026-08-15 — POSIX Advisory Lock Reentrancy Deadlock in File Operations
+
+- Mission: Implement pending proposal store for Tier 3 worker briefs under `.ralph/pending_proposals.jsonl`.
+- Failure: A public function (`approve_pending_proposal` / `submit_brief_proposal`) acquired an exclusive file lock (`fcntl.flock(stream.fileno(), fcntl.LOCK_EX)`) via a context manager and then called `read_pending_proposals`, which attempted to open the same lock file and acquire another `LOCK_EX` on a new file descriptor, resulting in a self-deadlock that hung the test runner indefinitely.
+- Resolution: Split the logic into an internal unlocked helper (`_read_pending_proposals_unlocked`) called when the lock is already held, and a public locked function (`read_pending_proposals`).
+- Lesson: POSIX `fcntl.flock` is not reentrant across separate file descriptors in the same process. Always separate unlocked internal helpers from public locked entry points.
+
+## 2026-08-15 — Triple Manifest Closure Invariant for Skill Python Modules
+
+- Mission: Add new production module `risk_tiered_application.py` and test suite `test_risk_tiered_application.py`.
+- Failure: Regression tests in `test_routing.py` (`ManagedFileClosureTests`, `LearningJournalTests`) failed because new skill modules must be declared in three separate manifests: `.github/workflows/test.yml` (`PYTHON_MODULES`/`PYTHON_TESTS`), `install.sh` (`MANAGED_FILES`), and `uninstall.sh` (`INSTALLED_FILES`).
+- Resolution: Updated all three files in tandem when adding the new modules.
+- Lesson: Skill Python files have a triple-manifest invariant; always synchronize `test.yml`, `install.sh`, and `uninstall.sh` whenever introducing a new `.py` file to `skills/worker-routing/`.
+
 ## 2026-08-15 — Voting Quota Paradox (Banzhaf Power Collapse in Multi-Agent Ensembles)
 
 - Mission: Design weighted multi-agent jury system for Council Review with Claude Opus (45%), Codex Sol (45%), and Gemini Pro (10%).
