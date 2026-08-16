@@ -31,7 +31,7 @@ Two cadences:
   single one-shot `invoke_worker` call, not an `advisory_consultation`
   dialogue — settled as one-shot synthesis in ADR 0009 (Ticket 31) because
   downstream risk-tiering (Tier 2 Acceptance Gate, Tier 3 Human Review, Tier
-  1 Anti-Flapping and Auto-Revert) provides full safety without background
+  1 Anti-Flapping and Auto-Revert) provides appropriate protection without background
   cron stalemate risks.
 
 **This module owns no clock.** `now` is always injected by both cadences'
