@@ -602,7 +602,10 @@ class WeeklyDeepTests(unittest.TestCase):
 
             gate_decision = result.routing_outcomes[0].gate_decision
             assert gate_decision is not None
-            self.assertTrue(all(record.run_id == "weekly-run-32" for record in gate_decision.trial_records))
+            self.assertEqual(len(gate_decision.trial_records), 5)
+            self.assertTrue(
+                all(record.run_id == "weekly-run-32" for record in gate_decision.trial_records)
+            )
 
     def test_weekly_routing_update_defaults_gate_trial_run_id_to_none(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -616,7 +619,26 @@ class WeeklyDeepTests(unittest.TestCase):
 
             gate_decision = result.routing_outcomes[0].gate_decision
             assert gate_decision is not None
+            self.assertEqual(len(gate_decision.trial_records), 5)
             self.assertTrue(all(record.run_id is None for record in gate_decision.trial_records))
+
+    def test_weekly_deep_rejects_invalid_run_id_before_worker_or_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = _RecordingWorker(_json_reply({"memory_lessons": ["Lesson A"]}))
+            runner, calls = _counting_runner(0.95)
+
+            with self.assertRaises(ValueError):
+                learner_worker.run_weekly_deep(
+                    worker,
+                    root_dir=root,
+                    now=_NOW,
+                    runner=runner,
+                    run_id="invalid run id",
+                )
+
+            self.assertEqual(len(worker.calls), 0)
+            self.assertEqual(calls, [])
 
     def test_routing_table_update_rejected_when_score_below_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

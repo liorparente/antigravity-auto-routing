@@ -109,9 +109,10 @@ _WEEKLY_DEEP_EFFORT = "high"
 # The exact character class `learned_state._CHANGE_ID_RE` and
 # `risk_tiered_application._PROPOSAL_ID_RE` both accept
 # (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`). `_change_id` below sanitizes a
-# caller-supplied `session_id`/`run_id` against this before using it as a
-# seed, so a seed containing a character either validator would reject can
-# never reach them.
+# caller-supplied `session_id`/`run_id` before using it as a seed. In the
+# weekly path, `run_id` is also validated at entry against
+# `learning_journal.TASK_ID_RE`, because it is forwarded directly to the
+# acceptance gate rather than used only in a change-id seed.
 _IDENTIFIER_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
@@ -129,6 +130,14 @@ def _require_aware_now(now: datetime) -> None:
     """
     if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
         raise ValueError("now must be a timezone-aware datetime, got a naive value")
+
+
+def _require_valid_run_id(run_id: str | None) -> None:
+    """Refuse a weekly run id the acceptance gate cannot journal safely."""
+    if run_id is not None and not learning_journal.TASK_ID_RE.fullmatch(run_id):
+        raise ValueError(
+            f"run_id must match {learning_journal.TASK_ID_RE.pattern}, got {run_id!r}"
+        )
 
 
 def _wire_timestamp(now: datetime) -> str:
@@ -155,10 +164,10 @@ def _change_id(prefix: str, *, seed: str, index: int) -> str:
     emits multiple distinct proposals from one run and needs each to get its
     own identifier rather than collide on `index=0`.
 
-    Sanitizes rather than trusts the seed: `session_id` and `run_id` are
-    validated elsewhere against `learning_journal.TASK_ID_RE` before this
-    module ever sees them, but `_compact_timestamp` and any future seed
-    source are not, so every seed is passed through the same filter.
+    Sanitizes rather than trusts the seed: although weekly `run_id` values
+    are validated at entry before reaching the acceptance gate, `session_id`,
+    `_compact_timestamp`, and any future seed source may not be, so every
+    seed is passed through the same filter.
 
     The seed is truncated *before* formatting, not the final string after —
     a trailing `[:128]` on the assembled string can chop off the `-{index}`
@@ -691,6 +700,7 @@ def run_weekly_deep(
     revert a change and immediately readopt it on the same evidence.
     """
     _require_aware_now(now)
+    _require_valid_run_id(run_id)
     trials, score_threshold = _load_acceptance_gate_config(config_path)
 
     journal = _prefix_cut_journal(root_dir, now=now)

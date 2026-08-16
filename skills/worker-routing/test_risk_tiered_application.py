@@ -165,10 +165,15 @@ class Tier2RoutingTableUpdateTests(unittest.TestCase):
 
             assert outcome.gate_decision is not None
             self.assertTrue(outcome.gate_decision.accepted)
+            self.assertEqual(len(outcome.gate_decision.trial_records), 5)
             self.assertTrue(
-                all(record.run_id == "weekly-run-32" for record in outcome.gate_decision.trial_records)
+                all(
+                    record.run_id == "weekly-run-32"
+                    for record in outcome.gate_decision.trial_records
+                )
             )
             journal = learning_journal.read_journal(root)
+            self.assertEqual(len(journal.replay_benchmarks), 5)
             self.assertTrue(
                 all(record.run_id == "weekly-run-32" for record in journal.replay_benchmarks)
             )
