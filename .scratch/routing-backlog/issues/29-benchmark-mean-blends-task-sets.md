@@ -46,14 +46,14 @@ satisfied as written — it asks that a record *can carry* the identity, which i
 
 **Blocked by:** none (16 and 26 are done; this is a follow-on against their shipped code)
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] A rule is chosen from the options above (or a better one), and the reasoning is recorded in
+- [x] A rule is chosen from the options above (or a better one), and the reasoning is recorded in
       `_replay_benchmark_metrics`' docstring — not just the mechanism.
-- [ ] `_replay_benchmark_metrics` implements it; `task_set` is read by a consumer for the first time.
-- [ ] A test drives the actual failure: a window holding two task sets, where the blended mean would
+- [x] `_replay_benchmark_metrics` implements it; `task_set` is read by a consumer for the first time.
+- [x] A test drives the actual failure: a window holding two task sets, where the blended mean would
       read `regressed` and the corrected one does not.
-- [ ] `acceptance_gate.evaluate_proposal` is exercised across a task-set change and does not reject a
+- [x] `acceptance_gate.evaluate_proposal` is exercised across a task-set change and does not reject a
       good proposal for the version bump alone.
-- [ ] The weekly report's replay-benchmark section stays correct under the new rule, including its
+- [x] The weekly report's replay-benchmark section stays correct under the new rule, including its
       `sample_size`.

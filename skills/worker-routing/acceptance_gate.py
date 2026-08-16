@@ -236,6 +236,13 @@ def evaluate_proposal(
     `task_id`, applied here without duplicating `learning_journal`'s private
     validators across a module boundary.
 
+    To ensure like-for-like comparison across task-set transitions without false
+    regressions, `task_set` is passed to the baseline and current calls to
+    `read_scoreboard`. This isolates the scoreboard comparison exclusively to
+    the active benchmark version, preventing older, incomparable task set
+    records in the trailing window from blending and falsely flagging a
+    regression.
+
     A journal write that fails (a full disk, an unwritable `.ralph`) never
     raises and never silently vanishes: `append_journal_record` already
     returns rather than raises for it, and that returned message is handed to
@@ -256,7 +263,9 @@ def evaluate_proposal(
         task_set=task_set, success=False, run_id=run_id, timestamp=timestamp
     )
 
-    baseline = learning_scoreboard.read_scoreboard(root_dir, now=now, window_days=window_days)
+    baseline = learning_scoreboard.read_scoreboard(
+        root_dir, now=now, window_days=window_days, task_set=task_set
+    )
 
     records: list[learning_journal.ReplayBenchmarkRecord] = []
     journal_complete = True
@@ -293,7 +302,9 @@ def evaluate_proposal(
             report_journal_error(error)
         records.append(record)
 
-    current = learning_scoreboard.read_scoreboard(root_dir, now=now, window_days=window_days)
+    current = learning_scoreboard.read_scoreboard(
+        root_dir, now=now, window_days=window_days, task_set=task_set
+    )
     comparison = learning_scoreboard.compare_scoreboards(baseline, current)
 
     threshold_met = all(

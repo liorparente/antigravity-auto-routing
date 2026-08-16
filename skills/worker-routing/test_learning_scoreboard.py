@@ -3638,5 +3638,117 @@ class ReplayBenchmarkFamilyTests(unittest.TestCase):
         self.assertEqual(metric.sample_size, 1)
 
 
+class ReplayBenchmarkMetricsTests(unittest.TestCase):
+    """Ticket 29 — `mean_benchmark_score` blends incomparable task sets."""
+
+    def test_multiple_task_sets_in_window_are_not_blended_default_latest(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            v1_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=True, score=0.2, timestamp="2026-01-05T00:00:00Z"
+            )
+            v2_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v2", success=True, score=0.9, timestamp="2026-01-06T00:00:00Z"
+            )
+            learning_journal.append_journal_record(v1_record, root_dir=root)
+            learning_journal.append_journal_record(v2_record, root_dir=root)
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        metric = board.replay_benchmark.mean_benchmark_score
+        self.assertIsInstance(metric, learning_scoreboard.MetricValue)
+        assert isinstance(metric, learning_scoreboard.MetricValue)
+        self.assertEqual(metric.value, 0.9)
+        self.assertEqual(metric.sample_size, 1)
+
+    def test_explicit_task_set_filters_to_target_task_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            v1_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=True, score=0.2, timestamp="2026-01-05T00:00:00Z"
+            )
+            v2_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v2", success=True, score=0.9, timestamp="2026-01-06T00:00:00Z"
+            )
+            learning_journal.append_journal_record(v1_record, root_dir=root)
+            learning_journal.append_journal_record(v2_record, root_dir=root)
+
+            journal = learning_journal.read_journal(root)
+
+        # Explicitly ask for bench-v1
+        board_v1 = learning_scoreboard.compute_scoreboard(journal, now=_NOW, task_set="bench-v1")
+        metric_v1 = board_v1.replay_benchmark.mean_benchmark_score
+        self.assertIsInstance(metric_v1, learning_scoreboard.MetricValue)
+        assert isinstance(metric_v1, learning_scoreboard.MetricValue)
+        self.assertEqual(metric_v1.value, 0.2)
+        self.assertEqual(metric_v1.sample_size, 1)
+
+        # Explicitly ask for bench-v2
+        board_v2 = learning_scoreboard.compute_scoreboard(journal, now=_NOW, task_set="bench-v2")
+        metric_v2 = board_v2.replay_benchmark.mean_benchmark_score
+        self.assertIsInstance(metric_v2, learning_scoreboard.MetricValue)
+        assert isinstance(metric_v2, learning_scoreboard.MetricValue)
+        self.assertEqual(metric_v2.value, 0.9)
+        self.assertEqual(metric_v2.sample_size, 1)
+
+    def test_explicit_task_set_with_no_records_returns_no_data(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            v1_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=True, score=0.2, timestamp="2026-01-05T00:00:00Z"
+            )
+            learning_journal.append_journal_record(v1_record, root_dir=root)
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW, task_set="bench-v3")
+        metric = board.replay_benchmark.mean_benchmark_score
+        self.assertIsInstance(metric, learning_scoreboard.MetricNoData)
+
+    def test_task_set_validation_on_compute_and_read_scoreboard(self) -> None:
+        invalid_task_sets: list[Any] = ["", 123, True, "contains-secret-word"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journal = learning_journal.read_journal(root)
+
+            for invalid in invalid_task_sets:
+                with self.assertRaises(ValueError):
+                    learning_scoreboard.compute_scoreboard(journal, now=_NOW, task_set=invalid)
+                with self.assertRaises(ValueError):
+                    learning_scoreboard.read_scoreboard(root, now=_NOW, task_set=invalid)
+
+    def test_blended_mean_would_regress_but_unblended_does_not(self) -> None:
+        # Scenario from ticket 29:
+        # If task sets were blended, the current scoreboard contains both bench-v1 (1.0) and bench-v2 (0.85).
+        # With unblended scoreboards, baseline on bench-v2 is MetricNoData and current on bench-v2 is 0.85,
+        # which is compared to MetricNoData and yields indeterminate change (no regression).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Baseline contains bench-v1 record with score 1.0
+            v1_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=True, score=1.0, timestamp="2026-01-05T00:00:00Z"
+            )
+            learning_journal.append_journal_record(v1_record, root_dir=root)
+
+            # Read baseline on bench-v2
+            baseline = learning_scoreboard.read_scoreboard(root, now=_NOW, task_set="bench-v2")
+            self.assertIsInstance(baseline.replay_benchmark.mean_benchmark_score, learning_scoreboard.MetricNoData)
+
+            # Candidate runs on bench-v2 and scores 0.85
+            v2_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v2", success=True, score=0.85, timestamp="2026-01-06T00:00:00Z"
+            )
+            learning_journal.append_journal_record(v2_record, root_dir=root)
+
+            # Read current on bench-v2
+            current = learning_scoreboard.read_scoreboard(root, now=_NOW, task_set="bench-v2")
+            self.assertEqual(current.replay_benchmark.mean_benchmark_score.value, 0.85)
+
+            # Compare them: regression should not be detected since baseline was MetricNoData
+            comp = learning_scoreboard.compare_scoreboards(baseline, current)
+            self.assertFalse(comp.has_regression)
+            self.assertIn("mean_benchmark_score", comp.indeterminate)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -567,7 +567,11 @@ def _cost_per_completed_task_usd(
 
 
 def _replay_benchmark_metrics(
-    replay_benchmarks: tuple[Any, ...], *, window_start: datetime, now: datetime
+    replay_benchmarks: tuple[Any, ...],
+    *,
+    window_start: datetime,
+    now: datetime,
+    task_set: str | None = None,
 ) -> ReplayBenchmarkMetrics:
     """Ticket 26's records, finally: a mean over the window's *successful*
     trials' scores. A failed trial (`success=False`, `score=None`) is real
@@ -580,9 +584,41 @@ def _replay_benchmark_metrics(
     rendered line is identical whether or not a failed trial sat beside them.
     `MetricNoData` when the window holds no successful trial, matching every
     other `_mean`-shaped metric's no-data rule.
+
+    Policy reasoning for not blending task sets:
+    A benchmark task set represents a specific, versioned suite of tasks. Averaging
+    scores across different task sets (e.g., bench-v1 and bench-v2) is mathematically
+    meaningless and leads to false regressions or false improvements when the task set
+    is updated (since different versions have different baseline difficulties). To prevent
+    this, we isolate evaluation to a single task set.
+
+    By default (when no explicit `task_set` is requested), the latest task set in the
+    window is selected as the active task set. This enables autonomous reporting tools (like
+    the weekly progress report) to automatically track the most recent benchmark version
+    once records for it begin appearing.
+
+    When a caller (like the acceptance gate) supplies an explicit `task_set`, we filter
+    exclusively to that task set. This guarantees a like-for-like comparison when verifying
+    a candidate agent proposal against the exact same task set version used in the baseline.
     """
     windowed = _windowed(replay_benchmarks, window_start=window_start, now=now)
-    scores = [record.score for record in windowed if record.success]
+    if not windowed:
+        return ReplayBenchmarkMetrics(
+            mean_benchmark_score=MetricNoData(
+                name="mean_benchmark_score", direction="higher_is_better"
+            )
+        )
+
+    if task_set is not None:
+        active_task_set = task_set
+    else:
+        active_task_set = max(windowed, key=lambda r: r.timestamp).task_set
+
+    scores = [
+        record.score
+        for record in windowed
+        if record.task_set == active_task_set and record.success
+    ]
     return ReplayBenchmarkMetrics(
         mean_benchmark_score=_mean(
             name="mean_benchmark_score", direction="higher_is_better", values=scores
@@ -733,6 +769,7 @@ def compute_scoreboard(
     *,
     now: datetime,
     window_days: int = DEFAULT_WINDOW_DAYS,
+    task_set: str | None = None,
 ) -> Scoreboard:
     """Compute a `Scoreboard` from an already-read journal. Pure; reads no clock.
 
@@ -749,6 +786,8 @@ def compute_scoreboard(
     """
     _require_aware_now(now)
     _validate_window_days(window_days)
+    if task_set is not None:
+        learning_journal.ReplayBenchmarkRecord(task_set=task_set, success=False)
 
     worker_executions = _prefix_cut(journal.worker_executions, now=now)
     outcomes = _prefix_cut(journal.outcomes, now=now)
@@ -767,7 +806,7 @@ def compute_scoreboard(
             worker_executions, outcomes, dialogues, window_start=window_start, now=now
         ),
         replay_benchmark=_replay_benchmark_metrics(
-            replay_benchmarks, window_start=window_start, now=now
+            replay_benchmarks, window_start=window_start, now=now, task_set=task_set
         ),
         window_days=window_days,
         window_end=now,
@@ -777,7 +816,11 @@ def compute_scoreboard(
 
 
 def read_scoreboard(
-    root_dir: Path, *, now: datetime, window_days: int = DEFAULT_WINDOW_DAYS
+    root_dir: Path,
+    *,
+    now: datetime,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    task_set: str | None = None,
 ) -> Scoreboard:
     """Read the journal beneath `root_dir` and compute a `Scoreboard` from it.
 
@@ -787,7 +830,7 @@ def read_scoreboard(
     nothing — implementation_plan.md Section 2.2's "why two entry points".
     """
     journal = learning_journal.read_journal(root_dir)
-    return compute_scoreboard(journal, now=now, window_days=window_days)
+    return compute_scoreboard(journal, now=now, window_days=window_days, task_set=task_set)
 
 
 def _classify_change(baseline: Metric, current: Metric) -> ChangeStatus:

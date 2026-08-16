@@ -690,5 +690,58 @@ class JournalWriteFailureTests(unittest.TestCase):
         self.assertEqual(len(journalled), 2)
 
 
+class TaskSetBumpTests(unittest.TestCase):
+    """Ticket 29 — verify evaluate_proposal across task-set version bumps."""
+
+    def test_proposal_evaluation_across_task_set_version_bump_does_not_reject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Seed the journal with bench-v1 records
+            v1_record = learning_journal.ReplayBenchmarkRecord(
+                task_set="bench-v1", success=True, score=1.0, timestamp="2026-01-05T00:00:00Z"
+            )
+            learning_journal.append_journal_record(v1_record, root_dir=root)
+
+            # Evaluate proposal with task_set="bench-v2" and runner returning 0.85
+            decision = acceptance_gate.evaluate_proposal(
+                _scripted_runner([0.85, 0.85]),
+                task_set="bench-v2",
+                root_dir=root,
+                now=_NOW,
+                trials=2,
+                score_threshold=0.8,
+            )
+
+        self.assertTrue(decision.accepted)
+        self.assertFalse(decision.comparison.has_regression)
+
+    def test_subsequent_proposal_on_same_task_set_detects_true_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # First, evaluate a proposal that establishes the bench-v2 baseline of 0.85
+            decision1 = acceptance_gate.evaluate_proposal(
+                _scripted_runner([0.85, 0.85]),
+                task_set="bench-v2",
+                root_dir=root,
+                now=_NOW - timedelta(hours=1),
+                trials=2,
+                score_threshold=0.8,
+            )
+            self.assertTrue(decision1.accepted)
+
+            # Second, run subsequent evaluate_proposal on bench-v2 where runner returns 0.7
+            decision2 = acceptance_gate.evaluate_proposal(
+                _scripted_runner([0.7, 0.7]),
+                task_set="bench-v2",
+                root_dir=root,
+                now=_NOW,
+                trials=2,
+                score_threshold=0.8,
+            )
+
+        self.assertFalse(decision2.accepted)
+        self.assertEqual(decision2.comparison.regressed, ("mean_benchmark_score",))
+
+
 if __name__ == "__main__":
     unittest.main()
