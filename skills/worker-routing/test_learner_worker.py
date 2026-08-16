@@ -602,7 +602,7 @@ class WeeklyDeepTests(unittest.TestCase):
 
             gate_decision = result.routing_outcomes[0].gate_decision
             self.assertIsNotNone(gate_decision)
-            assert gate_decision is not None  # noqa: S101 - narrows for mypy; asserted above
+            assert gate_decision is not None  # narrows for mypy; asserted above
             self.assertEqual(len(gate_decision.trial_records), 5)  # trials from routing-config.json
             self.assertTrue(
                 all(record.run_id == "weekly-run-32" for record in gate_decision.trial_records)
@@ -620,7 +620,7 @@ class WeeklyDeepTests(unittest.TestCase):
 
             gate_decision = result.routing_outcomes[0].gate_decision
             self.assertIsNotNone(gate_decision)
-            assert gate_decision is not None  # noqa: S101 - narrows for mypy; asserted above
+            assert gate_decision is not None  # narrows for mypy; asserted above
             self.assertEqual(len(gate_decision.trial_records), 5)  # trials from routing-config.json
             self.assertTrue(all(record.run_id is None for record in gate_decision.trial_records))
 
@@ -921,7 +921,7 @@ class WeeklyDeepTests(unittest.TestCase):
         but it must not narrow which journal evidence the retrospective
         reads — the batch retrospective's whole point is to read every
         task's evidence for the window, not one run's (see `run_weekly_deep`'s
-        docstring and Issue 32).
+        docstring and the gate-forwarding tests).
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
