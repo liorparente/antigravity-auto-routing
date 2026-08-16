@@ -4,8 +4,8 @@
 
 Today, `uninstall.sh` intentionally excludes `$TARGET_PROJECT_DIR/.agents/` and `$TARGET_PROJECT_DIR/.agent/` from `TARGET_DIRS` because they are shared convention directories. Now that `install.sh` propagates learned state (`memory`, `briefs`, `routing_table`, `history.jsonl`), uninstallation leaves learned state files inside those two project-local subdirectories.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `uninstall.sh` removes `skills/worker-routing/` within `.agents` and `.agent` when present.
-- [ ] Preserves non-worker-routing content in `.agents/` and `.agent/`.
-- [ ] Tests verify clean teardown across all 5 installation targets.
+- [x] `uninstall.sh` removes `skills/worker-routing/` within `.agents` and `.agent` when present.
+- [x] Preserves non-worker-routing content in `.agents/` and `.agent/`.
+- [x] Tests verify clean teardown across all 5 installation targets.

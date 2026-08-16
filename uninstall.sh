@@ -19,16 +19,39 @@ if [ ! -d "$TARGET_PROJECT_DIR" ]; then
 fi
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
 
-# Note: intentionally excludes "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
-# and "$TARGET_PROJECT_DIR/.agent/skills/worker-routing".
-# install.sh writes there too, but .agents/ and .agent/ are shared convention
-# directories other tools may also populate — uninstall.sh leaves them alone so
-# it never has to guess whether it is safe to touch.
+# Mirrors install.sh's TARGET_DIRS exactly — all 5 targets install.sh writes
+# to are torn down here, including the project-local
+# "$TARGET_PROJECT_DIR/.agents/skills/worker-routing" and
+# "$TARGET_PROJECT_DIR/.agent/skills/worker-routing" convention directories,
+# left out of this list before install.sh started propagating learned state
+# into them (spec 0004 ticket 23/34). ".agents/" and ".agent/" are shared
+# convention directories other tools may also populate, so this script never
+# removes them outright — it only deletes the specific files it knows it
+# installed (INSTALLED_FILES, learned-state/) and then removes
+# "skills/worker-routing" and its "skills" parent with `rmdir`, which no-ops
+# whenever anything else — worker-routing leftovers or another tool's files —
+# still lives there. That parent-directory reclaim is scoped by index (see
+# PROJECT_LOCAL_INDICES below) to the project-local targets (.agents/,
+# .agent/, .codex/); it never ascends past the two home-directory targets
+# ("$HOME/.gemini/config/skills/worker-routing",
+# "$HOME/.codex/skills/worker-routing") into "$HOME/.gemini/config" or
+# "$HOME/.codex", since install.sh did not create those solely to hold this
+# skill — even when TARGET_PROJECT_DIR happens to equal $HOME, where a
+# path-prefix check would otherwise treat the home targets as project-local
+# too. Non-worker-routing content in ".agents/" or ".agent/" is therefore
+# always preserved.
 TARGET_DIRS=(
     "$HOME/.gemini/config/skills/worker-routing"
     "$HOME/.codex/skills/worker-routing"
+    "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
+    "$TARGET_PROJECT_DIR/.agent/skills/worker-routing"
     "$TARGET_PROJECT_DIR/.codex/skills/worker-routing"
 )
+# Indices into TARGET_DIRS that are project-local convention directories
+# eligible for parent-directory reclamation. Indices 0 and 1 are the
+# home-directory targets and must never ascend past their own skill
+# directory, regardless of what TARGET_PROJECT_DIR resolves to.
+PROJECT_LOCAL_INDICES=(2 3 4)
 GEMINI_MD="$HOME/.gemini/GEMINI.md"
 AGENTS_MD="$TARGET_PROJECT_DIR/AGENTS.md"
 CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
@@ -57,8 +80,19 @@ echo "---"
 
 # 1. Remove only the specific files install.sh copied into each skill
 #    directory, then remove the directory itself if that leaves it empty.
-#    Any other content a user placed there is left untouched.
-for target_dir in "${TARGET_DIRS[@]}"; do
+#    Any other content a user placed there is left untouched. For the
+#    project-local targets only (index in PROJECT_LOCAL_INDICES), also try
+#    the "skills" parent and its own parent (e.g. ".agents/skills" then
+#    ".agents") once the skill directory itself is gone — `rmdir` only
+#    succeeds on a truly empty directory, so this reclaims convention
+#    directories install.sh created purely to hold worker-routing without
+#    ever deleting one that still holds another tool's content. Scoping by
+#    index (rather than a "$target_dir" path-prefix check against
+#    "$TARGET_PROJECT_DIR") guarantees the two home-directory targets never
+#    ascend past their own skill directory even when TARGET_PROJECT_DIR
+#    resolves to "$HOME" itself. Each removal is echoed as it happens.
+for i in "${!TARGET_DIRS[@]}"; do
+    target_dir="${TARGET_DIRS[$i]}"
     if [ -d "$target_dir" ]; then
         for installed_file in "${INSTALLED_FILES[@]}"; do
             rm -f "$target_dir/$installed_file"
@@ -69,6 +103,23 @@ for target_dir in "${TARGET_DIRS[@]}"; do
             echo "✅ Removed skill files from $target_dir (other content preserved)"
         else
             echo "✅ Removed $target_dir"
+            is_project_local=false
+            for project_local_index in "${PROJECT_LOCAL_INDICES[@]}"; do
+                if [ "$i" -eq "$project_local_index" ]; then
+                    is_project_local=true
+                    break
+                fi
+            done
+            if [ "$is_project_local" = true ]; then
+                skills_parent="$(dirname "$target_dir")"
+                if rmdir "$skills_parent" 2>/dev/null; then
+                    echo "✅ Removed empty $skills_parent"
+                    convention_parent="$(dirname "$skills_parent")"
+                    if rmdir "$convention_parent" 2>/dev/null; then
+                        echo "✅ Removed empty $convention_parent"
+                    fi
+                fi
+            fi
         fi
     else
         echo "⏭️  $target_dir not found — skipping."

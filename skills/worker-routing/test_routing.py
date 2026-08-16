@@ -93,6 +93,25 @@ def _bash_array(script: Path, name: str) -> list[str]:
     return match.group(1).split()
 
 
+def _target_dirs(script: Path, *, home: str, target_project_dir: str) -> tuple[Path, ...]:
+    """Resolve `script`'s `TARGET_DIRS` bash array into concrete paths, the
+    same way the shell would substitute `$HOME` and `$TARGET_PROJECT_DIR`.
+
+    Reading `TARGET_DIRS` from the script itself — rather than hardcoding the
+    five resolved paths in tests — means a target added to (or dropped from)
+    install.sh's array is exercised here without the test file drifting out
+    of sync with it.
+    """
+    return tuple(
+        Path(
+            raw.strip('"')
+            .replace("$HOME", home)
+            .replace("$TARGET_PROJECT_DIR", target_project_dir)
+        )
+        for raw in _bash_array(script, "TARGET_DIRS")
+    )
+
+
 def run_check(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, str(ROUTING_CHECK), *args],
@@ -662,11 +681,18 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertFalse((Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing").exists())
             self.assertFalse((Path(target_dir) / ".claude" / "rules" / "worker-routing.md").exists())
             self.assertFalse((Path(target_dir) / ".claude").exists())
+            # .agents/ and .agent/ held nothing but the installed skill, so
+            # they are reclaimed entirely once empty — same as .codex/.
+            self.assertFalse((Path(target_dir) / ".agents" / "skills" / "worker-routing").exists())
+            self.assertFalse((Path(target_dir) / ".agents").exists())
+            self.assertFalse((Path(target_dir) / ".agent" / "skills" / "worker-routing").exists())
+            self.assertFalse((Path(target_dir) / ".agent").exists())
 
-    def test_uninstall_sh_does_not_touch_local_agents_dir(self) -> None:
-        # uninstall.sh's TARGET_DIRS intentionally excludes the project-local
-        # .agents/ directory (unlike install.sh's) — see uninstall.sh for
-        # rationale. Its installed skill files are left in place.
+    def test_uninstall_sh_removes_local_agents_dir_skill_files(self) -> None:
+        # uninstall.sh's TARGET_DIRS now covers the project-local .agents/
+        # directory too (spec 0004 ticket 34), matching install.sh's parity.
+        # The now-empty "skills/worker-routing" and "skills" convention
+        # directories are reclaimed along with it.
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             self._run(INSTALL_SH, target_dir, home=fake_home)
             agents_skill_dir = Path(target_dir) / ".agents" / "skills" / "worker-routing"
@@ -675,11 +701,11 @@ class ProtocolSyncTests(unittest.TestCase):
             result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-            self.assertTrue((agents_skill_dir / "protocol.md").exists())
+            self.assertFalse(agents_skill_dir.exists())
+            self.assertFalse((Path(target_dir) / ".agents" / "skills").exists())
 
-    def test_uninstall_sh_does_not_touch_local_agent_dir(self) -> None:
-        # uninstall.sh's TARGET_DIRS intentionally excludes the project-local
-        # .agent/ directory (unlike install.sh's). Its installed skill files are left in place.
+    def test_uninstall_sh_removes_local_agent_dir_skill_files(self) -> None:
+        # Same parity fix for the singular ".agent/" convention directory.
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             self._run(INSTALL_SH, target_dir, home=fake_home)
             agent_skill_dir = Path(target_dir) / ".agent" / "skills" / "worker-routing"
@@ -688,7 +714,44 @@ class ProtocolSyncTests(unittest.TestCase):
             result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-            self.assertTrue((agent_skill_dir / "protocol.md").exists())
+            self.assertFalse(agent_skill_dir.exists())
+            self.assertFalse((Path(target_dir) / ".agent" / "skills").exists())
+
+    def test_uninstall_sh_preserves_other_content_in_local_agents_dir(self) -> None:
+        # .agents/ is a shared convention directory other tools may also
+        # populate. Uninstall must remove only what it installed, never
+        # another tool's files or the directories holding them.
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            self._run(INSTALL_SH, target_dir, home=fake_home)
+            other_skill_dir = Path(target_dir) / ".agents" / "skills" / "other-skill"
+            other_skill_dir.mkdir(parents=True)
+            (other_skill_dir / "notes.md").write_text("keep me\n")
+
+            result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertFalse(
+                (Path(target_dir) / ".agents" / "skills" / "worker-routing").exists()
+            )
+            self.assertEqual((other_skill_dir / "notes.md").read_text(), "keep me\n")
+            self.assertTrue((Path(target_dir) / ".agents" / "skills").exists())
+            self.assertTrue((Path(target_dir) / ".agents").exists())
+
+    def test_uninstall_sh_preserves_other_content_in_local_agent_dir(self) -> None:
+        # Same preservation guarantee for the singular ".agent/" directory,
+        # exercised with a file directly under ".agent/" rather than nested
+        # under "skills/".
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            self._run(INSTALL_SH, target_dir, home=fake_home)
+            agent_dir = Path(target_dir) / ".agent"
+            (agent_dir / "other-file").write_text("keep me too\n")
+
+            result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertFalse((agent_dir / "skills" / "worker-routing").exists())
+            self.assertEqual((agent_dir / "other-file").read_text(), "keep me too\n")
+            self.assertTrue(agent_dir.exists())
 
     def test_uninstall_sh_removes_protocol_md_but_preserves_other_content(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -730,6 +793,80 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertIn("Keep me too.", claude_text)
             self.assertNotIn(PROTOCOL_START, agents_text)
             self.assertNotIn(PROTOCOL_START, claude_text)
+
+    def test_target_dirs_parity_between_install_and_uninstall_sh(self) -> None:
+        # A target install.sh writes to but uninstall.sh's TARGET_DIRS omits
+        # (or vice versa) either strands learned state and skill files
+        # forever, or makes uninstall touch a directory install.sh never
+        # created. Ticket 34 fixed one such drift (.agents/, .agent/); this
+        # closure test keeps future drift from recurring silently.
+        self.assertEqual(
+            _bash_array(INSTALL_SH, "TARGET_DIRS"),
+            _bash_array(UNINSTALL_SH, "TARGET_DIRS"),
+        )
+
+    def test_uninstall_sh_does_not_ascend_past_home_directory_skill_dirs(self) -> None:
+        # Parent-directory reclaim is scoped to project-local targets only.
+        # "$HOME/.gemini/config" and "$HOME/.codex" are not directories
+        # install.sh created solely to hold this skill, so uninstall must
+        # never remove them even once their "skills/worker-routing" child is
+        # gone.
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            self._run(INSTALL_SH, target_dir, home=fake_home)
+            result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertFalse(
+                (Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing").exists()
+            )
+            self.assertFalse((Path(fake_home) / ".codex" / "skills" / "worker-routing").exists())
+            self.assertTrue((Path(fake_home) / ".gemini" / "config" / "skills").exists())
+            self.assertTrue((Path(fake_home) / ".gemini" / "config").exists())
+            self.assertTrue((Path(fake_home) / ".codex" / "skills").exists())
+            self.assertTrue((Path(fake_home) / ".codex").exists())
+
+    def test_uninstall_sh_reports_reclaimed_parent_convention_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            self._run(INSTALL_SH, target_dir, home=fake_home)
+            result = self._run(UNINSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            # Anchored on the exact full line rather than a bare path
+            # substring: ".agents" is itself a substring of ".agents/skills",
+            # so a substring-only assertion would pass even if the "skills"
+            # line were missing (or vice versa) as long as either mention of
+            # the path happened to appear anywhere in stdout.
+            for path in (
+                Path(target_dir) / ".agents" / "skills",
+                Path(target_dir) / ".agents",
+                Path(target_dir) / ".agent" / "skills",
+                Path(target_dir) / ".agent",
+            ):
+                self.assertIn(f"✅ Removed empty {path}\n", result.stdout)
+
+    def test_uninstall_sh_does_not_ascend_past_home_when_target_project_dir_is_home(
+        self,
+    ) -> None:
+        # Regression for the path-prefix check this replaced: when
+        # TARGET_PROJECT_DIR resolves to exactly $HOME, "$target_dir starts
+        # with $TARGET_PROJECT_DIR" is true for the home-directory targets
+        # too, so a prefix check would incorrectly treat
+        # "$HOME/.gemini/config/skills/worker-routing" and
+        # "$HOME/.codex/skills/worker-routing" as project-local and ascend
+        # into "$HOME/.gemini/config" and "$HOME/.codex". Scoping by index
+        # instead must keep them intact regardless of where
+        # TARGET_PROJECT_DIR points.
+        with tempfile.TemporaryDirectory() as fake_home:
+            self._run(INSTALL_SH, fake_home, home=fake_home)
+            result = self._run(UNINSTALL_SH, fake_home, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            self.assertFalse(
+                (Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing").exists()
+            )
+            self.assertFalse((Path(fake_home) / ".codex" / "skills" / "worker-routing").exists())
+            self.assertTrue((Path(fake_home) / ".gemini" / "config").exists())
+            self.assertTrue((Path(fake_home) / ".codex").exists())
 
 
 class LearnedStatePropagationTests(unittest.TestCase):
@@ -786,13 +923,7 @@ class LearnedStatePropagationTests(unittest.TestCase):
         )
 
     def _installed_dirs(self, fake_home: str, target_dir: str) -> tuple[Path, ...]:
-        return (
-            Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing",
-            Path(fake_home) / ".codex" / "skills" / "worker-routing",
-            Path(target_dir) / ".agents" / "skills" / "worker-routing",
-            Path(target_dir) / ".agent" / "skills" / "worker-routing",
-            Path(target_dir) / ".codex" / "skills" / "worker-routing",
-        )
+        return _target_dirs(INSTALL_SH, home=fake_home, target_project_dir=target_dir)
 
     def test_a_successful_install_propagates_adopted_learned_state_to_every_harness(
         self,
@@ -902,15 +1033,43 @@ class LearnedStatePropagationTests(unittest.TestCase):
             )
             self.assertEqual(uninst_res.returncode, 0, uninst_res.stdout + uninst_res.stderr)
 
-            self.assertFalse(
-                (Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing").exists()
+            for installed_dir in self._installed_dirs(fake_home, target_dir):
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertFalse(installed_dir.exists())
+                    self.assertFalse((installed_dir / "learned-state").exists())
+
+    def test_uninstall_sh_removes_learned_state_but_preserves_custom_file_in_surviving_dir(
+        self,
+    ) -> None:
+        # A skill directory that survives uninstall (because it still holds
+        # non-installer content) must lose its learned-state just like one
+        # that gets removed outright — learned-state removal is not
+        # conditional on the directory itself disappearing.
+        source_root = self._isolated_source_tree()
+        self._adopt(source_root, memory="memory v1")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(source_root, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            codex_skill_dir = Path(target_dir) / ".codex" / "skills" / "worker-routing"
+            self.assertTrue((codex_skill_dir / "learned-state").exists())
+            (codex_skill_dir / "my-custom-notes.txt").write_text("keep me\n")
+
+            env = dict(os.environ)
+            env["HOME"] = str(fake_home)
+            uninst_res = subprocess.run(
+                ["bash", str(UNINSTALL_SH), target_dir],
+                capture_output=True,
+                check=False,
+                text=True,
+                env=env,
             )
-            self.assertFalse(
-                (Path(fake_home) / ".codex" / "skills" / "worker-routing").exists()
-            )
-            self.assertFalse(
-                (Path(target_dir) / ".codex" / "skills" / "worker-routing").exists()
-            )
+            self.assertEqual(uninst_res.returncode, 0, uninst_res.stdout + uninst_res.stderr)
+
+            self.assertTrue(codex_skill_dir.exists())
+            self.assertEqual((codex_skill_dir / "my-custom-notes.txt").read_text(), "keep me\n")
+            self.assertFalse((codex_skill_dir / "learned-state").exists())
 
     def test_a_failure_mid_learned_state_sync_rolls_back_every_learned_state_write(
         self,
