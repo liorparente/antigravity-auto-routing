@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import learned_state
+import learning_journal
 from learned_state import DocumentChange
 from learning_scoreboard import MetricChange, MetricValue, ScoreboardComparison
 from risk_tiered_application import (
@@ -150,6 +151,50 @@ class Tier2RoutingTableUpdateTests(unittest.TestCase):
             assert outcome.gate_decision is not None
             self.assertFalse(outcome.gate_decision.accepted)
             self.assertEqual(learned_state.read_history(root), ())
+
+    def test_run_id_reaches_gate_trials_and_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = apply_routing_table_update(
+                '{"version": "v2", "routes": []}',
+                root_dir=root,
+                now=_NOW,
+                runner=lambda: 0.95,
+                run_id="weekly-run-32",
+            )
+
+            assert outcome.gate_decision is not None
+            self.assertTrue(outcome.gate_decision.accepted)
+            self.assertTrue(
+                all(record.run_id == "weekly-run-32" for record in outcome.gate_decision.trial_records)
+            )
+            journal = learning_journal.read_journal(root)
+            self.assertTrue(
+                all(record.run_id == "weekly-run-32" for record in journal.replay_benchmarks)
+            )
+
+    def test_invalid_run_id_fails_before_trials_or_journal_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            calls = 0
+
+            def runner() -> float:
+                nonlocal calls
+                calls += 1
+                return 0.95
+
+            with self.assertRaises(ValueError):
+                apply_routing_table_update(
+                    '{"version": "v2", "routes": []}',
+                    root_dir=root,
+                    now=_NOW,
+                    runner=runner,
+                    run_id="invalid run id",
+                )
+
+            self.assertEqual(calls, 0)
+            self.assertFalse(learning_journal.journal_path(root).exists())
+            self.assertEqual(learning_journal.read_journal(root).replay_benchmarks, ())
 
 
 class Tier3BriefProposalTests(unittest.TestCase):

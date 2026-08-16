@@ -160,16 +160,24 @@ def apply_routing_table_update(
     runner: Callable[[], float],
     task_set: str = "routing_benchmark",
     change_id: str | None = None,
+    run_id: str | None = None,
     trials: int = DEFAULT_TRIAL_COUNT,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     report_journal_error: Callable[[str], None] | None = None,
 ) -> TierOutcome:
-    """Tier 2: Apply a routing-table update only after passing the acceptance gate."""
+    """Tier 2: Apply a routing-table update only after passing the acceptance gate.
+
+    `run_id`, when supplied, is forwarded to the acceptance gate so every
+    trial's journaled `ReplayBenchmarkRecord` is traceable to the learner run
+    that requested this update. The gate validates it before any trial runs or
+    journal record is written.
+    """
     _require_aware_now(now)
     gate_kwargs: dict[str, Any] = {
         "task_set": task_set,
         "root_dir": root_dir,
         "now": now,
+        "run_id": run_id,
         "trials": trials,
         "score_threshold": score_threshold,
     }

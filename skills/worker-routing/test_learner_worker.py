@@ -588,6 +588,36 @@ class WeeklyDeepTests(unittest.TestCase):
             current = learned_state.read_current(root)
             self.assertEqual(current.get("routing_table"), '{"version": "v2", "routes": []}')
 
+    def test_weekly_run_id_reaches_routing_update_gate_trials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = _RecordingWorker(
+                _json_reply({"routing_table_update": '{"version": "v2", "routes": []}'})
+            )
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner, run_id="weekly-run-32"
+            )
+
+            gate_decision = result.routing_outcomes[0].gate_decision
+            assert gate_decision is not None
+            self.assertTrue(all(record.run_id == "weekly-run-32" for record in gate_decision.trial_records))
+
+    def test_weekly_routing_update_defaults_gate_trial_run_id_to_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = _RecordingWorker(
+                _json_reply({"routing_table_update": '{"version": "v2", "routes": []}'})
+            )
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(worker, root_dir=root, now=_NOW, runner=runner)
+
+            gate_decision = result.routing_outcomes[0].gate_decision
+            assert gate_decision is not None
+            self.assertTrue(all(record.run_id is None for record in gate_decision.trial_records))
+
     def test_routing_table_update_rejected_when_score_below_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

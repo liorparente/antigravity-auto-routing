@@ -667,21 +667,18 @@ def run_weekly_deep(
     through the acceptance gate (Tier 2), brief diffs held pending (Tier 3),
     memory lessons auto-applied (Tier 1) — then write the weekly report.
 
-    `run_id` names this learner run's own identity (used only to seed
-    `change_id`/`proposal_id` derivation, for traceability across the
-    proposals one run produces); it does not narrow which journal evidence
-    the retrospective reads; the batch retrospective's whole point is to
-    read every task's evidence for the window, not one run's.
+    `run_id` names this learner run's own identity. It seeds
+    `change_id`/`proposal_id` derivation for traceability across the proposals
+    one run produces and, for a routing-table proposal, is forwarded through
+    Tier 2 to the acceptance gate's journaled `ReplayBenchmarkRecord`s. It
+    does not narrow which journal evidence the retrospective reads; the batch
+    retrospective's whole point is to read every task's evidence for the
+    window, not one run's.
 
     The acceptance gate's `trials`/`score_threshold` are read from
     `config_path` via `_load_acceptance_gate_config` — this ticket's own
     requirement — rather than left at `acceptance_gate.py`'s module
     defaults.
-
-    See Issue 32 for the open question of forwarding this run's `run_id`
-    through `risk_tiered_application.apply_routing_table_update` to the
-    `ReplayBenchmarkRecord`s the acceptance gate produces — currently
-    unwired.
 
     Immediately after the scoreboard comparison, and before the worker is
     ever invoked, `risk_tiered_application.revert_attributable_regression`
@@ -797,6 +794,7 @@ def run_weekly_deep(
                 now=now,
                 runner=runner,
                 change_id=_change_id("learner-deep-routing", seed=seed, index=0),
+                run_id=run_id,
                 trials=trials,
                 score_threshold=score_threshold,
             ),

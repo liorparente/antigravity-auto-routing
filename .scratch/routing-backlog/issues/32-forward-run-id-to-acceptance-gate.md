@@ -39,14 +39,14 @@ crosses into tickets 18/20's owned signatures rather than staying inside `learne
 **Blocked by:** none technically, but should land with awareness of tickets 18 and 20's existing
 contracts
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] `risk_tiered_application.apply_routing_table_update` accepts an optional `run_id: str | None`
+- [x] `risk_tiered_application.apply_routing_table_update` accepts an optional `run_id: str | None`
       keyword argument and forwards it into `acceptance_gate.evaluate_proposal`'s own `run_id`.
-- [ ] `learner_worker.run_weekly_deep` passes its own `run_id` argument through to
+- [x] `learner_worker.run_weekly_deep` passes its own `run_id` argument through to
       `apply_routing_table_update`.
-- [ ] A test asserts that `ReplayBenchmarkRecord`s written during a `run_weekly_deep` call carry the
+- [x] A test asserts that `ReplayBenchmarkRecord`s written during a `run_weekly_deep` call carry the
       `run_id` the caller supplied, and that omitting `run_id` still works exactly as it does today
       (`run_id=None` throughout).
-- [ ] `acceptance_gate.evaluate_proposal`'s existing `run_id` validation (the throwaway probe record)
+- [x] `acceptance_gate.evaluate_proposal`'s existing `run_id` validation (the throwaway probe record)
       is exercised by the new forwarding path, not bypassed by it.
