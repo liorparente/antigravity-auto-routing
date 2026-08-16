@@ -23,6 +23,7 @@ import tempfile
 import threading
 import unittest
 from collections.abc import Iterator, Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 from unittest import mock
@@ -70,6 +71,26 @@ assert advisory_consultation_spec is not None and advisory_consultation_spec.loa
 advisory_consultation = importlib.util.module_from_spec(advisory_consultation_spec)
 sys.modules["advisory_consultation"] = advisory_consultation
 advisory_consultation_spec.loader.exec_module(advisory_consultation)
+
+learned_state_spec = importlib.util.spec_from_file_location(
+    "learned_state", SKILL_DIR / "learned_state.py"
+)
+assert learned_state_spec is not None and learned_state_spec.loader is not None
+learned_state = importlib.util.module_from_spec(learned_state_spec)
+sys.modules["learned_state"] = learned_state
+learned_state_spec.loader.exec_module(learned_state)
+
+
+def _bash_array(script: Path, name: str) -> list[str]:
+    """Parse a `NAME=(a b c)` bash array literal out of `script`'s source.
+
+    Shared by `LearnedStatePropagationTests` and `ManagedFileClosureTests` —
+    both need `install.sh`'s `MANAGED_FILES` without executing the script.
+    """
+    text = script.read_text(encoding="utf-8")
+    match = re.search(rf"^{name}=\(([^)]*)\)", text, re.MULTILINE)
+    assert match is not None, f"{name} not found in {script}"
+    return match.group(1).split()
 
 
 def run_check(*args: str) -> subprocess.CompletedProcess[str]:
@@ -710,6 +731,166 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertNotIn(PROTOCOL_START, agents_text)
             self.assertNotIn(PROTOCOL_START, claude_text)
 
+
+class LearnedStatePropagationTests(unittest.TestCase):
+    """Spec 0004 ticket 23: adopted learned state propagates across harnesses
+    through `install.sh`'s existing atomic staging/sync mechanism — it does
+    not get a second, parallel one.
+
+    `install.sh` resolves `learned_state.current_version_dir` against
+    `SCRIPT_DIR` (the directory `install.sh` itself lives in), so a test
+    that adopted state directly into this checkout's own `learned-state/`
+    would mutate the real, git-tracked, currently-empty store. Every test
+    here instead builds an isolated *source* tree — a scratch copy of
+    `install.sh` plus exactly the files it reads from `SRC_DIR` — and adopts
+    into that copy's own `SCRIPT_DIR` instead.
+    """
+
+    def _isolated_source_tree(self) -> Path:
+        """A scratch `install.sh` plus a minimal `skills/worker-routing`
+        holding only `MANAGED_FILES` and `routing-config.json` — what
+        `install.sh` actually reads from `SRC_DIR` — not a full copy of this
+        skill directory's caches and other test files."""
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        source_root = Path(tmp)
+        shutil.copy(INSTALL_SH, source_root / "install.sh")
+        worker_routing_dir = source_root / "skills" / "worker-routing"
+        worker_routing_dir.mkdir(parents=True)
+        for name in [*_bash_array(INSTALL_SH, "MANAGED_FILES"), "routing-config.json"]:
+            shutil.copy(SKILL_DIR / name, worker_routing_dir / name)
+        return source_root
+
+    def _adopt(self, source_root: Path, **document_contents: str) -> None:
+        learned_state.adopt(
+            [
+                learned_state.DocumentChange(document=document, content=content)  # type: ignore[arg-type]
+                for document, content in document_contents.items()
+            ],
+            root_dir=source_root,
+            now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+
+    def _run_install(
+        self, source_root: Path, target_dir: str, *, home: str, **env_overrides: str
+    ) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env.update(env_overrides)
+        return subprocess.run(
+            ["bash", str(source_root / "install.sh"), target_dir],
+            capture_output=True,
+            check=False,
+            text=True,
+            env=env,
+        )
+
+    def _installed_dirs(self, fake_home: str, target_dir: str) -> tuple[Path, ...]:
+        return (
+            Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing",
+            Path(fake_home) / ".codex" / "skills" / "worker-routing",
+            Path(target_dir) / ".agents" / "skills" / "worker-routing",
+            Path(target_dir) / ".agent" / "skills" / "worker-routing",
+            Path(target_dir) / ".codex" / "skills" / "worker-routing",
+        )
+
+    def test_a_successful_install_propagates_adopted_learned_state_to_every_harness(
+        self,
+    ) -> None:
+        source_root = self._isolated_source_tree()
+        self._adopt(source_root, memory="memory v1", briefs="briefs v1")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(source_root, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            for installed_dir in self._installed_dirs(fake_home, target_dir):
+                with self.subTest(installed_dir=installed_dir):
+                    history = installed_dir / "learned-state" / "history.jsonl"
+                    version_dir = installed_dir / "learned-state" / "versions" / "v0001"
+                    self.assertTrue(history.exists())
+                    self.assertEqual((version_dir / "memory").read_text(), "memory v1")
+                    self.assertEqual((version_dir / "briefs").read_text(), "briefs v1")
+
+                    self.assertEqual(
+                        learned_state.read_current(root_dir=installed_dir),
+                        {"memory": "memory v1", "briefs": "briefs v1"},
+                    )
+                    self.assertEqual(
+                        learned_state.current_version_dir(root_dir=installed_dir),
+                        version_dir,
+                    )
+
+    def test_install_without_any_adopted_learned_state_installs_cleanly(self) -> None:
+        source_root = self._isolated_source_tree()
+        self.assertFalse((source_root / "learned-state").exists())
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(source_root, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            for installed_dir in self._installed_dirs(fake_home, target_dir):
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertTrue((installed_dir / "SKILL.md").exists())
+                    self.assertTrue((installed_dir / "protocol.md").exists())
+                    self.assertFalse((installed_dir / "learned-state").exists())
+                    self.assertIsNone(learned_state.current_version_dir(root_dir=installed_dir))
+
+    def test_a_failure_mid_learned_state_sync_rolls_back_every_learned_state_write(
+        self,
+    ) -> None:
+        source_root = self._isolated_source_tree()
+        self._adopt(source_root, memory="memory v1", briefs="briefs v1")
+
+        # MANAGED_FILES writes land first for each target directory; the two
+        # learned-state writes ("history.jsonl", then "briefs" — the
+        # alphabetically-first adopted document) follow immediately after.
+        # Failing on the second of those proves both roll back together,
+        # and that a later target directory in the loop is never reached.
+        managed_files_count = len(_bash_array(INSTALL_SH, "MANAGED_FILES"))
+        fail_after = managed_files_count + 2
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(
+                source_root,
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES=str(fail_after),
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("AUTO_ROUTING_FAIL_AFTER_WRITES", result.stderr)
+
+            first_installed_dir = Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing"
+            self.assertFalse((first_installed_dir / "learned-state" / "history.jsonl").exists())
+            self.assertFalse(
+                (first_installed_dir / "learned-state" / "versions" / "v0001" / "briefs").exists()
+            )
+            # Rollback restores absence, not just the two learned-state
+            # files: MANAGED_FILES writes that preceded them in this same
+            # target directory are gone too.
+            self.assertFalse((first_installed_dir / "SKILL.md").exists())
+
+            second_installed_dir = Path(fake_home) / ".codex" / "skills" / "worker-routing"
+            self.assertFalse(second_installed_dir.exists())
+
+    def test_a_corrupted_history_journal_aborts_preflight_without_mutating_any_target(
+        self,
+    ) -> None:
+        source_root = self._isolated_source_tree()
+        learned_state_dir = source_root / "learned-state"
+        (learned_state_dir / "versions").mkdir(parents=True)
+        (learned_state_dir / "history.jsonl").write_text("not valid json\n")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(source_root, target_dir, home=fake_home)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("learned-state", result.stdout + result.stderr)
+
+            for installed_dir in self._installed_dirs(fake_home, target_dir):
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertFalse(installed_dir.exists())
+            self.assertFalse((Path(target_dir) / "AGENTS.md").exists())
+            self.assertFalse((Path(target_dir) / "CLAUDE.md").exists())
 
 
 class GoldStandardV6NegativeTests(unittest.TestCase):

@@ -64,6 +64,7 @@ expected input here, not a caller bug.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -71,14 +72,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import acceptance_gate
 import learning_journal
 import learning_report
 import learning_scoreboard
 import risk_tiered_application
-from risk_tiered_application import TierOutcome
+from risk_tiered_application import RevertOutcome, TierOutcome
 
 # The seam every worker invocation in this repository shares: `(model,
 # effort, prompt) -> str`. Declared locally rather than imported from
@@ -215,6 +216,20 @@ def _string_tuple(value: object) -> tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(entry.strip() for entry in value if isinstance(entry, str) and entry.strip())
+
+
+def _content_digest(content: str) -> str:
+    """The sha256 hex digest over `content`'s UTF-8 bytes.
+
+    Mirrors `learned_state._digest` exactly (see `_validate_trials`'s
+    docstring above on why this file restates rather than imports a
+    sibling's private helper) so a digest computed here from a freshly
+    proposed document body is directly comparable to the `before_digest`/
+    `after_digest` a `DocumentDelta` already carries on a `VersionEntry` —
+    the anti-flapping guard in `run_weekly_deep` needs exactly that
+    comparison, without ever importing `learned_state` itself.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _optional_string(value: object) -> str | None:
@@ -622,13 +637,15 @@ def _render_weekly_deep_prompt(
 @dataclass(frozen=True)
 class WeeklyDeepResult:
     """The deep run's outcome: what happened to each tiered proposal, the
-    retrospective summary, the written report's path, and the worker's raw
-    reply for audit."""
+    attributable-regression revert this run attempted, the retrospective
+    summary, the written report's path, and the worker's raw reply for
+    audit."""
 
     report_path: Path
     routing_outcomes: tuple[TierOutcome, ...]
     brief_outcomes: tuple[TierOutcome, ...]
     memory_outcomes: tuple[TierOutcome, ...]
+    revert_outcome: RevertOutcome
     retrospective_summary: str
     raw_response: str
 
@@ -665,6 +682,16 @@ def run_weekly_deep(
     through `risk_tiered_application.apply_routing_table_update` to the
     `ReplayBenchmarkRecord`s the acceptance gate produces — currently
     unwired.
+
+    Immediately after the scoreboard comparison, and before the worker is
+    ever invoked, `risk_tiered_application.revert_attributable_regression`
+    runs unconditionally (spec 0004 ticket 21) — a regression this run's
+    comparison surfaces gets reverted (or reported as not attributable)
+    whether or not the worker itself proposes anything. The digest of
+    whatever content that revert just undid is then checked against this
+    same run's own proposals: a proposal identical to the just-reverted
+    content is rejected rather than reapplied, so one run can never both
+    revert a change and immediately readopt it on the same evidence.
     """
     _require_aware_now(now)
     trials, score_threshold = _load_acceptance_gate_config(config_path)
@@ -678,6 +705,38 @@ def run_weekly_deep(
         journal, now=window_start, window_days=window_days
     )
     comparison = learning_scoreboard.compare_scoreboards(baseline_board, current_board)
+
+    seed = run_id or _compact_timestamp(now)
+    revert_outcome = risk_tiered_application.revert_attributable_regression(
+        comparison,
+        root_dir=root_dir,
+        now=now,
+        window_days=window_days,
+        change_id=_change_id("learner-deep-revert", seed=seed, index=0),
+    )
+
+    reverted_entries: list[str] = []
+    reverted_before_digests: dict[str, str] = {}
+    if revert_outcome.status == "reverted":
+        doc_name = (
+            revert_outcome.version_entry.documents[0].document
+            if (revert_outcome.version_entry and revert_outcome.version_entry.documents)
+            else "unknown"
+        )
+        reverted_entries.append(
+            f"{doc_name}: change_id={revert_outcome.reverted_change_id or 'none'} "
+            f"(regressed: {', '.join(revert_outcome.regressed_metrics)})"
+        )
+        if revert_outcome.version_entry is not None:
+            reverted_before_digests = {
+                delta.document: delta.before_digest
+                for delta in revert_outcome.version_entry.documents
+                if delta.before_digest is not None
+            }
+    elif revert_outcome.status in ("unattributable", "unrevertable"):
+        reverted_entries.append(
+            f"none: {revert_outcome.reason} (regressed: {', '.join(revert_outcome.regressed_metrics)})"
+        )
 
     windowed_journal = learning_journal.JournalRead(
         worker_executions=_window_cut(
@@ -700,13 +759,39 @@ def run_weekly_deep(
     payload = _extract_json_object(raw_response) or {}
 
     retrospective_summary = _optional_string(payload.get("retrospective_summary")) or ""
-    seed = run_id or _compact_timestamp(now)
+
+    def _flapping_guard(
+        document: Literal["memory", "routing_table", "briefs"], content: str
+    ) -> TierOutcome | None:
+        """`None` when `content` is safe to propose; a `rejected` `TierOutcome`
+        when `document`'s just-reverted content (this same run, above) hashes
+        identical to `content` — the worker would otherwise re-adopt, within
+        the very run that undid it, the exact content the revert just
+        proved regressive. Compares digests rather than raw strings so this
+        never needs to hold a document's full content in memory twice; see
+        `_content_digest`'s docstring for why the comparison is even
+        possible without importing `learned_state`.
+        """
+        if reverted_before_digests.get(document) != _content_digest(content):
+            return None
+        return TierOutcome(
+            document=document,
+            status="rejected",
+            applied=False,
+            reason=(
+                "anti-flapping guard: identical to the content this run just "
+                "reverted for a regression"
+            ),
+        )
 
     routing_outcomes: tuple[TierOutcome, ...] = ()
     routing_update = _optional_string(payload.get("routing_table_update"))
     if routing_update is not None:
+        guarded = _flapping_guard("routing_table", routing_update)
         routing_outcomes = (
-            risk_tiered_application.apply_routing_table_update(
+            guarded
+            if guarded is not None
+            else risk_tiered_application.apply_routing_table_update(
                 routing_update,
                 root_dir=root_dir,
                 now=now,
@@ -720,8 +805,11 @@ def run_weekly_deep(
     brief_outcomes: tuple[TierOutcome, ...] = ()
     brief_update = _optional_string(payload.get("brief_update"))
     if brief_update is not None:
+        guarded = _flapping_guard("briefs", brief_update)
         brief_outcomes = (
-            risk_tiered_application.submit_brief_proposal(
+            guarded
+            if guarded is not None
+            else risk_tiered_application.submit_brief_proposal(
                 brief_update,
                 root_dir=root_dir,
                 now=now,
@@ -733,8 +821,11 @@ def run_weekly_deep(
     memory_outcomes: tuple[TierOutcome, ...] = ()
     if lessons:
         consolidated = "\n".join(f"- {lesson}" for lesson in lessons)
+        guarded = _flapping_guard("memory", consolidated)
         memory_outcomes = (
-            risk_tiered_application.apply_memory_lesson(
+            guarded
+            if guarded is not None
+            else risk_tiered_application.apply_memory_lesson(
                 consolidated,
                 root_dir=root_dir,
                 now=now,
@@ -751,7 +842,11 @@ def run_weekly_deep(
             adopted_entries.append(f"memory: change_id={mo.change_id or 'none'}")
 
     report_path = learning_report.write_weekly_report(
-        root_dir, now=now, window_days=window_days, adopted=tuple(adopted_entries)
+        root_dir,
+        now=now,
+        window_days=window_days,
+        adopted=tuple(adopted_entries),
+        reverted=tuple(reverted_entries),
     )
 
     return WeeklyDeepResult(
@@ -759,6 +854,7 @@ def run_weekly_deep(
         routing_outcomes=routing_outcomes,
         brief_outcomes=brief_outcomes,
         memory_outcomes=memory_outcomes,
+        revert_outcome=revert_outcome,
         retrospective_summary=retrospective_summary,
         raw_response=raw_response,
     )

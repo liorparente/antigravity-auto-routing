@@ -18,12 +18,12 @@ whether the revert reports the regression as unrevertable, or whether ticket 19'
 representation of the pre-first-adoption state — but do not discover it as an uncaught exception in
 a scheduled run.
 
-**Status:** ready-for-agent
+**Status:** Implemented
 
-- [ ] A post-adoption regression triggers an automatic revert of the attributable change.
-- [ ] The reverted state matches the pre-adoption version exactly.
-- [ ] The revert appears as its own entry in the weekly report, naming the change and the metric that
+- [x] A post-adoption regression triggers an automatic revert of the attributable change.
+- [x] The reverted state matches the pre-adoption version exactly.
+- [x] The revert appears as its own entry in the weekly report, naming the change and the metric that
       regressed.
-- [ ] A regression not attributable to any adopted change reverts nothing and is reported as such.
-- [ ] A reverted change is not re-adopted by the next weekly run on the same evidence.
-- [ ] Tests cover an attributable regression, an unattributable one, and no regression at all.
+- [x] A regression not attributable to any adopted change reverts nothing and is reported as such.
+- [x] A reverted change is not re-adopted by the next weekly run on the same evidence.
+- [x] Tests cover an attributable regression, an unattributable one, and no regression at all.

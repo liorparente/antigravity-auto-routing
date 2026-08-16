@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import learned_state
 from learned_state import DocumentChange
+from learning_scoreboard import MetricChange, MetricValue, ScoreboardComparison
 from risk_tiered_application import (
     PendingProposal,
     apply_memory_lesson,
@@ -21,11 +22,30 @@ from risk_tiered_application import (
     approve_pending_proposal,
     read_pending_proposals,
     reject_pending_proposal,
+    revert_attributable_regression,
     submit_brief_proposal,
 )
 
 _NOW = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
 _LATER = datetime(2026, 8, 15, 13, 0, 0, tzinfo=timezone.utc)
+
+
+def _comparison_with_regression(name: str = "mean_rework_per_task") -> ScoreboardComparison:
+    baseline = MetricValue(name=name, direction="lower_is_better", value=1.0, sample_size=5)
+    current = MetricValue(name=name, direction="lower_is_better", value=5.0, sample_size=5)
+    change = MetricChange(
+        name=name, direction="lower_is_better", status="regressed", baseline=baseline, current=current
+    )
+    return ScoreboardComparison(changes=(change,))
+
+
+def _comparison_without_regression(name: str = "mean_rework_per_task") -> ScoreboardComparison:
+    baseline = MetricValue(name=name, direction="lower_is_better", value=1.0, sample_size=5)
+    current = MetricValue(name=name, direction="lower_is_better", value=1.0, sample_size=5)
+    change = MetricChange(
+        name=name, direction="lower_is_better", status="held", baseline=baseline, current=current
+    )
+    return ScoreboardComparison(changes=(change,))
 
 
 class Tier1MemoryLessonTests(unittest.TestCase):
@@ -44,6 +64,7 @@ class Tier1MemoryLessonTests(unittest.TestCase):
             self.assertEqual(outcome.status, "applied")
             self.assertTrue(outcome.applied)
             self.assertIsNotNone(outcome.version_entry)
+            assert outcome.version_entry is not None
             self.assertEqual(outcome.version_entry.version, 1)
             self.assertEqual(outcome.version_entry.change_id, "lesson-01")
 
@@ -78,8 +99,10 @@ class Tier2RoutingTableUpdateTests(unittest.TestCase):
             self.assertEqual(outcome.status, "applied")
             self.assertTrue(outcome.applied)
             self.assertIsNotNone(outcome.gate_decision)
+            assert outcome.gate_decision is not None
             self.assertTrue(outcome.gate_decision.accepted)
             self.assertIsNotNone(outcome.version_entry)
+            assert outcome.version_entry is not None
             self.assertEqual(outcome.version_entry.version, 1)
 
             # Verify on-disk
@@ -102,6 +125,7 @@ class Tier2RoutingTableUpdateTests(unittest.TestCase):
             self.assertEqual(outcome.status, "rejected")
             self.assertFalse(outcome.applied)
             self.assertIsNotNone(outcome.gate_decision)
+            assert outcome.gate_decision is not None
             self.assertFalse(outcome.gate_decision.accepted)
             self.assertIsNone(outcome.version_entry)
 
@@ -123,6 +147,7 @@ class Tier2RoutingTableUpdateTests(unittest.TestCase):
             )
             self.assertEqual(outcome.status, "rejected")
             self.assertFalse(outcome.applied)
+            assert outcome.gate_decision is not None
             self.assertFalse(outcome.gate_decision.accepted)
             self.assertEqual(learned_state.read_history(root), ())
 
@@ -178,6 +203,7 @@ class Tier3BriefProposalTests(unittest.TestCase):
             self.assertEqual(outcome.status, "applied")
             self.assertTrue(outcome.applied)
             self.assertIsNotNone(outcome.version_entry)
+            assert outcome.version_entry is not None
             self.assertEqual(outcome.version_entry.version, 1)
 
             # Pending store must now be empty
@@ -276,12 +302,14 @@ class IdempotencyNoOpTests(unittest.TestCase):
             # First adoption
             first = apply_memory_lesson("Lesson 1", root_dir=root, now=_NOW)
             self.assertEqual(first.status, "applied")
+            assert first.version_entry is not None
             self.assertEqual(first.version_entry.version, 1)
 
             # Second identical adoption
             second = apply_memory_lesson("Lesson 1", root_dir=root, now=_LATER)
             self.assertEqual(second.status, "no_op")
             self.assertTrue(second.applied)
+            assert second.version_entry is not None
             self.assertEqual(second.version_entry.version, 1)
             self.assertIn("identical", second.reason or "")
 
@@ -300,6 +328,7 @@ class IdempotencyNoOpTests(unittest.TestCase):
                 runner=runner,
             )
             self.assertEqual(first.status, "applied")
+            assert first.version_entry is not None
             self.assertEqual(first.version_entry.version, 1)
 
             # Second identical update
@@ -311,7 +340,9 @@ class IdempotencyNoOpTests(unittest.TestCase):
             )
             self.assertEqual(second.status, "no_op")
             self.assertTrue(second.applied)
+            assert second.gate_decision is not None
             self.assertTrue(second.gate_decision.accepted)
+            assert second.version_entry is not None
             self.assertEqual(second.version_entry.version, 1)
             self.assertEqual(len(learned_state.read_history(root)), 1)
 
@@ -334,9 +365,105 @@ class IdempotencyNoOpTests(unittest.TestCase):
             outcome = approve_pending_proposal("prop-same", root_dir=root, now=_LATER)
             self.assertEqual(outcome.status, "no_op")
             self.assertTrue(outcome.applied)
+            assert outcome.version_entry is not None
             self.assertEqual(outcome.version_entry.version, 1)
             self.assertEqual(read_pending_proposals(root), ())
             self.assertEqual(len(learned_state.read_history(root)), 1)
+
+
+class AutoRevertOnRegressionTests(unittest.TestCase):
+    """Auto-revert: a scoreboard regression rolls back the attributable live adoption."""
+
+    def test_attributable_regression_triggers_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson v1", root_dir=root, now=_NOW, change_id="adopt-1")
+            apply_memory_lesson("Lesson v2", root_dir=root, now=_LATER, change_id="adopt-2")
+
+            outcome = revert_attributable_regression(
+                _comparison_with_regression(),
+                root_dir=root,
+                now=_LATER,
+                window_days=7,
+                change_id="revert-1",
+            )
+
+            self.assertEqual(outcome.status, "reverted")
+            self.assertEqual(outcome.regressed_metrics, ("mean_rework_per_task",))
+            self.assertEqual(outcome.reverted_change_id, "adopt-2")
+            self.assertIsNotNone(outcome.version_entry)
+            assert outcome.version_entry is not None
+            self.assertEqual(outcome.version_entry.kind, "rollback")
+
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "Lesson v1")
+
+    def test_unattributable_regression_when_no_adoptions_in_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson v1", root_dir=root, now=_NOW, change_id="adopt-1")
+
+            far_future = _NOW + timedelta(days=30)
+            outcome = revert_attributable_regression(
+                _comparison_with_regression(),
+                root_dir=root,
+                now=far_future,
+                window_days=7,
+            )
+
+            self.assertEqual(outcome.status, "unattributable")
+            self.assertEqual(outcome.regressed_metrics, ("mean_rework_per_task",))
+            self.assertIsNone(outcome.reverted_change_id)
+            self.assertIsNone(outcome.version_entry)
+
+            # No rollback was attempted: history is unchanged.
+            self.assertEqual(len(learned_state.read_history(root)), 1)
+
+    def test_no_regression_returns_no_regression_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = revert_attributable_regression(
+                _comparison_without_regression(),
+                root_dir=root,
+                now=_NOW,
+            )
+
+            self.assertEqual(outcome.status, "no_regression")
+            self.assertEqual(outcome.regressed_metrics, ())
+            self.assertIn("no scoreboard metric regressed", outcome.reason or "")
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_first_adoption_regression_handled_as_unrevertable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson v1", root_dir=root, now=_NOW, change_id="adopt-1")
+
+            outcome = revert_attributable_regression(
+                _comparison_with_regression(),
+                root_dir=root,
+                now=_NOW,
+                window_days=7,
+            )
+
+            self.assertEqual(outcome.status, "unrevertable")
+            self.assertEqual(outcome.regressed_metrics, ("mean_rework_per_task",))
+            self.assertIn("first adoption", outcome.reason or "")
+            self.assertIsNone(outcome.reverted_change_id)
+            self.assertIsNone(outcome.version_entry)
+
+            # The refused rollback wrote nothing new.
+            self.assertEqual(len(learned_state.read_history(root)), 1)
+
+    def test_revert_requires_timezone_aware_now(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            naive_now = datetime(2026, 8, 15, 12, 0, 0)  # noqa: DTZ001 - the value under test
+            with self.assertRaises(ValueError):
+                revert_attributable_regression(
+                    _comparison_with_regression(),
+                    root_dir=root,
+                    now=naive_now,
+                )
 
 
 if __name__ == "__main__":

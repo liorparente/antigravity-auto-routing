@@ -889,6 +889,199 @@ class WeeklyDeepTests(unittest.TestCase):
             )
 
 
+class WeeklyDeepRevertTests(unittest.TestCase):
+    """Ticket 21 slice 2: `run_weekly_deep` calls
+    `risk_tiered_application.revert_attributable_regression` unconditionally
+    after computing the scoreboard comparison, reports the outcome as its
+    own weekly-report section, and refuses to let this same run's own
+    proposal readopt whatever content the revert just undid.
+    """
+
+    # Baseline window (2026-08-01T12:00:00Z, 2026-08-08T12:00:00Z].
+    _BASELINE_TS = "2026-08-03T00:00:00Z"
+
+    def test_attributable_regression_reverts_and_reports_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            risk_tiered_application.apply_memory_lesson(
+                "- Lesson A",
+                root_dir=root,
+                now=datetime(2026, 8, 1, 0, 0, 0, tzinfo=timezone.utc),
+                change_id="adopt-1",
+            )
+            risk_tiered_application.apply_memory_lesson(
+                "- Lesson B",
+                root_dir=root,
+                now=datetime(2026, 8, 12, 0, 0, 0, tzinfo=timezone.utc),
+                change_id="adopt-2",
+            )
+            _seed_replay_benchmark(root, task_set="bench", score=0.9, timestamp=self._BASELINE_TS)
+            _seed_replay_benchmark(root, task_set="bench", score=0.1, timestamp=_IN_WINDOW_TS)
+            worker = _RecordingWorker(_json_reply({}))
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.revert_outcome.status, "reverted")
+            self.assertEqual(
+                result.revert_outcome.regressed_metrics, ("mean_benchmark_score",)
+            )
+            self.assertEqual(result.revert_outcome.reverted_change_id, "adopt-2")
+
+            # The reverted state matches the pre-adoption version exactly.
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A")
+
+            content = result.report_path.read_text(encoding="utf-8")
+            reverted_section = content.split("## Changes reverted this week", 1)[1].split(
+                "## Budget degradations", 1
+            )[0]
+            self.assertIn("memory: change_id=adopt-2", reverted_section)
+            self.assertIn("mean_benchmark_score", reverted_section)
+
+    def test_unattributable_regression_reverts_nothing_and_reports_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # The only live adoption is well outside the trailing window, so
+            # the regression cannot be attributed to it.
+            risk_tiered_application.apply_memory_lesson(
+                "- Lesson A",
+                root_dir=root,
+                now=datetime(2026, 7, 1, 0, 0, 0, tzinfo=timezone.utc),
+                change_id="adopt-old",
+            )
+            _seed_replay_benchmark(root, task_set="bench", score=0.9, timestamp=self._BASELINE_TS)
+            _seed_replay_benchmark(root, task_set="bench", score=0.1, timestamp=_IN_WINDOW_TS)
+            worker = _RecordingWorker(_json_reply({}))
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.revert_outcome.status, "unattributable")
+            self.assertEqual(
+                result.revert_outcome.regressed_metrics, ("mean_benchmark_score",)
+            )
+            self.assertIsNone(result.revert_outcome.reverted_change_id)
+
+            # Nothing was rolled back: history is unchanged.
+            self.assertEqual(len(learned_state.read_history(root)), 1)
+
+            content = result.report_path.read_text(encoding="utf-8")
+            reverted_section = content.split("## Changes reverted this week", 1)[1].split(
+                "## Budget degradations", 1
+            )[0]
+            self.assertIn("none:", reverted_section)
+            self.assertIn("mean_benchmark_score", reverted_section)
+
+    def test_no_regression_reports_empty_reverted_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = _RecordingWorker(_json_reply({}))
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.revert_outcome.status, "no_regression")
+            self.assertEqual(result.revert_outcome.regressed_metrics, ())
+
+            content = result.report_path.read_text(encoding="utf-8")
+            reverted_section = content.split("## Changes reverted this week", 1)[1].split(
+                "## Budget degradations", 1
+            )[0]
+            self.assertIn("None this week.", reverted_section)
+
+    def test_reverted_content_is_not_readopted_by_the_same_run(self) -> None:
+        """The anti-flapping guard: a proposal identical to the content this
+        run's own revert just undid must not be re-applied — a `rejected`
+        `TierOutcome` is returned instead, and the store is left exactly as
+        the revert left it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            risk_tiered_application.apply_memory_lesson(
+                "- Lesson A",
+                root_dir=root,
+                now=datetime(2026, 8, 1, 0, 0, 0, tzinfo=timezone.utc),
+                change_id="adopt-1",
+            )
+            risk_tiered_application.apply_memory_lesson(
+                "- Lesson B",
+                root_dir=root,
+                now=datetime(2026, 8, 12, 0, 0, 0, tzinfo=timezone.utc),
+                change_id="adopt-2",
+            )
+            _seed_replay_benchmark(root, task_set="bench", score=0.9, timestamp=self._BASELINE_TS)
+            _seed_replay_benchmark(root, task_set="bench", score=0.1, timestamp=_IN_WINDOW_TS)
+            # The worker proposes exactly the content the revert is about to
+            # undo — consolidating a single "Lesson B" lesson renders as
+            # "- Lesson B", byte-for-byte what `adopt-2` put in the store.
+            worker = _RecordingWorker(_json_reply({"memory_lessons": ["Lesson B"]}))
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.revert_outcome.status, "reverted")
+            self.assertEqual(len(result.memory_outcomes), 1)
+            self.assertEqual(result.memory_outcomes[0].status, "rejected")
+            self.assertFalse(result.memory_outcomes[0].applied)
+            self.assertIsNotNone(result.memory_outcomes[0].reason)
+            assert result.memory_outcomes[0].reason is not None  # narrows for mypy
+            self.assertIn("anti-flapping", result.memory_outcomes[0].reason)
+
+            # The store still holds exactly what the revert restored — the
+            # rejected re-proposal never touched it.
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A")
+            self.assertEqual(len(learned_state.read_history(root)), 3)  # 2 adopts + 1 rollback
+
+            content = result.report_path.read_text(encoding="utf-8")
+            adopted_section = content.split("## Changes adopted this week", 1)[1].split(
+                "## Changes reverted this week", 1
+            )[0]
+            self.assertNotIn("memory: change_id=", adopted_section)
+
+    def test_different_content_still_applies_after_an_unrelated_revert(self) -> None:
+        """The anti-flapping guard is content-specific, not a blanket freeze
+        on the reverted document: a genuinely different proposal for the
+        same document this run just reverted still applies normally.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            risk_tiered_application.apply_memory_lesson(
+                "- Lesson A",
+                root_dir=root,
+                now=datetime(2026, 8, 1, 0, 0, 0, tzinfo=timezone.utc),
+                change_id="adopt-1",
+            )
+            risk_tiered_application.apply_memory_lesson(
+                "- Lesson B",
+                root_dir=root,
+                now=datetime(2026, 8, 12, 0, 0, 0, tzinfo=timezone.utc),
+                change_id="adopt-2",
+            )
+            _seed_replay_benchmark(root, task_set="bench", score=0.9, timestamp=self._BASELINE_TS)
+            _seed_replay_benchmark(root, task_set="bench", score=0.1, timestamp=_IN_WINDOW_TS)
+            worker = _RecordingWorker(_json_reply({"memory_lessons": ["Lesson C"]}))
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.revert_outcome.status, "reverted")
+            self.assertEqual(result.memory_outcomes[0].status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson C")
+
+
 _PROPOSAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 

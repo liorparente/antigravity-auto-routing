@@ -29,12 +29,13 @@ import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 import acceptance_gate
 import learned_state
+import learning_scoreboard
 from acceptance_gate import (
     DEFAULT_SCORE_THRESHOLD,
     DEFAULT_TRIAL_COUNT,
@@ -370,14 +371,120 @@ def reject_pending_proposal(
         _write_pending_proposals_unlocked(root_dir, remaining)
 
 
+@dataclass(frozen=True)
+class RevertOutcome:
+    """The result of attempting to revert a scoreboard regression to whichever
+    live adoption is most likely responsible for it."""
+
+    status: Literal["reverted", "unattributable", "unrevertable", "no_regression"]
+    regressed_metrics: tuple[str, ...]
+    reverted_change_id: str | None = None
+    version_entry: VersionEntry | None = None
+    reason: str | None = None
+
+
+def _parse_version_timestamp(value: str) -> datetime:
+    """Parse a `VersionEntry.timestamp` wire string into an aware UTC datetime."""
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+        tzinfo=timezone.utc
+    )
+
+
+def _most_recent_live_adoption(history: Sequence[VersionEntry]) -> VersionEntry | None:
+    """The most recent `adopt` entry not yet undone by a later `rollback`.
+
+    Mirrors the bracket-matching walk `learned_state.roll_back` uses
+    internally to pick its own target, so this function and that call agree
+    on which adoption is "live" without either importing the other's
+    private state.
+    """
+    skip = 0
+    for entry in reversed(history):
+        if entry.kind == "rollback":
+            skip += 1
+            continue
+        if skip > 0:
+            skip -= 1
+            continue
+        return entry
+    return None
+
+
+def revert_attributable_regression(
+    comparison: learning_scoreboard.ScoreboardComparison,
+    *,
+    root_dir: Path,
+    now: datetime,
+    window_days: int = learning_scoreboard.DEFAULT_WINDOW_DAYS,
+    change_id: str | None = None,
+) -> RevertOutcome:
+    """Auto-revert a scoreboard regression to the adoption most likely responsible.
+
+    Attribution is deliberately narrow: only the most recent live adoption
+    (per `learned_state.roll_back`'s own bracket-matching walk) is ever a
+    candidate, and only when its timestamp falls in the trailing
+    `window_days` window ending at `now`. A regression with no such
+    adoption is `unattributable` rather than guessed at; a regression whose
+    only live adoption is the very first one ever made is `unrevertable`,
+    since `learned_state.roll_back` refuses to undo the un-learned system's
+    starting state.
+    """
+    _require_aware_now(now)
+    regressed_metrics = tuple(
+        change.name for change in comparison.changes if change.status == "regressed"
+    )
+    if not regressed_metrics:
+        return RevertOutcome(
+            status="no_regression",
+            regressed_metrics=(),
+            reason="no scoreboard metric regressed",
+        )
+
+    history = learned_state.read_history(root_dir)
+    window_start = now - timedelta(days=window_days)
+
+    target_adoption = _most_recent_live_adoption(history)
+    if target_adoption is None or not (
+        window_start <= _parse_version_timestamp(target_adoption.timestamp) <= now
+    ):
+        return RevertOutcome(
+            status="unattributable",
+            regressed_metrics=regressed_metrics,
+            reason="no live adoption found in the trailing window",
+        )
+
+    try:
+        entry = learned_state.roll_back(root_dir=root_dir, now=now, change_id=change_id)
+    except ValueError as exc:
+        if "cannot roll back the first adoption" in str(exc):
+            return RevertOutcome(
+                status="unrevertable",
+                regressed_metrics=regressed_metrics,
+                reason=(
+                    "cannot roll back the first adoption — state before it is "
+                    "un-learned system"
+                ),
+            )
+        raise
+
+    return RevertOutcome(
+        status="reverted",
+        regressed_metrics=regressed_metrics,
+        reverted_change_id=target_adoption.change_id,
+        version_entry=entry,
+    )
+
+
 __all__ = [
     "ApplicationStatus",
     "PendingProposal",
+    "RevertOutcome",
     "TierOutcome",
     "apply_memory_lesson",
     "apply_routing_table_update",
     "approve_pending_proposal",
     "read_pending_proposals",
     "reject_pending_proposal",
+    "revert_attributable_regression",
     "submit_brief_proposal",
 ]

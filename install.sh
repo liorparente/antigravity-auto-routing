@@ -157,6 +157,54 @@ for file in "${MANAGED_FILES[@]}"; do
     cp "$SRC_DIR/$file" "$STAGING_DIR/files/$file"
 done
 
+# Adopted learned state (spec 0004 ticket 23) joins the same atomic
+# staging/sync mechanism as every other managed artifact rather than getting
+# a second, parallel one. `learned_state.py`'s `root_dir` for this repo's own
+# store is `SCRIPT_DIR` (the directory this script itself lives in), since
+# `learned-state/` is a git-tracked sibling of `install.sh`, not part of
+# `SRC_DIR`. Resolving "what is currently adopted" is Python's job
+# (`learned_state.current_version_dir`); this script's only job is bridging
+# that answer into bash.
+LEARNED_STATE_RELATIVE="learned-state"
+LEARNED_STATE_SRC="$SCRIPT_DIR/$LEARNED_STATE_RELATIVE"
+STAGED_LEARNED_STATE=0
+
+if [ -d "$LEARNED_STATE_SRC" ]; then
+    CURRENT_VERSION_DIR=""
+    if ! CURRENT_VERSION_DIR="$(python3 - "$SRC_DIR" "$SCRIPT_DIR" <<'PYEOF'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+import learned_state
+
+try:
+    resolved = learned_state.current_version_dir(root_dir=Path(sys.argv[2]))
+except ValueError as exc:
+    print(f"learned-state is damaged: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+print(str(resolved) if resolved is not None else "")
+PYEOF
+)"; then
+        # A damaged store (e.g. a corrupted history.jsonl) must fail preflight
+        # cleanly, before any target has been touched — same contract as the
+        # marker-balance check below.
+        echo "❌ Preflight failed: adopted learned state could not be resolved." >&2
+        exit 1
+    fi
+
+    if [ -n "$CURRENT_VERSION_DIR" ]; then
+        # A resolvable but un-adopted store (`current_version_dir` returned
+        # `None`, printed here as an empty line) proceeds cleanly without
+        # staging anything — there is nothing yet to propagate.
+        STAGED_LEARNED_STATE=1
+        mkdir -p "$STAGING_DIR/learned-state/versions"
+        cp "$LEARNED_STATE_SRC/history.jsonl" "$STAGING_DIR/learned-state/history.jsonl"
+        cp -R "$LEARNED_STATE_SRC/versions/." "$STAGING_DIR/learned-state/versions/"
+    fi
+fi
+
 DOCS=("$AGENTS_MD" "$CLAUDE_MD" "$GEMINI_MD")
 STAGED_DOCS=()
 for index in "${!DOCS[@]}"; do
@@ -179,20 +227,39 @@ if [ "${AUTO_ROUTING_FAIL_AFTER_STAGE:-0}" = "1" ]; then
 fi
 
 write_count=0
+# One helper shared by every managed write below (MANAGED_FILES and, when
+# staged, learned state) so both count against the same
+# AUTO_ROUTING_FAIL_AFTER_WRITES fault-injection hook and roll back through
+# the same atomic_copy/snapshot_file transaction.
+copy_managed() {
+    local source="$1" target="$2"
+    atomic_copy "$source" "$target"
+    write_count=$((write_count + 1))
+    if [ "${AUTO_ROUTING_FAIL_AFTER_WRITES:-0}" = "$write_count" ]; then
+        echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_WRITES triggered." >&2
+        exit 1
+    fi
+}
+
 for target_dir in "${TARGET_DIRS[@]}"; do
     for file in "${MANAGED_FILES[@]}"; do
-        atomic_copy "$STAGING_DIR/files/$file" "$target_dir/$file"
-        write_count=$((write_count + 1))
-        if [ "${AUTO_ROUTING_FAIL_AFTER_WRITES:-0}" = "$write_count" ]; then
-            echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_WRITES triggered." >&2
-            exit 1
-        fi
+        copy_managed "$STAGING_DIR/files/$file" "$target_dir/$file"
     done
     # Preserve customized routing configuration; install only the default.
     if [ ! -f "$target_dir/routing-config.json" ]; then
         atomic_copy "$SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
     fi
     chmod +x "$target_dir/routing-audit.sh" "$target_dir/agent_council.py"
+
+    if [ "$STAGED_LEARNED_STATE" -eq 1 ]; then
+        copy_managed \
+            "$STAGING_DIR/learned-state/history.jsonl" \
+            "$target_dir/$LEARNED_STATE_RELATIVE/history.jsonl"
+        while IFS= read -r -d '' version_file; do
+            relative="${version_file#"$STAGING_DIR/learned-state/versions/"}"
+            copy_managed "$version_file" "$target_dir/$LEARNED_STATE_RELATIVE/versions/$relative"
+        done < <(find "$STAGING_DIR/learned-state/versions" -type f -print0 | LC_ALL=C sort -z)
+    fi
 done
 
 atomic_copy "$STAGING_DIR/claude-rule.md" "$CLAUDE_RULE"
