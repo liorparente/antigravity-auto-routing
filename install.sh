@@ -180,6 +180,9 @@ import learned_state
 
 try:
     resolved = learned_state.current_version_dir(root_dir=Path(sys.argv[2]))
+    if resolved is not None:
+        # Validate that the current version snapshot directory and documents are intact
+        learned_state.read_current(root_dir=Path(sys.argv[2]))
 except ValueError as exc:
     print(f"learned-state is damaged: {exc}", file=sys.stderr)
     sys.exit(1)

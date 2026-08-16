@@ -19,10 +19,11 @@ if [ ! -d "$TARGET_PROJECT_DIR" ]; then
 fi
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
 
-# Note: intentionally excludes "$TARGET_PROJECT_DIR/.agents/skills/worker-routing".
-# install.sh writes there too, but .agents/ is a shared convention directory
-# other tools may also populate — uninstall.sh leaves it alone so it never
-# has to guess whether it's safe to touch.
+# Note: intentionally excludes "$TARGET_PROJECT_DIR/.agents/skills/worker-routing"
+# and "$TARGET_PROJECT_DIR/.agent/skills/worker-routing".
+# install.sh writes there too, but .agents/ and .agent/ are shared convention
+# directories other tools may also populate — uninstall.sh leaves them alone so
+# it never has to guess whether it is safe to touch.
 TARGET_DIRS=(
     "$HOME/.gemini/config/skills/worker-routing"
     "$HOME/.codex/skills/worker-routing"

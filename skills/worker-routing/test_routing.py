@@ -839,8 +839,12 @@ class LearnedStatePropagationTests(unittest.TestCase):
     def test_install_with_existing_but_unadopted_learned_state_directory_installs_cleanly(
         self,
     ) -> None:
+        # Exercises the unadopted-store preflight branch on an orphaned snapshot
+        # (versions/v0001 present but no history.jsonl line yet — Decision 2).
         source_root = self._isolated_source_tree()
-        (source_root / "learned-state").mkdir(parents=True)
+        orphan_version = source_root / "learned-state" / "versions" / "v0001"
+        orphan_version.mkdir(parents=True)
+        (orphan_version / "memory").write_text("orphan v1")
 
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             result = self._run_install(source_root, target_dir, home=fake_home)
@@ -854,6 +858,25 @@ class LearnedStatePropagationTests(unittest.TestCase):
                     self.assertIsNone(
                         learned_state.current_version_dir(root_dir=installed_dir)
                     )
+
+    def test_a_missing_snapshot_directory_aborts_preflight_without_mutating_any_target(
+        self,
+    ) -> None:
+        # history.jsonl names version 1, but its snapshot directory is missing.
+        source_root = self._isolated_source_tree()
+        self._adopt(source_root, memory="memory v1")
+        shutil.rmtree(source_root / "learned-state" / "versions" / "v0001")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(source_root, target_dir, home=fake_home)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("learned-state", result.stdout + result.stderr)
+
+            for installed_dir in self._installed_dirs(fake_home, target_dir):
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertFalse(installed_dir.exists())
+            self.assertFalse((Path(target_dir) / "AGENTS.md").exists())
+            self.assertFalse((Path(target_dir) / "CLAUDE.md").exists())
 
     def test_uninstall_sh_removes_installed_learned_state_from_target_dirs(
         self,
