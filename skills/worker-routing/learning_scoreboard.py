@@ -804,8 +804,16 @@ def _classify_change(baseline: Metric, current: Metric) -> ChangeStatus:
     changed its *coverage*, not its performance — reading the arrival of the
     first canary probe as an improvement, or its disappearance as a
     regression, would be exactly the invented verdict the ticket forbids.
+
+    NaN is also treated as missing data: if `baseline.value` or
+    `current.value` is NaN, return `indeterminate`. This applies to both
+    `higher_is_better` and `lower_is_better`, because NaN cannot be ordered
+    as greater or less under IEEE-754 semantics, so it must never be
+    coerced into `improved`, `regressed`, or `held` (ticket 28 defense-in-depth).
     """
     if isinstance(baseline, MetricNoData) or isinstance(current, MetricNoData):
+        return "indeterminate"
+    if math.isnan(baseline.value) or math.isnan(current.value):
         return "indeterminate"
     if current.value == baseline.value:
         return "held"

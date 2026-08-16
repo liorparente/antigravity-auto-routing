@@ -34,14 +34,14 @@ that claim — this ticket is that artifact.
 
 **Blocked by:** none (16 is done; this is a follow-on hardening ticket against its shipped code)
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] `_classify_change` returns `indeterminate` for a NaN-valued metric on either side, matching how
+- [x] `_classify_change` returns `indeterminate` for a NaN-valued metric on either side, matching how
       it already treats `MetricNoData` on either side — never `improved` or `regressed`.
-- [ ] The existing `test_a_nan_metric_can_never_reach_a_comparison_as_an_improvement` is updated to
+- [x] The existing `test_a_nan_metric_can_never_reach_a_comparison_as_an_improvement` is updated to
       assert the new, corrected behavior (`indeterminate`), and its comment stops citing this ticket
       as a future fix and instead notes the fix landed here.
-- [ ] A parallel case for `higher_is_better` is covered too — the docstring above the fix should name
+- [x] A parallel case for `higher_is_better` is covered too — the docstring above the fix should name
       both directions, not just the one the original test happened to use.
-- [ ] No change to `MetricValue`'s own NaN-rejection — this ticket adds a second, independent guard,
+- [x] No change to `MetricValue`'s own NaN-rejection — this ticket adds a second, independent guard,
       it does not relax or replace the first one.
