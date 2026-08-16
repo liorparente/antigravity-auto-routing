@@ -12,11 +12,11 @@ Settled the open design decision for `run_weekly_deep`'s batch retrospective, es
 
 ## Codebase Design & Deep Module Principles
 
-- **Public Interface:** The public interface of `learner_worker` (`run_weekly_deep`, `run_session_end_light`, `DEFAULT_WINDOW_DAYS`, `SessionEndResult`, `WeeklyDeepResult`) is intentionally narrow and declarative. It exposes only high-level cadence entry points and typed result objects.
+- **Public Interface:** The public interface of `learner_worker` (`run_weekly_deep`, `run_session_end_light`, `DEFAULT_WINDOW_DAYS`, `InvokeWorker`, `SessionEndResult`, `WeeklyDeepResult`) is intentionally narrow and declarative. It exposes only high-level cadence entry points, the standard worker seam type alias, and typed result objects.
 - **Module Depth:** High depth-to-surface ratio. Behind the simple `run_weekly_deep` entry point, the module encapsulates complex logic: timezone validation, prefix cutting, multi-family window filtering, baseline scoreboard computation, attributable regression rollback, structured JSON extraction, anti-flapping hash digest checks, and weekly markdown report generation.
 - **Leverage:** Maximum architectural leverage. By standardizing on the injected `InvokeWorker = Callable[[str, str, str], str]` seam, `learner_worker` avoids dragging in the heavy multi-party state machine of `advisory_consultation.py` (which requires interactive human stalemate resolution and async/urllib dependencies).
 - **Locality:** All prompt template construction (`_render_weekly_deep_prompt`), defensive parsing (`_extract_json_object`), and tier-based dispatching remain localized within `learner_worker.py`. Callers pass dependencies and receive structured outcomes without needing internal knowledge of prompt schemas or parser fallbacks.
-- **Test Seams:** Comprehensive test seams. Injected `InvokeWorker`, injected `runner` (benchmark scoring), injected `root_dir` (filesystem isolation), and explicit `now` (temporal determinism) allow all 56 unit tests in `test_learner_worker.py` (and 867 total repo tests) to run 100% offline, deterministically, and sub-second.
+- **Test Seams:** Comprehensive test seams. Injected `InvokeWorker`, injected `runner` (benchmark scoring), injected `root_dir` (filesystem isolation), and explicit `now` (temporal determinism) allow all 56 unit tests in `test_learner_worker.py` to run 100% offline, deterministically, and sub-second (~0.06s), while all 867 total repo offline tests execute in ~45s.
 
 ## Proposed Changes
 
