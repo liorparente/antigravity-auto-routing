@@ -184,7 +184,7 @@ returns scripted scores in tests and drives the real evaluator in production.
 - Content-freedom is enforced: no task text anywhere; a normal task carries at most a coarse tag;
   a sensitivity-halted task carries none.
 - The gate accepts only threshold-plus-zero-regression across repeated scripted trials; a single
-  good run is rejected; a regression in any one metric rejects.
+  good run is rejected; a concurrent non-benchmark metric regression rejects (ADR 0008).
 - Tier routing: a memory lesson auto-applies; a routing update applies only post-gate; a brief
   diff is held pending and applies only on recorded human approval.
 - Auto-revert: a scripted post-adoption regression reverts the change and writes the report

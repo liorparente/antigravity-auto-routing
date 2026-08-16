@@ -8,10 +8,10 @@ one-shot `invoke_worker` call, or become a full multi-round `advisory_consultati
 (`_render_weekly_deep_prompt`) from the scoreboard comparison and the week's windowed journal
 records, sends it through the single `invoke_worker` seam once, and parses whatever JSON object comes
 back into `routing_table_update`/`brief_update`/`memory_lessons`/`retrospective_summary`. Ticket 22's
-own description calls this "a batch retrospective dialogue over the week's tasks" — but nothing in
-the implementation is a dialogue: there is no second party, no round, no verdict, no
-`DialogueQualityRecord` written for it. It is a single worker's single unreviewed opinion about a
-week of evidence, dressed in the vocabulary of a review process that does not run here.
+original description called this "a batch retrospective dialogue over the week's tasks" — but nothing in
+the implementation was a dialogue: there was no second party, no round, no verdict, no
+`DialogueQualityRecord` written for it. It was a single worker's single unreviewed opinion about a
+week of evidence, dressed in the vocabulary of a review process that did not run here.
 
 **The case that this is fine as one-shot.** The weekly run already tiers everything it proposes
 through `risk_tiered_application` — a routing-table update still has to clear the acceptance gate
@@ -28,8 +28,8 @@ that a single worker's unreviewed judgment is exactly the failure mode spec 0004
 catch — see this repo's `post-mortem` occasion, which exists for retrospective-shaped work already.
 A routing-table update that clears the acceptance gate on weak trials, or a brief diff that reads
 plausible but embeds a bad generalization, would ride on nothing but one worker's synthesis of a
-week's evidence before either of those checks ever run. And ticket 22's own naming ("batch
-retrospective dialogue") suggests a dialogue was the original intent, not a one-shot prompt that
+week's evidence before either of those checks ever run. And ticket 22's early naming ("batch
+retrospective dialogue") suggested a dialogue was the original intent, not a one-shot prompt that
 happens to return JSON.
 
 **Origin:** Ticket 22 convergence loop (`3cecc61`) review pass, Category 2 — a design trade-off
