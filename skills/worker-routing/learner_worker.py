@@ -133,10 +133,20 @@ def _require_aware_now(now: datetime) -> None:
 
 
 def _require_valid_run_id(run_id: str | None) -> None:
-    """Refuse a weekly run id the acceptance gate cannot journal safely."""
+    """Reject a malformed caller-supplied ``run_id`` before any worker runs.
+
+    This mirrors `learning_journal`'s carried-identifier validation and the
+    production invoker's corresponding run-id guard, without importing either
+    module's private validator.  The acceptance gate also probes its trial
+    records, but it is reached only when a weekly worker proposes a
+    ``routing_table_update``.  Validating at entry therefore keeps fail-fast
+    behavior consistent for every weekly run, before invoking a worker or
+    reverting state.
+    """
     if run_id is not None and not learning_journal.TASK_ID_RE.fullmatch(run_id):
         raise ValueError(
-            f"run_id must match {learning_journal.TASK_ID_RE.pattern}, got {run_id!r}"
+            f"run_id must match {learning_journal.TASK_ID_RE.pattern} — the "
+            "journal carries identifiers only, never task text, prompt text, or paths"
         )
 
 
