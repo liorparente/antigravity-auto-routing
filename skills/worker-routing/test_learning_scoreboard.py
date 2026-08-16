@@ -3641,17 +3641,20 @@ class ReplayBenchmarkFamilyTests(unittest.TestCase):
 class ReplayBenchmarkMetricsTests(unittest.TestCase):
     """Ticket 29 — `mean_benchmark_score` blends incomparable task sets."""
 
+    def _seed_benchmarks(self, root: Path) -> None:
+        v1_record = learning_journal.ReplayBenchmarkRecord(
+            task_set="bench-v1", success=True, score=0.2, timestamp="2026-01-05T00:00:00Z"
+        )
+        v2_record = learning_journal.ReplayBenchmarkRecord(
+            task_set="bench-v2", success=True, score=0.9, timestamp="2026-01-06T00:00:00Z"
+        )
+        learning_journal.append_journal_record(v1_record, root_dir=root)
+        learning_journal.append_journal_record(v2_record, root_dir=root)
+
     def test_multiple_task_sets_in_window_are_not_blended_default_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            v1_record = learning_journal.ReplayBenchmarkRecord(
-                task_set="bench-v1", success=True, score=0.2, timestamp="2026-01-05T00:00:00Z"
-            )
-            v2_record = learning_journal.ReplayBenchmarkRecord(
-                task_set="bench-v2", success=True, score=0.9, timestamp="2026-01-06T00:00:00Z"
-            )
-            learning_journal.append_journal_record(v1_record, root_dir=root)
-            learning_journal.append_journal_record(v2_record, root_dir=root)
+            self._seed_benchmarks(root)
 
             journal = learning_journal.read_journal(root)
 
@@ -3665,14 +3668,7 @@ class ReplayBenchmarkMetricsTests(unittest.TestCase):
     def test_explicit_task_set_filters_to_target_task_set(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            v1_record = learning_journal.ReplayBenchmarkRecord(
-                task_set="bench-v1", success=True, score=0.2, timestamp="2026-01-05T00:00:00Z"
-            )
-            v2_record = learning_journal.ReplayBenchmarkRecord(
-                task_set="bench-v2", success=True, score=0.9, timestamp="2026-01-06T00:00:00Z"
-            )
-            learning_journal.append_journal_record(v1_record, root_dir=root)
-            learning_journal.append_journal_record(v2_record, root_dir=root)
+            self._seed_benchmarks(root)
 
             journal = learning_journal.read_journal(root)
 

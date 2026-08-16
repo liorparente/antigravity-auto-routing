@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -764,6 +764,10 @@ class ScoreboardComparison:
         return len(self.regressed) > 0
 
 
+def _wire_timestamp(now: datetime) -> str:
+    return now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def compute_scoreboard(
     journal: learning_journal.JournalRead,
     *,
@@ -787,7 +791,9 @@ def compute_scoreboard(
     _require_aware_now(now)
     _validate_window_days(window_days)
     if task_set is not None:
-        learning_journal.ReplayBenchmarkRecord(task_set=task_set, success=False)
+        learning_journal.ReplayBenchmarkRecord(
+            task_set=task_set, success=False, timestamp=_wire_timestamp(now)
+        )
 
     worker_executions = _prefix_cut(journal.worker_executions, now=now)
     outcomes = _prefix_cut(journal.outcomes, now=now)
