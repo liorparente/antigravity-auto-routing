@@ -42,16 +42,20 @@ whatever is decided, so the documented rule and the actual mechanism never drift
 
 **Blocked by:** 25 (done, commit `533360f`)
 
-**Status:** ready-for-agent
+**Status:** done — Option A, positional reduction, is the settled formal convention.
 
-- [ ] The two-producers-one-`task_id`-one-`ground_truth` shape for `plan` is resolved one of two ways,
-      chosen and justified rather than defaulted: the positional convention is declared sufficient, or
-      `OutcomeRecord` gains a validated discriminator field.
-- [ ] If a field is added: it is validated by construction like every other field on the record, it
-      carries no content beyond a closed vocabulary, and records written before the field existed are
-      handled explicitly (a stated default, or an "absent" case every consumer must read).
-- [ ] `protocol.md`'s "Learning-Journal Ground-Truth Recording" section states whichever rule this
-      ticket lands on, so the documented reduction and the real one cannot drift apart.
-- [ ] Tests cover the chosen resolution: either that a consumer's positional reduction is correct
-      under a stream ticket 25 already produces two-plan-records for, or that the new field
-      round-trips through validation and rejects a value outside its vocabulary.
+The append-only journal's file order is authoritative: consumers group `OutcomeRecord`s by
+`(task_id, ground_truth)` and keep the last record in each group. This matches the established
+`ComplianceRecord` reduction exactly. A discriminator would make the same history self-describing,
+but adds schema vocabulary, validation, and legacy-record semantics without changing the reduction
+every outcome consumer already needs. `OutcomeRecord` therefore remains unchanged.
+
+- [x] The two-producers-one-`task_id`-one-`ground_truth` shape for `plan` is resolved: Option A
+      declares positional reduction sufficient and formal, with no discriminator field added.
+- [x] No field was added, so field validation, closed-vocabulary, and legacy-record handling are not
+      applicable; the existing schema remains unchanged.
+- [x] `protocol.md`'s "Learning-Journal Ground-Truth Recording" section now names Ticket 27's
+      settled positional-reduction rule, keeping the documentation aligned with the mechanism.
+- [x] Tests drive ticket 25's automatic consensus writer followed by the manual rejection writer
+      under one `task_id`, then prove file-order last-wins reduction yields `rejected`; they also
+      prove a single plan record reduces to its own verdict.

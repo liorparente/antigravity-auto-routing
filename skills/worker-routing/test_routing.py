@@ -11713,6 +11713,73 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             len(_countable_runs(records, "plan-outcome-caller-run-1")), 1
         )
 
+    # --- ticket 27: multiple plan verdicts are formally reduced by file order ---
+
+    @staticmethod
+    def _reduce_plan_outcomes_by_position(
+        outcomes: tuple[learning_journal.OutcomeRecord, ...],
+    ) -> dict[tuple[str, str], learning_journal.OutcomeRecord]:
+        """Apply Ticket 27's consumer rule to already-file-ordered records."""
+        reduced: dict[tuple[str, str], learning_journal.OutcomeRecord] = {}
+        for record in outcomes:
+            if record.ground_truth == "plan":
+                reduced[(record.task.task_id, record.ground_truth)] = record
+        return reduced
+
+    def test_manual_rejection_after_automatic_consensus_wins_positionally(self) -> None:
+        """Ticket 25's automatic writer and the documented human writer share
+        one task identity. Ticket 27 makes their append order the formal,
+        deterministic resolution rather than adding provenance to the schema.
+        """
+        task_id = "plan-outcome-positional-resolution-1"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {}, clear=True
+        ):
+            root = Path(tmp)
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the auth rewrite",
+                _RecordingInvoker(["Planner's plan.", _approve("Planner's plan.")]),
+                root_dir=root,
+                task_id=task_id,
+            )
+            error = learning_outcomes.record_plan_outcome(
+                task_id, accepted=False, root_dir=root
+            )
+            journal = learning_journal.read_journal(root)
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertIsNone(error)
+        plan_outcomes = tuple(
+            record for record in journal.outcomes if record.ground_truth == "plan"
+        )
+        self.assertEqual([record.verdict for record in plan_outcomes], ["accepted", "rejected"])
+        reduced = self._reduce_plan_outcomes_by_position(journal.outcomes)
+        self.assertEqual(reduced[(task_id, "plan")].verdict, "rejected")
+
+    def test_a_single_plan_record_reduces_to_its_own_verdict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertIsNone(
+                learning_outcomes.record_plan_outcome(
+                    "plan-outcome-single-accepted-1", accepted=True, root_dir=root
+                )
+            )
+            self.assertIsNone(
+                learning_outcomes.record_plan_outcome(
+                    "plan-outcome-single-rejected-1", accepted=False, root_dir=root
+                )
+            )
+            reduced = self._reduce_plan_outcomes_by_position(
+                learning_journal.read_journal(root).outcomes
+            )
+
+        self.assertEqual(
+            reduced[("plan-outcome-single-accepted-1", "plan")].verdict, "accepted"
+        )
+        self.assertEqual(
+            reduced[("plan-outcome-single-rejected-1", "plan")].verdict, "rejected"
+        )
+
     # --- a write failure degrades the instrumentation, never the consultation ---
 
     def test_a_journal_write_failure_is_folded_into_the_result_error_and_never_raised(

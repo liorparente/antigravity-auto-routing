@@ -119,11 +119,10 @@ against. The routing protocol's own production path already does.
   leaves the consultation's automatic `accepted` and then your `rejected` under the same `task_id`
   and the same `ground_truth`. `OutcomeRecord` carries `task`, `ground_truth`, `verdict`, `run_id`,
   and `timestamp` — no actor and no stage — so nothing in the record itself says which of the two
-  wrote it. Reduce them positionally, exactly as `ComplianceRecord` is already reduced (see
-  `CONTEXT.md`): group by `task_id`, and within a group the last record wins. The stream is
-  append-only, so file order is verdict order, and yours is always the later one. That is a
-  positional convention rather than a machine-readable distinction; making it explicit would mean
-  adding an actor or stage field to `OutcomeRecord`, which is ticket 14's schema, not this wiring.
+  wrote it. **Ticket 27 settled positional reduction as the formal convention:** group outcomes by
+  `(task_id, ground_truth)` and, within a group, the last record wins, exactly as
+  `ComplianceRecord` is reduced (see `CONTEXT.md`). The stream is append-only, so file order is
+  verdict order and your later `rejected` verdict wins. No `OutcomeRecord` schema change is needed.
 - **Review verdicts.** No in-repo process renders an approved/rejected verdict on a task's work.
   `routing_check.py`'s audit (`run_audit`/`_persist_compliance_record`) grades protocol *compliance* —
   whether Antigravity itself routed correctly — a separate, already-wired `ComplianceRecord` family, not

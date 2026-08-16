@@ -106,9 +106,9 @@ architecture," so the human who resolves it may accept the very plan a `rejected
 condemned — so only a human who actually read and declined a plan may record one, by hand, once that
 happens. Two `plan` records for one task are therefore expected, not a conflict.
 `OutcomeRecord` carries no actor or stage field to distinguish them, so a consumer resolves them
-positionally: group by `task_id`, and the last record in the append-only stream wins — the same
-reduction [[ComplianceRecord]] already uses. Whether that positional convention is durable enough, or
-the schema needs an explicit discriminator, is open; see ticket 27. Spec 0004 ticket 25.
+positionally: group by `(task_id, ground_truth)`, and the last record in the append-only stream wins
+— the same reduction [[ComplianceRecord]] already uses. Ticket 27 confirmed and settled this formal
+reduction convention; no schema discriminator is needed. Spec 0004 tickets 25 and 27.
 
 ### LearnerWorker
 The background worker that turns the [[LearningJournal]] into changed behavior: a light session-end distillation into institutional memory, and a deep weekly run proposing routing-table updates and brief diffs. It only proposes — an external [[AcceptanceGate]] (repeated benchmark trials, zero scoreboard regression) disposes, application is risk-tiered, adopted state is git-versioned, and a post-adoption regression auto-reverts. The protocol is unreachable by construction. Spec 0004.
