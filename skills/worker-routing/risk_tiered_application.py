@@ -23,13 +23,15 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import re
+import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import acceptance_gate
 import learned_state
@@ -64,7 +66,9 @@ def _wire_timestamp(now: datetime) -> str:
 
 def _validate_proposal_id(value: object, field_name: str = "proposal_id") -> None:
     if not isinstance(value, str):
-        raise ValueError(f"{field_name} must be a string, got {type(value).__name__}")
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+            f"{field_name} must be a string, got {type(value).__name__}"
+        )
     if not _PROPOSAL_ID_RE.fullmatch(value):
         raise ValueError(f"{field_name} must match {_PROPOSAL_ID_RE.pattern}, got {value!r}")
 
@@ -83,7 +87,9 @@ class PendingProposal:
                 f"only 'briefs' proposals are held as pending proposals, got {self.document!r}"
             )
         if not isinstance(self.content, str):
-            raise ValueError(f"content must be a string, got {type(self.content).__name__}")
+            raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+                f"content must be a string, got {type(self.content).__name__}"
+            )
         if not isinstance(self.timestamp, str) or not _TIMESTAMP_RE.fullmatch(self.timestamp):
             raise ValueError(f"timestamp must match {_TIMESTAMP_RE.pattern}, got {self.timestamp!r}")
 
@@ -261,7 +267,17 @@ def _write_pending_proposals_unlocked(root_dir: Path, proposals: Sequence[Pendin
         + "\n"
         for p in proposals
     ]
-    path.write_text("".join(lines), encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".pending_proposals.", suffix=".tmp")
+    tmp_path = Path(tmp_name)
+    try:
+        with open(fd, "w", encoding="utf-8") as stream:
+            stream.write("".join(lines))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def submit_brief_proposal(
@@ -320,12 +336,13 @@ def approve_pending_proposal(
 
         _write_pending_proposals_unlocked(root_dir, remaining)
 
+    effective_change_id = change_id or proposal_id
     change = DocumentChange(document=target.document, content=target.content)
     status, applied, entry, reason = _adopt_with_idempotency(
         [change],
         root_dir=root_dir,
         now=now,
-        change_id=change_id or proposal_id,
+        change_id=effective_change_id,
     )
     return TierOutcome(
         document="briefs",
@@ -333,7 +350,7 @@ def approve_pending_proposal(
         applied=applied,
         version_entry=entry,
         proposal_id=proposal_id,
-        change_id=change_id,
+        change_id=effective_change_id,
         reason=reason,
     )
 

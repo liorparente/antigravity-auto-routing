@@ -14,10 +14,8 @@ from pathlib import Path
 
 import learned_state
 from learned_state import DocumentChange
-import risk_tiered_application
 from risk_tiered_application import (
     PendingProposal,
-    TierOutcome,
     apply_memory_lesson,
     apply_routing_table_update,
     approve_pending_proposal,
@@ -56,7 +54,7 @@ class Tier1MemoryLessonTests(unittest.TestCase):
     def test_memory_lesson_requires_timezone_aware_now(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            naive_now = datetime(2026, 8, 15, 12, 0, 0)
+            naive_now = datetime(2026, 8, 15, 12, 0, 0)  # noqa: DTZ001 - the value under test
             with self.assertRaises(ValueError):
                 apply_memory_lesson("Lesson text", root_dir=root, now=naive_now)
 
@@ -188,6 +186,19 @@ class Tier3BriefProposalTests(unittest.TestCase):
             # Document must be present in current learned state
             current = learned_state.read_current(root)
             self.assertEqual(current.get("briefs"), "# Context Brief v2")
+
+    def test_approve_pending_proposal_uses_proposal_id_as_change_id_when_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submit_brief_proposal(
+                "# Context Brief v3",
+                root_dir=root,
+                now=_NOW,
+                proposal_id="brief-01",
+            )
+
+            outcome = approve_pending_proposal("brief-01", root_dir=root, now=_LATER)
+            self.assertEqual(outcome.change_id, "brief-01")
 
     def test_reject_pending_proposal_removes_from_store_without_adopting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
