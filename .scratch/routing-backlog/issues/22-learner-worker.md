@@ -26,15 +26,15 @@ is what finishes ticket 18's "configuration" requirement rather than leaving it 
 
 **Blocked by:** 17, 18, 20
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The light session-end pass runs as a worker invocation and writes institutional-memory lessons.
-- [ ] The deep weekly run produces routing-table proposals and brief diffs from journal evidence.
-- [ ] The weekly run includes a batch retrospective over the week's small tasks.
-- [ ] Every learner run is observable as a worker invocation through the injected callable; the
+- [x] The light session-end pass runs as a worker invocation and writes institutional-memory lessons.
+- [x] The deep weekly run produces routing-table proposals and brief diffs from journal evidence.
+- [x] The weekly run includes a batch retrospective over the week's small tasks.
+- [x] Every learner run is observable as a worker invocation through the injected callable; the
       orchestrator path itself writes no learned state.
-- [ ] Both cadences take the current time as an input rather than reading the clock.
-- [ ] Proposals reach the tiering from ticket 20 and are never applied by the learner directly.
-- [ ] The acceptance gate's trial count and score threshold are read from `routing-config.json` and
+- [x] Both cadences take the current time as an input rather than reading the clock.
+- [x] Proposals reach the tiering from ticket 20 and are never applied by the learner directly.
+- [x] The acceptance gate's trial count and score threshold are read from `routing-config.json` and
       passed in, not left at `acceptance_gate.py`'s module defaults.
-- [ ] Tests drive both cadences offline through the injected worker callable.
+- [x] Tests drive both cadences offline through the injected worker callable.
