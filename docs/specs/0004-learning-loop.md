@@ -65,7 +65,7 @@ A closed loop in four parts:
    institutional memory automatically, so that learning is continuous rather than on-demand.
 9. As an orchestrator, I want a deep weekly run that proposes routing-table updates and brief
    improvements from journal evidence, so that the policy tracks reality.
-10. As a developer, I want small tasks covered by a weekly batch retrospective dialogue, so that
+10. As a developer, I want small tasks covered by a weekly batch retrospective synthesis, so that
     every action feeds learning without paying dialogue cost per action.
 11. As a maintainer, I want the learner to be a background worker and never the orchestrator, so
     that the proposer and the approver are always separate parties.
@@ -134,9 +134,9 @@ under their existing rules — the journal itself never becomes one.
 the orchestrator itself. Two cadences: a light session-end pass that distills the session's
 journal entries into institutional-memory lessons (extending the learn-session flow to mine the
 journal, not just chat), and a deep weekly run that computes the scoreboard, runs the batch
-retrospective over the week's small tasks, and produces proposals: routing-table updates and
-brief diffs. Cadence is driven by the existing scheduler; the modules themselves take the current
-time as input and own no clock.
+retrospective synthesis over the week's small tasks (ADR 0009), and produces proposals:
+routing-table updates and brief diffs. Cadence is driven by the existing scheduler; the modules
+themselves take the current time as input and own no clock.
 
 **The acceptance gate.** A proposal is evaluated by running the fixed benchmark task set multiple
 times (count is config) through an injected benchmark-runner and comparing scoreboard metrics.

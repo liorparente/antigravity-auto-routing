@@ -26,10 +26,13 @@ Two cadences:
   learn-session flow to mine the content-free journal rather than only chat
   history.
 - **Weekly, deep** (`run_weekly_deep`). Computes the scoreboard, runs a batch
-  retrospective over the week's tasks, and proposes routing-table updates,
-  brief diffs, and memory lessons from the evidence. This is a single
-  one-shot `invoke_worker` call, not an `advisory_consultation` dialogue —
-  see issue 31 for the open question of whether it should become one.
+  retrospective synthesis over the week's tasks, and proposes routing-table
+  updates, brief diffs, and memory lessons from the evidence. This is a
+  single one-shot `invoke_worker` call, not an `advisory_consultation`
+  dialogue — settled as one-shot synthesis in ADR 0009 (Ticket 31) because
+  downstream risk-tiering (Tier 2 Acceptance Gate, Tier 3 Human Review, Tier
+  1 Anti-Flapping and Auto-Revert) provides full safety without background
+  cron stalemate risks.
 
 **This module owns no clock.** `now` is always injected by both cadences'
 callers, matching every sibling in this family
@@ -681,7 +684,7 @@ def run_weekly_deep(
     model: str = _WEEKLY_DEEP_MODEL,
     effort: str = _WEEKLY_DEEP_EFFORT,
 ) -> WeeklyDeepResult:
-    """Compute the scoreboard, run the batch retrospective, and route every
+    """Compute the scoreboard, run the one-shot batch retrospective synthesis, and route every
     proposal the worker returns through its tier — routing-table updates
     through the acceptance gate (Tier 2), brief diffs held pending (Tier 3),
     memory lessons auto-applied (Tier 1) — then write the weekly report.

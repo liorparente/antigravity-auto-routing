@@ -8,9 +8,9 @@ Two cadences:
 
 - **Session end, light.** Distills the session's journal entries into institutional-memory lessons,
   extending the learn-session flow to mine the journal rather than only chat history.
-- **Weekly, deep.** Computes the scoreboard, runs a batch retrospective dialogue over the week's
+- **Weekly, deep.** Computes the scoreboard, runs a batch retrospective synthesis over the week's
   small tasks — so every action feeds learning without paying dialogue cost per action — and produces
-  proposals: routing-table updates and brief diffs.
+  proposals: routing-table updates and brief diffs (settled as one-shot synthesis in ADR 0009 / Ticket 31).
 
 The modules own no clock: cadence comes from the existing scheduler, and the current time is an
 input.
@@ -33,8 +33,8 @@ is what finishes ticket 18's "configuration" requirement rather than leaving it 
 - [x] The light session-end pass runs as a worker invocation and writes institutional-memory lessons.
 - [x] The deep weekly run produces routing-table proposals and brief diffs from journal evidence.
 - [x] The weekly run includes a batch retrospective over the week's small tasks — implemented as a
-      single one-shot worker prompt, not a full multi-round `post-mortem` dialogue occasion; see
-      issue 31 for the open decision on whether it should become one.
+      single one-shot worker prompt, not a full multi-round `post-mortem` dialogue occasion; settled
+      as one-shot synthesis in ADR 0009 (Ticket 31).
 - [x] Every learner run is observable as a worker invocation through the injected callable; the
       orchestrator path itself writes no learned state.
 - [x] Both cadences take the current time as an input rather than reading the clock.

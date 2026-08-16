@@ -43,13 +43,13 @@ it a "dialogue" so the vocabulary matches the implementation.
 
 **Blocked by:** none to decide
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] A decision is recorded (spec 0004, or an ADR) on whether the weekly retrospective is a one-shot
-      worker prompt or a full `advisory_consultation` dialogue.
-- [ ] If it becomes a dialogue, `run_weekly_deep` is wired through `run_advisory_consultation_debate`
+- [x] A decision is recorded (spec 0004, or an ADR) on whether the weekly retrospective is a one-shot
+      worker prompt or a full `advisory_consultation` dialogue (settled as one-shot synthesis in ADR 0009).
+- [x] If it becomes a dialogue, `run_weekly_deep` is wired through `run_advisory_consultation_debate`
       (or equivalent) with a `task_id` supplied, per this repo's Learning-Journal Ground-Truth
       Recording rule that every consultation invoked with recording in mind needs one, and a
-      `DialogueQualityRecord` lands in the journal for the run.
-- [ ] If it stays one-shot, `learner_worker.py`'s module docstring, `run_weekly_deep`'s own docstring,
-      and ticket 22's `Status` all stop describing it as a "dialogue."
+      `DialogueQualityRecord` lands in the journal for the run (N/A — one-shot synthesis chosen).
+- [x] If it stays one-shot, `learner_worker.py`'s module docstring, `run_weekly_deep`'s own docstring,
+      and ticket 22's `Status` all stop describing it as a "dialogue" (updated to "synthesis" / "one-shot batch retrospective").
