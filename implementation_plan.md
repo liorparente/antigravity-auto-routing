@@ -4,7 +4,7 @@ Settled the open design decision for `run_weekly_deep`'s batch retrospective, es
 
 ## User Review Required
 
-- **Architectural Decision:** ADR 0009 formalizes that the weekly batch retrospective in `learner_worker.run_weekly_deep` remains a one-shot worker prompt (`invoke_worker`) producing structured JSON proposals (`routing_table_update`, `brief_update`, `memory_lessons`, `retrospective_summary`).
+- **Architectural Decision:** ADR 0009 formalizes that the weekly batch retrospective in `learner_worker.run_weekly_deep` remains a one-shot worker prompt (`invoke_worker`) producing actionable JSON proposals (`routing_table_update`, `brief_update`, `memory_lessons`) and an informational `retrospective_summary`.
 - **Safety Boundaries:**
   - **Tier 2 (Routing Table)**: Evaluated pre-adoption by Acceptance Gate (`acceptance_gate.evaluate_proposal`, ADR 0008) via config-sourced benchmark trials (`trials=5`, `score_threshold=0.8` in `routing-config.json`), zero regression on concurrent live metrics, and fail-closed journaling.
   - **Tier 3 (Briefs)**: Staged as pending proposals requiring explicit human review and approval.
@@ -12,9 +12,11 @@ Settled the open design decision for `run_weekly_deep`'s batch retrospective, es
 
 ## Codebase Design & Deep Module Principles
 
-- **Interface Preservation:** Preserves the lean, decoupled `InvokeWorker = Callable[[str, str, str], str]` seam in `learner_worker.py`.
-- **Fail-Closed & Autonomy:** Eliminates stalemate blocks on unattended background scheduler runs.
-- **Spec & Backlog Consistency:** Fully synchronizes ADR 0009, Spec 0004, `learner_worker.py` docstrings, and backlog issues 22 and 31.
+- **Public Interface:** The public interface of `learner_worker` (`run_weekly_deep`, `run_session_end_light`, `DEFAULT_WINDOW_DAYS`, `SessionEndResult`, `WeeklyDeepResult`) is intentionally narrow and declarative. It exposes only high-level cadence entry points and typed result objects.
+- **Module Depth:** High depth-to-surface ratio. Behind the simple `run_weekly_deep` entry point, the module encapsulates complex logic: timezone validation, prefix cutting, multi-family window filtering, baseline scoreboard computation, attributable regression rollback, structured JSON extraction, anti-flapping hash digest checks, and weekly markdown report generation.
+- **Leverage:** Maximum architectural leverage. By standardizing on the injected `InvokeWorker = Callable[[str, str, str], str]` seam, `learner_worker` avoids dragging in the heavy multi-party state machine of `advisory_consultation.py` (which requires interactive human stalemate resolution and async/urllib dependencies).
+- **Locality:** All prompt template construction (`_render_weekly_deep_prompt`), defensive parsing (`_extract_json_object`), and tier-based dispatching remain localized within `learner_worker.py`. Callers pass dependencies and receive structured outcomes without needing internal knowledge of prompt schemas or parser fallbacks.
+- **Test Seams:** Comprehensive test seams. Injected `InvokeWorker`, injected `runner` (benchmark scoring), injected `root_dir` (filesystem isolation), and explicit `now` (temporal determinism) allow all 56 unit tests in `test_learner_worker.py` (and 867 total repo tests) to run 100% offline, deterministically, and sub-second.
 
 ## Proposed Changes
 
