@@ -10,20 +10,25 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 import tempfile
 import unittest
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import learned_state
 import learner_worker
 import risk_tiered_application
 from learning_journal import (
+    ComplianceRecord,
     DialogueQualityRecord,
     DialogueRound,
     OutcomeRecord,
+    ReplayBenchmarkRecord,
     TaskLabel,
     WorkerExecutionRecord,
     append_journal_record,
@@ -68,12 +73,59 @@ def _seed_outcome(
     assert error is None, error
 
 
+def _seed_compliance(
+    root: Path,
+    *,
+    session_id: str,
+    run_id: str | None = None,
+    violation_count: int = 0,
+    declaration_drift_count: int = 0,
+    issue_codes: tuple[str, ...] = (),
+    timestamp: str = _IN_WINDOW_TS,
+) -> None:
+    record = ComplianceRecord(
+        session_id=session_id,
+        total_writes=0,
+        code_writes=0,
+        routing_declarations=0,
+        worker_calls=0,
+        violation_count=violation_count,
+        declaration_drift_count=declaration_drift_count,
+        calibration_markers=0,
+        code_write_count=0,
+        issue_codes=issue_codes,
+        run_id=run_id,
+        timestamp=timestamp,
+    )
+    error = append_journal_record(record, root_dir=root)
+    assert error is None, error
+
+
 def _seed_dialogue(root: Path, *, task_id: str, timestamp: str = _IN_WINDOW_TS) -> None:
     record = DialogueQualityRecord(
         task=TaskLabel.for_task(task_id),
         occasion="ambiguity",
         topology="pair",
         rounds=(DialogueRound(verdict="approved", engagement_count=2),),
+        timestamp=timestamp,
+    )
+    error = append_journal_record(record, root_dir=root)
+    assert error is None, error
+
+
+def _seed_replay_benchmark(
+    root: Path,
+    *,
+    task_set: str = "bench-v1",
+    run_id: str | None = None,
+    score: float = 0.9,
+    timestamp: str = _IN_WINDOW_TS,
+) -> None:
+    record = ReplayBenchmarkRecord(
+        task_set=task_set,
+        success=True,
+        score=score,
+        run_id=run_id,
         timestamp=timestamp,
     )
     error = append_journal_record(record, root_dir=root)
@@ -107,6 +159,98 @@ def _counting_runner(score: float) -> tuple[Callable[[], float], list[None]]:
     return runner, calls
 
 
+@dataclass(frozen=True)
+class _LightRenderCapture:
+    """What `_render_session_light_prompt` was actually called with, plus the
+    pass's own result. Per docs/specs/0004-learning-loop.md:168-170, tests
+    assert on the selected journal records and call arguments a render
+    function received — never on the wording of the prompt it produced.
+    """
+
+    result: learner_worker.SessionEndResult
+    journal: learner_worker.learning_journal.JournalRead
+    now: datetime
+
+
+def _run_light_capturing_render_args(
+    worker: _RecordingWorker,
+    root: Path,
+    *,
+    now: datetime = _NOW,
+    session_id: str | None = None,
+    run_id: str | None = None,
+) -> _LightRenderCapture:
+    """Run the light pass while spying on `_render_session_light_prompt`,
+    capturing the `journal: JournalRead` and `now` it was actually given.
+    """
+    captured: dict[str, Any] = {}
+    original = learner_worker._render_session_light_prompt
+
+    def _capture(journal: learner_worker.learning_journal.JournalRead, **kwargs: Any) -> str:
+        captured["journal"] = journal
+        captured["now"] = kwargs["now"]
+        return original(journal, **kwargs)
+
+    with patch.object(learner_worker, "_render_session_light_prompt", side_effect=_capture):
+        result = learner_worker.run_session_end_light(
+            worker, root_dir=root, now=now, session_id=session_id, run_id=run_id
+        )
+    return _LightRenderCapture(result=result, journal=captured["journal"], now=captured["now"])
+
+
+@dataclass(frozen=True)
+class _WeeklyRenderCapture:
+    """What `_render_weekly_deep_prompt` was actually called with, plus the
+    deep pass's own result. Same rationale as `_LightRenderCapture` above.
+    """
+
+    result: learner_worker.WeeklyDeepResult
+    comparison: learner_worker.learning_scoreboard.ScoreboardComparison
+    journal: learner_worker.learning_journal.JournalRead
+    now: datetime
+    window_days: int
+
+
+def _run_weekly_capturing_render_args(
+    worker: _RecordingWorker,
+    root: Path,
+    runner: Callable[[], float],
+    *,
+    now: datetime = _NOW,
+    window_days: int = learner_worker.DEFAULT_WINDOW_DAYS,
+    run_id: str | None = None,
+) -> _WeeklyRenderCapture:
+    """Run the deep pass while spying on `_render_weekly_deep_prompt`,
+    capturing the scoreboard `comparison`, the `journal: JournalRead`, and
+    the `now`/`window_days` it was actually given.
+    """
+    captured: dict[str, Any] = {}
+    original = learner_worker._render_weekly_deep_prompt
+
+    def _capture(
+        comparison: learner_worker.learning_scoreboard.ScoreboardComparison,
+        journal: learner_worker.learning_journal.JournalRead,
+        **kwargs: Any,
+    ) -> str:
+        captured["comparison"] = comparison
+        captured["journal"] = journal
+        captured["now"] = kwargs["now"]
+        captured["window_days"] = kwargs["window_days"]
+        return original(comparison, journal, **kwargs)
+
+    with patch.object(learner_worker, "_render_weekly_deep_prompt", side_effect=_capture):
+        result = learner_worker.run_weekly_deep(
+            worker, root_dir=root, now=now, runner=runner, window_days=window_days, run_id=run_id
+        )
+    return _WeeklyRenderCapture(
+        result=result,
+        comparison=captured["comparison"],
+        journal=captured["journal"],
+        now=captured["now"],
+        window_days=captured["window_days"],
+    )
+
+
 class SessionEndLightTests(unittest.TestCase):
     def test_generates_lessons_and_applies_tier1_memory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -125,8 +269,24 @@ class SessionEndLightTests(unittest.TestCase):
             self.assertTrue(result.outcomes[0].applied)
 
             current = learned_state.read_current(root)
-            self.assertEqual(current.get("memory"), "Lesson: test seams directly.")
+            self.assertEqual(current.get("memory"), "- Lesson: test seams directly.")
             self.assertEqual(len(worker.calls), 1)
+
+    def test_light_pass_consolidates_multiple_lessons_into_one_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_worker_execution(root, task_id="task-1")
+            worker = _RecordingWorker(
+                _json_reply({"memory_lessons": ["Lesson A", "Lesson B"]})
+            )
+
+            result = learner_worker.run_session_end_light(worker, root_dir=root, now=_NOW)
+
+            self.assertEqual(result.lessons, ("Lesson A", "Lesson B"))
+            self.assertEqual(len(result.outcomes), 1)
+            current = learned_state.read_current(root)
+            self.assertIn("Lesson A", current.get("memory", ""))
+            self.assertIn("Lesson B", current.get("memory", ""))
 
     def test_rejects_naive_now_without_invoking_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -144,12 +304,12 @@ class SessionEndLightTests(unittest.TestCase):
             root = Path(tmp)
             worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
 
-            result = learner_worker.run_session_end_light(worker, root_dir=root, now=_NOW)
+            captured = _run_light_capturing_render_args(worker, root)
 
-            self.assertEqual(result.lessons, ())
-            self.assertEqual(result.outcomes, ())
+            self.assertEqual(captured.result.lessons, ())
+            self.assertEqual(captured.result.outcomes, ())
             self.assertEqual(len(worker.calls), 1)
-            self.assertIn("worker_executions: 0", worker.calls[0][2])
+            self.assertEqual(captured.journal.worker_executions, ())
 
     def test_robust_to_non_json_worker_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,20 +338,21 @@ class SessionEndLightTests(unittest.TestCase):
             root = Path(tmp)
             _seed_worker_execution(root, task_id="task-42", run_id="run-9")
             _seed_outcome(root, task_id="task-42", run_id="run-9")
+            _seed_compliance(root, session_id="session-xyz", run_id="run-9")
             worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
 
-            learner_worker.run_session_end_light(
-                worker, root_dir=root, now=_NOW, session_id="session-xyz", run_id="run-9"
+            captured = _run_light_capturing_render_args(
+                worker, root, session_id="session-xyz", run_id="run-9"
             )
 
             self.assertEqual(len(worker.calls), 1)
-            model, effort, prompt = worker.calls[0]
+            model, effort, _prompt = worker.calls[0]
             self.assertEqual(model, learner_worker._SESSION_LIGHT_MODEL)
             self.assertEqual(effort, learner_worker._SESSION_LIGHT_EFFORT)
-            self.assertIn("session_id: session-xyz", prompt)
-            self.assertIn("run_id: run-9", prompt)
-            self.assertIn("task=task-42", prompt)
-            self.assertIn("memory_lessons", prompt)
+            journal = captured.journal
+            self.assertEqual([r.task.task_id for r in journal.worker_executions], ["task-42"])
+            self.assertEqual([r.task.task_id for r in journal.outcomes], ["task-42"])
+            self.assertEqual([c.session_id for c in journal.compliance], ["session-xyz"])
 
     def test_prompt_includes_dialogue_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -199,12 +360,12 @@ class SessionEndLightTests(unittest.TestCase):
             _seed_dialogue(root, task_id="task-dialogue")
             worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
 
-            learner_worker.run_session_end_light(worker, root_dir=root, now=_NOW)
+            captured = _run_light_capturing_render_args(worker, root)
 
-            prompt = worker.calls[0][2]
-            self.assertIn("dialogues: 1", prompt)
-            self.assertIn("task=task-dialogue", prompt)
-            self.assertIn("occasion=ambiguity", prompt)
+            journal = captured.journal
+            self.assertEqual(len(journal.dialogues), 1)
+            self.assertEqual(journal.dialogues[0].task.task_id, "task-dialogue")
+            self.assertEqual(journal.dialogues[0].occasion, "ambiguity")
 
     def test_run_id_filter_excludes_other_runs_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,16 +374,160 @@ class SessionEndLightTests(unittest.TestCase):
             _seed_worker_execution(root, task_id="task-other", run_id="run-other")
             worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
 
-            learner_worker.run_session_end_light(worker, root_dir=root, now=_NOW, run_id="run-mine")
+            captured = _run_light_capturing_render_args(worker, root, run_id="run-mine")
 
-            prompt = worker.calls[0][2]
-            self.assertIn("task=task-mine", prompt)
-            self.assertNotIn("task=task-other", prompt)
+            self.assertEqual(
+                [r.task.task_id for r in captured.journal.worker_executions], ["task-mine"]
+            )
+
+    def test_session_id_alone_narrows_compliance_only(self) -> None:
+        """`session_id` without `run_id` narrows only `compliance` — the one
+        family that actually carries `session_id`. It must not be joined
+        through compliance's `run_id`s to filter the other four families;
+        those have no session concept of their own, so both sessions' worker
+        evidence still appears when only `session_id` is given.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_compliance(
+                root, session_id="session-mine", run_id="run-mine", violation_count=2,
+                declaration_drift_count=1, issue_codes=("RT-01",),
+            )
+            _seed_compliance(root, session_id="session-other", run_id="run-other")
+            _seed_worker_execution(root, task_id="task-mine", run_id="run-mine")
+            _seed_worker_execution(root, task_id="task-other", run_id="run-other")
+            _seed_outcome(root, task_id="task-mine", run_id="run-mine")
+            _seed_outcome(root, task_id="task-other", run_id="run-other")
+            worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
+
+            captured = _run_light_capturing_render_args(
+                worker, root, session_id="session-mine"
+            )
+
+            journal = captured.journal
+            # Not narrowed: session_id has no join partner on these families.
+            self.assertEqual(
+                {r.task.task_id for r in journal.worker_executions}, {"task-mine", "task-other"}
+            )
+            self.assertEqual(
+                {r.task.task_id for r in journal.outcomes}, {"task-mine", "task-other"}
+            )
+            # Narrowed: compliance carries session_id directly.
+            self.assertEqual(len(journal.compliance), 1)
+            comp = journal.compliance[0]
+            self.assertEqual(comp.session_id, "session-mine")
+            self.assertEqual(comp.violation_count, 2)
+            self.assertEqual(comp.declaration_drift_count, 1)
+            self.assertEqual(comp.issue_codes, ("RT-01",))
+
+    def test_run_id_narrows_all_five_families_independently_of_session_id(self) -> None:
+        """`run_id` given alongside `session_id` narrows every family that
+        carries `run_id` directly by that field — including `compliance`,
+        which then reflects both filters since it carries both identities.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_compliance(root, session_id="session-mine", run_id="run-mine")
+            _seed_compliance(root, session_id="session-mine", run_id="run-other-in-session")
+            _seed_worker_execution(root, task_id="task-mine", run_id="run-mine")
+            _seed_worker_execution(root, task_id="task-other", run_id="run-other-in-session")
+            _seed_outcome(root, task_id="task-mine", run_id="run-mine")
+            worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
+
+            captured = _run_light_capturing_render_args(
+                worker, root, session_id="session-mine", run_id="run-mine"
+            )
+
+            journal = captured.journal
+            self.assertEqual([r.task.task_id for r in journal.worker_executions], ["task-mine"])
+            self.assertEqual(len(journal.compliance), 1)
+            self.assertEqual(journal.compliance[0].run_id, "run-mine")
+
+    def test_session_id_with_mismatched_run_id_yields_no_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_compliance(root, session_id="session-mine", run_id="run-mine")
+            _seed_worker_execution(root, task_id="task-mine", run_id="run-mine")
+            worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
+
+            captured = _run_light_capturing_render_args(
+                worker,
+                root,
+                session_id="session-mine",
+                run_id="run-not-in-session",
+            )
+
+            self.assertEqual(captured.journal.worker_executions, ())
+            self.assertEqual(captured.journal.compliance, ())
+
+
+class LocalValidatorTests(unittest.TestCase):
+    """`learner_worker._validate_trials`/`_validate_score_threshold` are
+    local mirrors of `acceptance_gate`'s private validators of the same
+    name — never calls across the module boundary into `acceptance_gate`'s
+    own private functions. Exercised directly here, not only through
+    `_load_acceptance_gate_config`.
+    """
+
+    def test_validate_trials_rejects_bool(self) -> None:
+        with self.assertRaises(ValueError):
+            learner_worker._validate_trials(True, "trials")
+
+    def test_validate_trials_rejects_non_positive(self) -> None:
+        with self.assertRaises(ValueError):
+            learner_worker._validate_trials(0, "trials")
+
+    def test_validate_trials_accepts_positive_int(self) -> None:
+        learner_worker._validate_trials(5, "trials")
+
+    def test_validate_score_threshold_rejects_bool(self) -> None:
+        with self.assertRaises(ValueError):
+            learner_worker._validate_score_threshold(True, "score_threshold")
+
+    def test_validate_score_threshold_rejects_non_finite(self) -> None:
+        with self.assertRaises(ValueError):
+            learner_worker._validate_score_threshold(float("nan"), "score_threshold")
+        with self.assertRaises(ValueError):
+            learner_worker._validate_score_threshold(float("inf"), "score_threshold")
+
+    def test_validate_score_threshold_accepts_finite_number(self) -> None:
+        learner_worker._validate_score_threshold(0.8, "score_threshold")
+
+
+class StringTupleTests(unittest.TestCase):
+    def test_string_tuple_filters_non_string_elements(self) -> None:
+        result = learner_worker._string_tuple(
+            ["Lesson 1", 123, None, "Lesson 2", "   "]
+        )
+        self.assertEqual(result, ("Lesson 1", "Lesson 2"))
+
+
+class PrefixCutJournalTests(unittest.TestCase):
+    def test_prefix_cut_excludes_future_stamped_records(self) -> None:
+        """`_prefix_cut_journal` must drop every record stamped after `now` —
+        `run_weekly_deep`/`run_session_end_light` both trust this to keep a
+        future-dated record (e.g. clock skew on the writer) from ever
+        reaching a prompt or a scoreboard.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            future_ts = "2026-08-20T00:00:00Z"  # after _NOW (2026-08-15T12:00:00Z)
+            _seed_worker_execution(root, task_id="task-future", timestamp=future_ts)
+            _seed_worker_execution(root, task_id="task-past", timestamp=_IN_WINDOW_TS)
+
+            journal = learner_worker._prefix_cut_journal(root, now=_NOW)
+
+            self.assertEqual(
+                [r.task.task_id for r in journal.worker_executions], ["task-past"]
+            )
 
 
 class WeeklyDeepTests(unittest.TestCase):
     def test_loads_trials_and_score_threshold_from_routing_config(self) -> None:
         config_path = Path(__file__).with_name("routing-config.json")
+        config_data = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertIn("acceptance_gate", config_data)
+
         trials, score_threshold = learner_worker._load_acceptance_gate_config(config_path)
         self.assertEqual(trials, 5)
         self.assertEqual(score_threshold, 0.8)
@@ -237,6 +542,26 @@ class WeeklyDeepTests(unittest.TestCase):
             trials, score_threshold = learner_worker._load_acceptance_gate_config(custom_config)
             self.assertEqual(trials, 3)
             self.assertEqual(score_threshold, 0.55)
+
+    def test_load_acceptance_gate_config_rejects_bool_trials(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            custom_config = Path(tmp) / "routing-config.json"
+            custom_config.write_text(
+                json.dumps({"acceptance_gate": {"trials": True, "score_threshold": 0.5}}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                learner_worker._load_acceptance_gate_config(custom_config)
+
+    def test_load_acceptance_gate_config_rejects_non_finite_score_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            custom_config = Path(tmp) / "routing-config.json"
+            custom_config.write_text(
+                json.dumps({"acceptance_gate": {"trials": 3, "score_threshold": float("inf")}}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                learner_worker._load_acceptance_gate_config(custom_config)
 
     def test_routing_table_update_evaluated_and_applied_through_acceptance_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,11 +638,15 @@ class WeeklyDeepTests(unittest.TestCase):
                 worker, root_dir=root, now=_NOW, runner=runner
             )
 
-            self.assertEqual(len(result.memory_outcomes), 2)
-            self.assertTrue(all(o.status == "applied" for o in result.memory_outcomes))
-            # Only the last-adopted memory content is visible via read_current,
-            # but the history must show both adoptions.
-            self.assertEqual(len(learned_state.read_history(root)), 2)
+            # Multiple lessons from one run are consolidated into a single
+            # `apply_memory_lesson` call, never one call per lesson — a
+            # second call would silently overwrite the first's adoption.
+            self.assertEqual(len(result.memory_outcomes), 1)
+            self.assertEqual(result.memory_outcomes[0].status, "applied")
+            self.assertEqual(len(learned_state.read_history(root)), 1)
+            current = learned_state.read_current(root)
+            self.assertIn("Lesson A", current.get("memory", ""))
+            self.assertIn("Lesson B", current.get("memory", ""))
 
     def test_writes_weekly_markdown_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -334,6 +663,78 @@ class WeeklyDeepTests(unittest.TestCase):
             self.assertEqual(result.report_path.parent, root / ".ralph" / "reports")
             content = result.report_path.read_text(encoding="utf-8")
             self.assertIn("Weekly Learning Report", content)
+
+    def test_weekly_report_lists_no_adopted_changes_when_nothing_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = _RecordingWorker(_json_reply({}))
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            content = result.report_path.read_text(encoding="utf-8")
+            adopted_section = content.split("## Changes adopted this week", 1)[1].split(
+                "## Changes reverted this week", 1
+            )[0]
+            self.assertIn("None this week.", adopted_section)
+            self.assertNotIn("Not yet wired", adopted_section)
+
+    def test_weekly_report_lists_adopted_changes_when_proposals_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = _RecordingWorker(
+                _json_reply(
+                    {
+                        "routing_table_update": '{"version": "v2", "routes": []}',
+                        "memory_lessons": ["Lesson A"],
+                    }
+                )
+            )
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.routing_outcomes[0].status, "applied")
+            self.assertEqual(result.memory_outcomes[0].status, "applied")
+            routing_change_id = result.routing_outcomes[0].change_id
+            memory_change_id = result.memory_outcomes[0].change_id
+            self.assertIsNotNone(routing_change_id)
+            self.assertIsNotNone(memory_change_id)
+
+            content = result.report_path.read_text(encoding="utf-8")
+            self.assertIn(f"routing_table: change_id={routing_change_id}", content)
+            self.assertIn(f"memory: change_id={memory_change_id}", content)
+
+    def test_weekly_report_omits_no_op_change_from_adopted_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner, _ = _counting_runner(0.95)
+            reply = _json_reply({"memory_lessons": ["Lesson A"]})
+
+            learner_worker.run_weekly_deep(
+                _RecordingWorker(reply), root_dir=root, now=_NOW, runner=runner
+            )
+            second_result = learner_worker.run_weekly_deep(
+                _RecordingWorker(reply), root_dir=root, now=_NOW, runner=runner
+            )
+
+            # Second run proposes the same lesson content, so
+            # `_adopt_with_idempotency` reports it as `no_op` rather than
+            # `applied` — Finding 2's fix gates the adopted-changes list on
+            # `status == "applied"`, not the `applied` flag, which is also
+            # `True` for a `no_op`.
+            self.assertEqual(second_result.memory_outcomes[0].status, "no_op")
+
+            content = second_result.report_path.read_text(encoding="utf-8")
+            adopted_section = content.split("## Changes adopted this week", 1)[1].split(
+                "## Changes reverted this week", 1
+            )[0]
+            self.assertIn("None this week.", adopted_section)
+            self.assertNotIn("memory: change_id=", adopted_section)
 
     def test_retrospective_summary_carried_from_worker_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -362,6 +763,86 @@ class WeeklyDeepTests(unittest.TestCase):
             self.assertEqual(worker.calls, [])
             self.assertEqual(calls, [])
 
+    def test_window_cuts_compliance_and_replay_benchmarks_consistently(self) -> None:
+        """All five journal families are window-cut the same way — including
+        `compliance` and `replay_benchmarks`, which previously passed through
+        unfiltered while the other three were windowed.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_compliance(root, session_id="s-in-window", timestamp=_IN_WINDOW_TS)
+            _seed_compliance(
+                root, session_id="s-out-of-window", timestamp="2026-07-01T00:00:00Z"
+            )
+            _seed_replay_benchmark(root, task_set="bench-in", timestamp=_IN_WINDOW_TS)
+            _seed_replay_benchmark(
+                root, task_set="bench-out", timestamp="2026-07-01T00:00:00Z"
+            )
+            worker = _RecordingWorker(_json_reply({}))
+            runner, _ = _counting_runner(0.95)
+
+            captured = _run_weekly_capturing_render_args(worker, root, runner)
+
+            windowed = captured.journal
+            self.assertEqual(len(windowed.compliance), 1)
+            self.assertEqual(windowed.compliance[0].session_id, "s-in-window")
+            self.assertEqual(len(windowed.replay_benchmarks), 1)
+            self.assertEqual(windowed.replay_benchmarks[0].task_set, "bench-in")
+
+    def test_weekly_deep_forwards_config_trials_and_threshold_to_the_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            custom_config = root / "routing-config.json"
+            custom_config.write_text(
+                json.dumps({"acceptance_gate": {"trials": 3, "score_threshold": 0.9}}),
+                encoding="utf-8",
+            )
+            worker = _RecordingWorker(
+                _json_reply({"routing_table_update": '{"version": "v2", "routes": []}'})
+            )
+            runner, calls = _counting_runner(0.85)  # clears 0.8 default, misses the config's 0.9
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner, config_path=custom_config
+            )
+
+            self.assertEqual(len(calls), 3)  # 3, not DEFAULT_TRIAL_COUNT's 5
+            self.assertEqual(result.routing_outcomes[0].status, "rejected")  # 0.9, not 0.8
+
+    def test_weekly_deep_baseline_uses_window_start(self) -> None:
+        """`baseline_board` is computed as if `now` were `window_start`, so it
+        reflects the *prior* window's activity while `current_board` reflects
+        the recent one — mutating `run_weekly_deep` to pass `now` (instead of
+        `window_start`) for the baseline call would collapse the two into
+        identical scoreboards without any assertion here catching it unless
+        the two windows are seeded with genuinely different evidence.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Baseline window: (2026-08-01T12:00:00Z, 2026-08-08T12:00:00Z].
+            _seed_replay_benchmark(
+                root, task_set="bench-baseline", score=0.2, timestamp="2026-08-03T00:00:00Z"
+            )
+            # Current window: (2026-08-08T12:00:00Z, 2026-08-15T12:00:00Z] — _IN_WINDOW_TS.
+            _seed_replay_benchmark(
+                root, task_set="bench-current", score=0.9, timestamp=_IN_WINDOW_TS
+            )
+            worker = _RecordingWorker(_json_reply({}))
+            runner, _ = _counting_runner(0.95)
+
+            captured = _run_weekly_capturing_render_args(worker, root, runner)
+
+            changes_by_name = {c.name: c for c in captured.comparison.changes}
+            benchmark_change = changes_by_name["mean_benchmark_score"]
+            baseline_metric = benchmark_change.baseline
+            current_metric = benchmark_change.current
+            self.assertIsInstance(baseline_metric, learner_worker.learning_scoreboard.MetricValue)
+            self.assertIsInstance(current_metric, learner_worker.learning_scoreboard.MetricValue)
+            assert isinstance(baseline_metric, learner_worker.learning_scoreboard.MetricValue)
+            assert isinstance(current_metric, learner_worker.learning_scoreboard.MetricValue)
+            self.assertAlmostEqual(baseline_metric.value, 0.2)
+            self.assertAlmostEqual(current_metric.value, 0.9)
+
     def test_no_proposal_keys_yields_no_tier_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -377,23 +858,109 @@ class WeeklyDeepTests(unittest.TestCase):
             self.assertEqual(result.memory_outcomes, ())
             self.assertEqual(calls, [])  # the gate never ran; no proposal to evaluate
 
+    def test_weekly_deep_with_run_id_seeds_change_id_without_narrowing_windowed_journal(
+        self,
+    ) -> None:
+        """`run_id` seeds this run's own `change_id`/`proposal_id` derivation,
+        but it must not narrow which journal evidence the retrospective
+        reads — the batch retrospective's whole point is to read every
+        task's evidence for the window, not one run's (see `run_weekly_deep`'s
+        docstring and Issue 32).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_worker_execution(root, task_id="task-other", run_id="run-other-xyz")
+            worker = _RecordingWorker(
+                _json_reply({"memory_lessons": ["Lesson A"]})
+            )
+            runner, _ = _counting_runner(0.95)
+
+            captured = _run_weekly_capturing_render_args(
+                worker, root, runner, run_id="run-weekly-abc"
+            )
+
+            change_id = captured.result.memory_outcomes[0].change_id
+            self.assertIsNotNone(change_id)
+            assert change_id is not None  # narrows for mypy; asserted above
+            self.assertIn("run-weekly-abc", change_id)
+            self.assertIn(
+                "run-other-xyz",
+                [r.run_id for r in captured.journal.worker_executions],
+            )
+
+
+_PROPOSAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+class ChangeIdTests(unittest.TestCase):
+    def test_change_id_sanitization_produces_valid_proposal_id(self) -> None:
+        """A seed carrying characters `learned_state`/`risk_tiered_application`'s
+        own validators would reject (`/`, `#`, `@`) must still yield a
+        `change_id` matching their shared pattern
+        (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`) — `_change_id` sanitizes
+        rather than trusting the seed.
+        """
+        change_id = learner_worker._change_id(
+            "learner-light", seed="invalid/chars#with@symbols", index=0
+        )
+        self.assertRegex(change_id, _PROPOSAL_ID_RE)
+
+    def test_long_seed_never_truncates_the_trailing_index(self) -> None:
+        long_seed = "s" * 150
+        first = learner_worker._change_id("learner-deep-memory", seed=long_seed, index=0)
+        second = learner_worker._change_id("learner-deep-memory", seed=long_seed, index=1)
+
+        self.assertLessEqual(len(first), 128)
+        self.assertLessEqual(len(second), 128)
+        self.assertTrue(first.endswith("-0"))
+        self.assertTrue(second.endswith("-1"))
+        self.assertNotEqual(first, second)
+
+
+class ExtractJsonObjectTests(unittest.TestCase):
+    def test_extracts_unfenced_json(self) -> None:
+        payload = learner_worker._extract_json_object('{"memory_lessons": ["a"]}')
+        self.assertEqual(payload, {"memory_lessons": ["a"]})
+
+    def test_extracts_json_substring_with_surrounding_prose(self) -> None:
+        response = 'Sure thing! {"memory_lessons": ["a"]} Let me know if you need more.'
+        payload = learner_worker._extract_json_object(response)
+        self.assertEqual(payload, {"memory_lessons": ["a"]})
+
+    def test_extract_json_object_with_code_fence_and_surrounding_braces(self) -> None:
+        """When a worker produces a markdown response with a fenced JSON code
+        block, stray braces in the surrounding prose must not be what gets
+        returned. Without the fence branch, the candidate spanning from the
+        first `{` to the last `}` would span non-JSON prose across the code
+        block and fail to parse as valid JSON, returning `None` rather than
+        the fenced payload.
+        """
+        response = (
+            "Here's a random aside about {curly braces} in prose, "
+            "not JSON at all.\n"
+            "```json\n"
+            '{"memory_lessons": ["from the fence"]}\n'
+            "```\n"
+            "Hope that helps!"
+        )
+        payload = learner_worker._extract_json_object(response)
+        self.assertEqual(payload, {"memory_lessons": ["from the fence"]})
+
 
 class TestSeamAndSeparationTests(unittest.TestCase):
     """Prompt-structure assertions and proposer/approver separation."""
 
-    def test_invoke_worker_called_with_expected_prompt_structure_light(self) -> None:
+    def test_invoke_worker_called_with_expected_model_and_effort_light(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
-            learner_worker.run_session_end_light(worker, root_dir=root, now=_NOW)
+            captured = _run_light_capturing_render_args(worker, root)
 
             self.assertEqual(len(worker.calls), 1)
-            model, effort, prompt = worker.calls[0]
+            model, effort, _prompt = worker.calls[0]
             self.assertEqual(model, learner_worker._SESSION_LIGHT_MODEL)
             self.assertEqual(effort, learner_worker._SESSION_LIGHT_EFFORT)
-            self.assertIn("session-end light pass", prompt)
-            self.assertIn("as_of: 2026-08-15T12:00:00Z", prompt)
-            self.assertIn('"memory_lessons"', prompt)
+            self.assertEqual(captured.now, _NOW)
 
     def test_invoke_worker_called_with_expected_prompt_structure_deep(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -401,17 +968,21 @@ class TestSeamAndSeparationTests(unittest.TestCase):
             _seed_worker_execution(root, task_id="task-1")
             worker = _RecordingWorker(_json_reply({}))
             runner, _ = _counting_runner(0.95)
-            learner_worker.run_weekly_deep(worker, root_dir=root, now=_NOW, runner=runner)
+            captured = _run_weekly_capturing_render_args(worker, root, runner)
 
             self.assertEqual(len(worker.calls), 1)
-            model, effort, prompt = worker.calls[0]
+            model, effort, _prompt = worker.calls[0]
             self.assertEqual(model, learner_worker._WEEKLY_DEEP_MODEL)
             self.assertEqual(effort, learner_worker._WEEKLY_DEEP_EFFORT)
-            self.assertIn("weekly deep run", prompt)
-            self.assertIn("window_days: 7", prompt)
-            self.assertIn("violations_per_session", prompt)
-            self.assertIn('"routing_table_update"', prompt)
-            self.assertIn("task=task-1", prompt)
+            self.assertEqual(captured.now, _NOW)
+            self.assertEqual(captured.window_days, 7)
+            self.assertIn(
+                "violations_per_session",
+                [change.name for change in captured.comparison.changes],
+            )
+            self.assertEqual(
+                [r.task.task_id for r in captured.journal.worker_executions], ["task-1"]
+            )
 
     def test_module_never_imports_learned_state(self) -> None:
         """The learner proposes; it never adopts. Enforced structurally: this

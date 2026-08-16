@@ -8,9 +8,13 @@ approver must always be separate parties; an orchestrator that distills its
 own session is both. Every call this module makes into
 `risk_tiered_application` is a *proposal*: Tier 1 auto-applies, Tier 2 must
 clear the acceptance gate, Tier 3 is held pending human approval, and Tier 4
-(the protocol) is unreachable because this module never imports
-`learned_state` at all — see `risk_tiered_application.py` for what each tier
-means. `test_learner_worker.py`'s `ProposerApproverSeparationTests` asserts
+(the protocol) is unreachable via the closed `LearnedDocument` vocabulary
+(`{"memory", "routing_table", "briefs"}`) — it has no member for protocol
+files, so no `risk_tiered_application` call can ever target it. Separately,
+`learner_worker` itself only ever emits proposals through
+`risk_tiered_application` — see `risk_tiered_application.py` for what each
+tier means. `test_learner_worker.py`'s
+`TestSeamAndSeparationTests.test_module_never_imports_learned_state` asserts
 this module's own source never imports `learned_state` at all, so a future
 edit that reached around the tiering to call its adoption entry point
 directly would fail a test rather than ship quietly.
@@ -22,8 +26,10 @@ Two cadences:
   learn-session flow to mine the content-free journal rather than only chat
   history.
 - **Weekly, deep** (`run_weekly_deep`). Computes the scoreboard, runs a batch
-  retrospective dialogue over the week's tasks, and proposes routing-table
-  updates, brief diffs, and memory lessons from the evidence.
+  retrospective over the week's tasks, and proposes routing-table updates,
+  brief diffs, and memory lessons from the evidence. This is a single
+  one-shot `invoke_worker` call, not an `advisory_consultation` dialogue —
+  see issue 31 for the open question of whether it should become one.
 
 **This module owns no clock.** `now` is always injected by both cadences'
 callers, matching every sibling in this family
@@ -35,14 +41,17 @@ scheduler, never from a `datetime.now()` call here.
 a benchmark run "several times — the count is configuration", and
 `acceptance_gate.evaluate_proposal` provides that as `trials` /
 `score_threshold` keyword arguments over `DEFAULT_TRIAL_COUNT` /
-`DEFAULT_SCORE_THRESHOLD`. Nothing read `routing-config.json` for them
-before this ticket, deliberately — the gate is a leaf with no caller until
-now, and a config read inside it would be a second source for a value its
-caller already passes. `_load_acceptance_gate_config` reads
+`DEFAULT_SCORE_THRESHOLD`. The gate already has a caller —
+`risk_tiered_application.apply_routing_table_update`, which re-exposes those
+same two keyword arguments over the same two defaults — but nothing supplied
+it config-sourced values before this ticket, deliberately: the gate itself
+is a leaf, and a config read inside it would be a second source for a value
+its caller already passes down. `_load_acceptance_gate_config` reads
 `routing-config.json`'s `acceptance_gate` section the same way
 `advisory_consultation._load_dialogue_budget_config` reads
-`dialogue_budget.session_dialogue_cap`, and `run_weekly_deep` is the caller
-that hands the result to `risk_tiered_application.apply_routing_table_update`.
+`dialogue_budget.session_dialogue_cap`, and `run_weekly_deep` is the first
+caller of `apply_routing_table_update` to hand it those config-loaded
+`trials`/`score_threshold` rather than leaving them at their defaults.
 
 **The journal carries no prose (`learning_journal.py`'s own content-freedom
 guarantee), so neither does a prompt built from it.** Every prompt this
@@ -56,6 +65,7 @@ expected input here, not a caller bug.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -137,15 +147,29 @@ def _change_id(prefix: str, *, seed: str, index: int) -> str:
     """A `change_id`/`proposal_id` shaped for `learned_state` and
     `risk_tiered_application`'s validators, built from a caller-supplied or
     derived `seed` (a `session_id`, `run_id`, or `_compact_timestamp`) plus
-    an index so a run producing several lessons gets one identifier each.
+    `index`, which identifies the proposal's position within the run or
+    session that produced it. Every call site today consolidates its inputs
+    (e.g. all of a run's memory lessons) into a single proposal and always
+    passes `index=0`; the index exists for a future or alternate caller that
+    emits multiple distinct proposals from one run and needs each to get its
+    own identifier rather than collide on `index=0`.
 
     Sanitizes rather than trusts the seed: `session_id` and `run_id` are
     validated elsewhere against `learning_journal.TASK_ID_RE` before this
     module ever sees them, but `_compact_timestamp` and any future seed
     source are not, so every seed is passed through the same filter.
+
+    The seed is truncated *before* formatting, not the final string after —
+    a trailing `[:128]` on the assembled string can chop off the `-{index}`
+    suffix itself when `prefix` and `seed` are already long, which collides
+    two different indices into the same identifier. Reserving room for
+    `prefix`, both separators, and `index` up front guarantees `-{index}`
+    always survives intact.
     """
     safe_seed = _IDENTIFIER_UNSAFE_RE.sub("-", seed).strip("-") or "run"
-    return f"{prefix}-{safe_seed}-{index}"[:128]
+    max_seed_len = 128 - len(prefix) - len(str(index)) - 2
+    truncated_seed = safe_seed[: max(1, max_seed_len)].rstrip("-")
+    return f"{prefix}-{truncated_seed}-{index}"
 
 
 def _extract_json_object(response: str) -> dict[str, object] | None:
@@ -204,6 +228,36 @@ def _optional_string(value: object) -> str | None:
     return stripped or None
 
 
+def _validate_trials(value: object, field_name: str = "trials") -> None:
+    """A strictly positive, non-`bool` `int` — the shape of a trial count.
+
+    Mirrors `acceptance_gate._validate_trials` rather than importing it: a
+    private name is never imported across these modules (see `InvokeWorker`'s
+    docstring above on why this file restates rather than reaches into a
+    sibling's internals). `bool` is an `int` subclass, so `isinstance` alone
+    would admit `trials=True`.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+            f"{field_name} must be an integer, got {type(value).__name__}"
+        )
+    if value <= 0:
+        raise ValueError(f"{field_name} must be > 0, got {value!r}")
+
+
+def _validate_score_threshold(value: object, field_name: str = "score_threshold") -> None:
+    """A finite, non-`bool` number — the shape of a bar every trial must
+    clear. Mirrors `acceptance_gate._validate_score_threshold`; see
+    `_validate_trials` above for why this is restated rather than imported.
+    """
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+            f"{field_name} must be a number, got {type(value).__name__}"
+        )
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite, got {value!r}")
+
+
 def _load_acceptance_gate_config(config_path: Path) -> tuple[int, float]:
     """Read `trials`/`score_threshold` from `config_path`'s `acceptance_gate`
     section, falling back to `acceptance_gate.DEFAULT_TRIAL_COUNT` /
@@ -213,15 +267,23 @@ def _load_acceptance_gate_config(config_path: Path) -> tuple[int, float]:
     calls this with the default `_CONFIG_PATH`, which is checked into the
     repo, so a missing or malformed `config_path` is a genuine caller
     mistake left to raise loudly rather than be swallowed.
+
+    Validated with this module's own `_validate_trials`/
+    `_validate_score_threshold` before any coercion — a raw `True` for
+    `trials` or a raw `float` would otherwise survive `int()`/`float()`
+    silently (`bool` is an `int` subclass, and `int(1.9)` truncates rather
+    than rejects), which is exactly the class of malformed config this
+    module's own docstring on `_IDENTIFIER_UNSAFE_RE`-adjacent validation
+    elsewhere refuses to let through unchecked.
     """
     with open(config_path, "r", encoding="utf-8") as stream:
         config = json.load(stream)
     section = config.get("acceptance_gate", {})
-    trials = int(section.get("trials", acceptance_gate.DEFAULT_TRIAL_COUNT))
-    score_threshold = float(
-        section.get("score_threshold", acceptance_gate.DEFAULT_SCORE_THRESHOLD)
-    )
-    return trials, score_threshold
+    raw_trials = section.get("trials", acceptance_gate.DEFAULT_TRIAL_COUNT)
+    raw_threshold = section.get("score_threshold", acceptance_gate.DEFAULT_SCORE_THRESHOLD)
+    _validate_trials(raw_trials, "trials")
+    _validate_score_threshold(raw_threshold, "score_threshold")
+    return raw_trials, float(raw_threshold)
 
 
 def _in_window(ts: datetime, *, window_start: datetime, now: datetime) -> bool:
@@ -243,6 +305,24 @@ def _prefix_cut(records: tuple[Any, ...], *, now: datetime) -> tuple[Any, ...]:
         record
         for record in records
         if learning_journal.parse_wire_timestamp(record.timestamp) <= now
+    )
+
+
+def _window_cut(records: tuple[Any, ...], *, window_start: datetime, now: datetime) -> tuple[Any, ...]:
+    """The `(window_start, now]` window of one journal family — mirrors
+    `_prefix_cut`'s shape (`Any`-typed for the same "one implementation
+    shared across otherwise-unrelated record types" reason) so
+    `run_weekly_deep` doesn't repeat the same three-line filter once per
+    family.
+    """
+    return tuple(
+        record
+        for record in records
+        if _in_window(
+            learning_journal.parse_wire_timestamp(record.timestamp),
+            window_start=window_start,
+            now=now,
+        )
     )
 
 
@@ -274,13 +354,26 @@ def _session_journal(
     """The `<= now` journal prefix, optionally narrowed to one session and/or
     one run.
 
-    `run_id` narrows the four families that carry it
-    (`worker_executions`, `outcomes`, `dialogues`, `replay_benchmarks`);
-    `session_id` narrows the one family that carries it (`compliance`,
-    `learning_journal.ComplianceRecord.session_id`). Neither filter touches
-    a family it has no field to match against — there is no fabricated
-    "session" concept for a `WorkerExecutionRecord`, only the real
-    `run_id`/`task_id` identity it already carries.
+    `session_id` and `run_id` each narrow *independently*, by the field they
+    actually carry — never joined or intersected across the two. `session_id`
+    is the only carried identity `compliance`
+    (`learning_journal.ComplianceRecord.session_id`) has, so an explicit
+    `session_id` narrows *only* that family, directly by its `session_id`
+    field. `run_id`, when given, narrows all five families
+    (`worker_executions`, `outcomes`, `dialogues`, `compliance`,
+    `replay_benchmarks`) directly by their own `run_id` field — `compliance`
+    is narrowed by both filters when both are given, since it is the one
+    family that carries both identities.
+
+    Deliberately not a join: `worker_executions`/`outcomes`/`dialogues`/
+    `replay_benchmarks` have no `session_id` field, and deriving one for them
+    by looking up the `run_id`s that happen to appear on a session's
+    `compliance` records would treat `run_id` as if it were a single global
+    namespace shared across every audit surface. It is not — a `run_id`
+    collision across disjoint producers would silently pull in another
+    session's worker records. A caller that wants a session's worker/outcome/
+    dialogue evidence narrowed too must pass the matching `run_id` alongside
+    `session_id`; this function does not infer it.
     """
     journal = _prefix_cut_journal(root_dir, now=now)
 
@@ -290,15 +383,14 @@ def _session_journal(
     compliance = journal.compliance
     replay_benchmarks = journal.replay_benchmarks
 
+    if session_id is not None:
+        compliance = tuple(r for r in compliance if r.session_id == session_id)
     if run_id is not None:
         worker_executions = tuple(r for r in worker_executions if r.run_id == run_id)
         outcomes = tuple(r for r in outcomes if r.run_id == run_id)
         dialogues = tuple(r for r in dialogues if r.run_id == run_id)
-        replay_benchmarks = tuple(r for r in replay_benchmarks if r.run_id == run_id)
         compliance = tuple(r for r in compliance if r.run_id == run_id)
-
-    if session_id is not None:
-        compliance = tuple(r for r in compliance if r.session_id == session_id)
+        replay_benchmarks = tuple(r for r in replay_benchmarks if r.run_id == run_id)
 
     return learning_journal.JournalRead(
         worker_executions=worker_executions,
@@ -359,6 +451,14 @@ def _render_session_light_prompt(
         )
     lines.append("")
 
+    lines.append(f"compliance: {len(journal.compliance)}")
+    for comp in journal.compliance:
+        lines.append(
+            f"- session={comp.session_id} violations={comp.violation_count} "
+            f"drift={comp.declaration_drift_count} codes={comp.issue_codes}"
+        )
+    lines.append("")
+
     lines.append(
         "Respond with a fenced ```json code block containing exactly one object: "
         '{"memory_lessons": ["<lesson 1>", "<lesson 2>", ...]}. Each lesson must be a '
@@ -400,6 +500,21 @@ def run_session_end_light(
     parse into JSON, or whose `memory_lessons` field is malformed, yields no
     lessons rather than raising — see `_extract_json_object` and
     `_string_tuple`.
+
+    Every lesson from one run is folded into a single `apply_memory_lesson`
+    call, never one call per lesson: `learned_state.adopt` replaces the
+    current memory version wholesale, so applying lessons one at a time
+    would have each call overwrite the previous lesson rather than add to
+    it, leaving only the last lesson of a multi-lesson run actually adopted.
+
+    This consolidation is intra-run only: it merges the several lessons *one*
+    call to this function proposes into one `apply_memory_lesson` call. It
+    does not accumulate lessons *across* separate runs — each call to this
+    function still replaces `learned_state`'s current memory version
+    wholesale via the tier it goes through, the same way a second run's
+    lessons would replace a first run's rather than merge with them. Whether
+    and how to accumulate memory lessons across multiple sessions/runs is an
+    open design question, not yet addressed here — see issue 33.
     """
     _require_aware_now(now)
     journal = _session_journal(root_dir, now=now, session_id=session_id, run_id=run_id)
@@ -412,15 +527,16 @@ def run_session_end_light(
     lessons = _string_tuple(payload.get("memory_lessons")) if payload is not None else ()
 
     seed = session_id or run_id or _compact_timestamp(now)
-    outcomes = tuple(
-        risk_tiered_application.apply_memory_lesson(
-            lesson,
+    outcomes: tuple[TierOutcome, ...] = ()
+    if lessons:
+        consolidated = "\n".join(f"- {lesson}" for lesson in lessons)
+        outcome = risk_tiered_application.apply_memory_lesson(
+            consolidated,
             root_dir=root_dir,
             now=now,
-            change_id=_change_id("learner-light", seed=seed, index=index),
+            change_id=_change_id("learner-light", seed=seed, index=0),
         )
-        for index, lesson in enumerate(lessons)
-    )
+        outcomes = (outcome,)
     return SessionEndResult(lessons=lessons, outcomes=outcomes, raw_response=raw_response)
 
 
@@ -544,6 +660,11 @@ def run_weekly_deep(
     `config_path` via `_load_acceptance_gate_config` — this ticket's own
     requirement — rather than left at `acceptance_gate.py`'s module
     defaults.
+
+    See Issue 32 for the open question of forwarding this run's `run_id`
+    through `risk_tiered_application.apply_routing_table_update` to the
+    `ReplayBenchmarkRecord`s the acceptance gate produces — currently
+    unwired.
     """
     _require_aware_now(now)
     trials, score_threshold = _load_acceptance_gate_config(config_path)
@@ -559,35 +680,15 @@ def run_weekly_deep(
     comparison = learning_scoreboard.compare_scoreboards(baseline_board, current_board)
 
     windowed_journal = learning_journal.JournalRead(
-        worker_executions=tuple(
-            r
-            for r in journal.worker_executions
-            if _in_window(
-                learning_journal.parse_wire_timestamp(r.timestamp),
-                window_start=window_start,
-                now=now,
-            )
+        worker_executions=_window_cut(
+            journal.worker_executions, window_start=window_start, now=now
         ),
-        outcomes=tuple(
-            r
-            for r in journal.outcomes
-            if _in_window(
-                learning_journal.parse_wire_timestamp(r.timestamp),
-                window_start=window_start,
-                now=now,
-            )
+        outcomes=_window_cut(journal.outcomes, window_start=window_start, now=now),
+        dialogues=_window_cut(journal.dialogues, window_start=window_start, now=now),
+        compliance=_window_cut(journal.compliance, window_start=window_start, now=now),
+        replay_benchmarks=_window_cut(
+            journal.replay_benchmarks, window_start=window_start, now=now
         ),
-        dialogues=tuple(
-            r
-            for r in journal.dialogues
-            if _in_window(
-                learning_journal.parse_wire_timestamp(r.timestamp),
-                window_start=window_start,
-                now=now,
-            )
-        ),
-        compliance=journal.compliance,
-        replay_benchmarks=journal.replay_benchmarks,
         unreadable_lines=journal.unreadable_lines,
         unknown_kind_lines=journal.unknown_kind_lines,
     )
@@ -629,18 +730,28 @@ def run_weekly_deep(
         )
 
     lessons = _string_tuple(payload.get("memory_lessons"))
-    memory_outcomes = tuple(
-        risk_tiered_application.apply_memory_lesson(
-            lesson,
-            root_dir=root_dir,
-            now=now,
-            change_id=_change_id("learner-deep-memory", seed=seed, index=index),
+    memory_outcomes: tuple[TierOutcome, ...] = ()
+    if lessons:
+        consolidated = "\n".join(f"- {lesson}" for lesson in lessons)
+        memory_outcomes = (
+            risk_tiered_application.apply_memory_lesson(
+                consolidated,
+                root_dir=root_dir,
+                now=now,
+                change_id=_change_id("learner-deep-memory", seed=seed, index=0),
+            ),
         )
-        for index, lesson in enumerate(lessons)
-    )
+
+    adopted_entries: list[str] = []
+    for ro in routing_outcomes:
+        if ro.status == "applied":
+            adopted_entries.append(f"routing_table: change_id={ro.change_id or 'none'}")
+    for mo in memory_outcomes:
+        if mo.status == "applied":
+            adopted_entries.append(f"memory: change_id={mo.change_id or 'none'}")
 
     report_path = learning_report.write_weekly_report(
-        root_dir, now=now, window_days=window_days
+        root_dir, now=now, window_days=window_days, adopted=tuple(adopted_entries)
     )
 
     return WeeklyDeepResult(

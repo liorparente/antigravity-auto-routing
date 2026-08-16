@@ -15,6 +15,12 @@ it does not get a second, parallel one.
 `install.sh` is pure bash with nothing bridging Python to shell yet; this ticket owns resolving the
 current version from a shell script.
 
+**Note:** this ticket propagates whatever `learned_state`'s *current* memory version holds across
+harnesses; it does not decide how that version accumulates across separate runs in the first place
+(each `apply_memory_lesson` call today replaces memory wholesale rather than merging with a prior
+run's lessons — see issue 33). Issue 33's resolution changes what content this sync ships, not
+whether or how it ships it.
+
 - [ ] Adopted learned state is synchronized by the existing install mechanism.
 - [ ] The install's atomicity holds: a failure mid-sync rolls back every touched file, learned state
       included.
