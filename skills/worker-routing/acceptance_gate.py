@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AcceptanceGate: repeated benchmark trials, zero scoreboard regression.
+"""AcceptanceGate: repeated benchmark trials, non-benchmark regression guard.
 
 Named for its siblings `learning_journal.py` (the record contract),
 `learning_scoreboard.py` (the eight-metric snapshot), and `learning_report.py`
@@ -30,34 +30,29 @@ load-bearing decision in spec 0004 (external signals beat self-assessment;
 see `docs/research/self-improvement-prior-art.md`), and it is enforced by
 this module simply never containing a second way to produce one.
 
-**The batch's own trials are part of the `mean_benchmark_score` they can
-regress — deliberately.** `baseline` is read before the trial loop, `current`
-after it, and every trial this call just journaled is timestamped `now` and
-so falls inside `current`'s window. If prior history in that window scored
-high and this batch merely clears `score_threshold`, blending the two can
-still pull the windowed mean down, and `compare_scoreboards` correctly reads
-that as `regressed` — rejecting a proposal whose every individual trial met
-threshold. This is not the self-grading `runner()` already forecloses:
-nothing computed a verdict about the trials, `compare_scoreboards` did, from
-the same journaled scores `threshold_met` already read. It is instead the
-literal reading of "no scoreboard metric regresses" — the replay-benchmark
-family is not carved out from that rule just because these are the trials
-that fed it — and it is what stops a proposal from ratcheting the benchmark
-down one just-adequate batch at a time. See
-`ScoreboardRegressionRejectionTests.test_a_batch_that_drags_down_its_own_benchmark_trend_regresses_too`
-in `test_acceptance_gate.py`.
+**The gate separates candidate quality from live-system regression.** Every
+candidate probe trial is judged against the absolute `score_threshold`: every
+trial must succeed and score at or above that threshold. `baseline` is read
+before the trial loop and `current` after it, so the resulting comparison
+also captures concurrent system activity during the gate run. A regression in
+discipline, critique authenticity, or efficiency rejects the proposal; a
+`mean_benchmark_score` regression by itself does not. The candidate probe is
+not adopted system state, so blending its scores into a historical probe mean
+must not create a second, implicit admission bar. `GateDecision.comparison`
+still exposes every movement, including the benchmark mean, for complete
+telemetry.
 
-**Acceptance requires every trial to clear the bar, not the mean.** A
-proposal is accepted only when *every* trial in the batch both succeeded and
-scored at or above `score_threshold`, and comparing the scoreboard from
-before the batch to the scoreboard after it shows no regressed metric. A
-single winning run among losing ones is rejected by this rule directly: if
-even one trial scores below threshold (or fails outright), `threshold_met` is
-`False` and the proposal is rejected — no mean, no majority vote, ever
-launders one bad run into an accepted score. A regression in any one
-scoreboard metric rejects independently of the score, even an excellent one
-(`ScoreboardComparison.has_regression`, computed once in
-`learning_scoreboard.py` and read here rather than re-derived).
+**Acceptance requires every trial to clear the bar, durable evidence, and no
+concurrent non-benchmark regression.** A proposal is accepted only when
+*every* trial in the batch both succeeded and scored at or above
+`score_threshold`, every trial reached the journal, and no non-benchmark
+scoreboard metric regressed. A single winning run among losing ones is
+rejected directly: if even one trial scores below threshold (or fails
+outright), `threshold_met` is `False` — no mean, no majority vote, ever
+launders one bad run into an accepted score. The anti-ratchet protection for
+`mean_benchmark_score` belongs to Ticket 21's post-adoption auto-revert,
+which compares live post-adoption metrics against their pre-adoption baseline
+(ADR 0008).
 
 **A runner failure fails the gate closed, not silently.** Every trial is
 attempted — even after an earlier one raised — so the batch always produces
@@ -225,8 +220,10 @@ def evaluate_proposal(
     `ReplayBenchmarkRecord` per trial (a `runner()` call that raises, or
     returns a value the record itself refuses, becomes `success=False`,
     never a re-raise), reads a `current` `Scoreboard` afterward, and accepts
-    only when every trial met `score_threshold` and `compare_scoreboards`
-    finds no regressed metric.
+    only when every trial met `score_threshold`, every trial was journaled,
+    and no non-benchmark scoreboard metric regressed. A benchmark-mean
+    regression remains visible on `comparison` but is handled by Ticket 21's
+    post-adoption anti-ratchet auto-revert (ADR 0008), not by this gate.
 
     `task_set` and `run_id` are validated up front, against the exact rules
     `ReplayBenchmarkRecord` itself enforces, by constructing one throwaway
@@ -311,9 +308,12 @@ def evaluate_proposal(
         record.success and record.score is not None and record.score >= score_threshold
         for record in records
     )
+    has_non_benchmark_regression = any(
+        metric_name != "mean_benchmark_score" for metric_name in comparison.regressed
+    )
 
     return GateDecision(
-        accepted=threshold_met and journal_complete and not comparison.has_regression,
+        accepted=threshold_met and journal_complete and not has_non_benchmark_regression,
         threshold_met=threshold_met,
         journal_complete=journal_complete,
         trial_records=tuple(records),

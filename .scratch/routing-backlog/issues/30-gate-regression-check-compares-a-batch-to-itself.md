@@ -51,13 +51,15 @@ and 22, which are not written yet.
 
 **Blocked by:** none to decide; any implementation should land with or before 21
 
-**Status:** ready-for-agent
+**Status:** complete — ADR 0008 assigns candidate probe quality to the threshold check, concurrent
+non-benchmark regression to the acceptance gate, and `mean_benchmark_score` anti-ratchet protection
+to Ticket 21's post-adoption auto-revert.
 
-- [ ] A decision is recorded (spec 0004, or an ADR) on what the gate's regression check compares, and
+- [x] A decision is recorded in ADR 0008 on what the gate's regression check compares, and
       on whether the anti-ratchet rule lives in the gate or in ticket 21's auto-revert.
-- [ ] If the gate's rule changes, `acceptance_gate.py`'s module docstring and ticket 18's `Status`
+- [x] If the gate's rule changes, `acceptance_gate.py`'s module docstring and ticket 18's `Status`
       both stop asserting the superseded rationale — they currently defend it explicitly.
-- [ ] `test_a_batch_that_drags_down_its_own_benchmark_trend_regresses_too` is updated to assert the
+- [x] `test_a_batch_that_drags_down_its_own_benchmark_trend_regresses_too` is updated to assert the
       decided behaviour, whichever way it goes, rather than deleted.
-- [ ] Whatever is decided, a proposal's own trials can still never *raise* the bar they are judged
+- [x] Whatever is decided, a proposal's own trials can still never *raise* the bar they are judged
       against — the "learner never grades its own proposal" invariant is untouched by this ticket.

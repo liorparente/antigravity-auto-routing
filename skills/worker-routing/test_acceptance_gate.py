@@ -200,16 +200,13 @@ class ScoreboardRegressionRejectionTests(unittest.TestCase):
         )
 
     def test_a_batch_that_drags_down_its_own_benchmark_trend_regresses_too(self) -> None:
-        """`mean_benchmark_score` is not exempt from `has_regression` just
-        because the batch computing it is this call's own trials. Prior
-        history in the window scored high (0.98, 0.97); every one of this
-        batch's three trials individually clears the 0.8 threshold at 0.81
-        — but blending the new, merely-adequate trials into that window
-        drags the mean from 0.975 down to 0.876, which `compare_scoreboards`
-        correctly reads as `regressed`. This is deliberate, not a self-
-        grading loophole: no trial *computed* its own verdict, the runner
-        did, and "no scoreboard metric regresses" was never spec'd with a
-        carve-out for the metric family the trials themselves feed."""
+        """A candidate probe's benchmark trend remains telemetry, not a
+        second admission bar. Prior history in the window scored high (0.98,
+        0.97); every one of this batch's three trials individually clears the
+        0.8 threshold at 0.81, while blending them into the window regresses
+        `mean_benchmark_score`. ADR 0008 assigns anti-ratchet enforcement to
+        Ticket 21's post-adoption auto-revert, so this benchmark-only
+        regression does not reject the un-adopted candidate."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for score, timestamp in ((0.98, "2026-01-02T00:00:00Z"), (0.97, "2026-01-03T00:00:00Z")):
@@ -231,7 +228,7 @@ class ScoreboardRegressionRejectionTests(unittest.TestCase):
 
         self.assertTrue(decision.threshold_met, "every trial individually cleared 0.8")
         self.assertEqual(decision.comparison.regressed, ("mean_benchmark_score",))
-        self.assertFalse(decision.accepted)
+        self.assertTrue(decision.accepted)
 
 
 class RunnerFailureFailsClosedTests(unittest.TestCase):
@@ -519,29 +516,56 @@ class WindowDaysTests(unittest.TestCase):
 
         Asserting "it did not raise" would be enough to catch that and would
         prove nothing about the window itself, so this drives the span until
-        it changes the answer: one 0.98 trial ten days old sits inside a
-        14-day window and outside the default 7-day one. At 14 it is the
-        baseline the batch is measured against, and two merely-adequate 0.81
-        trials drag the mean below it — a regression, so the proposal is
-        rejected. At 7 that history is invisible, the baseline has no data,
-        and the identical batch is accepted.
+        it changes the answer. A clean compliance record ten days old is
+        inside a 14-day baseline but outside the default seven-day one. The
+        runner appends a concurrent record with five violations. At 14 that
+        live-system regression rejects the proposal; at seven the older
+        baseline is absent, so there is no regression and the identical
+        candidate is accepted.
         """
         older = _NOW - timedelta(days=10)
 
         def run(window_days: int) -> Any:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
-                record = learning_journal.ReplayBenchmarkRecord(
-                    task_set="bench-v1",
-                    success=True,
-                    score=0.98,
+                record = learning_journal.ComplianceRecord(
+                    session_id="session-window",
+                    total_writes=1,
+                    code_writes=0,
+                    routing_declarations=1,
+                    worker_calls=0,
+                    violation_count=0,
+                    declaration_drift_count=0,
+                    calibration_markers=0,
+                    code_write_count=0,
                     timestamp=older.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    session_last_activity=older.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 )
                 self.assertIsNone(
                     learning_journal.append_journal_record(record, root_dir=root)
                 )
+                def runner() -> float:
+                    error = learning_journal.append_journal_record(
+                        learning_journal.ComplianceRecord(
+                            session_id="session-window",
+                            total_writes=1,
+                            code_writes=0,
+                            routing_declarations=1,
+                            worker_calls=0,
+                            violation_count=5,
+                            declaration_drift_count=0,
+                            calibration_markers=0,
+                            code_write_count=0,
+                            timestamp=_NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            session_last_activity=_NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        ),
+                        root_dir=root,
+                    )
+                    assert error is None
+                    return 0.81
+
                 return acceptance_gate.evaluate_proposal(
-                    _scripted_runner([0.81, 0.81]),
+                    runner,
                     task_set="bench-v1",
                     root_dir=root,
                     now=_NOW,
@@ -554,12 +578,12 @@ class WindowDaysTests(unittest.TestCase):
         narrow = run(acceptance_gate.DEFAULT_WINDOW_DAYS)
 
         self.assertTrue(wide.threshold_met, "every trial cleared 0.8 either way")
-        self.assertEqual(wide.comparison.regressed, ("mean_benchmark_score",))
-        self.assertFalse(wide.accepted, "the ten-day-old 0.98 is inside a 14-day window")
+        self.assertEqual(wide.comparison.regressed, ("violations_per_session",))
+        self.assertFalse(wide.accepted, "the ten-day-old clean baseline is inside 14 days")
 
         self.assertTrue(narrow.threshold_met)
         self.assertEqual(narrow.comparison.regressed, ())
-        self.assertTrue(narrow.accepted, "and outside the default 7-day one")
+        self.assertTrue(narrow.accepted, "the clean baseline is outside the default 7-day window")
 
 
 class NonUtcNowTests(unittest.TestCase):

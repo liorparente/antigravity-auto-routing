@@ -19,13 +19,11 @@ while the trend it is supposed to move stays permanently at "no data".
 **Blocked by:** 16 (and pairs with 26, which journals what this runner returns)
 
 **Status:** done — commit `e934fcb` (`acceptance_gate.py`, `test_acceptance_gate.py`; landed together
-with ticket 26's schema and writer, per this ticket's own "land the two together" note). Acceptance
-requires every trial to individually clear `score_threshold` — never a mean — which is what makes a
-single winning run among losing ones reject on its own; `ScoreboardComparison.has_regression`
-(`learning_scoreboard.py`, already computed for ticket 16) rejects independently of the score, even
-an excellent one, including when the batch's own trials are what drags the replay-benchmark family's
-own trend down (see `acceptance_gate.py`'s module docstring and
-`ScoreboardRegressionRejectionTests.test_a_batch_that_drags_down_its_own_benchmark_trend_regresses_too`).
+with ticket 26's schema and writer, per this ticket's own "land the two together" note). Ticket 30
+and ADR 0008 settle the regression-check scope: acceptance requires every trial to individually clear
+`score_threshold` — never a mean — durable journal evidence, and no concurrent non-benchmark
+regression. `mean_benchmark_score` remains visible in `ScoreboardComparison` but its anti-ratchet
+protection lives in Ticket 21's post-adoption auto-revert.
 A runner failure — raising, or returning a value `ReplayBenchmarkRecord` itself refuses — is caught
 per trial and journaled as `success=False`, never re-raised and never assumed good. A *journal write*
 failure rejects too (`GateDecision.journal_complete`): the batch's evidence exists only in memory, the
@@ -36,7 +34,9 @@ its own trials); 30 revisits the "deliberately" in the paragraph above and shoul
 it.
 
 - [x] The gate runs the benchmark set a configured number of times through an injected runner.
-- [x] A proposal is accepted only when the score meets threshold and no scoreboard metric regresses.
+- [x] A proposal is accepted only when every trial meets threshold, journal persistence is complete,
+      and no concurrent non-benchmark scoreboard metric regresses; benchmark anti-ratchet is Ticket 21's
+      post-adoption auto-revert (ADR 0008).
 - [x] A single winning run among losing runs is rejected.
 - [x] A regression in any one metric rejects, even when the benchmark score is excellent.
 - [x] No code path lets a proposal's own output influence its score.

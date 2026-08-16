@@ -39,8 +39,8 @@ A closed loop in four parts:
 - **Scoreboard and weekly report** — four metric families computed from the journal, written as
   a short Markdown trend report every week: discipline, critique authenticity, efficiency, and a
   replay benchmark.
-- **Gates** — a proposed change is accepted only after repeated benchmark trials meet threshold
-  with zero scoreboard regression; application is risk-tiered (memory auto, routing table auto
+- **Gates** — a proposed change is accepted only after repeated benchmark trials meet threshold,
+  persist completely, and concurrent non-benchmark scoreboard metrics do not regress; application is risk-tiered (memory auto, routing table auto
   after the gate, briefs human-approved, protocol untouchable); every adopted change is
   git-versioned; a post-adoption regression auto-reverts with a report.
 
@@ -70,7 +70,8 @@ A closed loop in four parts:
 11. As a maintainer, I want the learner to be a background worker and never the orchestrator, so
     that the proposer and the approver are always separate parties.
 12. As a developer, I want a proposed change accepted only after repeated benchmark trials meet
-    threshold with zero scoreboard regression, so that single-run luck never reshapes my system.
+    threshold, persist completely, and concurrent non-benchmark metrics do not regress, so that
+    single-run luck never reshapes my system.
 13. As a developer, I want accepted memory changes to auto-apply and appear in the weekly report,
     so that low-risk learning flows without me as a bottleneck.
 14. As a developer, I want routing-table changes to auto-apply only after the acceptance gate,
@@ -139,9 +140,11 @@ time as input and own no clock.
 
 **The acceptance gate.** A proposal is evaluated by running the fixed benchmark task set multiple
 times (count is config) through an injected benchmark-runner and comparing scoreboard metrics.
-Accept only if the score meets threshold *and* no scoreboard metric regresses. A single winning
-run is explicitly insufficient. The learner never grades its own proposal by self-assessment —
-scores come only from the external runner.
+Accept only if every score meets threshold, every trial persists to the journal, and no concurrent
+non-benchmark metric (discipline, critique authenticity, or efficiency) regresses. A probe-only
+`mean_benchmark_score` regression remains visible but does not reject the candidate: probes are not
+adopted system state. A single winning run is explicitly insufficient. The learner never grades its
+own proposal by self-assessment — scores come only from the external runner.
 
 **Risk-tiered application.** Memory lessons: auto-apply, listed in the weekly report.
 Routing-table updates: auto-apply after passing the gate, one report line each. Brief diffs:
@@ -150,9 +153,11 @@ the learner has no code path that writes it.
 
 **Versioning and auto-revert.** Every adopted change is a git-tracked version of the learned
 state; manual rollback is always one step. The weekly run compares the scoreboard against the
-pre-adoption baseline; a regression attributable to an adopted change triggers an automatic
-revert and a report entry. The system is free to learn because its mistakes self-correct and
-leave a trail.
+pre-adoption baseline; a regression attributable to an adopted change — including
+`mean_benchmark_score` — triggers an automatic revert and a report entry. This post-adoption check
+is the anti-ratchet boundary; it evaluates live system state rather than the gate's un-adopted
+probe batch (ADR 0008). The system is free to learn because its mistakes self-correct and leave a
+trail.
 
 **The scoreboard.** Four metric families, all computed from the journal: discipline (protocol
 violation rate per session), critique authenticity (canary catch rate and engagement-count
