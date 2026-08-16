@@ -211,6 +211,90 @@ class RollBackTests(unittest.TestCase):
             self.assertNotIn("routing_table", current)
 
 
+# No return annotation: the module is loaded by path, so mypy cannot
+# resolve `learned_state.VersionEntry` as a type. Same reason `_change` at
+# the top of this file has none.
+def _entry(kind: str, version: int, replaces: int | None):
+    """A minimal, otherwise-valid `VersionEntry` naming only what
+    `most_recent_live_adoption` actually inspects (`kind`), plus the two
+    fields every entry must carry. Built directly rather than through
+    `adopt`/`roll_back` so interleaved sequences can be constructed without
+    a filesystem round trip."""
+    return learned_state.VersionEntry(  # type: ignore[arg-type]
+        kind=kind,
+        version=version,
+        replaces=replaces,
+        documents=(),
+        change_id=None,
+        timestamp="2026-01-08T00:00:00Z",
+    )
+
+
+class MostRecentLiveAdoptionTests(unittest.TestCase):
+    def test_empty_history_returns_none(self) -> None:
+        self.assertIsNone(learned_state.most_recent_live_adoption(()))
+
+    def test_single_adoption_returns_that_adoption(self) -> None:
+        adopt_v1 = _entry("adopt", 1, None)
+        self.assertIs(learned_state.most_recent_live_adoption((adopt_v1,)), adopt_v1)
+
+    def test_adoption_rolled_back_returns_none_when_it_was_the_only_one(self) -> None:
+        adopt_v1 = _entry("adopt", 1, None)
+        rollback = _entry("rollback", 1, 1)
+        history = (adopt_v1, rollback)
+        self.assertIsNone(learned_state.most_recent_live_adoption(history))
+
+    def test_adoption_rolled_back_returns_the_prior_live_adoption(self) -> None:
+        adopt_v1 = _entry("adopt", 1, None)
+        adopt_v2 = _entry("adopt", 2, 1)
+        rollback = _entry("rollback", 1, 2)
+        history = (adopt_v1, adopt_v2, rollback)
+        self.assertIs(learned_state.most_recent_live_adoption(history), adopt_v1)
+
+    def test_interleaved_adoptions_and_rollbacks_return_the_correct_live_adoption(
+        self,
+    ) -> None:
+        # adopt v1 -> adopt v2 -> roll back to v1 -> adopt v3 (fresh, live)
+        adopt_v1 = _entry("adopt", 1, None)
+        adopt_v2 = _entry("adopt", 2, 1)
+        rollback_to_v1 = _entry("rollback", 1, 2)
+        adopt_v3 = _entry("adopt", 3, 1)
+        history = (adopt_v1, adopt_v2, rollback_to_v1, adopt_v3)
+        self.assertIs(learned_state.most_recent_live_adoption(history), adopt_v3)
+
+    def test_two_rollbacks_consume_two_adoptions_leaving_the_first_live(self) -> None:
+        adopt_v1 = _entry("adopt", 1, None)
+        adopt_v2 = _entry("adopt", 2, 1)
+        adopt_v3 = _entry("adopt", 3, 2)
+        rollback_to_v2 = _entry("rollback", 2, 3)
+        rollback_to_v1 = _entry("rollback", 1, 2)
+        history = (adopt_v1, adopt_v2, adopt_v3, rollback_to_v2, rollback_to_v1)
+        self.assertIs(learned_state.most_recent_live_adoption(history), adopt_v1)
+
+    def test_agrees_with_roll_back_on_a_real_store(self) -> None:
+        """The unit-level walk above and the on-disk `roll_back` it backs
+        must pick the same target — otherwise the factoring in this ticket
+        changed behaviour instead of merely relocating it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "v1")], root_dir=root, now=_NOW)
+            learned_state.adopt(
+                [_change("memory", "v2")], root_dir=root, now=_NOW + timedelta(hours=1)
+            )
+            learned_state.adopt(
+                [_change("memory", "v3")], root_dir=root, now=_NOW + timedelta(hours=2)
+            )
+            learned_state.roll_back(root_dir=root, now=_NOW + timedelta(hours=3))
+
+            history = learned_state.read_history(root)
+            target = learned_state.most_recent_live_adoption(history)
+            assert target is not None
+            self.assertEqual(target.version, 2)
+
+            entry = learned_state.roll_back(root_dir=root, now=_NOW + timedelta(hours=4))
+            self.assertEqual(entry.version, target.replaces)
+
+
 class NonUtcNowTests(unittest.TestCase):
     def test_a_non_utc_now_is_stamped_in_utc_on_the_wire(self) -> None:
         """Every other test injects a `now` that is already UTC, which

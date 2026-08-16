@@ -1327,6 +1327,30 @@ def adopt(
     return entry
 
 
+def most_recent_live_adoption(history: Sequence[VersionEntry]) -> VersionEntry | None:
+    """The most recent `"adopt"` entry in `history` not yet undone by a later
+    `"rollback"`, or `None` if every adoption has already been undone (which
+    includes an empty `history`).
+
+    The bracket-matching backward walk from the module docstring's Decision
+    3, factored out so `roll_back` and any other caller that needs to know
+    which adoption is "live" — `risk_tiered_application.
+    revert_attributable_regression`, picking a regression's attribution
+    target, is the other one today — compute the identical answer from one
+    definition instead of two copies drifting apart.
+    """
+    skip = 0
+    for entry in reversed(history):
+        if entry.kind == "rollback":
+            skip += 1
+            continue
+        if skip > 0:
+            skip -= 1
+            continue
+        return entry
+    return None
+
+
 def roll_back(*, root_dir: Path, now: datetime, change_id: str | None = None) -> VersionEntry:
     """Undo the most recent adoption that has not already been undone.
 
@@ -1371,17 +1395,7 @@ def roll_back(*, root_dir: Path, now: datetime, change_id: str | None = None) ->
 
         current_version = history[-1].version
 
-        skip = 0
-        target_entry: VersionEntry | None = None
-        for entry in reversed(history):
-            if entry.kind == "rollback":
-                skip += 1
-                continue
-            if skip > 0:
-                skip -= 1
-                continue
-            target_entry = entry
-            break
+        target_entry = most_recent_live_adoption(history)
 
         if target_entry is None:
             raise ValueError("cannot roll back: every adoption has already been undone")
@@ -1416,6 +1430,7 @@ __all__ = [
     "VersionEntry",
     "adopt",
     "current_version_dir",
+    "most_recent_live_adoption",
     "read_current",
     "read_history",
     "roll_back",

@@ -390,26 +390,6 @@ def _parse_version_timestamp(value: str) -> datetime:
     )
 
 
-def _most_recent_live_adoption(history: Sequence[VersionEntry]) -> VersionEntry | None:
-    """The most recent `adopt` entry not yet undone by a later `rollback`.
-
-    Mirrors the bracket-matching walk `learned_state.roll_back` uses
-    internally to pick its own target, so this function and that call agree
-    on which adoption is "live" without either importing the other's
-    private state.
-    """
-    skip = 0
-    for entry in reversed(history):
-        if entry.kind == "rollback":
-            skip += 1
-            continue
-        if skip > 0:
-            skip -= 1
-            continue
-        return entry
-    return None
-
-
 def revert_attributable_regression(
     comparison: learning_scoreboard.ScoreboardComparison,
     *,
@@ -421,7 +401,8 @@ def revert_attributable_regression(
     """Auto-revert a scoreboard regression to the adoption most likely responsible.
 
     Attribution is deliberately narrow: only the most recent live adoption
-    (per `learned_state.roll_back`'s own bracket-matching walk) is ever a
+    (per `learned_state.most_recent_live_adoption`, the same bracket-matching
+    walk `learned_state.roll_back` uses to pick its own target) is ever a
     candidate, and only when its timestamp falls in the trailing
     `window_days` window ending at `now`. A regression with no such
     adoption is `unattributable` rather than guessed at; a regression whose
@@ -443,7 +424,7 @@ def revert_attributable_regression(
     history = learned_state.read_history(root_dir)
     window_start = now - timedelta(days=window_days)
 
-    target_adoption = _most_recent_live_adoption(history)
+    target_adoption = learned_state.most_recent_live_adoption(history)
     if target_adoption is None or not (
         window_start <= _parse_version_timestamp(target_adoption.timestamp) <= now
     ):
