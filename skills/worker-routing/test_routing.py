@@ -805,6 +805,38 @@ class ProtocolSyncTests(unittest.TestCase):
             _bash_array(UNINSTALL_SH, "TARGET_DIRS"),
         )
 
+    def test_project_local_indices_closure_over_target_dirs(self) -> None:
+        # PROJECT_LOCAL_INDICES is a hardcoded index list into TARGET_DIRS
+        # with nothing tying the two together — a future reorder/add/remove
+        # in either array could silently desync them, letting the
+        # parent-directory reclaim ascend past a home-directory target or
+        # skip a project-local one. Derive both arrays from uninstall.sh's
+        # own source (rather than hardcoding them again here) and check
+        # every index against the raw $TARGET_PROJECT_DIR / $HOME prefix, so
+        # future drift fails this test instead of silently misbehaving.
+        target_dirs = _bash_array(UNINSTALL_SH, "TARGET_DIRS")
+        project_local_indices = {
+            int(raw) for raw in _bash_array(UNINSTALL_SH, "PROJECT_LOCAL_INDICES")
+        }
+
+        for index in project_local_indices:
+            self.assertGreaterEqual(index, 0)
+            self.assertLess(index, len(target_dirs), f"index {index} is out of range for TARGET_DIRS")
+
+        for index, raw_target in enumerate(target_dirs):
+            if index in project_local_indices:
+                self.assertTrue(
+                    raw_target.startswith('"$TARGET_PROJECT_DIR/'),
+                    f"TARGET_DIRS[{index}] = {raw_target} is in PROJECT_LOCAL_INDICES "
+                    "but is not rooted at $TARGET_PROJECT_DIR",
+                )
+            else:
+                self.assertFalse(
+                    raw_target.startswith('"$TARGET_PROJECT_DIR/'),
+                    f"TARGET_DIRS[{index}] = {raw_target} is rooted at $TARGET_PROJECT_DIR "
+                    "but missing from PROJECT_LOCAL_INDICES",
+                )
+
     def test_uninstall_sh_does_not_ascend_past_home_directory_skill_dirs(self) -> None:
         # Parent-directory reclaim is scoped to project-local targets only.
         # "$HOME/.gemini/config" and "$HOME/.codex" are not directories
