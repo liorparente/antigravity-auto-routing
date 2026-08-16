@@ -836,6 +836,59 @@ class LearnedStatePropagationTests(unittest.TestCase):
                     self.assertFalse((installed_dir / "learned-state").exists())
                     self.assertIsNone(learned_state.current_version_dir(root_dir=installed_dir))
 
+    def test_install_with_existing_but_unadopted_learned_state_directory_installs_cleanly(
+        self,
+    ) -> None:
+        source_root = self._isolated_source_tree()
+        (source_root / "learned-state").mkdir(parents=True)
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(source_root, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            for installed_dir in self._installed_dirs(fake_home, target_dir):
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertTrue((installed_dir / "SKILL.md").exists())
+                    self.assertTrue((installed_dir / "protocol.md").exists())
+                    self.assertFalse((installed_dir / "learned-state").exists())
+                    self.assertIsNone(
+                        learned_state.current_version_dir(root_dir=installed_dir)
+                    )
+
+    def test_uninstall_sh_removes_installed_learned_state_from_target_dirs(
+        self,
+    ) -> None:
+        source_root = self._isolated_source_tree()
+        self._adopt(source_root, memory="memory v1", briefs="briefs v1")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run_install(source_root, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            for installed_dir in self._installed_dirs(fake_home, target_dir):
+                self.assertTrue((installed_dir / "learned-state").exists())
+
+            env = dict(os.environ)
+            env["HOME"] = str(fake_home)
+            uninst_res = subprocess.run(
+                ["bash", str(UNINSTALL_SH), target_dir],
+                capture_output=True,
+                check=False,
+                text=True,
+                env=env,
+            )
+            self.assertEqual(uninst_res.returncode, 0, uninst_res.stdout + uninst_res.stderr)
+
+            self.assertFalse(
+                (Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing").exists()
+            )
+            self.assertFalse(
+                (Path(fake_home) / ".codex" / "skills" / "worker-routing").exists()
+            )
+            self.assertFalse(
+                (Path(target_dir) / ".codex" / "skills" / "worker-routing").exists()
+            )
+
     def test_a_failure_mid_learned_state_sync_rolls_back_every_learned_state_write(
         self,
     ) -> None:

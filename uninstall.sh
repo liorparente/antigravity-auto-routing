@@ -62,6 +62,7 @@ for target_dir in "${TARGET_DIRS[@]}"; do
         for installed_file in "${INSTALLED_FILES[@]}"; do
             rm -f "$target_dir/$installed_file"
         done
+        rm -rf "$target_dir/learned-state"
         rmdir "$target_dir" 2>/dev/null || true
         if [ -d "$target_dir" ]; then
             echo "✅ Removed skill files from $target_dir (other content preserved)"
