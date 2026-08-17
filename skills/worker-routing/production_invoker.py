@@ -101,6 +101,18 @@ AsyncRunner = Callable[..., Awaitable[AsyncWorkerProcess]]
 WorkerRequest = tuple[str, str, str]
 
 
+async def _kill_and_reap_process(proc: AsyncWorkerProcess) -> None:
+    """Terminate ``proc`` and wait for it to be reaped when possible."""
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+    try:
+        await proc.wait()
+    except ProcessLookupError:
+        pass
+
+
 @dataclass(frozen=True)
 class WorkerExecutionResult:
     """Structured outcome data for a single worker invocation."""
@@ -393,14 +405,7 @@ async def invoke_worker_async(
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await proc.wait()
-        except ProcessLookupError:
-            pass
+        await _kill_and_reap_process(proc)
         duration_ms = max(0, round((clock() - start) * 1000))
         return WorkerExecutionResult(
             raw_output="",
@@ -410,14 +415,7 @@ async def invoke_worker_async(
             error=f"Worker {model!r} timed out after {timeout} seconds",
         )
     except Exception as error:  # noqa: BLE001 - a communicate() failure is a worker outcome, not a call-site bug.
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-        try:
-            await proc.wait()
-        except ProcessLookupError:
-            pass
+        await _kill_and_reap_process(proc)
         duration_ms = max(0, round((clock() - start) * 1000))
         return WorkerExecutionResult(
             raw_output="",
