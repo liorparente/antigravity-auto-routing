@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Unit tests for extracted advisory transcript and telemetry persistence."""
 from __future__ import annotations
 
@@ -10,9 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import advisory_consultation
 import dialogue_contracts
 import dialogue_transcript
+
+import advisory_consultation
 
 
 class DialogueTranscriptTests(unittest.TestCase):

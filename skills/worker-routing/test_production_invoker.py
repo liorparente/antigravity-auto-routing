@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_routing import _approve
 
 MODULE_PATH = Path(__file__).with_name("production_invoker.py")
@@ -666,7 +667,7 @@ class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
                     return process
             raise AssertionError(f"unexpected prompt: {prompt}")
 
-        requests: list[production_invoker.WorkerRequest] = [
+        requests: list[tuple[str, str, str]] = [
             ("claude-sonnet-5", "high", "first prompt"),
             ("gpt-5.6-terra", "medium", "second prompt"),
             ("agy", "low", "third prompt"),
@@ -688,7 +689,7 @@ class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
         async def runner(*args: Any, **kwargs: Any) -> _FakeAsyncProcess:
             return good_process
 
-        requests: list[production_invoker.WorkerRequest] = [
+        requests: list[tuple[str, str, str]] = [
             ("claude-sonnet-5", "high", "good request"),
             ("acme-model", "low", "bad request"),
         ]
@@ -709,7 +710,7 @@ class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
             prompt = args[-1]
             return hung_process if "slow" in prompt else fast_process
 
-        requests: list[production_invoker.WorkerRequest] = [
+        requests: list[tuple[str, str, str]] = [
             ("agy", "high", "slow request"),
             ("gpt-5.6-terra", "medium", "fast request"),
         ]
@@ -743,7 +744,7 @@ class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
                 raise FileNotFoundError("no such file or directory: 'codex'")
             return good_process
 
-        requests: list[production_invoker.WorkerRequest] = [
+        requests: list[tuple[str, str, str]] = [
             ("claude-sonnet-5", "high", "good request"),
             ("gpt-5.6-terra", "medium", "missing binary request"),
         ]

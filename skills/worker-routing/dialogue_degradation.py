@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Deterministic policy for the advisory dialogue budget ladder.
 
 The consultation orchestrator deliberately does not own session state: its
@@ -22,7 +21,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
-
 
 DegradationRung = Literal[0, 1, 2, 3]
 

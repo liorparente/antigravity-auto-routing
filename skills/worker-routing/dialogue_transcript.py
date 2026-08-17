@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Persistence and rendering boundary for advisory consultations.
 
 This module owns the artifacts emitted after a Planner--Critic dialogue:
@@ -41,27 +40,35 @@ def _load_sibling(name: str):
 
 
 try:
-    from dialogue_contracts import AdvisoryRoundVerdict, CriticVerdict, VerdictContractResult
+    from dialogue_contracts import (
+        AdvisoryRoundVerdict,
+        CriticVerdict,
+        VerdictContractResult,
+    )
 except ModuleNotFoundError as exc:
     if exc.name != "dialogue_contracts":
         raise
     _load_sibling("dialogue_contracts")
-    from dialogue_contracts import AdvisoryRoundVerdict, CriticVerdict, VerdictContractResult
+    from dialogue_contracts import (
+        AdvisoryRoundVerdict,
+        CriticVerdict,
+        VerdictContractResult,
+    )
 
 try:
     from dialogue_degradation import (
+        _DEGRADATION_RUNG_LABELS,
         BUDGET_DEGRADATION_MARKER,
         DegradationRung,
-        _DEGRADATION_RUNG_LABELS,
     )
 except ModuleNotFoundError as exc:
     if exc.name != "dialogue_degradation":
         raise
     _load_sibling("dialogue_degradation")
     from dialogue_degradation import (
+        _DEGRADATION_RUNG_LABELS,
         BUDGET_DEGRADATION_MARKER,
         DegradationRung,
-        _DEGRADATION_RUNG_LABELS,
     )
 
 DEGRADED_INDEPENDENCE_MARKER = "DEGRADED INDEPENDENCE"
@@ -165,27 +172,47 @@ def _render_consultation_transcript(
     rounds = result.rounds
     is_canary = result.outcome == "canary" and canary_fixture is not None
     lines = [
-        "# AdvisoryConsultation Transcript", "", f"**Outcome:** {result.outcome}",
-        f"**Planner:** {result.planner_model}", f"**Critic:** {result.critic_model}",
-        f"**Rounds run:** {len(rounds)}", "",
+        "# AdvisoryConsultation Transcript",
+        "",
+        f"**Outcome:** {result.outcome}",
+        f"**Planner:** {result.planner_model}",
+        f"**Critic:** {result.critic_model}",
+        f"**Rounds run:** {len(rounds)}",
+        "",
     ]
     if result.degraded_independence:
         lines.extend([
-            f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could not achieve "
-            "full cross-family independence. Treat its outcome with reduced confidence.", "",
+            (
+                f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could not achieve "
+                "full cross-family independence. Treat its outcome with reduced confidence."
+            ),
+            "",
         ])
     if is_canary:
         assert canary_fixture is not None
-        result_text = "approved the flawed fixture" if result.canary_result == "miss" else "did not approve the flawed fixture"
+        result_text = (
+            "approved the flawed fixture"
+            if result.canary_result == "miss"
+            else "did not approve the flawed fixture"
+        )
         lines.extend([
-            f"**{CANARY_MARKER}:** This dialogue reviewed seeded-flaw fixture "
-            f"`{canary_fixture.id}`, not a real mission artifact. No Planner was invoked.", "",
-            f"Seeded flaw: {canary_fixture.flaw_summary}", "", f"Critic result: **{result.canary_result}** ({result_text}).", "",
+            (
+                f"**{CANARY_MARKER}:** This dialogue reviewed seeded-flaw fixture "
+                f"`{canary_fixture.id}`, not a real mission artifact. No Planner was invoked."
+            ),
+            "",
+            f"Seeded flaw: {canary_fixture.flaw_summary}",
+            "",
+            f"Critic result: **{result.canary_result}** ({result_text}).",
+            "",
         ])
     if result.degradation_rung > 0:
         lines.extend([
-            f"**{BUDGET_DEGRADATION_MARKER}:** degradation rung {result.degradation_rung} "
-            f"({_DEGRADATION_RUNG_LABELS[result.degradation_rung]}).", "",
+            (
+                f"**{BUDGET_DEGRADATION_MARKER}:** degradation rung {result.degradation_rung} "
+                f"({_DEGRADATION_RUNG_LABELS[result.degradation_rung]})."
+            ),
+            "",
         ])
     lines.extend(["## Task", "", task_description, ""])
     if result.outcome == "budget_skipped":
@@ -194,17 +221,22 @@ def _render_consultation_transcript(
         lines.append("_No rounds were run._")
     for index, round_ in enumerate(rounds, start=1):
         panel = round_.critic_b_response is not None
-        planner_header = (
-            f"### Seeded-flaw fixture (`{canary_fixture.id}`)" if is_canary
-            else f"### Planner ({result.planner_model})"
+        planner_header = f"### Planner ({result.planner_model})"
+        if is_canary:
+            assert canary_fixture is not None
+            planner_header = f"### Seeded-flaw fixture (`{canary_fixture.id}`)"
+        critic_header = (
+            f"### Critic A ({result.critic_model})"
+            if panel
+            else f"### Critic ({result.critic_model})"
         )
-        critic_header = f"### Critic A ({result.critic_model})" if panel else f"### Critic ({result.critic_model})"
         lines.extend([
             f"## Round {index}", "", planner_header, "", round_.planner_proposal, "",
             critic_header, "", round_.critic_response, "",
         ])
-        if panel:
-            lines.extend(["### Critic B", "", round_.critic_b_response, ""])
+        critic_b_response = round_.critic_b_response
+        if critic_b_response is not None:
+            lines.extend(["### Critic B", "", critic_b_response, ""])
     return "\n".join(lines)
 
 

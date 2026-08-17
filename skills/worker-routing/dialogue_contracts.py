@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Pure VerdictContract parsing for AdvisoryConsultation.
 
 The consultation facade owns worker coordination, persistence, and telemetry;
@@ -17,7 +16,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from typing import Literal
-
 
 CRITIC_VERDICT_APPROVE = "VERDICT: APPROVE"
 CRITIC_VERDICT_REVISE = "VERDICT: REVISE"

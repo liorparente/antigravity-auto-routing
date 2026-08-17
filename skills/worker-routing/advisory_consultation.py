@@ -15,17 +15,12 @@ loop remains exercisable offline with a fake.
 from __future__ import annotations
 
 import dataclasses
-import fcntl
-import hashlib
 import importlib.util
 import json
-import os
 import re
 import secrets
 import sys
-import tempfile
 import threading
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,19 +32,7 @@ from typing import Literal
 # only for that path-loading mode, then make the same explicit re-export in
 # both cases so the facade's historical surface remains unchanged.
 try:
-    from dialogue_contracts import (
-        AdvisoryRoundVerdict,
-        CRITIC_VERDICT_APPROVE,
-        CRITIC_VERDICT_REVISE,
-        CriticVerdict,
-        VerdictContractResult,
-        _count_engagement_units,
-        _is_tolerant_revise,
-        _OBJECTION_LINE_PATTERN,
-        _parse_critic_verdict,
-        _QUOTE_LINE_PATTERN,
-        _split_off_verdict_line,
-    )
+    import dialogue_contracts as _dialogue_contracts
 except ModuleNotFoundError as exc:
     if exc.name != "dialogue_contracts":
         raise
@@ -57,41 +40,28 @@ except ModuleNotFoundError as exc:
         "dialogue_contracts", Path(__file__).with_name("dialogue_contracts.py")
     )
     assert _contracts_spec is not None and _contracts_spec.loader is not None
-    _contracts_module = importlib.util.module_from_spec(_contracts_spec)
-    sys.modules["dialogue_contracts"] = _contracts_module
-    _contracts_spec.loader.exec_module(_contracts_module)
-    from dialogue_contracts import (
-        AdvisoryRoundVerdict,
-        CRITIC_VERDICT_APPROVE,
-        CRITIC_VERDICT_REVISE,
-        CriticVerdict,
-        VerdictContractResult,
-        _count_engagement_units,
-        _is_tolerant_revise,
-        _OBJECTION_LINE_PATTERN,
-        _parse_critic_verdict,
-        _QUOTE_LINE_PATTERN,
-        _split_off_verdict_line,
-    )
+    _dialogue_contracts = importlib.util.module_from_spec(_contracts_spec)
+    sys.modules["dialogue_contracts"] = _dialogue_contracts
+    _contracts_spec.loader.exec_module(_dialogue_contracts)
+
+AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
+CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
+CRITIC_VERDICT_REVISE = _dialogue_contracts.CRITIC_VERDICT_REVISE
+CriticVerdict = _dialogue_contracts.CriticVerdict
+VerdictContractResult = _dialogue_contracts.VerdictContractResult
+_count_engagement_units = _dialogue_contracts._count_engagement_units
+_is_tolerant_revise = _dialogue_contracts._is_tolerant_revise
+_OBJECTION_LINE_PATTERN = _dialogue_contracts._OBJECTION_LINE_PATTERN
+_parse_critic_verdict = _dialogue_contracts._parse_critic_verdict
+_QUOTE_LINE_PATTERN = _dialogue_contracts._QUOTE_LINE_PATTERN
+_split_off_verdict_line = _dialogue_contracts._split_off_verdict_line
 
 # The facade remains importable both from installed skill directories and
 # through direct ``importlib`` file loading.  Mirror the contract-module
 # fallback so the extracted degradation policy keeps the facade's historic
 # exports available in either mode.
 try:
-    from dialogue_degradation import (
-        BUDGET_DEGRADATION_MARKER,
-        DEFAULT_SESSION_DIALOGUE_CAP,
-        DegradationLadderState,
-        DegradationRung,
-        _DEFAULT_DEGRADED_ROSTER_MODEL,
-        _DEGRADED_EFFORT,
-        _DEGRADED_ROUND_CAP,
-        _DEGRADATION_RUNG_LABELS,
-        _load_degraded_roster_model,
-        _load_dialogue_budget_config,
-        resolve_degradation_rung,
-    )
+    import dialogue_degradation as _dialogue_degradation
 except ModuleNotFoundError as exc:
     if exc.name != "dialogue_degradation":
         raise
@@ -99,32 +69,48 @@ except ModuleNotFoundError as exc:
         "dialogue_degradation", Path(__file__).with_name("dialogue_degradation.py")
     )
     assert _degradation_spec is not None and _degradation_spec.loader is not None
-    _degradation_module = importlib.util.module_from_spec(_degradation_spec)
-    sys.modules["dialogue_degradation"] = _degradation_module
-    _degradation_spec.loader.exec_module(_degradation_module)
-    from dialogue_degradation import (
-        BUDGET_DEGRADATION_MARKER,
-        DEFAULT_SESSION_DIALOGUE_CAP,
-        DegradationLadderState,
-        DegradationRung,
-        _DEFAULT_DEGRADED_ROSTER_MODEL,
-        _DEGRADED_EFFORT,
-        _DEGRADED_ROUND_CAP,
-        _DEGRADATION_RUNG_LABELS,
-        _load_degraded_roster_model,
-        _load_dialogue_budget_config,
-        resolve_degradation_rung,
-    )
+    _dialogue_degradation = importlib.util.module_from_spec(_degradation_spec)
+    sys.modules["dialogue_degradation"] = _dialogue_degradation
+    _degradation_spec.loader.exec_module(_dialogue_degradation)
+
+BUDGET_DEGRADATION_MARKER = _dialogue_degradation.BUDGET_DEGRADATION_MARKER
+DEFAULT_SESSION_DIALOGUE_CAP = _dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+DegradationLadderState = _dialogue_degradation.DegradationLadderState
+DegradationRung = _dialogue_degradation.DegradationRung
+_DEFAULT_DEGRADED_ROSTER_MODEL = _dialogue_degradation._DEFAULT_DEGRADED_ROSTER_MODEL
+_DEGRADED_EFFORT = _dialogue_degradation._DEGRADED_EFFORT
+_DEGRADED_ROUND_CAP = _dialogue_degradation._DEGRADED_ROUND_CAP
+_DEGRADATION_RUNG_LABELS = _dialogue_degradation._DEGRADATION_RUNG_LABELS
+_load_degraded_roster_model = _dialogue_degradation._load_degraded_roster_model
+_load_dialogue_budget_config = _dialogue_degradation._load_dialogue_budget_config
+resolve_degradation_rung = _dialogue_degradation.resolve_degradation_rung
 
 # Keep the facade-only names observably referenced while retaining the
 # module's historically broad import surface.  An ``__all__`` declaration
 # would narrow ``from advisory_consultation import *`` and be a compatibility
 # break; this tuple instead documents the explicit re-exports without doing
 # that.
+_CONTRACT_FACADE_EXPORTS = (
+    AdvisoryRoundVerdict,
+    CRITIC_VERDICT_REVISE,
+    CriticVerdict,
+    VerdictContractResult,
+    _count_engagement_units,
+    _is_tolerant_revise,
+    _OBJECTION_LINE_PATTERN,
+    _QUOTE_LINE_PATTERN,
+    _split_off_verdict_line,
+)
 _DEGRADATION_FACADE_EXPORTS = (
+    BUDGET_DEGRADATION_MARKER,
     DEFAULT_SESSION_DIALOGUE_CAP,
     DegradationLadderState,
+    DegradationRung,
     _DEFAULT_DEGRADED_ROSTER_MODEL,
+    _DEGRADED_EFFORT,
+    _DEGRADED_ROUND_CAP,
+    _DEGRADATION_RUNG_LABELS,
+    _load_degraded_roster_model,
     _load_dialogue_budget_config,
 )
 
@@ -632,7 +618,6 @@ def resolve_roster(
 # never needs to hand-copy the marker text to check for it — see the
 # acceptance criterion that a test asserting on transcript content must
 # find this, not just the structured record.
-DEGRADED_INDEPENDENCE_MARKER = "DEGRADED INDEPENDENCE"
 
 # Spec 0003 (CriticalDialogue) ticket 04: named once and reused by both
 # `run_advisory_consultation_debate` and the crash-recovery path inside
@@ -848,7 +833,6 @@ def is_canary_dialogue(
 # what a test greps for — same role `DEGRADED_INDEPENDENCE_MARKER` plays
 # for ticket 07's marker, and named/exported for the identical reason: a
 # caller never needs to hand-copy the marker text to check for it.
-CANARY_MARKER = "CANARY DIALOGUE"
 
 
 @dataclass(frozen=True)
@@ -1203,20 +1187,6 @@ def needs_post_mortem_consultation(
     return stalemate_occurred
 
 
-def _atomic_text_write(path: Path, content: str) -> None:
-    """Write text without exposing a partially-written plan artifact."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
 
 
 @dataclass(frozen=True)
@@ -1444,627 +1414,6 @@ def _fold_error(existing: str | None, addition: str | None) -> str | None:
     return f"{existing}; {addition}"
 
 
-def _default_task_id(task_description: str) -> str:
-    """Derive a stable task identity from `task_description` when the caller
-    supplied none.
-
-    A truncated SHA-256 hex digest, never the task text itself. This is the
-    default for every outcome except `sensitivity_halt` and `canary` — see
-    `_resolve_task_id` for why a halt and a canary each cannot use it, for
-    two distinct reasons: a digest, however non-reversible, is still a
-    confirmation oracle over guessable task text, and the redaction
-    boundary around a halt forbids anything derived from `task_description`
-    at all; a canary run, meanwhile, keeps the real `task_description`
-    (only the plan is substituted), so this same digest would collide with
-    the real mission's own task_id.
-    """
-    return hashlib.sha256(task_description.encode("utf-8")).hexdigest()[:16]
-
-
-def _resolve_task_id(
-    task_description: str, task_id: str | None, outcome: AdvisoryOutcome
-) -> str:
-    """Resolve the task identity `_result` emits to both artifacts for one outcome.
-
-    A caller-supplied `task_id` always wins, on every outcome: the caller
-    chose it, so it carries none of the risk a value this module derived
-    would. Absent one, every outcome but `sensitivity_halt` and `canary`
-    falls back to `_default_task_id` — a stable digest of
-    `task_description`, safe to reuse across runs of the same task.
-
-    `sensitivity_halt` is one outcome that must never fall back to that
-    digest: the module's redaction boundary (see `_detect_sensitivity_marker`
-    and `_render_sensitivity_halt_transcript`) promises nothing derived from
-    `task_description` escapes a halt, and a digest over guessable task text
-    is exactly the confirmation oracle that promise rules out. Its default is
-    instead a random identity, unrelated to the task text, generated fresh
-    per halt — an auditor can still count and correlate distinct halts
-    against their transcripts by this id, just not recover anything about
-    what was halted from it.
-
-    `canary` (spec 0003 ticket 08) is a second outcome that must never fall
-    back to that digest either, for a different reason: unlike a halt, a
-    canary run keeps the real `task_description` untouched (only the
-    Planner's plan is substituted for a fixture — see
-    `run_advisory_consultation_debate`'s `is_canary` docstring; the task
-    text is never redacted here). A digest-of-task-description default
-    would therefore resolve to the *exact same* `task_id` a real,
-    non-canary dialogue over that same task description already got (or
-    will get), silently colliding the two in any store keyed by `task_id`.
-    Any telemetry consumer that groups or joins by `task_id` alone — the
-    natural per-mission key, and exactly what spec 0004's
-    LearningJournal/scoreboard will do — would then fold a canary's
-    miss/catch into that mission's real event stream, which is precisely
-    what "a canary run never feeds a real mission's outcome" (this
-    function's own module, spec 0003's Implementation Decisions) forbids.
-    Its default is instead a random identity, unrelated to the task text,
-    generated fresh per canary run — the identical mechanism
-    `sensitivity_halt` already uses, reused here for a distinct reason
-    (collision avoidance with a real mission's task_id, not redaction of
-    sensitive text).
-    """
-    if task_id is not None:
-        return task_id
-    if outcome in ("sensitivity_halt", "canary"):
-        return secrets.token_hex(8)
-    return _default_task_id(task_description)
-
-
-def _render_consultation_transcript(
-    task_description: str,
-    result: AdvisoryDebateResult,
-    *,
-    canary_fixture: CanaryFixture | None = None,
-) -> str:
-    """Render the round-by-round transcript for every outcome except a halt.
-
-    Reached for every outcome except `sensitivity_halt` (see
-    `_render_sensitivity_halt_transcript` for that redacted counterpart), so
-    `task_description` and each round's full Planner/Critic text are fair
-    game here — that is the entire point of a transcript. Takes the already-
-    built `result` rather than its individual fields: `outcome`, `rounds`,
-    `planner_model`, and `critic_model` are its own field set, and threading
-    them through as a separate parameter clump would just re-derive what the
-    result object already carries.
-
-    `canary_fixture` (spec 0003 ticket 08) is `None` for every call site
-    that predates this ticket, which keeps every one of their rendered
-    transcripts byte-for-byte unchanged: the two blocks it controls below
-    (the `CANARY_MARKER` note and the fixture-labeled round header) are both
-    gated on `result.outcome == "canary" and canary_fixture is not None`,
-    so a normal run's transcript never mentions a fixture at all. Passed by
-    `_result` only for the one outcome that has a fixture to name.
-    """
-    rounds = result.rounds
-    is_canary_transcript = result.outcome == "canary" and canary_fixture is not None
-    lines = [
-        "# AdvisoryConsultation Transcript",
-        "",
-        f"**Outcome:** {result.outcome}",
-        f"**Planner:** {result.planner_model}",
-        f"**Critic:** {result.critic_model}",
-        f"**Rounds run:** {len(rounds)}",
-        "",
-    ]
-    # Spec 0003 (CriticalDialogue) ticket 07: only present when
-    # `result.degraded_independence` is True — never an always-rendered
-    # "Degraded independence: False" line — so a normal run's transcript
-    # never contains `DEGRADED_INDEPENDENCE_MARKER` at all, which is the
-    # literal acceptance criterion ("A normal ... run never carries the
-    # marker") a test can grep for with `assertNotIn`, not merely a falsy
-    # field a reader has to notice.
-    if result.degraded_independence:
-        lines.extend(
-            [
-                (
-                    f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could "
-                    "not achieve full cross-family independence — the "
-                    "effective roster assigns the same model family to more "
-                    "than one role, whether because the roster resolver was "
-                    "forced into family reuse by unavailability or because "
-                    "budget rung 2 substituted one cheap model into every "
-                    "seat. Treat this consultation's outcome with reduced "
-                    "confidence."
-                ),
-                "",
-            ]
-        )
-    # Spec 0003 (CriticalDialogue) ticket 08: only present for the one
-    # outcome that has a fixture to name, gated the same way
-    # `DEGRADED_INDEPENDENCE_MARKER` above is gated — never an
-    # always-rendered line, so a normal run's transcript never contains
-    # `CANARY_MARKER` at all. This is the acceptance criterion that a
-    # canary's telemetry/transcript record be "clearly marked as a canary,
-    # not a real mission outcome": an auditor filtering canaries out of
-    # real quality metrics (ticket 10's job) can grep the transcript for
-    # this exact marker, not merely notice `outcome == "canary"` in isolation.
-    if is_canary_transcript:
-        assert canary_fixture is not None  # narrows for the type checker
-        lines.extend(
-            [
-                (
-                    f"**{CANARY_MARKER}:** This dialogue reviewed a seeded-flaw "
-                    f"fixture (`{canary_fixture.id}`), not a real mission "
-                    "artifact. No Planner was invoked, and no plan/diff "
-                    "artifact was written. This is a pure measurement probe "
-                    "and must never be folded into a real mission's "
-                    "consensus or stalemate outcome.\n\n"
-                    f"Seeded flaw: {canary_fixture.flaw_summary}\n\n"
-                    f"Critic result: **{result.canary_result}** "
-                    + (
-                        "(approved the flawed fixture)."
-                        if result.canary_result == "miss"
-                        else "(did not approve the flawed fixture)."
-                    )
-                ),
-                "",
-            ]
-        )
-    # Spec 0003 (CriticalDialogue) ticket 09: only present when
-    # `result.degradation_rung > 0` — never an always-rendered "rung 0"
-    # line — gated the same way `DEGRADED_INDEPENDENCE_MARKER` and
-    # `CANARY_MARKER` are above, so an un-degraded run's transcript never
-    # contains `BUDGET_DEGRADATION_MARKER` at all. Shown for every degraded
-    # rung, not only the skip rung: a rung-1 or rung-2 dialogue still ran,
-    # but it ran under degradation, and this line is what makes that
-    # visible to a reader of the transcript, not only to a reader of the
-    # structured telemetry record.
-    if result.degradation_rung > 0:
-        lines.extend(
-            [
-                (
-                    f"**{BUDGET_DEGRADATION_MARKER}:** This session's dialogue "
-                    f"budget was met or exceeded, placing this dialogue at "
-                    f"degradation rung {result.degradation_rung} "
-                    f"({_DEGRADATION_RUNG_LABELS[result.degradation_rung]}). "
-                    "Degradation is never silent — see this dialogue's "
-                    "telemetry record's `degradation_rung` field."
-                ),
-                "",
-            ]
-        )
-    lines.extend(
-        [
-            "## Task",
-            "",
-            task_description,
-            "",
-        ]
-    )
-    if result.outcome == "budget_skipped":
-        lines.append(
-            "_No Planner or Critic was contacted for this dialogue: the "
-            "session's budget was fully exhausted before this call could "
-            "run. This report exists so the caller never silently receives "
-            '"no dialogue happened" with no trace._'
-        )
-    elif not rounds:
-        lines.append("_No rounds were run._")
-    for index, round_ in enumerate(rounds, start=1):
-        # `critic_b_response is not None` is exactly `AdvisoryDebateRound`'s
-        # own pair-vs-panel discriminant (see its docstring): a pair-mode
-        # round leaves this branch untaken, so its rendered output — the
-        # `### Critic (...)` header and nothing after the sole response — is
-        # byte-identical to every transcript this function rendered before
-        # panel mode existed (spec 0003 ticket 05). A panel-mode round gets a
-        # second, plainly-labeled section for Critic B; giving Critic B's
-        # header a model name to match Critic A's requires a field this
-        # ticket deliberately does not add to `AdvisoryDebateResult` — see
-        # the ticket's report for why that is ticket 10's job, not this one's.
-        is_panel_round = round_.critic_b_response is not None
-        critic_a_header = (
-            f"### Critic A ({result.critic_model})"
-            if is_panel_round
-            else f"### Critic ({result.critic_model})"
-        )
-        # A canary round's "proposal" is a fixture, not a Planner's work —
-        # labeling it "### Planner (...)" would misstate that the Planner
-        # (still shown, unhelpfully, in `result.planner_model`) produced
-        # this text, when it was in fact never invoked. Every other outcome
-        # keeps the original header unchanged.
-        planner_header = (
-            f"### Seeded-flaw fixture (`{canary_fixture.id}`)"
-            if is_canary_transcript and canary_fixture is not None
-            else f"### Planner ({result.planner_model})"
-        )
-        lines.extend(
-            [
-                f"## Round {index}",
-                "",
-                planner_header,
-                "",
-                round_.planner_proposal,
-                "",
-                critic_a_header,
-                "",
-                round_.critic_response,
-                "",
-            ]
-        )
-        if round_.critic_b_response is not None:
-            lines.extend(
-                [
-                    "### Critic B",
-                    "",
-                    round_.critic_b_response,
-                    "",
-                ]
-            )
-    return "\n".join(lines)
-
-
-def _render_sensitivity_halt_transcript(marker: str, task_id: str) -> str:
-    """Render the redacted transcript written on a `sensitivity_halt`.
-
-    The redaction boundary documented on `_detect_sensitivity_marker`: nothing
-    derived from the task text may appear here, only the matched marker
-    constant, the halt's `task_id`, and the fact that human approval is
-    required. `marker` is required, not optional: a halt with no marker to
-    report is a programming error inside this module (the only call site
-    only reaches this function when `_detect_sensitivity_marker` already
-    found one), so it must be impossible to construct this transcript with
-    nothing to blame the halt on rather than silently rendering an empty
-    explanation. `task_id` is included so this transcript and the
-    `sensitivity_halt` telemetry record for the same halt can be correlated
-    by an auditor — see `_resolve_task_id`.
-    """
-    return "\n".join(
-        [
-            "# AdvisoryConsultation Transcript",
-            "",
-            "**Outcome:** sensitivity_halt",
-            f"**Task ID:** {task_id}",
-            "",
-            (
-                f"Task text matched sensitivity marker `{marker}`. Human approval "
-                "is required before this task may proceed."
-            ),
-            "",
-            "No Planner or Critic was contacted. No task details are recorded here.",
-        ]
-    )
-
-
-def _write_transcript(path: Path, content: str) -> str | None:
-    """Write the transcript fresh (never appended) so a stale transcript from
-    an earlier run can never survive. Failure is reported, never raised."""
-    try:
-        _atomic_text_write(path, content)
-    except OSError as exc:
-        return f"failed to write consultation transcript at {path}: {exc}"
-    return None
-
-
-def _append_jsonl_locked(path: Path, record: dict[str, object]) -> None:
-    """Append one JSON record to `path` under an exclusive advisory lock.
-
-    Mirrors `agent_council.append_jsonl_locked` rather than importing it:
-    importing `agent_council` would pull `urllib.request`, `asyncio`, and its
-    own `fcntl` usage into a module whose docstring promises offline
-    exercisability, and these files are loaded by path rather than as a
-    package (see the identical precedent on `SENSITIVITY_MARKERS`).
-    `test_routing.py` asserts this writes to the same path
-    `AgentCouncil.telemetry_file` uses AND that the two writers produce
-    byte-identical output for the same record, so neither the log path nor
-    the record encoding (`sort_keys`, the trailing newline) can silently
-    drift apart from that precedent. The lock semantics (`fcntl.flock`
-    itself) are NOT covered by that or any other test — a byte comparison
-    of the two output files cannot observe locking behaviour.
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(record, sort_keys=True) + "\n"
-    with open(path, "a", encoding="utf-8") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
-        try:
-            stream.write(line)
-            stream.flush()
-        finally:
-            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
-
-
-@dataclass(frozen=True)
-class AdvisoryTelemetryRecord:
-    """The one structured telemetry record a consultation emits.
-
-    A dataclass, like every other concept in this module, rather than a bare
-    mapping — the dataclass is what carries the field contract; `to_mapping`
-    is just its JSON-serialisable wire form for `_append_jsonl_locked`.
-    Carries only the derived/supplied task identity — never task text or a
-    matched secret value — alongside the run's shape and outcome: a
-    timestamp, rounds run, outcome, both model names, the
-    record-discriminating `kind`, and the per-ticket extensions each
-    documented in its own paragraph below (`degraded_independence`,
-    `canary_result`, `degradation_rung`, `occasion`, `topology`,
-    `round_verdicts`), so an auditor can tell which decisions were genuinely
-    deliberated without the log becoming a second place secrets can leak
-    from.
-
-    `kind` is the field that makes Spec 0001 US 12 joinable: both
-    `AgentCouncil` and this module append to the same
-    `.ralph/routing_telemetry.jsonl` stream, and this is the only field that
-    tells the two record families apart. It is deliberately one-sided — a
-    council record carries no `kind` at all, rather than a matching
-    `"council_decision"` value — because `agent_council.log_routing_telemetry`'s
-    record shape is asserted by its own tests and is off-limits for this
-    module to change. An auditor reads the absence of `kind` as "council
-    decision"; do not "helpfully" normalise that asymmetry away later by
-    adding the field to both sides, or the join breaks.
-
-    `degraded_independence` (spec 0003 ticket 07) is appended after `kind`,
-    last in field order — the same append-only rule `AdvisoryDebateResult`
-    documents on its own `degraded_independence` field, which is this
-    field's sole source: `_build_telemetry_record` copies
-    `result.degraded_independence` verbatim, never re-derives it. This is
-    deliberately a minimal, additive field rather than an attempt to
-    anticipate ticket 10's full telemetry-extension scope (occasion,
-    topology, per-round verdict sequence, engagement-unit counts, and a
-    general degradation-flags field for the budget ladder ticket 09 adds) —
-    this ticket's acceptance criteria require only that the
-    degraded-independence marker itself reach the telemetry record, not
-    that this record anticipate every later ticket's shape. Ticket 10
-    extends this record further; this field is what it has to build on for
-    this one signal.
-
-    `canary_result` (spec 0003 ticket 08) is appended after
-    `degraded_independence`, last, by the same rule and for the same
-    reason: ticket 08's own acceptance criteria require a canary
-    miss/catch to be "observable in telemetry", so this one field is added
-    now rather than deferred wholesale to ticket 10 — it is copied
-    verbatim from `result.canary_result` (`None` for every non-canary
-    outcome), exactly the same "copy, never re-derive" contract
-    `degraded_independence` already set. Ticket 10 still owns the richer
-    canary-adjacent telemetry the spec's Telemetry paragraph also lists
-    (e.g. which fixture id produced a given result) — this field is only
-    the miss/catch signal itself.
-
-    `degradation_rung` (spec 0003 ticket 09) is appended after
-    `canary_result`, last, by the same append-only rule and for the same
-    reason: this ticket's own acceptance criterion ("Each rung transition
-    emits its own telemetry record distinguishable from a normal run")
-    needs exactly one thing on this record that a normal run's telemetry
-    never carries — a nonzero rung. Copied verbatim from
-    `result.degradation_rung`, the same "copy, never re-derive" contract
-    `degraded_independence` and `canary_result` already set; defaults to
-    `0`, so every pre-ticket-09 construction of this dataclass — in this
-    module and in tests — that never mentions it keeps meaning exactly what
-    it meant before this field existed.
-
-    `occasion`, `topology`, and `round_verdicts` (spec 0003 ticket 10) close
-    out the telemetry-extension scope every field above already anticipated.
-    All three are appended last, by the identical append-only rule, and all
-    three are copied verbatim from `AdvisoryDebateResult`'s own
-    same-named fields by `_build_telemetry_record` — never re-derived here,
-    the same "copy, never re-derive" contract `degraded_independence`,
-    `canary_result`, and `degradation_rung` already set.
-
-    `occasion` defaults to `"ambiguity"`, mirroring
-    `AdvisoryDebateResult.occasion`'s own default (ticket 01) — it was
-    carried on the result from ticket 01 onward but never reached this
-    record until now.
-
-    `topology` defaults to `"pair"`, mirroring
-    `AdvisoryDebateResult.topology`'s own default — see that field's
-    docstring for the canary reassignment rule this record inherits
-    verbatim by copying it.
-
-    `round_verdicts` defaults to `()`, mirroring
-    `AdvisoryDebateResult.round_verdicts`'s own default and its
-    parallel-with-`rounds` invariant — see that field's docstring. Each
-    element is an `AdvisoryRoundVerdict`, itself wrapping one or two
-    `VerdictContractResult`s (a verdict label plus two integers); no plan
-    or critique prose and no task text ever appears in any element, which
-    is what keeps this field inside the same redaction boundary this
-    record's own opening paragraph already documents — see also
-    `AdvisoryTelemetryExtensionsTests.test_round_verdicts_carry_no_substring_of_a_distinctive_task_description`
-    in `test_routing.py`, ticket 10's redaction proof for this field
-    specifically.
-
-    WARNING for any future telemetry consumer aggregating `round_verdicts`
-    across records (spec 0004's LearningJournal/scoreboard, most likely):
-    a canary run's `round_verdicts` entry is structurally indistinguishable
-    from a real dialogue's — same `AdvisoryRoundVerdict` shape, same
-    `VerdictContractResult` fields, no marker of its own. `outcome` on this
-    same record is the only discriminator; a consumer MUST filter on
-    `outcome != "canary"` before aggregating or scoring this field, or a
-    canary's forced verdict silently blends into real-mission statistics.
-    This is the identical risk shape `_resolve_task_id` already had to
-    close for `task_id` (spec 0003 ticket 08: a canary keeps the real
-    `task_description`, so a naive digest default would collide with a
-    real mission's own `task_id` in any store keyed by it) — same
-    "a canary run never feeds a real mission's outcome" invariant, same
-    kind of silent-blend failure mode, just on a different field.
-    """
-
-    timestamp: str
-    task_id: str
-    rounds_run: int
-    outcome: AdvisoryOutcome
-    planner_model: str
-    critic_model: str
-    kind: str = "advisory_consultation"
-    degraded_independence: bool = False
-    canary_result: CanaryResult | None = None
-    degradation_rung: DegradationRung = 0
-    occasion: Occasion = "ambiguity"
-    topology: RosterTopology = "pair"
-    round_verdicts: tuple[AdvisoryRoundVerdict, ...] = ()
-
-    def to_mapping(self) -> dict[str, object]:
-        """The JSON-serialisable wire form `_write_telemetry_record` writes.
-
-        `dataclasses.asdict` rather than a hand-enumerated dict: a
-        hand-enumerated field list is exactly the kind of duplication this
-        module refuses everywhere else (see `SENSITIVITY_MARKERS` and
-        `_append_jsonl_locked`) unless a test pins it against drift — asdict
-        removes the duplication instead of needing that guard. Field order
-        does not matter: `_append_jsonl_locked` writes with `sort_keys=True`.
-        """
-        return dataclasses.asdict(self)
-
-
-def _reduce_dialogue_round(entry: AdvisoryRoundVerdict) -> tuple[CriticVerdict, int]:
-    """Reduce one round's Critic verdict(s) to the single (verdict, engagement
-    count) pair `learning_journal.DialogueRound` carries.
-
-    The rule itself — verified quotes only, `min` across a panel's Critics — is
-    stated in full on `learning_journal.DialogueRound.engagement_count`, which
-    is where a reader of the schema meets it. It is deliberately not restated
-    here: one authority, not two that can drift apart.
-
-    The verdict half mirrors this module's own panel control flow exactly
-    rather than forming a second opinion about it: either Critic unparseable
-    ends the round unparseable (see the round loop's `unparseable` check),
-    both approved is approved, and every other combination is a revision.
-    """
-    results = [entry.critic_a] if entry.critic_b is None else [entry.critic_a, entry.critic_b]
-    verdicts = [result.verdict for result in results]
-    if "unparseable" in verdicts:
-        verdict: CriticVerdict = "unparseable"
-    elif all(item == "approved" for item in verdicts):
-        verdict = "approved"
-    else:
-        verdict = "revise"
-    return verdict, min(result.verified_quote_count for result in results)
-
-
-def _build_telemetry_record(
-    result: AdvisoryDebateResult, *, task_id: str
-) -> AdvisoryTelemetryRecord:
-    """Build the one telemetry record a consultation emits.
-
-    Takes the already-built `result` rather than its individual fields, for
-    the same reason `_render_consultation_transcript` does: all ten copied
-    fields — `rounds_run`, `outcome`, `planner_model`, `critic_model`,
-    `degraded_independence`, `canary_result`, `degradation_rung`,
-    `occasion`, `topology`, and `round_verdicts` — are the result's own
-    field set, copied verbatim, never re-derived. `task_id` is passed
-    separately because it genuinely isn't — the result carries no task
-    identity, by design (see `AdvisoryDebateResult` and `_resolve_task_id`).
-    """
-    return AdvisoryTelemetryRecord(
-        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        task_id=task_id,
-        rounds_run=result.rounds_run,
-        outcome=result.outcome,
-        planner_model=result.planner_model,
-        critic_model=result.critic_model,
-        degraded_independence=result.degraded_independence,
-        canary_result=result.canary_result,
-        degradation_rung=result.degradation_rung,
-        occasion=result.occasion,
-        topology=result.topology,
-        round_verdicts=result.round_verdicts,
-    )
-
-
-def _write_telemetry_record(path: Path, record: AdvisoryTelemetryRecord) -> str | None:
-    """Render `record` to its wire form and write it. Failure is reported, never raised."""
-    try:
-        _append_jsonl_locked(path, record.to_mapping())
-    except OSError as exc:
-        return f"failed to write consultation telemetry at {path}: {exc}"
-    return None
-
-
-def _write_dialogue_quality_record(
-    result: AdvisoryDebateResult, *, task_id: str, run_id: str | None, root_dir: Path
-) -> str | None:
-    """Append this dialogue's one `learning_journal.DialogueQualityRecord`.
-
-    Best-effort, exactly like `_write_telemetry_record` and
-    `routing_check._persist_compliance_record`: returns `None` on success and
-    an error string on failure, and never raises. Two independent failures fold
-    into that one string — a record that cannot be *built* (a caller-supplied
-    `task_id` the journal's identifier pattern refuses, or `learning_journal`
-    missing from an installation) and a disk that cannot be *written*. From the
-    consultation's point of view they are one fact: instrumentation must never
-    displace or fail the dialogue it merely observes.
-
-    `import learning_journal` is local for the reason
-    `routing_check._persist_compliance_record`'s is: an installation missing
-    the module degrades to a reported error rather than an ImportError at
-    module load. `install.sh` does propagate it, and
-    `ManagedFileClosureTests` reads this import out of the AST to keep that
-    true.
-
-    Every field is copied from `result`, never re-derived — the same contract
-    `_build_telemetry_record` documents. Note the two deliberate translations:
-    `independent` is the *negation* of `degraded_independence` (the journal
-    names both flags for their healthy state), and `degraded` is "the budget
-    ladder degraded this call at all", i.e. a nonzero rung.
-
-    `canaries_planted` keys on `result.canary_result`, not on the caller's
-    `is_canary` argument: a canary that never reached a verdict (a worker
-    error, a rung-3 preemption) planted nothing a Critic ever saw, and
-    counting it would put a probe that never ran into the catch rate's
-    denominator. It also carries no round, so it cannot reach an engagement
-    statistic either way.
-    """
-    try:
-        import learning_journal
-
-        record = learning_journal.DialogueQualityRecord(
-            task=learning_journal.TaskLabel.for_task(task_id),
-            occasion=result.occasion,
-            topology=result.topology,
-            rounds=tuple(
-                learning_journal.DialogueRound(*_reduce_dialogue_round(entry))
-                for entry in result.round_verdicts
-            ),
-            canaries_planted=1 if result.canary_result is not None else 0,
-            canaries_caught=1 if result.canary_result == "catch" else 0,
-            degraded=result.degradation_rung != 0,
-            independent=not result.degraded_independence,
-            run_id=run_id,
-        )
-    except (ImportError, ValueError) as exc:
-        return f"failed to build dialogue-quality record: {exc}"
-    return learning_journal.append_journal_record(record, root_dir=root_dir)
-
-
-def _write_plan_outcome_record(
-    *, task_id: str, accepted: bool, run_id: str | None, root_dir: Path
-) -> str | None:
-    """Record this consultation's own ground truth: was the plan it produced accepted?
-
-    Best-effort, like `_write_dialogue_quality_record` immediately above:
-    returns `None` on success and an error string on failure, never raises,
-    and folds a construction failure (an ill-formed `task_id`) and a write
-    failure into that one string — from the consultation's point of view
-    they are one fact, an instrumentation problem that must never become the
-    dialogue's own outcome.
-
-    The error boundary here is wider than that function's, and the
-    difference is not incidental. `_write_dialogue_quality_record` builds its
-    own record, so it can keep `append_journal_record` outside the `try` and
-    catch construction alone. This one goes through
-    `learning_outcomes.record_plan_outcome`, whose entire purpose (ticket 14)
-    is that no caller builds a `TaskLabel` or imports `learning_journal` —
-    so construction and append arrive as a single call and are necessarily
-    caught as one. The consequence is that a `ValueError` raised on the write
-    path is folded here where the precedent above would let it escape. That
-    is the safer direction for a writer whose whole contract is that it never
-    aborts what it observes, which is why this is deliberately not a verbatim
-    copy of the function it otherwise follows.
-
-    `import learning_outcomes` is local for the same reason
-    `_write_dialogue_quality_record`'s `import learning_journal` is: an
-    installation missing the module degrades to a reported error rather than
-    an `ImportError` at module load, and `install.sh` propagates the module
-    so this is a defensive fallback, not the expected path.
-
-    Ticket 25: unlike the dialogue-quality write, this one does not fire for
-    every non-halted outcome — see the two call sites below for which
-    outcomes state a plan verdict at all and why.
-    """
-    try:
-        import learning_outcomes
-
-        return learning_outcomes.record_plan_outcome(
-            task_id, accepted=accepted, run_id=run_id, root_dir=root_dir
-        )
-    except (ImportError, ValueError) as exc:
-        return f"failed to record plan outcome: {exc}"
 
 
 # Transcript persistence is intentionally a sibling module.  Keep these
@@ -2085,6 +1434,9 @@ except ModuleNotFoundError as exc:
     _transcript_spec.loader.exec_module(_dialogue_transcript)
 
 ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
+DEGRADED_INDEPENDENCE_MARKER = _dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER
+CANARY_MARKER = _dialogue_transcript.CANARY_MARKER
+_atomic_text_write = _dialogue_transcript._atomic_text_write
 AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
 _default_task_id = _dialogue_transcript._default_task_id
 _resolve_task_id = _dialogue_transcript._resolve_task_id

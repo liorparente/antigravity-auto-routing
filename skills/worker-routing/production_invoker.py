@@ -82,7 +82,8 @@ class AsyncWorkerProcess(Protocol):
     not subclass an object the real event loop constructs.
     """
 
-    returncode: int | None
+    @property
+    def returncode(self) -> int | None: ...
 
     async def communicate(self) -> tuple[bytes, bytes]: ...
 

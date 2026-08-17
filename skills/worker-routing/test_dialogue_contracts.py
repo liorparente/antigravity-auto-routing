@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Focused, hermetic tests for the pure VerdictContract parser."""
 from __future__ import annotations
 
@@ -6,7 +5,6 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
-
 
 MODULE_PATH = Path(__file__).with_name("dialogue_contracts.py")
 SPEC = importlib.util.spec_from_file_location("dialogue_contracts", MODULE_PATH)

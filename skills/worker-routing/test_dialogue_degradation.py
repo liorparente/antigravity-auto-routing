@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Focused, hermetic tests for the dialogue budget degradation policy."""
 from __future__ import annotations
 
@@ -9,7 +8,6 @@ import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-
 
 MODULE_PATH = Path(__file__).with_name("dialogue_degradation.py")
 SPEC = importlib.util.spec_from_file_location("dialogue_degradation", MODULE_PATH)

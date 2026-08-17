@@ -4,10 +4,10 @@
 
 **Blocked by:** 03 — Extract Transcript Formatting & Telemetry Reporting (Slice 3).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Clean up `advisory_consultation.py`, ensuring it acts purely as a coordinator of the multi-round debate lifecycle.
-- [ ] Verify that internal complexity is dramatically reduced while retaining full public API compatibility.
-- [ ] Run full test suite (`python3 -m unittest skills/worker-routing/test_routing.py`) and ensure 100% green.
-- [ ] Run linters (`ruff check skills/worker-routing/`) and strict type-checker (`mypy skills/worker-routing/`).
-- [ ] Run `./install.sh .` to synchronize AGENTS.md, CLAUDE.md, and harness skill links.
+- [x] Clean up `advisory_consultation.py`, ensuring it acts purely as a coordinator of the multi-round debate lifecycle.
+- [x] Verify that internal complexity is dramatically reduced while retaining full public API compatibility.
+- [x] Run full test suite (`python3 -m unittest skills/worker-routing/test_routing.py`) and ensure 100% green.
+- [x] Run linters (`ruff check skills/worker-routing/`) and strict type-checker (`mypy skills/worker-routing/`).
+- [x] Run `./install.sh .` to synchronize AGENTS.md, CLAUDE.md, and harness skill links.
