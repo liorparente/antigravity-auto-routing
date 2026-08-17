@@ -24,14 +24,14 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from dialogue_contracts import AdvisoryRoundVerdict as _AdvisoryRoundVerdict
     from dialogue_degradation import DegradationRung as _DegradationRung
 
 
-def _load_sibling(name: str):
+def _load_sibling(name: str) -> Any:
     try:
         return __import__(name)
     except ModuleNotFoundError as exc:

@@ -21,10 +21,10 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 
-def _load_sibling(name: str):
+def _load_sibling(name: str) -> Any:
     """Load a sibling module when this file was imported directly by path."""
     try:
         return __import__(name)
