@@ -18,8 +18,10 @@ jobs:
         skills/worker-routing/test_routing.py
         skills/worker-routing/agent_council.py
         skills/worker-routing/dialogue_contracts.py
+        skills/worker-routing/dialogue_degradation.py
         skills/worker-routing/advisory_consultation.py
         skills/worker-routing/test_dialogue_contracts.py
+        skills/worker-routing/test_dialogue_degradation.py
         skills/worker-routing/learning_journal.py
         skills/worker-routing/production_invoker.py
         skills/worker-routing/test_production_invoker.py
@@ -51,6 +53,7 @@ jobs:
       PYTHON_TESTS: >-
         skills/worker-routing/test_routing.py
         skills/worker-routing/test_dialogue_contracts.py
+        skills/worker-routing/test_dialogue_degradation.py
         skills/worker-routing/test_production_invoker.py
         skills/worker-routing/test_learning_scoreboard.py
         skills/worker-routing/test_learning_report.py

@@ -74,6 +74,60 @@ except ModuleNotFoundError as exc:
         _split_off_verdict_line,
     )
 
+# The facade remains importable both from installed skill directories and
+# through direct ``importlib`` file loading.  Mirror the contract-module
+# fallback so the extracted degradation policy keeps the facade's historic
+# exports available in either mode.
+try:
+    from dialogue_degradation import (
+        BUDGET_DEGRADATION_MARKER,
+        DEFAULT_SESSION_DIALOGUE_CAP,
+        DegradationLadderState,
+        DegradationRung,
+        _DEFAULT_DEGRADED_ROSTER_MODEL,
+        _DEGRADED_EFFORT,
+        _DEGRADED_ROUND_CAP,
+        _DEGRADATION_RUNG_LABELS,
+        _load_degraded_roster_model,
+        _load_dialogue_budget_config,
+        resolve_degradation_rung,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "dialogue_degradation":
+        raise
+    _degradation_spec = importlib.util.spec_from_file_location(
+        "dialogue_degradation", Path(__file__).with_name("dialogue_degradation.py")
+    )
+    assert _degradation_spec is not None and _degradation_spec.loader is not None
+    _degradation_module = importlib.util.module_from_spec(_degradation_spec)
+    sys.modules["dialogue_degradation"] = _degradation_module
+    _degradation_spec.loader.exec_module(_degradation_module)
+    from dialogue_degradation import (
+        BUDGET_DEGRADATION_MARKER,
+        DEFAULT_SESSION_DIALOGUE_CAP,
+        DegradationLadderState,
+        DegradationRung,
+        _DEFAULT_DEGRADED_ROSTER_MODEL,
+        _DEGRADED_EFFORT,
+        _DEGRADED_ROUND_CAP,
+        _DEGRADATION_RUNG_LABELS,
+        _load_degraded_roster_model,
+        _load_dialogue_budget_config,
+        resolve_degradation_rung,
+    )
+
+# Keep the facade-only names observably referenced while retaining the
+# module's historically broad import surface.  An ``__all__`` declaration
+# would narrow ``from advisory_consultation import *`` and be a compatibility
+# break; this tuple instead documents the explicit re-exports without doing
+# that.
+_DEGRADATION_FACADE_EXPORTS = (
+    DEFAULT_SESSION_DIALOGUE_CAP,
+    DegradationLadderState,
+    _DEFAULT_DEGRADED_ROSTER_MODEL,
+    _load_dialogue_budget_config,
+)
+
 MAX_DEBATE_ROUNDS = 3
 
 # Mirrors `agent_council.ESCALATION_FAILURE_THRESHOLD` rather than importing
@@ -795,235 +849,6 @@ def is_canary_dialogue(
 # for ticket 07's marker, and named/exported for the identical reason: a
 # caller never needs to hand-copy the marker text to check for it.
 CANARY_MARKER = "CANARY DIALOGUE"
-
-
-# Spec 0003 (CriticalDialogue) ticket 09: the per-session dialogue budget
-# and its ordered degradation ladder ("Budget" paragraph, Implementation
-# Decisions: "On exhaustion, an ordered degradation ladder applies: reduce
-# rounds, then cheapen the roster, then skip the dialogue entirely with a
-# report. Every rung taken emits a telemetry record — degradation is never
-# silent.").
-#
-# **Unit of spend.** This module holds no session state — same philosophy
-# ticket 07's `reachability_check` and ticket 08's `is_canary_dialogue`
-# already established (see their own comments: a scheduler or a budget
-# ledger belongs to whatever orchestrates a session, not to a module that
-# promises full offline, stateless exercisability). `session_spend_so_far`
-# (on `run_advisory_consultation_debate`, threaded to `resolve_degradation_rung`
-# below) is a plain caller-tracked integer counter: the number of
-# `run_advisory_consultation_debate` calls the current session has already
-# made *before* this one, not rounds, not tokens, not dollars. Counting
-# dialogues rather than rounds or a cost estimate is the simplest unit that
-# is still faithful to the spec's own phrase, "per-session dialogue
-# budget" — a dialogue is the thing being budgeted, so a dialogue is what
-# is counted. A caller that also wants rounds or cost reflected in its
-# session-wide accounting is free to compute its own `session_spend_so_far`
-# from a richer formula (e.g. weighting a panel dialogue more than a pair
-# one) before passing it in; this module only consumes the final integer,
-# it does not prescribe how a caller arrives at it.
-#
-# **The ladder's thresholds.** `resolve_degradation_rung` reads exactly one
-# config number — `dialogue_budget.session_dialogue_cap` (the "numeric cap"
-# the ticket calls for) — and divides `session_spend_so_far` into four
-# bands, each exactly one cap's width wide: under one cap is rung 0 (no
-# degradation), one to two caps is rung 1 (reduce rounds), two to three caps
-# is rung 2 (cheapen roster/effort), three or more caps is rung 3 (skip
-# entirely). Multiples of the cap itself, rather than independently
-# configured per-rung thresholds, are deliberately chosen: they need no
-# extra config surface beyond the one number the ticket asks for, and they
-# read as a legible story — crossing the budget once is a mild overrun
-# (reduce rounds), crossing it twice is a serious overrun (cheapen further),
-# crossing it three times over is exhausted (stop spending, report instead).
-# A `session_dialogue_cap` of zero degenerates cleanly to "always rung 3"
-# for any `session_spend_so_far >= 0` (every band's upper bound is also
-# zero, so every comparison falls through to the final `return 3`) — a
-# session with no budget at all has no room for any dialogue, which is the
-# correct reading, not a special case this function needs to guard against.
-DegradationRung = Literal[0, 1, 2, 3]
-
-DEFAULT_SESSION_DIALOGUE_CAP = 10
-
-# **What each rung concretely does**, wired into `run_advisory_consultation_debate`:
-#
-# - Rung 1 reassigns the local `max_rounds` down to
-#   `_DEGRADED_ROUND_CAP` (below) — a single round: either the Planner's
-#   first proposal earns the Critic's approval immediately, or the
-#   dialogue reports a stalemate on round 1 rather than paying for up to
-#   `MAX_DEBATE_ROUNDS` of back-and-forth. One round, not two, is chosen
-#   because it is the simplest, least ambiguous reduction: any cap above 1
-#   still buys another full revision exchange, which is not "reduced," it
-#   is merely "slightly cheaper," and the ticket's own language ("reduce
-#   rounds") does not ask for a slightly-cheaper dialogue, it asks for a
-#   cheaper ladder rung that is visibly, structurally different from an
-#   un-degraded run.
-# - Rung 2 additionally (rungs compound — see below) reassigns
-#   `planner_effort`, `critic_effort`, `critic_a_effort`, and
-#   `critic_b_effort` down to `_DEGRADED_EFFORT`, AND reassigns
-#   `planner_model`/`critic_model`/`critic_a_model`/`critic_b_model` to the
-#   single model named by `_load_degraded_roster_model` (below) — the
-#   ticket's own "What to build" prose is specific ("cheapen the roster
-#   (e.g. fall back toward lighter/local families)"), so effort alone
-#   under-delivers against it; a "roster" is model/family assignment
-#   everywhere else in this module (`resolve_roster`, ticket 07), and rung
-#   2 now actually touches that, not only effort. This is still a config
-#   read plus a substitution, not a new resolver: `resolve_roster` (ticket
-#   07) has no "prefer the cheapest reachable family" bias to opt into —
-#   it only ever tries to maximize *independence* across roles, never cost
-#   — and building that bias into it would be new roster-resolution
-#   infrastructure this ticket does not need to invent. Reusing
-#   `routing-config.json`'s existing `light_doer` role block instead is the
-#   same "config-driven substitution" shape ticket 08 already uses for
-#   canary fixture substitution. Every role gets the *same* single cheap
-#   model at this rung, deliberately — rung 2 exists to cut cost, and a
-#   shared cheap model does that — but one model in every seat collapses
-#   the roster to a single family by construction, and that collapse is
-#   reported, never silent: the substitution site sets
-#   `degraded_independence` exactly as `resolve_roster` does when it is
-#   forced into family reuse (spec 0003 story 14 — a same-family fallback
-#   must be visible in telemetry and transcript, whatever mechanism
-#   caused it). Rung 2 is not asked to *preserve* independence — cutting
-#   cost is allowed to lose it — but it must not misreport losing it: a
-#   rung-2 dialogue is one model reviewing its own plan, the exact
-#   self-preference hazard the degraded-independence marker exists to
-#   surface, and an auditor filtering on that flag must see rung-2
-#   dialogues too, not only the roster resolver's own degraded
-#   assignments.
-# - Rung 3 ends the call entirely, before roster resolution, before a
-#   canary check, before any `invoke_worker` call — see the
-#   `"budget_skipped"` outcome and `run_advisory_consultation_debate`'s own
-#   budget-ladder block.
-#
-# The three rungs compound rather than replace one another (rung 2 keeps
-# rung 1's round reduction as well as adding its own effort reduction): a
-# ladder is a progressively worsening state, not three mutually exclusive
-# single-feature toggles, and a caller deep enough into overspend to reach
-# rung 2 should not regain the round budget rung 1 already took away.
-_DEGRADED_ROUND_CAP = 1
-_DEGRADED_EFFORT = "low"
-
-
-def _load_dialogue_budget_config(config_path: Path) -> int:
-    """Read the session dialogue cap from `config_path`'s `dialogue_budget`
-    section, falling back to `DEFAULT_SESSION_DIALOGUE_CAP` when the section
-    (or its one key) is absent — same pattern, including the no-try/except
-    contract, as `_load_canary_cadence_config` and `_load_roster_fallback_chains`
-    above: production always calls this with the default `_CONFIG_PATH`,
-    which is checked into the repo, so a missing/malformed `config_path` is
-    a genuine caller mistake left to raise loudly rather than be swallowed.
-    """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    section = config.get("dialogue_budget", {})
-    return int(section.get("session_dialogue_cap", DEFAULT_SESSION_DIALOGUE_CAP))
-
-
-# Fallback for a config file missing the `light_doer` section (or its
-# `name` key) — same role as this module's other `_DEFAULT_*` fallbacks
-# (`DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD`, `DEFAULT_ROSTER_FALLBACK_CHAINS`,
-# `DEFAULT_CANARY_DIALOGUES_PER_CANARY`), never what production actually
-# uses, since the checked-in `routing-config.json` supplies its own
-# `light_doer` block already. Matches that block's own first-listed
-# alternative today ("Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)").
-_DEFAULT_DEGRADED_ROSTER_MODEL = "Codex 5.6 Terra"
-
-
-def _load_degraded_roster_model(config_path: Path) -> str:
-    """Read the single model rung 2 substitutes for every role, drawn from
-    `config_path`'s existing `light_doer` role block rather than a new
-    config section this ticket would otherwise have to invent — see the
-    "What each rung concretely does" module comment above `DegradationRung`
-    for why `light_doer` (not `sensitive_doer`) is the right block to reuse
-    here, and why one shared model for every role is the deliberate choice
-    rather than a shortcoming.
-
-    `light_doer.name` lists several interchangeable alternatives, e.g.
-    ``"Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)"`` — the same
-    "ordered, first-is-primary" convention `DEFAULT_ROSTER_FALLBACK_CHAINS`
-    already establishes for its own tuples elsewhere in this module (see
-    that constant's comment: "Every chain's first entry is exactly the
-    parameter default ... already shipped"). This function reads that
-    first ``"/"``-delimited alternative, stripped, as the one concrete
-    model name a caller of `invoke_worker` actually needs — not a new
-    parsing scheme, just that same "first is primary" reading applied to
-    a config field that was, until now, only ever consumed by
-    `routing_check.py` for pattern matching, never as a model name by this
-    module.
-
-    Falls back to `_DEFAULT_DEGRADED_ROSTER_MODEL` when the `light_doer`
-    section, its `name` key, or a non-empty first alternative is missing —
-    mirrors this module's other `_load_*` functions' no-try/except
-    contract for the file read itself: a missing/malformed `config_path`
-    still raises loudly, only a missing/malformed *value inside* a present
-    file falls back, exactly like `_load_roster_fallback_chains` treats a
-    missing role key.
-    """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    role_block = config.get("light_doer", {})
-    name = role_block.get("name", _DEFAULT_DEGRADED_ROSTER_MODEL)
-    primary = name.split("/")[0].strip()
-    return primary or _DEFAULT_DEGRADED_ROSTER_MODEL
-
-
-def resolve_degradation_rung(
-    session_spend_so_far: int,
-    *,
-    config_path: Path = _CONFIG_PATH,
-) -> DegradationRung:
-    """Pure function: given how many dialogues this session has already run
-    (`session_spend_so_far`) and the configured per-session cap
-    (`dialogue_budget.session_dialogue_cap`, default `DEFAULT_SESSION_DIALOGUE_CAP`),
-    decide which degradation rung applies to the *next* dialogue.
-
-    See the module comment above `DegradationRung` for the full reasoning
-    behind the unit chosen for `session_spend_so_far` and the thresholds
-    below. In short: with `cap = dialogue_budget.session_dialogue_cap`,
-
-    - `session_spend_so_far < cap`            -> rung 0 (no degradation)
-    - `cap <= session_spend_so_far < 2 * cap`  -> rung 1 (reduce rounds)
-    - `2 * cap <= session_spend_so_far < 3 * cap` -> rung 2 (cheapen roster: model + effort)
-    - `session_spend_so_far >= 3 * cap`        -> rung 3 (skip entirely)
-
-    Every boundary is inclusive on its lower edge (`<=`/`>=`, matching
-    `is_canary_dialogue`'s identical "fires exactly at the boundary"
-    convention): a caller passing exactly `cap` already gets rung 1 on that
-    call, not the one after it.
-
-    This function is stateless and total exactly like `is_canary_dialogue`:
-    it holds no memory of past calls and never raises for any integer
-    `session_spend_so_far` (including negative values, which simply always
-    read as rung 0 — a caller passing a negative spend is under budget by
-    construction). `config_path` is read fresh on every call rather than
-    cached at import time, so a caller (or a test) pointing this at a
-    different file always observes that file's current cap, which is the
-    only way to prove the cap is genuinely config-driven rather than a
-    Python-side literal that happens to match the spec's numbers today.
-    """
-    cap = _load_dialogue_budget_config(config_path)
-    if session_spend_so_far < cap:
-        return 0
-    if session_spend_so_far < 2 * cap:
-        return 1
-    if session_spend_so_far < 3 * cap:
-        return 2
-    return 3
-
-
-# Spec 0003 (CriticalDialogue) ticket 09: the literal substring
-# `_render_consultation_transcript` writes into a degraded dialogue's
-# transcript, and what a test greps for — same role `DEGRADED_INDEPENDENCE_MARKER`
-# and `CANARY_MARKER` play for their own tickets. Only present when
-# `result.degradation_rung > 0`, never an always-rendered "rung 0" line, so
-# a normal, un-degraded run's transcript never contains this marker at all
-# — the same "gate on the condition, don't render a falsy value" contract
-# `DEGRADED_INDEPENDENCE_MARKER` already established.
-BUDGET_DEGRADATION_MARKER = "BUDGET DEGRADATION"
-
-_DEGRADATION_RUNG_LABELS: dict[DegradationRung, str] = {
-    1: "reduce rounds",
-    2: "cheapen roster: model + effort",
-    3: "skip the dialogue entirely",
-}
 
 
 @dataclass(frozen=True)

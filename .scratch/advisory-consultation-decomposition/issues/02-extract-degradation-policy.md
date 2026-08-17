@@ -4,10 +4,10 @@
 
 **Blocked by:** 01 — Extract Dialogue Contracts & Verdict Parser (Slice 1).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Extract `resolve_degradation_rung`, `DegradationLadderState`, and budget math constants into `dialogue_degradation.py`.
-- [ ] Ensure functions are completely pure (deterministic, zero file I/O or subprocesses).
-- [ ] Re-export all budget and degradation symbols in `advisory_consultation.py`.
-- [ ] Add direct unit tests for all rungs (rung 0 full, rung 1 reduced, rung 2 degraded independence, rung 3 budget skipped).
-- [ ] Verify all existing tests in `test_routing.py` pass without regression.
+- [x] Extract `resolve_degradation_rung`, `DegradationLadderState`, and budget math constants into `dialogue_degradation.py`.
+- [x] Ensure functions are completely pure (deterministic, zero file I/O or subprocesses).
+- [x] Re-export all budget and degradation symbols in `advisory_consultation.py`.
+- [x] Add direct unit tests for all rungs (rung 0 full, rung 1 reduced, rung 2 degraded independence, rung 3 budget skipped).
+- [x] Verify all existing tests in `test_routing.py` pass without regression.
