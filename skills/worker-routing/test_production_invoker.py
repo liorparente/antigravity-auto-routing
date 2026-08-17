@@ -108,6 +108,19 @@ class ExtractReviewPayloadTests(unittest.TestCase):
         self.assertEqual(payload["findings"], [])
         self.assertEqual(payload["candidate_hash"], "synth1")
 
+    def test_nested_findings_dictionaries_are_preserved(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            'Review: {"vote": "approve", "findings": '
+            '[{"rule": "no-eval", "severity": "high"}], '
+            '"confidence": 0.9} trailing notes'
+        )
+
+        self.assertEqual(payload["vote"], "approve")
+        self.assertEqual(payload["confidence"], 0.9)
+        self.assertEqual(
+            payload["findings"], [{"rule": "no-eval", "severity": "high"}]
+        )
+
     def test_invalid_json_field_values_use_safe_defaults(self) -> None:
         payload = production_invoker.extract_review_payload(
             '{"vote": 123, "confidence": "unknown", "findings": "none", '

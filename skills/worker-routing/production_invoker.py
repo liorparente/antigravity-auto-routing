@@ -108,12 +108,15 @@ def extract_review_payload(
     if not raw_output.strip():
         return defaults
 
-    match = re.search(r"\{.*?\}", raw_output, flags=re.DOTALL)
-    if match is not None:
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", raw_output):
         try:
-            parsed = json.loads(match.group(0))
+            # `raw_decode` consumes one complete object from this opening
+            # brace, so nested dictionaries and trailing prose do not alter
+            # the object boundary (unlike a non-greedy `\{.*?\}` match).
+            parsed, _ = decoder.raw_decode(raw_output, match.start())
         except json.JSONDecodeError:
-            parsed = None
+            continue
         if isinstance(parsed, dict):
             result = {**defaults, **parsed}
             result["vote"] = str(result["vote"]).lower()
