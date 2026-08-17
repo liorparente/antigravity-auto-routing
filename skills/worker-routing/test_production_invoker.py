@@ -38,6 +38,105 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+class WorkerExecutionResultTests(unittest.TestCase):
+    def test_construction_preserves_all_fields(self) -> None:
+        payload = {"vote": "approve"}
+        result = production_invoker.WorkerExecutionResult(
+            raw_output="worker output",
+            duration_ms=125,
+            cost_estimate_usd=0.25,
+            success=False,
+            error="worker failed",
+            parsed_payload=payload,
+        )
+
+        self.assertEqual(result.raw_output, "worker output")
+        self.assertEqual(result.duration_ms, 125)
+        self.assertEqual(result.cost_estimate_usd, 0.25)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "worker failed")
+        self.assertEqual(result.parsed_payload, payload)
+
+    def test_defaults_and_immutability(self) -> None:
+        result = production_invoker.WorkerExecutionResult("", 0, 0.0, True)
+
+        self.assertIsNone(result.error)
+        self.assertIsNone(result.parsed_payload)
+        with self.assertRaises(AttributeError):
+            result.success = False  # type: ignore[misc]
+
+    def test_negative_duration_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "duration_ms"):
+            production_invoker.WorkerExecutionResult("", -1, 0.0, True)
+
+    def test_negative_cost_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "cost_estimate_usd"):
+            production_invoker.WorkerExecutionResult("", 0, -0.01, True)
+
+
+class ExtractReviewPayloadTests(unittest.TestCase):
+    def test_empty_output_returns_defaults(self) -> None:
+        self.assertEqual(
+            production_invoker.extract_review_payload("  \n\t "),
+            {
+                "vote": "approve",
+                "confidence": 1.0,
+                "findings": [],
+                "candidate_hash": "synth1",
+            },
+        )
+
+    def test_json_payload_is_extracted_and_normalized(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            'Result: {"vote": "APPROVE", "confidence": "0.75", '
+            '"findings": ["minor"], "candidate_hash": "abc", "note": "kept"}'
+        )
+
+        self.assertEqual(payload["vote"], "approve")
+        self.assertEqual(payload["confidence"], 0.75)
+        self.assertEqual(payload["findings"], ["minor"])
+        self.assertEqual(payload["candidate_hash"], "abc")
+        self.assertEqual(payload["note"], "kept")
+
+    def test_markdown_embedded_json_is_extracted(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            "```json\n{\"vote\": \"REVISE\", \"confidence\": 0.2}\n```"
+        )
+
+        self.assertEqual(payload["vote"], "revise")
+        self.assertEqual(payload["confidence"], 0.2)
+        self.assertEqual(payload["findings"], [])
+        self.assertEqual(payload["candidate_hash"], "synth1")
+
+    def test_invalid_json_field_values_use_safe_defaults(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            '{"vote": 123, "confidence": "unknown", "findings": "none", '
+            '"candidate_hash": 9}',
+            default_candidate_hash="candidate-9",
+        )
+
+        self.assertEqual(payload["vote"], "123")
+        self.assertEqual(payload["confidence"], 1.0)
+        self.assertEqual(payload["findings"], [])
+        self.assertEqual(payload["candidate_hash"], "candidate-9")
+
+    def test_invalid_or_non_object_json_uses_text_heuristics(self) -> None:
+        cases = (
+            ("{not valid} critical concern", "block", -1.0),
+            ("[1, 2] changes requested", "revise", -0.3),
+            ("plain output: approve", "approve", 1.0),
+            ("unstructured output", "approve", 1.0),
+        )
+
+        for output, vote, confidence in cases:
+            with self.subTest(output=output):
+                payload = production_invoker.extract_review_payload(output)
+                self.assertEqual(payload["vote"], vote)
+                self.assertEqual(payload["confidence"], confidence)
+                self.assertEqual(payload["findings"], [])
+                self.assertEqual(payload["candidate_hash"], "synth1")
+
+
 class BuildWorkerCommandTests(unittest.TestCase):
     def test_codex_command_prepends_worker_token(self) -> None:
         command = production_invoker.build_worker_command(

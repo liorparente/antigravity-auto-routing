@@ -16,14 +16,17 @@ function's docstring for the journaling contract.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import secrets
 import subprocess
 import sys
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import learning_journal
 
@@ -67,6 +70,69 @@ CLAUDE_MODELS = frozenset({"claude-opus-5", "claude-sonnet-5", "claude-fable-5"}
 AGY_MODELS = frozenset({"agy", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro"})
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+@dataclass(frozen=True)
+class WorkerExecutionResult:
+    """Structured outcome data for a single worker invocation."""
+
+    raw_output: str
+    duration_ms: int
+    cost_estimate_usd: float
+    success: bool
+    error: str | None = None
+    parsed_payload: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.duration_ms < 0:
+            raise ValueError("duration_ms must be greater than or equal to 0")
+        if self.cost_estimate_usd < 0.0:
+            raise ValueError("cost_estimate_usd must be greater than or equal to 0.0")
+
+
+def extract_review_payload(
+    raw_output: str, *, default_candidate_hash: str = "synth1"
+) -> dict[str, Any]:
+    """Extract a normalized review payload from worker stdout.
+
+    A JSON object embedded in prose (including a Markdown code block) takes
+    precedence. Otherwise, a small deterministic set of verdict keywords
+    gives callers a safe, backwards-compatible payload.
+    """
+    defaults: dict[str, Any] = {
+        "vote": "approve",
+        "confidence": 1.0,
+        "findings": [],
+        "candidate_hash": default_candidate_hash,
+    }
+    if not raw_output.strip():
+        return defaults
+
+    match = re.search(r"\{.*?\}", raw_output, flags=re.DOTALL)
+    if match is not None:
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            result = {**defaults, **parsed}
+            result["vote"] = str(result["vote"]).lower()
+            try:
+                result["confidence"] = float(result["confidence"])
+            except (TypeError, ValueError):
+                result["confidence"] = 1.0
+            if not isinstance(result["findings"], list):
+                result["findings"] = []
+            if not isinstance(result["candidate_hash"], str):
+                result["candidate_hash"] = default_candidate_hash
+            return result
+
+    text = raw_output.lower()
+    if any(keyword in text for keyword in ("block", "security_halt", "critical")):
+        return {**defaults, "vote": "block", "confidence": -1.0}
+    if "revise" in text or "changes requested" in text:
+        return {**defaults, "vote": "revise", "confidence": -0.3}
+    return defaults
 
 
 def _with_worker_mode_token(prompt: str) -> str:
@@ -510,8 +576,10 @@ __all__ = [
     "UNPRICED_MODEL_ID",
     "USD_PER_SECOND",
     "WORKER_MODE_TOKEN",
+    "WorkerExecutionResult",
     "build_worker_command",
     "estimate_cost_usd",
+    "extract_review_payload",
     "invoke_worker",
     "make_journaled_invoke_worker",
     "report_journal_error_to_stderr",
