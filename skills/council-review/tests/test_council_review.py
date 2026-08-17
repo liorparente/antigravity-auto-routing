@@ -1,27 +1,28 @@
 import asyncio
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-import sys
+from typing import Any
 
 SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent / "scripts")
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
 from council_review import (
+    PrivacyMode,
     ReviewCouncil,
     ReviewRequest,
-    PrivacyMode,
     SecurityVetoHandler,
 )
 from provider_adapters import (
-    FakeReviewerAdapter,
-    ClaudeAdapter,
-    CodexAdapter,
     AgyAdapter,
+    ClaudeAdapter,
     CLIReviewerAdapter,
+    CodexAdapter,
+    FakeReviewerAdapter,
 )
 
 POLICY_PATH = str(Path(__file__).resolve().parent.parent / "references" / "council-policy.json")
@@ -47,7 +48,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
             security_threshold=0.80,
             enabled=True,
         )
-        votes = [
+        votes: list[dict[str, Any]] = [
             {"provider": "claude", "vote": "approve", "confidence": 1.0},
             {"provider": "codex", "vote": "block", "confidence": "0.95", "findings": [
                 {"id": "SEC-01", "severity": "CRITICAL", "claim": "SQL injection in auth", "confidence": "0.90"}
@@ -56,6 +57,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         ]
         veto = veto_handler.check(votes)
         self.assertIsNotNone(veto)
+        assert veto is not None
         self.assertEqual(veto.provider, "codex")
         self.assertEqual(veto.finding["id"], "SEC-01")
 
@@ -148,6 +150,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         ]
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
         self.assertEqual(outcome.status, "UNANIMOUS")
+        assert outcome.manifest_path is not None
         self.assertTrue(os.path.isfile(outcome.manifest_path))
 
     # Slice 7: End-to-End Async Review with Security Veto Halt

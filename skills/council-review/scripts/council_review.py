@@ -4,10 +4,11 @@ import hmac
 import json
 import os
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Optional, Dict, List, Any
+from typing import Any
 
-from provider_adapters import build_adapter, ReviewerAdapter
+from provider_adapters import ReviewerAdapter, build_adapter
 
 
 class PrivacyMode:
@@ -33,13 +34,13 @@ class ReviewRequest:
 class ReviewOutcome:
     status: str
     run_id: str
-    report_path: Optional[str] = None
-    manifest_path: Optional[str] = None
+    report_path: str | None = None
+    manifest_path: str | None = None
     unresolved_blockers: int = 0
     source_changed: bool = False
 
 
-DEFAULT_VOTE_CONFIDENCE: Dict[str, float] = {
+DEFAULT_VOTE_CONFIDENCE: dict[str, float] = {
     "approve": 1.0,
     "revise": -0.3,
     "block": -1.0,
@@ -52,15 +53,15 @@ NEGATIVE_LOSS_MULTIPLIER = 1.5
 class ConsensusTable:
     def __init__(
         self,
-        policy: List[str],
-        weights: Optional[Dict[str, float]] = None,
+        policy: list[str],
+        weights: dict[str, float] | None = None,
         quorum_threshold: float = 0.60,
     ) -> None:
         self.policy = policy
         self.weights = weights or {}
         self.quorum_threshold = quorum_threshold
 
-    def _confidence(self, vote: Dict[str, Any]) -> float:
+    def _confidence(self, vote: dict[str, Any]) -> float:
         confidence = vote.get("confidence")
         if confidence is None:
             confidence = DEFAULT_VOTE_CONFIDENCE.get(str(vote.get("vote", "")).lower(), 0.0)
@@ -70,7 +71,7 @@ class ConsensusTable:
             val = 0.0
         return max(-1.0, min(1.0, val))
 
-    def weighted_score(self, votes: List[Dict[str, Any]]) -> float:
+    def weighted_score(self, votes: list[dict[str, Any]]) -> float:
         # If all voters are local or unweighted, default each to equal weight
         total_weight = sum(self.weights.get(v.get("provider", ""), 0.0) for v in votes)
         if total_weight <= 0:
@@ -89,7 +90,7 @@ class ConsensusTable:
             score += weight * confidence
         return score / total_weight
 
-    def evaluate(self, votes: List[Dict[str, Any]]) -> str:
+    def evaluate(self, votes: list[dict[str, Any]]) -> str:
         providers = {v.get("provider") for v in votes if v.get("provider")}
         if len(providers) < 1:
             return "INCOMPLETE"
@@ -114,7 +115,7 @@ class SecurityVeto(Exception):
     weighted scoring runs — a majority of lenient votes must never override
     a valid security finding from a single provider."""
 
-    def __init__(self, provider: str, finding: Dict[str, Any]) -> None:
+    def __init__(self, provider: str, finding: dict[str, Any]) -> None:
         self.provider = provider
         self.finding = finding
         claim = finding.get("claim", finding.get("id", "unspecified"))
@@ -122,12 +123,12 @@ class SecurityVeto(Exception):
 
 
 class SecurityVetoHandler:
-    def __init__(self, veto_severities: List[str], security_threshold: float, enabled: bool = True) -> None:
+    def __init__(self, veto_severities: list[str], security_threshold: float, enabled: bool = True) -> None:
         self.veto_severities = {s.lower() for s in veto_severities}
         self.security_threshold = security_threshold
         self.enabled = enabled
 
-    def check(self, votes: List[Dict[str, Any]]) -> Optional[SecurityVeto]:
+    def check(self, votes: list[dict[str, Any]]) -> SecurityVeto | None:
         if not self.enabled:
             return None
         for vote in votes:
@@ -169,7 +170,7 @@ class ReviewCouncil:
             "and no workspace key found at .ralph/cache/calibration.key."
         )
 
-    def _load_weights(self, workspace_root: str) -> Dict[str, float]:
+    def _load_weights(self, workspace_root: str) -> dict[str, float]:
         weighting = self.policy.get("weighting", {})
         weights = dict(weighting.get("initial_weights", {}))
         lo = weighting.get("min_weight", 0.05)
@@ -198,7 +199,7 @@ class ReviewCouncil:
 
         return weights
 
-    def _resolve_adapters(self, request: ReviewRequest) -> List[ReviewerAdapter]:
+    def _resolve_adapters(self, request: ReviewRequest) -> list[ReviewerAdapter]:
         if request.privacy_mode == PrivacyMode.LOCAL_ONLY:
             adjudicators = self.policy.get("adjudicators", [])
             adapters = [build_adapter(a) for a in adjudicators]
@@ -230,12 +231,12 @@ class ReviewCouncil:
         return hasher.hexdigest()
 
     async def _execute_round(
-        self, adapters: List[ReviewerAdapter], envelope: str, round_num: int, deadline: int
-    ) -> List[Dict[str, Any]]:
+        self, adapters: Sequence[ReviewerAdapter], envelope: str, round_num: int, deadline: int
+    ) -> list[dict[str, Any]]:
         tasks = [a.review(envelope, round_num, deadline) for a in adapters]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        valid_results: List[Dict[str, Any]] = []
+        valid_results: list[dict[str, Any]] = []
         for a, r in zip(adapters, results):
             if isinstance(r, Exception):
                 valid_results.append({
@@ -249,12 +250,12 @@ class ReviewCouncil:
         return valid_results
 
     def _write_manifest(
-        self, status: str, run_id: str, workspace_root: str, security_veto: Optional[SecurityVeto] = None
+        self, status: str, run_id: str, workspace_root: str, security_veto: SecurityVeto | None = None
     ) -> str:
         manifest_path = os.path.join(workspace_root, ".ralph", f"council-manifest-{run_id}.json")
         os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
 
-        manifest: Dict[str, Any] = {
+        manifest: dict[str, Any] = {
             "metadata": {"status": status, "run_id": run_id},
             "events": [],
         }
@@ -274,7 +275,7 @@ class ReviewCouncil:
         return manifest_path
 
     async def review(
-        self, request: ReviewRequest, custom_adapters: Optional[List[ReviewerAdapter]] = None
+        self, request: ReviewRequest, custom_adapters: Sequence[ReviewerAdapter] | None = None
     ) -> ReviewOutcome:
         initial_hash = self._hash_source(request.subject)
         weights = self._load_weights(request.workspace_root)
