@@ -9,10 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import advisory_consultation
 import dialogue_contracts
 import dialogue_transcript
-
-import advisory_consultation
 
 
 class DialogueTranscriptTests(unittest.TestCase):
