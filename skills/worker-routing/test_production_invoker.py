@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
 import os
@@ -218,7 +219,61 @@ class BuildWorkerCommandTests(unittest.TestCase):
                     self.assertEqual(command[command.index("--model") + 1], cli_model)
 
 
-class AdvisoryConsultationIntegrationTests(unittest.TestCase):
+class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
+    """Ticket 04's compatibility contract for synchronous worker callers.
+
+    The async batch API is intentionally a separate contract.  These tests
+    pin the older three-argument callable that both existing callers and the
+    advisory debate loop continue to use.
+    """
+
+    def test_sync_caller_signatures_and_defaults_are_unchanged(self) -> None:
+        invoke = inspect.signature(production_invoker.invoke_worker)
+        self.assertEqual(tuple(invoke.parameters), ("model", "effort", "prompt", "timeout", "runner"))
+        self.assertEqual(invoke.parameters["model"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        self.assertEqual(invoke.parameters["effort"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        self.assertEqual(invoke.parameters["prompt"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        self.assertEqual(invoke.parameters["timeout"].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertEqual(invoke.parameters["timeout"].default, production_invoker.DEFAULT_TIMEOUT_SECONDS)
+        self.assertEqual(invoke.parameters["runner"].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIs(invoke.parameters["runner"].default, subprocess.run)
+
+        factory = inspect.signature(production_invoker.make_journaled_invoke_worker)
+        self.assertEqual(
+            tuple(factory.parameters),
+            ("task_id", "root_dir", "task_type", "run_id", "timeout", "runner", "clock", "report_journal_error"),
+        )
+        self.assertEqual(factory.parameters["task_id"].kind, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for name in tuple(factory.parameters)[1:]:
+            self.assertEqual(factory.parameters[name].kind, inspect.Parameter.KEYWORD_ONLY)
+        self.assertIsNone(factory.parameters["task_type"].default)
+        self.assertIsNone(factory.parameters["run_id"].default)
+        self.assertEqual(factory.parameters["timeout"].default, production_invoker.DEFAULT_TIMEOUT_SECONDS)
+        self.assertIs(factory.parameters["runner"].default, subprocess.run)
+
+    def test_journaled_sync_caller_closes_context_and_preserves_result_and_exception(self) -> None:
+        runner = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "worker output", ""),
+                subprocess.CompletedProcess([], 9, "partial", "failure"),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journaled = production_invoker.make_journaled_invoke_worker(
+                "task-compat-04", root_dir=root, runner=runner,
+                clock=_FakeClock([0.0, 0.1, 1.0, 1.2]),
+            )
+            self.assertEqual(journaled("claude-sonnet-5", "high", "Implement"), "worker output")
+            with self.assertRaisesRegex(RuntimeError, r"exit code 9.*partial.*failure"):
+                journaled("gpt-5.6-sol", "medium", "Review")
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual({record["task_id"] for record in records}, {"task-compat-04"})
+        self.assertEqual([record["success"] for record in records], [True, False])
+        self.assertEqual([record["duration_ms"] for record in records], [100, 200])
+
     def test_defaults_to_production_invoke_worker(self) -> None:
         advisory_path = Path(__file__).with_name("advisory_consultation.py")
         advisory_spec = importlib.util.spec_from_file_location(
@@ -279,6 +334,47 @@ class AdvisoryConsultationIntegrationTests(unittest.TestCase):
 
         self.assertTrue(result.consensus_reached)
         self.assertEqual(len(calls), 2)
+
+    def test_debate_loop_accepts_a_journaled_sync_caller(self) -> None:
+        advisory_path = Path(__file__).with_name("advisory_consultation.py")
+        advisory_spec = importlib.util.spec_from_file_location(
+            "advisory_consultation_for_journaled_sync_caller_test", advisory_path
+        )
+        assert advisory_spec is not None and advisory_spec.loader is not None
+        advisory_consultation = importlib.util.module_from_spec(advisory_spec)
+        previous_advisory = sys.modules.get(advisory_spec.name)
+        sys.modules[advisory_spec.name] = advisory_consultation
+        try:
+            advisory_spec.loader.exec_module(advisory_consultation)
+        finally:
+            if previous_advisory is None:
+                del sys.modules[advisory_spec.name]
+            else:
+                sys.modules[advisory_spec.name] = previous_advisory
+
+        runner = Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "Planner plan", ""),
+                subprocess.CompletedProcess([], 0, _approve("Planner plan"), ""),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journaled = production_invoker.make_journaled_invoke_worker(
+                "task-advisory-compat-04", root_dir=root, runner=runner
+            )
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the implementation",
+                invoke_worker=journaled,
+                root_dir=root,
+                task_id="task-advisory-compat-04",
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertTrue(result.consensus_reached)
+        worker_records = [record for record in records if record["kind"] == "worker_execution"]
+        self.assertEqual(len(worker_records), 2)
+        self.assertEqual({record["task_id"] for record in worker_records}, {"task-advisory-compat-04"})
 
     def test_agy_command_uses_tokenized_prompt(self) -> None:
         command = production_invoker.build_worker_command("gemini-3.6-flash", "medium", "Research")
