@@ -147,3 +147,7 @@ A content-agnostic Compare-And-Swap (CAS) precondition mapping (`Mapping[Learned
 
 ### MemoryLessonGrammar
 The canonical round-trip text format for learned memory documents. Each entry begins with a `"- "` bullet prefix, with multiline continuations indented by two spaces (`"  "`). Stripping and serialization preserve internal indentation (such as embedded code snippets), normalize legacy newlines (`\r\n`, `\r` -> `\n`), and reject malformed unindented mixtures fail-closed. Spec 0004 ticket 33 / ADR 0010.
+
+### WorkerInvocation
+A unified runtime execution module encapsulating process spawning, non-interactive stdin enforcement, process group termination upon timeout, model alias resolution, transparent wall-clock duration measurement, cost estimation, and safe journal emission for both synchronous single-worker calls and asynchronous multi-model review panels.
+
