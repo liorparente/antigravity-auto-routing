@@ -1,5 +1,12 @@
 # Worker Routing Fallbacks
 
+## 2026-08-17 — Stale Candidate Rejection in Anti-Flapping Optimistic CAS Retry Loop
+
+- Mission: Implement atomic, bounded memory lesson accumulation with anti-flapping (`reject_if_candidate_digest`) in `risk_tiered_application.py` (Ticket 33 / ADR 0010).
+- Failure: In an optimistic Compare-And-Swap loop, comparing the candidate digest against `reject_if_candidate_digest` and immediately returning `status="rejected"` caused a stale rejection bug: if a concurrent writer updated the `memory` document after this iteration's read, the rejection evaluated against obsolete state rather than retrying against the fresh state.
+- Resolution: Added a CAS linearization point recheck before returning rejection: `learned_state.read_current(root_dir).get("memory") == existing`. If the state mutated, the loop branches to `continue` (retry) rather than returning stale rejection.
+- Lesson: In optimistic retry loops with semantic rejection rules, always verify current state equality (linearization point) under or immediately prior to returning rejection to prevent stale rejections in concurrent write environments.
+
 ## 2026-08-15 — POSIX Advisory Lock Reentrancy Deadlock in File Operations
 
 - Mission: Implement pending proposal store for Tier 3 worker briefs under `.ralph/pending_proposals.jsonl`.

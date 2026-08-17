@@ -1,10 +1,15 @@
 # 🏛️ Institutional Memory
 
 ## 📊 Metadata
-- **עדכון אחרון:** 2026-08-15
-- **סה"כ תובנות:** 73
+- **עדכון אחרון:** 2026-08-17
+- **סה"כ תובנות:** 77
 
 ## התובנות
+
+- `[2026-08-17] [auto-routing] [importance:5] [architecture]` - **צבירה אטומית ותחומה של לקחי זיכרון (Memory Lessons) בריצות מרובות (ADR 0010, כרטיס 33):** מימוש מנגנון צבירת לקחים אטומי ב-`risk_tiered_application.apply_memory_lesson`, המשלב דקדוק קנוני של פריטים מוזחים (שורת פתיחה `- `, שורות המשך מוזחות ב-2 רווחים, טיפול בטקסט Legacy), מניעת כפילויות מדויקת (Case-sensitive exact dedup), תחימת קיבולת קבועה של עד 200 לקחים (`DEFAULT_MAX_MEMORY_LESSONS = 200`) בפינוי FIFO של הלקחים הישנים ביותר, ולולאת טרנזקציה אופטימית אטומית (`_MAX_MERGE_RETRIES = 8`). המודול `learned_state.py` נשאר לחלוטין Content-Agnostic באמצעות בדיקת תנאי `expected_current` תחת ה-Store Lock.
+- `[2026-08-17] [auto-routing] [importance:4] [gotcha]` - **נקודת לינאריזציה ב-Compare-And-Swap בעת דחיית מועמד (Anti-Flapping Linearization Point):** בעת ביצוע בדיקת Anti-Flapping (`reject_if_candidate_digest`) בלולאת CAS אופטימית, השוואת ה-Digest של המועמד עשויה להתבצע על מצב שכבר שונה במקביל על ידי כותב אחר. החזרת סטטוס `rejected` ללא אימות מחדש תגרום לדחיית שווא מיושנת (Stale Rejection). הפתרון: בדיקה חוזרת ש-`learned_state.read_current(root_dir).get("memory") == existing` לפני החזרת דחייה; אם המצב השתנה, הלולאה מבצעת Retry מול המצב העדכני במקום לדחות.
+- `[2026-08-17] [auto-routing] [importance:4] [pattern]` - **דקדוק Round-Trip של רשימות טקסט ושימור הזחה פנימית:** בפירוק מסמך רשימה לשורות המשך מוזחות, חיתוך גורף באמצעות `lstrip()` משמיד עיצוב פנימי (כגון בלוקי קוד מוזחים). הפתרון התקני הוא חיתוך מדויק של רוחב הזחת הדקדוק בלבד (`line[len(_CONTINUATION_INDENT):]`), ושימור מלא של כל הרווחים הפנימיים שמעבר לכך.
+- `[2026-08-17] [auto-routing] [importance:4] [workflow]` - **סגירת Backlog מלאה (34/34 כרטיסים) וסוויטת אימות ב-8 שכבות:** הושלמו כל 34 משימות ה-Backlog בפרויקט עם 100% מעבר (911 בדיקות ב-8 סוויטות מקומיות בתוך כ-38 שניות), אפס שגיאות ב-Ruff (`RUF022`), Mypy, Shellcheck, וסנכרון תקין בכל ה-Harnesses דרך `./install.sh .`.
 
 - `[2026-08-15] [auto-routing] [importance:5] [architecture]` - **מנוע יישום מדורג סיכונים (RiskTieredApplication) ב-4 שכבות בטיחות (כרטיס 20):** מימוש ארכיטקטורת בטיחות מלאה עבור לולאת הלמידה האוטונומית: רמה 1 (זיכרון: החלה אוטומטית ישירה ל-`learned_state`), רמה 2 (טבלאות ניתוב: החלה אוטומטית רק לאחר מעבר מלא של שער הקבלה `acceptance_gate.evaluate_proposal`), רמה 3 (תדריכים: שמירה כהצעות ממתינות `PendingProposal` הדורשות אישור אנושי מפורש `approve_pending_proposal` תחת נעילת קבצים), ורמה 4 (פרוטוקול: חסום לחלוטין מכל נתיב כתיבה ברמת ה-Type System ומבנה הקוד via `LearnedDocument`).
 - `[2026-08-15] [auto-routing] [importance:5] [gotcha]` - **מלכודת Deadlock בנעילת קבצים רקורסיבית עם POSIX `fcntl.flock`:** כאשר פונקציה ראשית (`approve_pending_proposal` / `submit_brief_proposal`) תופסת מנעול קבצים בלעדי (`fcntl.flock(..., LOCK_EX)`) וקוראת לפונקציית עזר פנימית שגם היא מנסה לפתוח ולנעול את אותו הקובץ ב-descriptor חדש, התהליך נכנס ל-Self-Deadlock ונתקע לנצח. הפתרון המחייב הוא הפרדה חדה בין פונקציות קריאה לא-נעולות (`_read_pending_proposals_unlocked`) לשימוש פנימי, לבין נקודות כניסה פומביות נעולות (`read_pending_proposals`).

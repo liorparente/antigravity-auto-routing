@@ -141,3 +141,9 @@ The four-tier safety mechanism that governs how proposed updates from the [[Lear
 
 ### PendingProposal
 A staged change to worker briefs held in `.ralph/pending_proposals.jsonl` under an exclusive file lock, awaiting explicit human approval before being adopted into [[LearnedState]]. Spec 0004 ticket 20.
+
+### ExpectedCurrent
+A content-agnostic Compare-And-Swap (CAS) precondition mapping (`Mapping[LearnedDocument, str | None] | None`) passed to `learned_state.adopt`. Verified under the store's exclusive lock against the active document snapshots before writing a new version. A mismatch indicates concurrent state mutation and raises a distinct `ValueError`, allowing callers (such as `risk_tiered_application.apply_memory_lesson`) to retry transactionally without content leakage into `learned_state.py`. Spec 0004 ticket 33 / ADR 0010.
+
+### MemoryLessonGrammar
+The canonical round-trip text format for learned memory documents. Each entry begins with a `"- "` bullet prefix, with multiline continuations indented by two spaces (`"  "`). Stripping and serialization preserve internal indentation (such as embedded code snippets), normalize legacy newlines (`\r\n`, `\r` -> `\n`), and reject malformed unindented mixtures fail-closed. Spec 0004 ticket 33 / ADR 0010.
