@@ -508,6 +508,47 @@ class InvokeWorkerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(process.killed)
         self.assertTrue(process.waited)
 
+    async def test_communicate_exception_terminates_and_reaps_with_accurate_result(
+        self,
+    ) -> None:
+        """An exception raised by `communicate()` itself (not a timeout) is a
+        worker outcome, not a call-site bug — but unlike that clean non-zero
+        exit or timeout, the child process is still running when this hits.
+        It must still be killed and reaped, and the diagnostic must say
+        "failed during execution", not "failed to spawn": spawning already
+        succeeded (`runner()` returned a process handle); it is
+        `communicate()` that failed.
+        """
+
+        class _CommunicateFailsProcess(_FakeAsyncProcess):
+            async def communicate(self) -> tuple[bytes, bytes]:
+                raise OSError("pipe broken")
+
+        process = _CommunicateFailsProcess()
+        runner = _RecordingAsyncRunner(process)
+
+        result = await production_invoker.invoke_worker_async(
+            "claude-sonnet-5",
+            "high",
+            "Review this",
+            runner=runner,
+            clock=_FakeClock([100.0, 100.5]),
+        )
+
+        self.assertFalse(result.success)
+        assert result.error is not None
+        self.assertIn("failed during execution", result.error)
+        self.assertIn("pipe broken", result.error)
+        self.assertNotIn("failed to spawn", result.error)
+        self.assertEqual(result.raw_output, "")
+        self.assertEqual(result.duration_ms, 500)
+        self.assertEqual(
+            result.cost_estimate_usd,
+            production_invoker.estimate_cost_usd("claude-sonnet-5", 500),
+        )
+        self.assertTrue(process.killed)
+        self.assertTrue(process.waited)
+
 
 class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
     """`invoke_workers_parallel` batches `invoke_worker_async` calls and is the

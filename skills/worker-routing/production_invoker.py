@@ -410,13 +410,21 @@ async def invoke_worker_async(
             error=f"Worker {model!r} timed out after {timeout} seconds",
         )
     except Exception as error:  # noqa: BLE001 - a communicate() failure is a worker outcome, not a call-site bug.
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await proc.wait()
+        except ProcessLookupError:
+            pass
         duration_ms = max(0, round((clock() - start) * 1000))
         return WorkerExecutionResult(
             raw_output="",
             duration_ms=duration_ms,
-            cost_estimate_usd=0.0,
+            cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
             success=False,
-            error=f"Worker {model!r} failed to spawn: {error}",
+            error=f"Worker {model!r} failed during execution: {error}",
         )
 
     duration_ms = max(0, round((clock() - start) * 1000))
