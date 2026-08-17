@@ -2,9 +2,15 @@
 
 ## 📊 Metadata
 - **עדכון אחרון:** 2026-08-17
-- **סה"כ תובנות:** 81
+- **סה"כ תובנות:** 86
 
 ## התובנות
+
+- `[2026-08-17] [auto-routing] [importance:5] [architecture]` - **פירוק מודול שיחת הייעוץ המונופוליטי (Spec 0006) ל-3 מודולי-על בעלי תפרי בדיקה טהורים:** פירוק `advisory_consultation.py` משכבה אחת של 4,000+ שורות לשלושה מודולים עמוקים: חוזים ופענוח ציטוטים (`dialogue_contracts.py`), מדיניות שחיקת תקציב טהורה ללא I/O (`dialogue_degradation.py`), ורישום תמלילים וטלמטריה מאובטחת תחת נעילה (`dialogue_transcript.py`), תוך שימור מלא של תאימות ממשק אחורנית באמצעות טוען אחים דינמי.
+- `[2026-08-17] [auto-routing] [importance:4] [gotcha]` - **זיהום משתפי תהליכים (Process Handler Mocks) בין סוויטות בדיקה באותו תהליך Python:** הרצת `test_routing.py` ו-`test_production_invoker.py` באותו תהליך `unittest` יחיד גרמה ל-Mocks של תהליכים מודולריים לדלוף ולפגוע בבדיקות תהליכים אמיתיות. הפרדת הריצה לתהליכי Python עצמאיים (כפי ש-CI מבצע בלולאת Bash) מבטיחה בידוד זיכרון מוחלט.
+- `[2026-08-17] [auto-routing] [importance:4] [architecture]` - **קליטת שגיאות חסינה במתאמי ביקורת אסינכרוניים (`provider_adapters.CLIReviewerAdapter`):** מתאמי CLI במערך `asyncio.gather` חייבים ללכוד כל חריגת ריצה (`except Exception: # noqa: BLE001`) ולהמירה ל-Payload בטוח (`vote: "abstain"`). צמצום החריגה ל-`ValueError` בלבד מסכן את הפאנל כולו בקריסה בעת Timeout או שגיאות I/O.
+- `[2026-08-17] [auto-routing] [importance:4] [gotcha]` - **החמרת כללי ארגון ייבוא (`I001` / `isort`) בריצות CI חדשות:** התקנת גרסה עדכנית של Ruff ב-CI מפעילה בדיקות סידור ייבוא (`I001`). שורת רווח מיותרת או סדר שאינו אלפביתי בקובצי בדיקות (כמו ב-`test_dialogue_transcript.py`) מפילה את ה-CI גם כאשר כל בדיקות היחידה והטיפוסים ירוקים.
+- `[2026-08-17] [auto-routing] [importance:4] [pattern]` - **טוען מודולים אחים מאוחד ומוגן טיפוסים (`_load_sibling(name: str) -> Any`):** במקום לשכפל בלוקי `try/except ModuleNotFoundError -> importlib` בכל מודול עלה ופונקציית מעטפת, חילוץ פונקציית עזר יחידה `_load_sibling` עם טיפוס החזרה מפורש מונע כפילות ומאפשר טעינה ישירה של קבצים מבודדים בטסטים ללא תלות ב-`sys.path`.
 
 - `[2026-08-17] [auto-routing] [importance:5] [architecture]` - **איחוד מנוע הרצת תהליכי סוכנים וחיסול זומבים (`production_invoker._kill_and_reap_process`):** איחוד כל מנגנוני הרצת ה-CLI האסינכרוניים ומערכי המודלים המקביליים (`invoke_worker_async`, `invoke_workers_parallel`) מאחורי מנוע מרכזי יחיד עם שומר חיסול ואיסוף תהליכים מובטח (`_kill_and_reap_process`). הפונקציה מבצעת `proc.kill()` מוגן בשילוב `await proc.wait()` הן בחריגות זמן (`asyncio.TimeoutError`) והן בחריגות תקשורת בלתי צפויות (`communicate()`), ומבטיחה אפס דליפות של תהליכי זומבי במערכת ההפעלה.
 - `[2026-08-17] [auto-routing] [importance:4] [architecture]` - **חוזי שגיאה מפוצלים: כישלון זורק בודד מול כישלון מובנה באצווה אסינכרונית:** בעוד `invoke_worker` הסינכרוני זורק בכוונה `RuntimeError` בקוד יציאה שאינו 0 או ב-Timeout (כדי שדיאלוג ייעוץ בודד יזהה כישלון תור), הממשק האסינכרוני המקבילי (`invoke_worker_async`) מחזיר `WorkerExecutionResult(success=False, error=...)` ללא זריקת שגיאה. הדבר מונע מצב שבו מבקר כושל בודד בפאנל ביקורת מרובה מודלים מפיל את כל שאר ה-Coroutines הממתינים לצידו ב-`asyncio.gather`.

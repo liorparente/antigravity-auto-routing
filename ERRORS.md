@@ -1,5 +1,26 @@
 # Worker Routing Fallbacks
 
+## 2026-08-17 — Subprocess Mock State Leak Across In-Process Unittest Invocations
+
+- Mission: Run full regression and unit test suite across decomposed advisory consultation and production invoker.
+- Failure: Running `python3 -m unittest skills/worker-routing/test_routing.py skills/worker-routing/test_production_invoker.py` in a single Python invocation caused module-level mock process handlers registered in `test_production_invoker.py` to contaminate unmocked subprocess tests in `test_routing.py`, generating false positive test failures.
+- Resolution: Executed each test file in its own isolated Python interpreter invocation (matching CI's `for test_file in $PYTHON_TESTS; do python3 "$test_file"; done` loop).
+- Lesson: Never run disparate test suites sharing process-level patches or global mock dispatchers in the same in-memory Python unittest runner invocation; run them as isolated child processes.
+
+## 2026-08-17 — Council Review Provider Adapter Gather Crash on Narrow Exception Catch
+
+- Mission: Resolve ruff BLE001 blind exception lint error in `provider_adapters.py`.
+- Failure: Replacing `except Exception:` with `except ValueError:` in `CLIReviewerAdapter.review()` caused non-ValueError exceptions (such as `TimeoutError`, `OSError`, or subprocess communications errors) to escape unhandled, crashing entire `asyncio.gather` parallel review panels instead of returning the safe `{"vote": "abstain"}` fallback.
+- Resolution: Restored catching all runtime exceptions with `except Exception as error: # noqa: BLE001`.
+- Lesson: For resilience in parallel async worker panels, adapter review calls must safely catch all exceptions at the boundary and translate them to structured fallback results (`abstain`).
+
+## 2026-08-17 — CI Ruff isort (`I001`) Test Import Formatting Breakdown
+
+- Mission: Add unit test suite `test_dialogue_transcript.py` for Spec 0006 decomposition.
+- Failure: GitHub Actions CI runner installing the latest Ruff release failed on `ruff check $PYTHON_MODULES` with `I001 [*] Import block is un-sorted or un-formatted` due to an extra newline separating `import advisory_consultation` from sibling module imports.
+- Resolution: Organized imports into contiguous alphabetical blocks and verified locally using `ruff check --select I $PYTHON_MODULES`.
+- Lesson: Whenever introducing new test files, verify import sorting with `ruff check --select I` to prevent CI runner version mismatches from failing automated builds.
+
 ## 2026-08-17 — Stale Candidate Rejection in Anti-Flapping Optimistic CAS Retry Loop
 
 - Mission: Implement atomic, bounded memory lesson accumulation with anti-flapping (`reject_if_candidate_digest`) in `risk_tiered_application.py` (Ticket 33 / ADR 0010).
