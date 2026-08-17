@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     # dynamically loaded module object below, whose attributes mypy cannot
     # resolve inside annotations.
     from advisory_consultation import CanaryFixture, IsFamilyReachable
+    from learning_journal import OutcomeRecord
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent
@@ -11717,10 +11718,10 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
 
     @staticmethod
     def _reduce_plan_outcomes_by_position(
-        outcomes: tuple[learning_journal.OutcomeRecord, ...],
-    ) -> dict[tuple[str, str], learning_journal.OutcomeRecord]:
+        outcomes: tuple[OutcomeRecord, ...],
+    ) -> dict[tuple[str, str], OutcomeRecord]:
         """Apply Ticket 27's consumer rule to already-file-ordered records."""
-        reduced: dict[tuple[str, str], learning_journal.OutcomeRecord] = {}
+        reduced: dict[tuple[str, str], OutcomeRecord] = {}
         for record in outcomes:
             if record.ground_truth == "plan":
                 reduced[(record.task.task_id, record.ground_truth)] = record
