@@ -16,6 +16,7 @@ function's docstring for the journaling contract.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -23,10 +24,10 @@ import secrets
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import learning_journal
 
@@ -70,6 +71,34 @@ CLAUDE_MODELS = frozenset({"claude-opus-5", "claude-sonnet-5", "claude-fable-5"}
 AGY_MODELS = frozenset({"agy", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro"})
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+
+
+class AsyncWorkerProcess(Protocol):
+    """The slice of ``asyncio.subprocess.Process`` this module depends on.
+
+    Naming the seam as a `Protocol` (rather than importing
+    `asyncio.subprocess.Process` directly) is what makes it fakeable: a test
+    double only has to implement `communicate`/`kill`/`wait`/`returncode`,
+    not subclass an object the real event loop constructs.
+    """
+
+    returncode: int | None
+
+    async def communicate(self) -> tuple[bytes, bytes]: ...
+
+    def kill(self) -> None: ...
+
+    async def wait(self) -> int: ...
+
+
+# An injectable seam standing in for ``asyncio.create_subprocess_exec``: the
+# real one is called as ``runner(*argv, **kwargs)`` and returns an awaitable
+# process handle, so tests substitute a fake coroutine function rather than
+# patching the event loop's subprocess machinery.
+AsyncRunner = Callable[..., Awaitable[AsyncWorkerProcess]]
+
+# One routed invocation request, the unit ``invoke_workers_parallel`` batches.
+WorkerRequest = tuple[str, str, str]
 
 
 @dataclass(frozen=True)
@@ -298,6 +327,137 @@ def invoke_worker(
         )
 
     return _diagnostic_text(result.stdout)
+
+
+async def invoke_worker_async(
+    model: str,
+    effort: str,
+    prompt: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    runner: AsyncRunner = asyncio.create_subprocess_exec,
+    clock: Callable[[], float] = time.monotonic,
+) -> WorkerExecutionResult:
+    """Run a worker without blocking the event loop, never raising for its outcome.
+
+    This is the async counterpart to `invoke_worker`, and deliberately
+    behaves differently from it at the one point their contracts diverge:
+    `invoke_worker` raises `RuntimeError` on a non-zero exit or a timeout,
+    because it is the seam `AdvisoryConsultation`'s single-worker debate loop
+    depends on and that loop already treats an exception as "this worker's
+    turn failed." This function instead reports the same two outcomes as a
+    `WorkerExecutionResult` with `success=False` and a populated `error`,
+    because its callers are batches — `invoke_workers_parallel`, and the
+    review panels ticket 03 point at it — where one worker's non-zero exit
+    or timeout must not abort every sibling awaited alongside it.
+
+    A malformed request is the one exception to that: an unsupported model
+    or an uncalibrated effort still raises, synchronously, before any
+    process is spawned. `build_worker_command` performs that validation, and
+    both are call-site bugs distinguishable from a worker's runtime outcome
+    only by never having reached a worker at all (spec 0005 user story 6).
+    `invoke_workers_parallel` is the layer that turns even this raise into a
+    failed result per-request, so a single bad request in a batch cannot
+    cancel its siblings; called directly, this function still fails closed.
+
+    ``runner`` and ``clock`` are both injectable so tests exercise success,
+    non-zero exit, and timeout reaping without a real subprocess or a real
+    clock. On timeout the child is explicitly killed and reaped
+    (`proc.kill()` then `await proc.wait()`) before this function returns, so
+    no caller can observe a result without the process lifecycle having
+    already been closed out — the guarantee spec 0005 asks for.
+    """
+    command = build_worker_command(model, effort, prompt)
+    model_id, _ = _resolve_model_id_and_family(model)
+    environment = {**os.environ, "IN_WORKER_ROUTING": "true"}
+
+    start = clock()
+    proc = await runner(
+        *command,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=environment,
+    )
+
+    try:
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        duration_ms = max(0, round((clock() - start) * 1000))
+        return WorkerExecutionResult(
+            raw_output="",
+            duration_ms=duration_ms,
+            cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
+            success=False,
+            error=f"Worker {model!r} timed out after {timeout} seconds",
+        )
+
+    duration_ms = max(0, round((clock() - start) * 1000))
+    stdout_text = _diagnostic_text(stdout_bytes)
+    stderr_text = _diagnostic_text(stderr_bytes)
+
+    if proc.returncode != 0:
+        return WorkerExecutionResult(
+            raw_output=stdout_text,
+            duration_ms=duration_ms,
+            cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
+            success=False,
+            error=(
+                f"Worker {model!r} exited with exit code {proc.returncode}; "
+                f"stderr: {stderr_text!r}"
+            ),
+        )
+
+    return WorkerExecutionResult(
+        raw_output=stdout_text,
+        duration_ms=duration_ms,
+        cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
+        success=True,
+        parsed_payload=extract_review_payload(stdout_text),
+    )
+
+
+async def invoke_workers_parallel(
+    requests: Sequence[WorkerRequest],
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    runner: AsyncRunner = asyncio.create_subprocess_exec,
+    clock: Callable[[], float] = time.monotonic,
+) -> list[WorkerExecutionResult]:
+    """Run a batch of `(model, effort, prompt)` requests concurrently.
+
+    Every request runs through `invoke_worker_async`, so it inherits that
+    function's "never raise for a worker's own outcome" contract. The one
+    gap that contract leaves open — a malformed request whose
+    `build_worker_command` call raises before a process exists — is closed
+    here: this is the layer review panels and multi-model batches actually
+    call (spec 0005 user story 2), and a single mistyped model name in a
+    ten-member panel must not cancel the other nine awaited alongside it.
+
+    Results come back in one list, positionally aligned with ``requests``
+    (`asyncio.gather` preserves input order regardless of completion order),
+    so a caller can zip the two sequences back together without threading an
+    identifier through the result type.
+    """
+
+    async def _invoke_one(request: WorkerRequest) -> WorkerExecutionResult:
+        model, effort, prompt = request
+        try:
+            return await invoke_worker_async(
+                model, effort, prompt, timeout=timeout, runner=runner, clock=clock
+            )
+        except ValueError as error:
+            return WorkerExecutionResult(
+                raw_output="",
+                duration_ms=0,
+                cost_estimate_usd=0.0,
+                success=False,
+                error=str(error),
+            )
+
+    return list(await asyncio.gather(*(_invoke_one(request) for request in requests)))
 
 
 # --- worker-execution journaling (spec 0004) ---------------------------------
@@ -579,11 +739,16 @@ __all__ = [
     "UNPRICED_MODEL_ID",
     "USD_PER_SECOND",
     "WORKER_MODE_TOKEN",
+    "AsyncRunner",
+    "AsyncWorkerProcess",
     "WorkerExecutionResult",
+    "WorkerRequest",
     "build_worker_command",
     "estimate_cost_usd",
     "extract_review_payload",
     "invoke_worker",
+    "invoke_worker_async",
+    "invoke_workers_parallel",
     "make_journaled_invoke_worker",
     "report_journal_error_to_stderr",
 ]

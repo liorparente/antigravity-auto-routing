@@ -4,8 +4,8 @@
 
 **Blocked by:** 01 — Worker Execution Result & Structured Output Extraction
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Implement `invoke_worker_async` and `invoke_workers_parallel` using `asyncio.create_subprocess_exec` with non-interactive stdin.
-- [ ] Implement guaranteed child process termination and reaping on `asyncio.TimeoutError` to prevent zombie subprocess leaks.
-- [ ] Add unit tests with injectable runner seams verifying async execution, parallel batch execution, and timeout child reaping.
+- [x] Implement `invoke_worker_async` and `invoke_workers_parallel` using `asyncio.create_subprocess_exec` with non-interactive stdin.
+- [x] Implement guaranteed child process termination and reaping on `asyncio.TimeoutError` to prevent zombie subprocess leaks.
+- [x] Add unit tests with injectable runner seams verifying async execution, parallel batch execution, and timeout child reaping.

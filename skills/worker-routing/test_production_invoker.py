@@ -2,6 +2,7 @@
 """Unit tests for the production worker invoker."""
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import importlib.util
 import io
@@ -13,6 +14,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock, patch
 
 from test_routing import _approve
@@ -332,6 +334,230 @@ class InvokeWorkerTests(unittest.TestCase):
             RuntimeError, r"timed out.*partial stdout.*timeout stderr"
         ):
             production_invoker.invoke_worker("agy", "high", "Research", runner=runner)
+
+
+class _FakeAsyncProcess:
+    """A fake standing in for the `AsyncWorkerProcess` slice of
+    `asyncio.subprocess.Process` this module depends on.
+
+    ``hang_seconds`` is how the timeout-reaping tests force a real
+    `asyncio.TimeoutError` out of `asyncio.wait_for` deterministically: the
+    fake sleeps longer than the caller's timeout instead of a mock raising
+    the exception itself, so the same code path a real hung subprocess would
+    take (`wait_for` cancelling `communicate()`) is what actually runs.
+    """
+
+    def __init__(
+        self,
+        *,
+        stdout: bytes = b"",
+        stderr: bytes = b"",
+        returncode: int = 0,
+        hang_seconds: float | None = None,
+    ) -> None:
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+        self._hang_seconds = hang_seconds
+        self.killed = False
+        self.waited = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        if self._hang_seconds is not None:
+            await asyncio.sleep(self._hang_seconds)
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        self.waited = True
+        return self.returncode
+
+
+class _RecordingAsyncRunner:
+    """An injectable `AsyncRunner` returning one fixed process and recording every call."""
+
+    def __init__(self, process: _FakeAsyncProcess) -> None:
+        self.process = process
+        self.calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> _FakeAsyncProcess:
+        self.calls.append((args, kwargs))
+        return self.process
+
+
+class InvokeWorkerAsyncTests(unittest.IsolatedAsyncioTestCase):
+    """`invoke_worker_async` is the batch-friendly counterpart to `invoke_worker`:
+    it reports a worker's own runtime outcome (non-zero exit, timeout) as a
+    failed `WorkerExecutionResult` instead of raising, so a caller awaiting
+    many of these concurrently never has one worker's failure cancel its
+    siblings. A malformed request (unsupported model/effort) still raises,
+    synchronously, before any process is spawned — that is a call-site bug,
+    not a worker outcome.
+    """
+
+    async def test_success_returns_result_with_parsed_payload(self) -> None:
+        process = _FakeAsyncProcess(stdout=b'{"vote": "approve", "confidence": 0.9}')
+        runner = _RecordingAsyncRunner(process)
+
+        result = await production_invoker.invoke_worker_async(
+            "claude-sonnet-5",
+            "high",
+            "Review this",
+            runner=runner,
+            clock=_FakeClock([100.0, 100.25]),
+        )
+
+        self.assertTrue(result.success)
+        self.assertIsNone(result.error)
+        self.assertEqual(result.raw_output, '{"vote": "approve", "confidence": 0.9}')
+        self.assertEqual(result.duration_ms, 250)
+        self.assertEqual(
+            result.cost_estimate_usd,
+            production_invoker.estimate_cost_usd("claude-sonnet-5", 250),
+        )
+        assert result.parsed_payload is not None
+        self.assertEqual(result.parsed_payload["vote"], "approve")
+        self.assertEqual(result.parsed_payload["confidence"], 0.9)
+
+    async def test_forwards_noninteractive_environment_and_worker_token(self) -> None:
+        process = _FakeAsyncProcess(stdout=b"ok")
+        runner = _RecordingAsyncRunner(process)
+
+        await production_invoker.invoke_worker_async(
+            "gpt-5.6-terra", "medium", "Implement it", runner=runner
+        )
+
+        self.assertEqual(len(runner.calls), 1)
+        args, kwargs = runner.calls[0]
+        self.assertEqual(args[0:2], ("codex", "exec"))
+        self.assertEqual(args[-1], "[WORKER-MODE: AGY-NESTED-EXEC] Implement it")
+        self.assertIs(kwargs["stdin"], asyncio.subprocess.DEVNULL)
+        self.assertIs(kwargs["stdout"], asyncio.subprocess.PIPE)
+        self.assertIs(kwargs["stderr"], asyncio.subprocess.PIPE)
+        self.assertEqual(kwargs["env"]["IN_WORKER_ROUTING"], "true")
+        self.assertEqual(kwargs["env"].get("PATH"), os.environ.get("PATH"))
+
+    async def test_nonzero_exit_returns_failed_result_without_raising(self) -> None:
+        process = _FakeAsyncProcess(stdout=b"partial", stderr=b"boom", returncode=3)
+        runner = _RecordingAsyncRunner(process)
+
+        result = await production_invoker.invoke_worker_async(
+            "claude-opus-5", "ultra", "Plan", runner=runner
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw_output, "partial")
+        assert result.error is not None
+        self.assertIn("exit code 3", result.error)
+        self.assertIn("boom", result.error)
+
+    async def test_timeout_kills_and_reaps_the_child_process(self) -> None:
+        process = _FakeAsyncProcess(hang_seconds=5.0)
+        runner = _RecordingAsyncRunner(process)
+
+        result = await production_invoker.invoke_worker_async(
+            "agy", "high", "Research", timeout=0.01, runner=runner
+        )
+
+        self.assertFalse(result.success)
+        assert result.error is not None
+        self.assertIn("timed out", result.error)
+        self.assertEqual(result.raw_output, "")
+        self.assertTrue(process.killed)
+        self.assertTrue(process.waited)
+
+    async def test_unsupported_model_raises_before_spawning_a_process(self) -> None:
+        runner = _RecordingAsyncRunner(_FakeAsyncProcess())
+
+        with self.assertRaisesRegex(ValueError, "Unsupported worker model"):
+            await production_invoker.invoke_worker_async(
+                "acme-model", "low", "Do work", runner=runner
+            )
+
+        self.assertEqual(runner.calls, [])
+
+
+class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
+    """`invoke_workers_parallel` batches `invoke_worker_async` calls and is the
+    seam review panels use to fan out to several models at once (spec 0005
+    user story 2 / ticket 03).
+    """
+
+    async def test_runs_batch_and_preserves_request_order(self) -> None:
+        outputs = {
+            "first prompt": _FakeAsyncProcess(stdout=b"first output"),
+            "second prompt": _FakeAsyncProcess(stdout=b"second output"),
+            "third prompt": _FakeAsyncProcess(stdout=b"third output"),
+        }
+
+        async def runner(*args: Any, **kwargs: Any) -> _FakeAsyncProcess:
+            prompt = args[-1]
+            for key, process in outputs.items():
+                if key in prompt:
+                    return process
+            raise AssertionError(f"unexpected prompt: {prompt}")
+
+        requests: list[production_invoker.WorkerRequest] = [
+            ("claude-sonnet-5", "high", "first prompt"),
+            ("gpt-5.6-terra", "medium", "second prompt"),
+            ("agy", "low", "third prompt"),
+        ]
+
+        results = await production_invoker.invoke_workers_parallel(requests, runner=runner)
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0].raw_output, "first output")
+        self.assertEqual(results[1].raw_output, "second output")
+        self.assertEqual(results[2].raw_output, "third output")
+        self.assertTrue(all(result.success for result in results))
+
+    async def test_a_malformed_request_becomes_a_failed_result_not_a_raised_batch(
+        self,
+    ) -> None:
+        good_process = _FakeAsyncProcess(stdout=b"ok")
+
+        async def runner(*args: Any, **kwargs: Any) -> _FakeAsyncProcess:
+            return good_process
+
+        requests: list[production_invoker.WorkerRequest] = [
+            ("claude-sonnet-5", "high", "good request"),
+            ("acme-model", "low", "bad request"),
+        ]
+
+        results = await production_invoker.invoke_workers_parallel(requests, runner=runner)
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0].success)
+        self.assertFalse(results[1].success)
+        assert results[1].error is not None
+        self.assertIn("Unsupported worker model", results[1].error)
+
+    async def test_a_timeout_in_one_request_does_not_cancel_its_siblings(self) -> None:
+        hung_process = _FakeAsyncProcess(hang_seconds=5.0)
+        fast_process = _FakeAsyncProcess(stdout=b"fast output")
+
+        async def runner(*args: Any, **kwargs: Any) -> _FakeAsyncProcess:
+            prompt = args[-1]
+            return hung_process if "slow" in prompt else fast_process
+
+        requests: list[production_invoker.WorkerRequest] = [
+            ("agy", "high", "slow request"),
+            ("gpt-5.6-terra", "medium", "fast request"),
+        ]
+
+        results = await production_invoker.invoke_workers_parallel(
+            requests, timeout=0.01, runner=runner
+        )
+
+        self.assertFalse(results[0].success)
+        assert results[0].error is not None
+        self.assertIn("timed out", results[0].error)
+        self.assertTrue(hung_process.killed)
+        self.assertTrue(hung_process.waited)
+        self.assertTrue(results[1].success)
+        self.assertEqual(results[1].raw_output, "fast output")
 
 
 class _FakeClock:
