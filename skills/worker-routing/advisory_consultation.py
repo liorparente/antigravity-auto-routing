@@ -2067,6 +2067,38 @@ def _write_plan_outcome_record(
         return f"failed to record plan outcome: {exc}"
 
 
+# Transcript persistence is intentionally a sibling module.  Keep these
+# assignments at the facade boundary so established direct-path imports of
+# ``advisory_consultation.py`` retain their historical public names while all
+# calls share the extracted implementation.
+try:
+    import dialogue_transcript as _dialogue_transcript
+except ModuleNotFoundError as exc:
+    if exc.name != "dialogue_transcript":
+        raise
+    _transcript_spec = importlib.util.spec_from_file_location(
+        "dialogue_transcript", Path(__file__).with_name("dialogue_transcript.py")
+    )
+    assert _transcript_spec is not None and _transcript_spec.loader is not None
+    _dialogue_transcript = importlib.util.module_from_spec(_transcript_spec)
+    sys.modules["dialogue_transcript"] = _dialogue_transcript
+    _transcript_spec.loader.exec_module(_dialogue_transcript)
+
+ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
+AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
+_default_task_id = _dialogue_transcript._default_task_id
+_resolve_task_id = _dialogue_transcript._resolve_task_id
+_render_consultation_transcript = _dialogue_transcript._render_consultation_transcript
+_render_sensitivity_halt_transcript = _dialogue_transcript._render_sensitivity_halt_transcript
+_write_transcript = _dialogue_transcript._write_transcript
+_append_jsonl_locked = _dialogue_transcript._append_jsonl_locked
+_reduce_dialogue_round = _dialogue_transcript._reduce_dialogue_round
+_build_telemetry_record = _dialogue_transcript._build_telemetry_record
+_write_telemetry_record = _dialogue_transcript._write_telemetry_record
+_write_dialogue_quality_record = _dialogue_transcript._write_dialogue_quality_record
+_write_plan_outcome_record = _dialogue_transcript._write_plan_outcome_record
+
+
 def _build_stalemate_report(
     planner_position: str,
     critic_position: str,

@@ -4,10 +4,10 @@
 
 **Blocked by:** 02 — Extract Degradation Policy & Budget Ladder (Slice 2).
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Extract `ConsultationTranscript`, `AdvisoryTelemetryRecord`, and formatting helpers into `dialogue_transcript.py`.
-- [ ] Centralize fail-closed prompt redaction on `sensitivity_halt` ensuring zero task prompt leakage.
-- [ ] Re-export all transcript and telemetry symbols in `advisory_consultation.py`.
-- [ ] Add direct unit tests for transcript rendering, sensitivity redaction boundaries, and telemetry stream serialization.
-- [ ] Verify all existing tests in `test_routing.py` pass without regression.
+- [x] Extract `ConsultationTranscript`, `AdvisoryTelemetryRecord`, and formatting helpers into `dialogue_transcript.py`.
+- [x] Centralize fail-closed prompt redaction on `sensitivity_halt` ensuring zero task prompt leakage.
+- [x] Re-export all transcript and telemetry symbols in `advisory_consultation.py`.
+- [x] Add direct unit tests for transcript rendering, sensitivity redaction boundaries, and telemetry stream serialization.
+- [x] Verify all existing tests in `test_routing.py` pass without regression.
