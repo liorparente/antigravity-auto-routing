@@ -74,7 +74,7 @@ class CLIReviewerAdapter(ReviewerAdapter):
             payload_dict = dict(payload)
             payload_dict["provider"] = self.provider_id
             return payload_dict
-        except ValueError as error:
+        except Exception as error:  # noqa: BLE001
             return {
                 "provider": self.provider_id,
                 "vote": "abstain",

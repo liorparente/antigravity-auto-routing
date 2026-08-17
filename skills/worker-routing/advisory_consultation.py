@@ -24,25 +24,35 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from dialogue_contracts import AdvisoryRoundVerdict as _AdvisoryRoundVerdict
+    from dialogue_degradation import DegradationRung as _DegradationRung
+
+
+def _load_sibling(name: str):
+    try:
+        return __import__(name)
+    except ModuleNotFoundError as exc:
+        if exc.name != name:
+            raise
+        spec = importlib.util.spec_from_file_location(
+            name, Path(__file__).with_name(f"{name}.py")
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+        return module
+
 
 # Installed harnesses and normal script execution expose this sibling through
 # `sys.path`. Several established callers instead load this facade directly
 # from its file with `importlib`, which does not. Register the sibling module
 # only for that path-loading mode, then make the same explicit re-export in
 # both cases so the facade's historical surface remains unchanged.
-try:
-    import dialogue_contracts as _dialogue_contracts
-except ModuleNotFoundError as exc:
-    if exc.name != "dialogue_contracts":
-        raise
-    _contracts_spec = importlib.util.spec_from_file_location(
-        "dialogue_contracts", Path(__file__).with_name("dialogue_contracts.py")
-    )
-    assert _contracts_spec is not None and _contracts_spec.loader is not None
-    _dialogue_contracts = importlib.util.module_from_spec(_contracts_spec)
-    sys.modules["dialogue_contracts"] = _dialogue_contracts
-    _contracts_spec.loader.exec_module(_dialogue_contracts)
+_dialogue_contracts = _load_sibling("dialogue_contracts")
 
 AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
 CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
@@ -60,18 +70,7 @@ _split_off_verdict_line = _dialogue_contracts._split_off_verdict_line
 # through direct ``importlib`` file loading.  Mirror the contract-module
 # fallback so the extracted degradation policy keeps the facade's historic
 # exports available in either mode.
-try:
-    import dialogue_degradation as _dialogue_degradation
-except ModuleNotFoundError as exc:
-    if exc.name != "dialogue_degradation":
-        raise
-    _degradation_spec = importlib.util.spec_from_file_location(
-        "dialogue_degradation", Path(__file__).with_name("dialogue_degradation.py")
-    )
-    assert _degradation_spec is not None and _degradation_spec.loader is not None
-    _dialogue_degradation = importlib.util.module_from_spec(_degradation_spec)
-    sys.modules["dialogue_degradation"] = _dialogue_degradation
-    _degradation_spec.loader.exec_module(_dialogue_degradation)
+_dialogue_degradation = _load_sibling("dialogue_degradation")
 
 BUDGET_DEGRADATION_MARKER = _dialogue_degradation.BUDGET_DEGRADATION_MARKER
 DEFAULT_SESSION_DIALOGUE_CAP = _dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
@@ -84,6 +83,24 @@ _DEGRADATION_RUNG_LABELS = _dialogue_degradation._DEGRADATION_RUNG_LABELS
 _load_degraded_roster_model = _dialogue_degradation._load_degraded_roster_model
 _load_dialogue_budget_config = _dialogue_degradation._load_dialogue_budget_config
 resolve_degradation_rung = _dialogue_degradation.resolve_degradation_rung
+
+_dialogue_transcript = _load_sibling("dialogue_transcript")
+ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
+DEGRADED_INDEPENDENCE_MARKER = _dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER
+CANARY_MARKER = _dialogue_transcript.CANARY_MARKER
+_atomic_text_write = _dialogue_transcript._atomic_text_write
+AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
+_default_task_id = _dialogue_transcript._default_task_id
+_resolve_task_id = _dialogue_transcript._resolve_task_id
+_render_consultation_transcript = _dialogue_transcript._render_consultation_transcript
+_render_sensitivity_halt_transcript = _dialogue_transcript._render_sensitivity_halt_transcript
+_write_transcript = _dialogue_transcript._write_transcript
+_append_jsonl_locked = _dialogue_transcript._append_jsonl_locked
+_reduce_dialogue_round = _dialogue_transcript._reduce_dialogue_round
+_build_telemetry_record = _dialogue_transcript._build_telemetry_record
+_write_telemetry_record = _dialogue_transcript._write_telemetry_record
+_write_dialogue_quality_record = _dialogue_transcript._write_dialogue_quality_record
+_write_plan_outcome_record = _dialogue_transcript._write_plan_outcome_record
 
 # Keep the facade-only names observably referenced while retaining the
 # module's historically broad import surface.  An ``__all__`` declaration
@@ -1020,9 +1037,9 @@ class AdvisoryDebateResult:
     occasion: Occasion = "ambiguity"
     degraded_independence: bool = False
     canary_result: CanaryResult | None = None
-    degradation_rung: DegradationRung = 0
+    degradation_rung: _DegradationRung = 0
     topology: RosterTopology = "pair"
-    round_verdicts: tuple[AdvisoryRoundVerdict, ...] = ()
+    round_verdicts: tuple[_AdvisoryRoundVerdict, ...] = ()
 
     @property
     def consensus_reached(self) -> bool:
@@ -1414,41 +1431,6 @@ def _fold_error(existing: str | None, addition: str | None) -> str | None:
     return f"{existing}; {addition}"
 
 
-
-
-# Transcript persistence is intentionally a sibling module.  Keep these
-# assignments at the facade boundary so established direct-path imports of
-# ``advisory_consultation.py`` retain their historical public names while all
-# calls share the extracted implementation.
-try:
-    import dialogue_transcript as _dialogue_transcript
-except ModuleNotFoundError as exc:
-    if exc.name != "dialogue_transcript":
-        raise
-    _transcript_spec = importlib.util.spec_from_file_location(
-        "dialogue_transcript", Path(__file__).with_name("dialogue_transcript.py")
-    )
-    assert _transcript_spec is not None and _transcript_spec.loader is not None
-    _dialogue_transcript = importlib.util.module_from_spec(_transcript_spec)
-    sys.modules["dialogue_transcript"] = _dialogue_transcript
-    _transcript_spec.loader.exec_module(_dialogue_transcript)
-
-ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
-DEGRADED_INDEPENDENCE_MARKER = _dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER
-CANARY_MARKER = _dialogue_transcript.CANARY_MARKER
-_atomic_text_write = _dialogue_transcript._atomic_text_write
-AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
-_default_task_id = _dialogue_transcript._default_task_id
-_resolve_task_id = _dialogue_transcript._resolve_task_id
-_render_consultation_transcript = _dialogue_transcript._render_consultation_transcript
-_render_sensitivity_halt_transcript = _dialogue_transcript._render_sensitivity_halt_transcript
-_write_transcript = _dialogue_transcript._write_transcript
-_append_jsonl_locked = _dialogue_transcript._append_jsonl_locked
-_reduce_dialogue_round = _dialogue_transcript._reduce_dialogue_round
-_build_telemetry_record = _dialogue_transcript._build_telemetry_record
-_write_telemetry_record = _dialogue_transcript._write_telemetry_record
-_write_dialogue_quality_record = _dialogue_transcript._write_dialogue_quality_record
-_write_plan_outcome_record = _dialogue_transcript._write_plan_outcome_record
 
 
 def _build_stalemate_report(
@@ -2001,7 +1983,7 @@ def run_advisory_consultation_debate(
     # than raising `UnboundLocalError` — a halted task never reaches the
     # budget check at all, and correctly reports no degradation for a
     # dialogue that never ran.
-    degradation_rung: DegradationRung = 0
+    degradation_rung: _DegradationRung = 0
 
     rounds: list[AdvisoryDebateRound] = []
     # Spec 0003 (CriticalDialogue) ticket 10: kept parallel with `rounds`
@@ -2010,7 +1992,7 @@ def run_advisory_consultation_debate(
     # `_parse_critic_verdict` is called for that round, so the two
     # sequences can never drift out of sync (same length, same order, every
     # outcome). See `AdvisoryDebateResult.round_verdicts`'s docstring.
-    round_verdicts: list[AdvisoryRoundVerdict] = []
+    round_verdicts: list[_AdvisoryRoundVerdict] = []
     previous_plan: str | None = None
     previous_critique: str | None = None
     # Panel mode only (spec 0003 ticket 06): each Critic's own last response,
