@@ -478,6 +478,36 @@ class InvokeWorkerAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(runner.calls, [])
 
+    async def test_process_lookup_error_on_kill_is_handled_gracefully(self) -> None:
+        """A process that exits on its own right at the timeout boundary can
+        make `kill()`/`wait()` raise `ProcessLookupError` for a pid that no
+        longer exists. That race must not surface as an unhandled exception —
+        the timeout result still comes back as a failed `WorkerExecutionResult`.
+        """
+
+        class _RaceConditionProcess(_FakeAsyncProcess):
+            def kill(self) -> None:
+                self.killed = True
+                raise ProcessLookupError("process already exited")
+
+            async def wait(self) -> int:
+                self.waited = True
+                raise ProcessLookupError("process already exited")
+
+        process = _RaceConditionProcess(hang_seconds=5.0)
+        runner = _RecordingAsyncRunner(process)
+
+        result = await production_invoker.invoke_worker_async(
+            "agy", "high", "Research", timeout=0.01, runner=runner
+        )
+
+        self.assertFalse(result.success)
+        assert result.error is not None
+        self.assertIn("timed out", result.error)
+        self.assertEqual(result.raw_output, "")
+        self.assertTrue(process.killed)
+        self.assertTrue(process.waited)
+
 
 class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
     """`invoke_workers_parallel` batches `invoke_worker_async` calls and is the
@@ -558,6 +588,40 @@ class InvokeWorkersParallelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(hung_process.waited)
         self.assertTrue(results[1].success)
         self.assertEqual(results[1].raw_output, "fast output")
+
+    async def test_spawn_failure_returns_failed_result_without_crashing_batch(
+        self,
+    ) -> None:
+        """A missing CLI binary (or any other process-creation error) raises
+        from the runner itself, before a process handle even exists. One
+        request hitting that must not cancel its siblings, and must not
+        propagate out of the batch — it becomes a failed result like any
+        other worker outcome.
+        """
+        good_process = _FakeAsyncProcess(stdout=b"ok")
+
+        async def runner(*args: Any, **kwargs: Any) -> _FakeAsyncProcess:
+            prompt = args[-1]
+            if "missing binary" in prompt:
+                raise FileNotFoundError("no such file or directory: 'codex'")
+            return good_process
+
+        requests: list[production_invoker.WorkerRequest] = [
+            ("claude-sonnet-5", "high", "good request"),
+            ("gpt-5.6-terra", "medium", "missing binary request"),
+        ]
+
+        results = await production_invoker.invoke_workers_parallel(requests, runner=runner)
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(results[0].success)
+        self.assertEqual(results[0].raw_output, "ok")
+        self.assertFalse(results[1].success)
+        assert results[1].error is not None
+        self.assertIn("failed to spawn", results[1].error)
+        self.assertIn("no such file or directory", results[1].error)
+        self.assertEqual(results[1].raw_output, "")
+        self.assertEqual(results[1].cost_estimate_usd, 0.0)
 
 
 class _FakeClock:

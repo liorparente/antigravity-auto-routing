@@ -372,19 +372,35 @@ async def invoke_worker_async(
     environment = {**os.environ, "IN_WORKER_ROUTING": "true"}
 
     start = clock()
-    proc = await runner(
-        *command,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=environment,
-    )
+    try:
+        proc = await runner(
+            *command,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=environment,
+        )
+    except Exception as error:  # noqa: BLE001 - a missing binary or spawn failure is a worker outcome, not a call-site bug.
+        duration_ms = max(0, round((clock() - start) * 1000))
+        return WorkerExecutionResult(
+            raw_output="",
+            duration_ms=duration_ms,
+            cost_estimate_usd=0.0,
+            success=False,
+            error=f"Worker {model!r} failed to spawn: {error}",
+        )
 
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+        try:
+            await proc.wait()
+        except ProcessLookupError:
+            pass
         duration_ms = max(0, round((clock() - start) * 1000))
         return WorkerExecutionResult(
             raw_output="",
@@ -392,6 +408,15 @@ async def invoke_worker_async(
             cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
             success=False,
             error=f"Worker {model!r} timed out after {timeout} seconds",
+        )
+    except Exception as error:  # noqa: BLE001 - a communicate() failure is a worker outcome, not a call-site bug.
+        duration_ms = max(0, round((clock() - start) * 1000))
+        return WorkerExecutionResult(
+            raw_output="",
+            duration_ms=duration_ms,
+            cost_estimate_usd=0.0,
+            success=False,
+            error=f"Worker {model!r} failed to spawn: {error}",
         )
 
     duration_ms = max(0, round((clock() - start) * 1000))
