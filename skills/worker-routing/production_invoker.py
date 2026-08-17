@@ -402,27 +402,27 @@ async def invoke_worker_async(
             error=f"Worker {model!r} failed to spawn: {error}",
         )
 
+    def failed_execution_result(error_message: str) -> WorkerExecutionResult:
+        duration_ms = max(0, round((clock() - start) * 1000))
+        return WorkerExecutionResult(
+            raw_output="",
+            duration_ms=duration_ms,
+            cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
+            success=False,
+            error=error_message,
+        )
+
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         await _kill_and_reap_process(proc)
-        duration_ms = max(0, round((clock() - start) * 1000))
-        return WorkerExecutionResult(
-            raw_output="",
-            duration_ms=duration_ms,
-            cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
-            success=False,
-            error=f"Worker {model!r} timed out after {timeout} seconds",
+        return failed_execution_result(
+            f"Worker {model!r} timed out after {timeout} seconds"
         )
     except Exception as error:  # noqa: BLE001 - a communicate() failure is a worker outcome, not a call-site bug.
         await _kill_and_reap_process(proc)
-        duration_ms = max(0, round((clock() - start) * 1000))
-        return WorkerExecutionResult(
-            raw_output="",
-            duration_ms=duration_ms,
-            cost_estimate_usd=estimate_cost_usd(model_id, duration_ms),
-            success=False,
-            error=f"Worker {model!r} failed during execution: {error}",
+        return failed_execution_result(
+            f"Worker {model!r} failed during execution: {error}"
         )
 
     duration_ms = max(0, round((clock() - start) * 1000))

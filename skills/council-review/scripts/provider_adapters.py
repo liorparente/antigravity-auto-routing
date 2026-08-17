@@ -40,7 +40,6 @@ class CLIReviewerAdapter(ReviewerAdapter):
         super().__init__(provider_id)
         self.model = model
         self.effort = effort
-        self.executable = executable or provider_id
         self._runner = runner
 
     def _get_args(self, prompt: str) -> List[str]:
