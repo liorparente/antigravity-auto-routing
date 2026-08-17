@@ -356,6 +356,26 @@ def _validate_digest(value: object, field_name: str) -> None:
         raise ValueError(f"{field_name} must match {_DIGEST_RE.pattern} or be None, got {text!r}")
 
 
+def _validate_expected_current(value: object, field_name: str = "expected_current") -> None:
+    """`None`, or a mapping from a valid `LearnedDocument` to `None` or content.
+
+    A content-agnostic compare-and-swap precondition (see `adopt`'s
+    docstring): the values are opaque strings to this module, never parsed
+    as lesson text — only ever compared for equality against what
+    `previous_documents` already holds.
+    """
+    if value is None:
+        return
+    if not isinstance(value, Mapping):
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+            f"{field_name} must be a mapping, got {type(value).__name__}"
+        )
+    for key, content in value.items():
+        _validate_choice(key, LEARNED_DOCUMENTS, f"{field_name} key")
+        if content is not None:
+            _validate_content(content, f"{field_name}[{key!r}]")
+
+
 def _validate_change_id(value: object, field_name: str = "change_id") -> None:
     """`None`, or a bare identifier — never prose, never a path.
 
@@ -1257,6 +1277,7 @@ def adopt(
     root_dir: Path,
     now: datetime,
     change_id: str | None = None,
+    expected_current: Mapping[LearnedDocument, str | None] | None = None,
 ) -> VersionEntry:
     """Adopt `changes`, writing a new version and returning its `VersionEntry`.
 
@@ -1280,10 +1301,27 @@ def adopt(
     store has ever used, on disk or in history (see
     `_highest_version_on_disk`) — see the module docstring's Decision 2 for
     why it is computed that way and what it guards against.
+
+    `expected_current`, when given, is a content-agnostic compare-and-swap
+    precondition (ADR 0010): for every `document` it names, the version
+    this call is about to replace must hold exactly the content given —
+    `None` meaning the document must be absent. The comparison is opaque
+    string equality against `previous_documents`, checked inside this same
+    critical section immediately after that read, so it catches a writer
+    that adopted (or rolled back) between whenever the caller read its own
+    prior state and this call — a race `risk_tiered_application.
+    apply_memory_lesson`'s read-merge-write needs closed to accumulate
+    memory lessons safely, without this module ever learning what a lesson
+    is (Decision 4). A mismatch raises `ValueError` with a message distinct
+    from the "no actual difference" refusal above, so a caller can tell a
+    stale-read conflict apart from a genuine no-op and retry the read
+    accordingly. `expected_current=None` (the default) skips the check
+    entirely, so no existing caller of `adopt` is affected.
     """
     _require_aware_now(now)
     validated_changes = _validate_changes(changes)
     _validate_change_id(change_id)
+    _validate_expected_current(expected_current)
 
     # Everything from here to the append is one critical section: the whole
     # point is that what gets written is decided from a read no other writer
@@ -1301,6 +1339,15 @@ def adopt(
             if current_version is not None
             else {}
         )
+
+        if expected_current is not None:
+            for document, content in expected_current.items():
+                if previous_documents.get(document) != content:
+                    raise ValueError(
+                        "adopt: current state changed since expected_current "
+                        "was captured — retry with a fresh read"
+                    )
+
         new_documents = dict(previous_documents)
         for change in validated_changes:
             new_documents[change.document] = change.content

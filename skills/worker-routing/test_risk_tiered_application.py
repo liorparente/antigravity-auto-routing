@@ -11,12 +11,15 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import learned_state
 import learning_journal
+import risk_tiered_application
 from learned_state import DocumentChange
 from learning_scoreboard import MetricChange, MetricValue, ScoreboardComparison
 from risk_tiered_application import (
+    DEFAULT_MAX_MEMORY_LESSONS,
     PendingProposal,
     apply_memory_lesson,
     apply_routing_table_update,
@@ -29,6 +32,7 @@ from risk_tiered_application import (
 
 _NOW = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
 _LATER = datetime(2026, 8, 15, 13, 0, 0, tzinfo=timezone.utc)
+_LATEST = datetime(2026, 8, 15, 14, 0, 0, tzinfo=timezone.utc)
 
 
 def _comparison_with_regression(name: str = "mean_rework_per_task") -> ScoreboardComparison:
@@ -50,7 +54,12 @@ def _comparison_without_regression(name: str = "mean_rework_per_task") -> Scoreb
 
 
 class Tier1MemoryLessonTests(unittest.TestCase):
-    """Tier 1: Memory lessons auto-apply without requiring an acceptance gate."""
+    """Tier 1: Memory lessons auto-apply without requiring an acceptance gate.
+
+    ADR 0010 (Ticket 33): `apply_memory_lesson` accumulates rather than
+    replaces — every adopted candidate is canonical-wrapped (`"- "`-prefixed)
+    regardless of whether the caller's own `content` already looked that way.
+    """
 
     def test_memory_lesson_auto_applies_and_creates_version_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,9 +78,11 @@ class Tier1MemoryLessonTests(unittest.TestCase):
             self.assertEqual(outcome.version_entry.version, 1)
             self.assertEqual(outcome.version_entry.change_id, "lesson-01")
 
-            # Verify on-disk learned state
+            # Verify on-disk learned state. Canonical-wrapped: the merge
+            # candidate is always serialized in canonical bullet form, even
+            # for a first, single, un-bulleted lesson.
             current = learned_state.read_current(root)
-            self.assertEqual(current.get("memory"), "Lesson: Always test seams directly.")
+            self.assertEqual(current.get("memory"), "- Lesson: Always test seams directly.")
 
     def test_memory_lesson_requires_timezone_aware_now(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -79,6 +90,512 @@ class Tier1MemoryLessonTests(unittest.TestCase):
             naive_now = datetime(2026, 8, 15, 12, 0, 0)  # noqa: DTZ001 - the value under test
             with self.assertRaises(ValueError):
                 apply_memory_lesson("Lesson text", root_dir=root, now=naive_now)
+
+    def test_second_call_accumulates_with_first_rather_than_replacing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson A", root_dir=root, now=_NOW, change_id="lesson-01")
+            second = apply_memory_lesson(
+                "Lesson B", root_dir=root, now=_LATER, change_id="lesson-02"
+            )
+
+            self.assertEqual(second.status, "applied")
+            self.assertIn("merged 1 new lesson(s)", second.reason or "")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A\n- Lesson B")
+
+    def test_reapplying_identical_lesson_text_is_deduplicated_and_returns_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson A", root_dir=root, now=_NOW)
+            apply_memory_lesson("Lesson B", root_dir=root, now=_LATER)
+
+            third = apply_memory_lesson("Lesson A", root_dir=root, now=_LATEST)
+
+            self.assertEqual(third.status, "no_op")
+            self.assertTrue(third.applied)
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A\n- Lesson B")
+            self.assertEqual(len(learned_state.read_history(root)), 2)
+
+    def test_duplicate_only_input_returns_no_op_without_writing_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("- Lesson A\n- Lesson B", root_dir=root, now=_NOW)
+
+            outcome = apply_memory_lesson("- Lesson B\n- Lesson A", root_dir=root, now=_LATER)
+
+            self.assertEqual(outcome.status, "no_op")
+            self.assertEqual(len(learned_state.read_history(root)), 1)
+
+    def test_exceeding_max_lessons_prunes_oldest_first_fifo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for i in range(DEFAULT_MAX_MEMORY_LESSONS + 5):
+                apply_memory_lesson(f"Lesson {i}", root_dir=root, now=_NOW)
+
+            current = learned_state.read_current(root)
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(len(entries), DEFAULT_MAX_MEMORY_LESSONS)
+            # The five oldest (0-4) were evicted; the most recent survive.
+            self.assertEqual(entries[0], "Lesson 5")
+            self.assertEqual(entries[-1], f"Lesson {DEFAULT_MAX_MEMORY_LESSONS + 4}")
+
+            last_outcome = apply_memory_lesson(
+                f"Lesson {DEFAULT_MAX_MEMORY_LESSONS + 5}", root_dir=root, now=_LATER
+            )
+            self.assertIn(
+                f"pruned 1 oldest to stay within max_lessons={DEFAULT_MAX_MEMORY_LESSONS}",
+                last_outcome.reason or "",
+            )
+
+    def test_legacy_non_bulleted_memory_content_is_preserved_as_one_entry_not_split(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_content = "Legacy multi-line lesson\nwith no bullets at all"
+            learned_state.adopt(
+                [DocumentChange(document="memory", content=legacy_content)],
+                root_dir=root,
+                now=_NOW,
+            )
+
+            outcome = apply_memory_lesson("New lesson", root_dir=root, now=_LATER)
+
+            self.assertEqual(outcome.status, "applied")
+            current = learned_state.read_current(root)
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(len(entries), 2)
+            self.assertEqual(entries[0], legacy_content)
+            self.assertEqual(entries[1], "New lesson")
+
+    def test_legacy_entry_survives_two_subsequent_merges_as_one_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_content = "Legacy multi-line lesson\nwith no bullets at all"
+            learned_state.adopt(
+                [DocumentChange(document="memory", content=legacy_content)],
+                root_dir=root,
+                now=_NOW,
+            )
+            apply_memory_lesson("New lesson", root_dir=root, now=_LATER)
+            apply_memory_lesson("Another lesson", root_dir=root, now=_LATEST)
+
+            current = learned_state.read_current(root)
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(len(entries), 3)
+            self.assertEqual(entries[0], legacy_content)
+
+    def test_blank_content_raises_and_writes_no_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                apply_memory_lesson("   \n  ", root_dir=root, now=_NOW)
+
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_non_string_content_raises_value_error_and_writes_no_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                apply_memory_lesson(123, root_dir=root, now=_NOW)  # type: ignore[arg-type]
+
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_non_string_reject_if_candidate_digest_raises_and_writes_no_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                apply_memory_lesson(
+                    "Lesson A",
+                    root_dir=root,
+                    now=_NOW,
+                    reject_if_candidate_digest=123,  # type: ignore[arg-type]
+                )
+
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_invalid_hex_reject_if_candidate_digest_raises_and_writes_no_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                apply_memory_lesson(
+                    "Lesson A",
+                    root_dir=root,
+                    now=_NOW,
+                    reject_if_candidate_digest="g" * 64,
+                )
+
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_short_reject_if_candidate_digest_raises_and_writes_no_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                apply_memory_lesson(
+                    "Lesson A",
+                    root_dir=root,
+                    now=_NOW,
+                    reject_if_candidate_digest="a" * 63,
+                )
+
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_uppercase_reject_if_candidate_digest_raises_and_writes_no_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                apply_memory_lesson(
+                    "Lesson A",
+                    root_dir=root,
+                    now=_NOW,
+                    reject_if_candidate_digest="A" * 64,
+                )
+
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_crlf_and_trailing_newline_input_normalizes_to_lf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = apply_memory_lesson(
+                "- Lesson A\r\n- Lesson B\r\n", root_dir=root, now=_NOW
+            )
+
+            self.assertEqual(outcome.status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A\n- Lesson B")
+            self.assertNotIn("\r", current.get("memory", ""))
+
+    def test_multiline_continuation_entry_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            multiline = "- First line of a lesson\n  continued on a second line"
+            outcome = apply_memory_lesson(multiline, root_dir=root, now=_NOW)
+
+            self.assertEqual(outcome.status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), multiline)
+
+            # A second, identical multiline entry dedupes to a no-op.
+            second = apply_memory_lesson(multiline, root_dir=root, now=_LATER)
+            self.assertEqual(second.status, "no_op")
+
+    def test_malformed_bulleted_mixture_raises_value_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError) as ctx:
+                apply_memory_lesson(
+                    "- Lesson A\nunindented continuation line", root_dir=root, now=_NOW
+                )
+            self.assertIn("malformed", str(ctx.exception))
+            self.assertEqual(learned_state.read_history(root), ())
+
+    def test_case_sensitive_dedup_treats_differently_cased_lessons_as_distinct(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson A", root_dir=root, now=_NOW)
+            outcome = apply_memory_lesson("lesson a", root_dir=root, now=_LATER)
+
+            self.assertEqual(outcome.status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A\n- lesson a")
+
+    def test_rollback_after_accumulated_adopt_restores_exact_prior_accumulated_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson A", root_dir=root, now=_NOW, change_id="adopt-1")
+            apply_memory_lesson("Lesson B", root_dir=root, now=_LATER, change_id="adopt-2")
+
+            learned_state.roll_back(root_dir=root, now=_LATEST, change_id="rollback-1")
+
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A")
+
+    def test_concurrent_apply_memory_lesson_calls_both_survive(self) -> None:
+        """A second caller's `apply_memory_lesson` call lands entirely
+        between this call's read and its own `adopt` — simulated in-process
+        (deterministic, no real threads/processes) by making the first
+        `read_current` call also perform the "concurrent" write before this
+        call's own retry loop ever sees it. Both lessons must survive, via
+        the CAS retry rather than one silently overwriting the other.
+
+        Patches `risk_tiered_application.learned_state.read_current` — the
+        exact attribute `apply_memory_lesson`'s own code resolves through —
+        rather than this test file's own `learned_state` import. Several
+        other test files in this directory reload `learned_state` via
+        `importlib.util.spec_from_file_location` at import time (see
+        `test_routing.py`), which under `unittest discover`'s whole-suite
+        collection can leave this test file's `learned_state` name bound to
+        a different module object than the one `risk_tiered_application.py`
+        itself already imported — patching that copy would silently no-op.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rta_learned_state = risk_tiered_application.learned_state
+            real_read_current = rta_learned_state.read_current
+            call_count = {"n": 0}
+
+            def racing_read_current(root_dir: Path):
+                call_count["n"] += 1
+                result = real_read_current(root_dir)
+                if call_count["n"] == 1:
+                    apply_memory_lesson("Lesson B", root_dir=root_dir, now=_LATER)
+                return result
+
+            with patch.object(rta_learned_state, "read_current", side_effect=racing_read_current):
+                outcome = apply_memory_lesson("Lesson A", root_dir=root, now=_NOW)
+
+            self.assertEqual(outcome.status, "applied")
+            self.assertGreater(call_count["n"], 1, "the race must have forced at least one retry")
+            current = rta_learned_state.read_current(root)
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(set(entries), {"Lesson A", "Lesson B"})
+
+    def test_concurrent_rollback_cannot_be_overwritten_by_a_stale_apply(self) -> None:
+        """A rollback landing inside this call's read-merge-write window
+        must not be silently overwritten by a stale-based adopt — the CAS
+        retry must pick up the post-rollback state on its next iteration.
+        See the previous test's docstring for why this patches
+        `risk_tiered_application.learned_state` rather than this test
+        file's own `learned_state` import.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson A", root_dir=root, now=_NOW, change_id="adopt-1")
+            apply_memory_lesson("Lesson B", root_dir=root, now=_LATER, change_id="adopt-2")
+
+            rta_learned_state = risk_tiered_application.learned_state
+            real_read_current = rta_learned_state.read_current
+            call_count = {"n": 0}
+
+            def racing_read_current(root_dir: Path):
+                call_count["n"] += 1
+                result = real_read_current(root_dir)
+                if call_count["n"] == 1:
+                    rta_learned_state.roll_back(
+                        root_dir=root_dir, now=_LATEST, change_id="rollback-1"
+                    )
+                return result
+
+            with patch.object(rta_learned_state, "read_current", side_effect=racing_read_current):
+                outcome = apply_memory_lesson("Lesson C", root_dir=root, now=_LATEST)
+
+            self.assertEqual(outcome.status, "applied")
+            self.assertGreater(call_count["n"], 1, "the race must have forced at least one retry")
+            current = rta_learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A\n- Lesson C")
+
+    def test_concurrent_modification_during_anti_flapping_check_triggers_retry(self) -> None:
+        """The anti-flapping recheck must not reject on a candidate digest
+        computed against state that is already stale. A concurrent writer
+        lands between this iteration's initial read (which produced a
+        candidate matching `reject_if_candidate_digest`) and the recheck
+        read just before returning `rejected` — the recheck must see the
+        changed `"memory"` value and retry instead, so the reject is never
+        issued against state nobody can act on anymore. See
+        `test_concurrent_apply_memory_lesson_calls_both_survive`'s docstring
+        for why this patches `risk_tiered_application.learned_state`
+        directly rather than this test file's own `learned_state` import.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            apply_memory_lesson("Lesson A", root_dir=root, now=_NOW, change_id="adopt-1")
+            reverted_before_digest = risk_tiered_application._digest("- Lesson A\n- Lesson B")
+
+            rta_learned_state = risk_tiered_application.learned_state
+            real_read_current = rta_learned_state.read_current
+            call_count = {"n": 0}
+
+            def racing_read_current(root_dir: Path):
+                call_count["n"] += 1
+                if call_count["n"] == 2:
+                    # Lands inside the anti-flapping recheck: a concurrent
+                    # writer changes "memory" before this call returns.
+                    apply_memory_lesson("Lesson C", root_dir=root_dir, now=_LATER)
+                return real_read_current(root_dir)
+
+            with patch.object(rta_learned_state, "read_current", side_effect=racing_read_current):
+                outcome = apply_memory_lesson(
+                    "Lesson B",
+                    root_dir=root,
+                    now=_LATEST,
+                    reject_if_candidate_digest=reverted_before_digest,
+                )
+
+            # The concurrent write invalidated the reject decision: the
+            # retried iteration merges against post-race state, whose
+            # candidate no longer matches `reject_if_candidate_digest`.
+            self.assertEqual(outcome.status, "applied")
+            self.assertTrue(outcome.applied)
+            current = rta_learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A\n- Lesson C\n- Lesson B")
+
+
+class ParseMemoryDocumentLegacyLineEndingTests(unittest.TestCase):
+    """`_parse_memory_document`'s legacy (no `"- "`-prefixed line) branch must
+    normalize `\\r`/`\\r\\n` to `\\n` via `str.splitlines()` + `"\\n".join`,
+    not return `text` verbatim — a verbatim return lets an embedded `\\r`
+    survive into the parsed entry and, later, into whatever re-serializes it.
+    """
+
+    def test_legacy_content_with_cr_line_endings_normalizes_embedded_cr(self) -> None:
+        entries = risk_tiered_application._parse_memory_document(
+            "Legacy line one\rLegacy line two"
+        )
+        self.assertEqual(entries, ("Legacy line one\nLegacy line two",))
+        self.assertNotIn("\r", entries[0])
+
+    def test_legacy_content_with_crlf_line_endings_normalizes_embedded_crlf(self) -> None:
+        entries = risk_tiered_application._parse_memory_document(
+            "Legacy line one\r\nLegacy line two\r\n"
+        )
+        self.assertEqual(entries, ("Legacy line one\nLegacy line two",))
+        self.assertNotIn("\r", entries[0])
+
+    def test_legacy_cr_content_round_trips_through_apply_memory_lesson(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_content = "Legacy line one\rLegacy line two"
+            learned_state.adopt(
+                [DocumentChange(document="memory", content=legacy_content)],
+                root_dir=root,
+                now=_NOW,
+            )
+
+            outcome = apply_memory_lesson("New lesson", root_dir=root, now=_LATER)
+
+            self.assertEqual(outcome.status, "applied")
+            current = learned_state.read_current(root)
+            self.assertNotIn("\r", current.get("memory", ""))
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(entries[0], "Legacy line one\nLegacy line two")
+            self.assertEqual(entries[1], "New lesson")
+
+    def test_legacy_crlf_content_round_trips_through_apply_memory_lesson(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_content = "Legacy line one\r\nLegacy line two\r\n"
+            learned_state.adopt(
+                [DocumentChange(document="memory", content=legacy_content)],
+                root_dir=root,
+                now=_NOW,
+            )
+
+            outcome = apply_memory_lesson("New lesson", root_dir=root, now=_LATER)
+
+            self.assertEqual(outcome.status, "applied")
+            current = learned_state.read_current(root)
+            self.assertNotIn("\r", current.get("memory", ""))
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(entries[0], "Legacy line one\nLegacy line two")
+            self.assertEqual(entries[1], "New lesson")
+
+
+class ParseMemoryDocumentContinuationIndentationTests(unittest.TestCase):
+    """A continuation line's indentation beyond the canonical two-space
+    `_CONTINUATION_INDENT` prefix (e.g. code embedded in a lesson) must
+    survive parsing, not be flattened to the continuation's first line via
+    `str.lstrip()`.
+    """
+
+    def test_continuation_line_indentation_beyond_prefix_is_preserved(self) -> None:
+        text = "- Do X:\n      code_line_one()\n      code_line_two()"
+        entries = risk_tiered_application._parse_memory_document(text)
+        self.assertEqual(
+            entries, ("Do X:\n    code_line_one()\n    code_line_two()",)
+        )
+
+    def test_multiline_lesson_with_internal_code_indentation_round_trips_through_apply(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            multiline = "- Do X:\n      code_line_one()\n      code_line_two()"
+            outcome = apply_memory_lesson(multiline, root_dir=root, now=_NOW)
+
+            self.assertEqual(outcome.status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), multiline)
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(
+                entries, ("Do X:\n    code_line_one()\n    code_line_two()",)
+            )
+
+
+class MergeMemoryContentAddedCountTests(unittest.TestCase):
+    """`_merge_memory_content`'s `added_count` must be computed from
+    membership of each `new_entries` item against `existing_entries`, not
+    `len(merged) - len(existing_entries)` — the length-difference formula
+    undercounts whenever `existing_entries` itself already contains a
+    duplicate, since the duplicate inflates `len(existing_entries)` without
+    ever occupying a second slot in `merged`.
+    """
+
+    def test_added_count_correct_when_existing_document_has_duplicate_entries(self) -> None:
+        existing = risk_tiered_application._serialize_memory_document(
+            ["Lesson A", "Lesson A", "Lesson B"]
+        )
+        candidate, added_count, pruned_count = risk_tiered_application._merge_memory_content(
+            existing, ["Lesson C"], max_lessons=200
+        )
+        self.assertEqual(added_count, 1)
+        self.assertEqual(pruned_count, 0)
+        entries = risk_tiered_application._parse_memory_document(candidate)
+        self.assertEqual(entries, ("Lesson A", "Lesson B", "Lesson C"))
+
+    def test_added_count_zero_when_new_entry_already_present_despite_existing_duplicates(
+        self,
+    ) -> None:
+        existing = risk_tiered_application._serialize_memory_document(
+            ["Lesson A", "Lesson A", "Lesson B"]
+        )
+        _candidate, added_count, _pruned_count = risk_tiered_application._merge_memory_content(
+            existing, ["Lesson B"], max_lessons=200
+        )
+        self.assertEqual(added_count, 0)
+
+    def test_apply_memory_lesson_reports_correct_added_count_with_existing_duplicates(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_content = risk_tiered_application._serialize_memory_document(
+                ["Lesson A", "Lesson A", "Lesson B"]
+            )
+            learned_state.adopt(
+                [DocumentChange(document="memory", content=legacy_content)],
+                root_dir=root,
+                now=_NOW,
+            )
+
+            outcome = apply_memory_lesson("Lesson C", root_dir=root, now=_LATER)
+
+            self.assertEqual(outcome.status, "applied")
+            self.assertIn("merged 1 new lesson(s)", outcome.reason or "")
+
+    def test_duplicate_new_entries_are_not_overcounted(self) -> None:
+        candidate, added_count, pruned_count = risk_tiered_application._merge_memory_content(
+            None, ["Lesson A", "Lesson A"], max_lessons=200
+        )
+        self.assertEqual(added_count, 1)
+        self.assertEqual(pruned_count, 0)
+        entries = risk_tiered_application._parse_memory_document(candidate)
+        self.assertEqual(entries, ("Lesson A",))
+
+    def test_apply_memory_lesson_reports_added_count_one_for_duplicate_new_entries(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outcome = apply_memory_lesson("- Lesson A\n- Lesson A", root_dir=root, now=_NOW)
+
+            self.assertEqual(outcome.status, "applied")
+            self.assertIn("merged 1 new lesson(s)", outcome.reason or "")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A")
 
 
 class Tier2RoutingTableUpdateTests(unittest.TestCase):
@@ -446,7 +963,7 @@ class AutoRevertOnRegressionTests(unittest.TestCase):
             self.assertEqual(outcome.version_entry.kind, "rollback")
 
             current = learned_state.read_current(root)
-            self.assertEqual(current.get("memory"), "Lesson v1")
+            self.assertEqual(current.get("memory"), "- Lesson v1")
 
     def test_unattributable_regression_when_no_adoptions_in_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

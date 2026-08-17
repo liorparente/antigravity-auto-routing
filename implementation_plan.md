@@ -1,48 +1,49 @@
-# Implementation Plan — Ticket 31: Batch Retrospective Architecture Resolution (ADR 0009)
+# Implementation Plan — Ticket 33: Atomic, Bounded Accumulation of Learned Memory Lessons (ADR 0010)
 
-Settled the open design decision for `run_weekly_deep`'s batch retrospective, establishing that it operates as a **one-shot synthesis** (`invoke_worker`) rather than a multi-round advisory dialogue.
+Settled the open architecture and implementation for cross-run memory lesson accumulation, establishing that `risk_tiered_application.apply_memory_lesson` owns accumulation, deduplication, FIFO bounding, and atomic CAS retries under ADR 0010.
 
 ## User Review Required
 
-- **Architectural Decision:** ADR 0009 formalizes that the weekly batch retrospective in `learner_worker.run_weekly_deep` remains a one-shot worker prompt (`invoke_worker`) producing actionable JSON proposals (`routing_table_update`, `brief_update`, `memory_lessons`) and an informational `retrospective_summary`.
-- **Safety Boundaries:**
-  - **Tier 2 (Routing Table)**: Evaluated pre-adoption by Acceptance Gate (`acceptance_gate.evaluate_proposal`, ADR 0008) via config-sourced benchmark trials (`trials=5`, `score_threshold=0.8` in `routing-config.json`), zero regression on concurrent live metrics, and fail-closed journaling.
-  - **Tier 3 (Briefs)**: Staged as pending proposals requiring explicit human review and approval.
-  - **Tier 1 (Memory Lessons)**: Auto-applied directly for low-stakes institutional memory, guarded by intra-run consolidation, anti-flapping checks, and post-adoption anti-ratchet rollback (`revert_attributable_regression`).
+- **Architectural Decision:** ADR 0010 formalizes that `risk_tiered_application.apply_memory_lesson` owns cross-run accumulation.
+- **Safety & Concurrency Boundaries:**
+  - **CAS Precondition:** `learned_state.adopt` gained `expected_current: Mapping[LearnedDocument, str | None] | None` verified inside `_exclusive_store_lock`.
+  - **Atomic Retry Loop:** `apply_memory_lesson` executes a bounded optimistic CAS retry loop (`_MAX_MERGE_RETRIES = 8`).
+  - **Round-Trip Grammar:** Canonical entries start with `"- "`; multiline continuations use 2-space indentation. Legacy unbulleted documents preserve as single entries; malformed mixtures fail closed.
+  - **Deduplication & Bounding:** Exact case-sensitive deduplication. FIFO capacity bound `DEFAULT_MAX_MEMORY_LESSONS = 200`.
+  - **Anti-Flapping:** Atomic validation via `reject_if_candidate_digest` matching the actual merged candidate document.
 
 ## Codebase Design & Deep Module Principles
 
-- **Public Interface:** The public interface of `learner_worker` (`run_weekly_deep`, `run_session_end_light`, `DEFAULT_WINDOW_DAYS`, `InvokeWorker`, `SessionEndResult`, `WeeklyDeepResult`) is intentionally narrow and declarative. It exposes only high-level cadence entry points, the standard worker seam type alias, and typed result objects.
-- **Module Depth:** High depth-to-surface ratio. Behind the simple `run_weekly_deep` entry point, the module encapsulates complex logic: timezone validation, prefix cutting, multi-family window filtering, baseline scoreboard computation, attributable regression rollback, structured JSON extraction, anti-flapping hash digest checks, and weekly markdown report generation.
-- **Leverage:** High caller capability per unit of interface learned. A caller provides minimal arguments (`invoke_worker`, `root_dir`, `now`, `runner`) and gains complete automated weekly learning lifecycle execution: computing trailing vs baseline scoreboards, rolling back regressive adoptions, synthesizing structured proposals, submitting them across risk tiers, and writing the weekly markdown report.
-- **Locality:** All prompt template construction (`_render_weekly_deep_prompt`), defensive parsing (`_extract_json_object`), and tier-based dispatching remain localized within `learner_worker.py`. Callers pass dependencies and receive structured outcomes without needing internal knowledge of prompt schemas or parser fallbacks.
-- **Test Seams:** Comprehensive test seams. Injected `InvokeWorker`, injected `runner` (benchmark scoring), injected `root_dir` (filesystem isolation), and explicit `now` (temporal determinism) allow all 56 unit tests in `test_learner_worker.py` to run 100% offline, deterministically, and sub-second (~0.06s), while all 867 total repo offline tests execute in ~45s.
+- **Public Interface:** The public interface of `risk_tiered_application` (`apply_memory_lesson`, `DEFAULT_MAX_MEMORY_LESSONS`) remains narrow and declarative.
+- **Module Depth:** High depth-to-surface ratio. Behind `apply_memory_lesson`, the module encapsulates round-trip grammar parsing, universal newline normalization, deduplication, FIFO bounding, atomic CAS retry transaction, and anti-flapping digest validation.
+- **Leverage:** Both cadences (`run_session_end_light`, `run_weekly_deep`) and manual callers gain automatic cross-run accumulation without implementing merge logic.
+- **Locality:** All parsing and formatting logic concentrates in `risk_tiered_application.py`. `learned_state.py` remains strictly content-agnostic.
+- **Test Seams:** Injected `root_dir` (filesystem isolation) and explicit `now` (temporal determinism) allow all unit and integration tests to run 100% offline.
 
-## Proposed Changes
+## Implemented Changes
 
 ### Architecture Decision Records
-- **[NEW] `docs/adr/0009-batch-retrospective-one-shot-synthesis.md`**: Formulated ADR 0009.
+- **[NEW] `docs/adr/0010-atomic-bounded-memory-lesson-accumulation.md`**: Formulated ADR 0010.
+
+### Learned State Module
+- **[MODIFY] `skills/worker-routing/learned_state.py`**: Added `expected_current` CAS precondition to `adopt`.
+
+### Risk-Tiered Application Module
+- **[MODIFY] `skills/worker-routing/risk_tiered_application.py`**: Implemented `DEFAULT_MAX_MEMORY_LESSONS = 200`, grammar parsing, deduplication, FIFO bounding, and atomic CAS retry in `apply_memory_lesson`.
 
 ### Learner Worker Module
-- **[MODIFY] `skills/worker-routing/learner_worker.py`**: Updated module docstring and `run_weekly_deep` docstring to reflect one-shot synthesis and exact tiering boundaries.
+- **[MODIFY] `skills/worker-routing/learner_worker.py`**: Added multiline continuation formatting (`_format_lesson_entry`) and wired `reject_if_candidate_digest` in `run_weekly_deep`.
 
-### Specifications & Backlog
-- **[MODIFY] `docs/specs/0004-learning-loop.md`**: Updated User Story 10, Implementation Decisions, and test cases (line 186) to align with ADR 0008 and ADR 0009.
-- **[MODIFY] `.scratch/routing-backlog/issues/22-learner-worker.md`**: Updated terminology to "synthesis" and referenced ADR 0009.
-- **[MODIFY] `.scratch/routing-backlog/issues/31-batch-retrospective-dialogue-occasion.md`**: Marked `Status: complete` with all criteria satisfied.
+### Backlog & Specs
+- **[MODIFY] `docs/specs/0004-learning-loop.md`**: Updated User Story 13 and risk-tiered application descriptions.
+- **[MODIFY] `.scratch/routing-backlog/issues/33-accumulate-memory-lessons-across-runs.md`**: Marked `Status: complete`.
 
 ## Verification Plan
 
 ### Automated Tests
 - `python3 -m py_compile skills/worker-routing/*.py` — 0 errors.
 - `shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh` — 0 warnings.
-- All 8 offline test suites (867 tests) passing:
-  - `skills/worker-routing/test_learner_worker.py` (56 tests)
-  - `skills/worker-routing/test_acceptance_gate.py` (24 tests)
-  - `skills/worker-routing/test_learning_scoreboard.py` (131 tests)
-  - `skills/worker-routing/test_learning_report.py` (44 tests)
-  - `skills/worker-routing/test_learned_state.py` (93 tests)
-  - `skills/worker-routing/test_risk_tiered_application.py` (23 tests)
-  - `skills/worker-routing/test_production_invoker.py` (30 tests)
-  - `skills/worker-routing/test_routing.py` (466 tests)
+- `ruff check skills/worker-routing/` — 0 errors.
+- `mypy skills/worker-routing/` — 0 errors.
+- All 8 offline test suites (911 tests) passing.
 - Multi-harness synchronization: `./install.sh .`

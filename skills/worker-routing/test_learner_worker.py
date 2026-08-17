@@ -272,6 +272,25 @@ class SessionEndLightTests(unittest.TestCase):
             self.assertEqual(current.get("memory"), "- Lesson: test seams directly.")
             self.assertEqual(len(worker.calls), 1)
 
+    def test_light_pass_formats_multiline_lesson_with_indented_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            multiline_lesson = "First line of lesson\ncontinued on a second line"
+            worker = _RecordingWorker(_json_reply({"memory_lessons": [multiline_lesson]}))
+
+            result = learner_worker.run_session_end_light(worker, root_dir=root, now=_NOW)
+
+            self.assertEqual(result.lessons, (multiline_lesson,))
+            current = learned_state.read_current(root)
+            self.assertEqual(
+                current.get("memory"),
+                "- First line of lesson\n  continued on a second line",
+            )
+            # Round-trips as one entry, not split by `_parse_memory_document`'s
+            # bulleted grammar into a malformed mixture or two entries.
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(entries, (multiline_lesson,))
+
     def test_light_pass_consolidates_multiple_lessons_into_one_document(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -287,6 +306,28 @@ class SessionEndLightTests(unittest.TestCase):
             current = learned_state.read_current(root)
             self.assertIn("Lesson A", current.get("memory", ""))
             self.assertIn("Lesson B", current.get("memory", ""))
+
+    def test_across_two_calls_accumulates_lessons(self) -> None:
+        """Cross-run accumulation (ADR 0010, Ticket 33): a second session's
+        light pass merges its lessons with the first session's rather than
+        replacing them — the gap this ticket closes.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first_worker = _RecordingWorker(_json_reply({"memory_lessons": ["Session 1 lesson"]}))
+            learner_worker.run_session_end_light(
+                first_worker, root_dir=root, now=_NOW, session_id="session-1"
+            )
+
+            second_worker = _RecordingWorker(_json_reply({"memory_lessons": ["Session 2 lesson"]}))
+            result = learner_worker.run_session_end_light(
+                second_worker, root_dir=root, now=_NOW, session_id="session-2"
+            )
+
+            self.assertEqual(result.outcomes[0].status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Session 1 lesson\n- Session 2 lesson")
+            self.assertEqual(len(learned_state.read_history(root)), 2)
 
     def test_rejects_naive_now_without_invoking_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -492,6 +533,23 @@ class LocalValidatorTests(unittest.TestCase):
 
     def test_validate_score_threshold_accepts_finite_number(self) -> None:
         learner_worker._validate_score_threshold(0.8, "score_threshold")
+
+
+class FormatLessonEntryTests(unittest.TestCase):
+    def test_single_line_lesson_gets_leading_dash(self) -> None:
+        self.assertEqual(learner_worker._format_lesson_entry("Lesson A"), "- Lesson A")
+
+    def test_multiline_lesson_indents_continuation_lines(self) -> None:
+        self.assertEqual(
+            learner_worker._format_lesson_entry("First line\nSecond line\nThird line"),
+            "- First line\n  Second line\n  Third line",
+        )
+
+    def test_formatted_entry_round_trips_through_parse_memory_document(self) -> None:
+        lesson = "First line\nSecond line"
+        formatted = learner_worker._format_lesson_entry(lesson)
+        entries = risk_tiered_application._parse_memory_document(formatted)
+        self.assertEqual(entries, (lesson,))
 
 
 class StringTupleTests(unittest.TestCase):
@@ -703,6 +761,52 @@ class WeeklyDeepTests(unittest.TestCase):
             current = learned_state.read_current(root)
             self.assertIn("Lesson A", current.get("memory", ""))
             self.assertIn("Lesson B", current.get("memory", ""))
+
+    def test_weekly_deep_formats_multiline_lesson_with_indented_continuation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            multiline_lesson = "Weekly first line\ncontinued weekly line"
+            worker = _RecordingWorker(_json_reply({"memory_lessons": [multiline_lesson]}))
+            runner, _ = _counting_runner(0.95)
+
+            result = learner_worker.run_weekly_deep(
+                worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.memory_outcomes[0].status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(
+                current.get("memory"),
+                "- Weekly first line\n  continued weekly line",
+            )
+            entries = risk_tiered_application._parse_memory_document(current.get("memory", ""))
+            self.assertEqual(entries, (multiline_lesson,))
+
+    def test_run_weekly_deep_across_two_runs_accumulates_memory_lessons_with_prior_light_pass(
+        self,
+    ) -> None:
+        """Accumulation is cross-cadence, not merely cross-run of the same
+        cadence: a prior session-end light pass's lesson survives a later
+        weekly deep run's own lesson, merged rather than replaced (ADR
+        0010, Ticket 33).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            light_worker = _RecordingWorker(
+                _json_reply({"memory_lessons": ["Session lesson"]})
+            )
+            learner_worker.run_session_end_light(light_worker, root_dir=root, now=_NOW)
+
+            deep_worker = _RecordingWorker(_json_reply({"memory_lessons": ["Weekly lesson"]}))
+            runner, _ = _counting_runner(0.95)
+            result = learner_worker.run_weekly_deep(
+                deep_worker, root_dir=root, now=_NOW, runner=runner
+            )
+
+            self.assertEqual(result.memory_outcomes[0].status, "applied")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Session lesson\n- Weekly lesson")
+            self.assertEqual(len(learned_state.read_history(root)), 2)
 
     def test_writes_weekly_markdown_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1074,9 +1178,15 @@ class WeeklyDeepRevertTests(unittest.TestCase):
             )
             _seed_replay_benchmark(root, task_set="bench", score=0.9, timestamp=self._BASELINE_TS)
             _seed_replay_benchmark(root, task_set="bench", score=0.1, timestamp=_IN_WINDOW_TS)
-            # The worker proposes exactly the content the revert is about to
-            # undo — consolidating a single "Lesson B" lesson renders as
-            # "- Lesson B", byte-for-byte what `adopt-2` put in the store.
+            # The worker proposes only "Lesson B" — its raw consolidated
+            # content is "- Lesson B", which is *not* byte-for-byte what
+            # `adopt-2` put in the store (that was the merged "- Lesson A\n-
+            # Lesson B"). The guard must catch this anyway: `apply_memory_
+            # lesson` merges "- Lesson B" back into post-revert "- Lesson A"
+            # and reconstructs exactly the just-reverted candidate, which is
+            # what `reject_if_candidate_digest` actually compares against —
+            # see `test_memory_anti_flapping_guard_rejects_via_reject_if_
+            # candidate_digest` below for the same property in isolation.
             worker = _RecordingWorker(_json_reply({"memory_lessons": ["Lesson B"]}))
             runner, _ = _counting_runner(0.95)
 
@@ -1134,8 +1244,47 @@ class WeeklyDeepRevertTests(unittest.TestCase):
 
             self.assertEqual(result.revert_outcome.status, "reverted")
             self.assertEqual(result.memory_outcomes[0].status, "applied")
+            # Accumulated, not a wholesale replacement: post-revert memory
+            # is "- Lesson A", and this run's genuinely different "Lesson C"
+            # merges into it rather than overwriting it.
             current = learned_state.read_current(root)
-            self.assertEqual(current.get("memory"), "- Lesson C")
+            self.assertEqual(current.get("memory"), "- Lesson A\n- Lesson C")
+
+    def test_memory_anti_flapping_guard_rejects_via_reject_if_candidate_digest(self) -> None:
+        """Written to fail against a naive raw-content digest comparison,
+        proving the guard exercises the actual *merged* candidate rather
+        than the caller's raw `content` argument (ADR 0010). Existing
+        memory already holds `"- Lesson A"`; a caller proposing only
+        `"Lesson B"` has raw content `"- Lesson B"`, whose digest never
+        equals `digest("- Lesson A\\n- Lesson B")` — the actual
+        just-reverted content. Only a comparison against the merged result
+        (what `apply_memory_lesson` is actually about to adopt) catches it.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            risk_tiered_application.apply_memory_lesson(
+                "Lesson A", root_dir=root, now=_NOW, change_id="adopt-1"
+            )
+            reverted_before_digest = risk_tiered_application._digest("- Lesson A\n- Lesson B")
+            naive_raw_digest = risk_tiered_application._digest("- Lesson B")
+            self.assertNotEqual(
+                naive_raw_digest,
+                reverted_before_digest,
+                "the scenario only proves the point if a raw comparison would have missed it",
+            )
+
+            outcome = risk_tiered_application.apply_memory_lesson(
+                "Lesson B",
+                root_dir=root,
+                now=datetime(2026, 8, 15, 13, 0, 0, tzinfo=timezone.utc),
+                reject_if_candidate_digest=reverted_before_digest,
+            )
+
+            self.assertEqual(outcome.status, "rejected")
+            self.assertFalse(outcome.applied)
+            self.assertIn("anti-flapping", outcome.reason or "")
+            current = learned_state.read_current(root)
+            self.assertEqual(current.get("memory"), "- Lesson A")
 
 
 _PROPOSAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")

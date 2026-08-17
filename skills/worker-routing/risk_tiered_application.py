@@ -14,6 +14,17 @@ the document's current content with a `ValueError`. Tier application catches
 that refusal and reports it as a successful `no_op` rather than a failure,
 since the intended state is already current.
 
+**Cross-run memory accumulation (ADR 0010, Ticket 33).** `apply_memory_lesson`
+owns accumulating memory lessons across separate calls — a second call does
+not replace a first run's lessons the way `apply_routing_table_update` and
+`submit_brief_proposal` wholesale-replace `content`. It reads the current
+memory document, merges `content`'s entries into it (existing first, then
+new, deduped by exact string equality), prunes to `DEFAULT_MAX_MEMORY_LESSONS`
+via FIFO eviction, and adopts the merged result — atomically, via a
+compare-and-swap retry loop against `learned_state.adopt`'s `expected_current`
+precondition. See that function's docstring for the parsing grammar and the
+retry mechanics.
+
 **Seams.**
 - `root_dir`: Path derived filesystem boundary for all on-disk state.
 - `now`: Injected timezone-aware datetime. This module owns no clock.
@@ -22,11 +33,12 @@ since the intended state is already current.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -54,6 +66,135 @@ _PROPOSAL_LOCK_RELATIVE_PATH = Path(".ralph") / ".pending_proposals.lock"
 
 _PROPOSAL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 _TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+
+# The document-wide bound on how many lesson entries `apply_memory_lesson`
+# ever accumulates (ADR 0010). Fixed, not a per-call keyword — see that
+# function's docstring for why a per-call override was rejected.
+DEFAULT_MAX_MEMORY_LESSONS: int = 200
+
+_MAX_MERGE_RETRIES = 8
+
+_BULLET_PREFIX = "- "
+_CONTINUATION_INDENT = "  "
+
+
+class _StaleReadConflict(Exception):
+    """Internal: `expected_current` no longer matched by the time `adopt` ran.
+
+    Caught only by `apply_memory_lesson`'s own retry loop; never escapes
+    this module. See `_adopt_with_idempotency`.
+    """
+
+
+def _digest(content: str) -> str:
+    """The sha256 hex digest over `content`'s UTF-8 bytes.
+
+    Mirrors `learned_state._digest` / `learner_worker._content_digest`
+    exactly (not imported — see `learned_state.py`'s docstring on why a
+    sibling in this directory restates rather than imports another's
+    private helper), so a digest computed here is directly comparable to
+    one either of those two produces.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _parse_memory_document(text: str) -> tuple[str, ...]:
+    """Parse a memory document into its entries.
+
+    Grammar (ADR 0010): an entry is one `"- "`-prefixed line, optionally
+    followed by indented continuation lines (any line whose first character
+    is whitespace), concatenated by `"\\n"` into that entry's text. Exactly
+    one layer of indentation is stripped from each continuation line — the
+    canonical `_CONTINUATION_INDENT` (two spaces) if present, else a single
+    leading whitespace character — so any indentation beyond that layer
+    (e.g. code embedded in a lesson) survives into the entry's text
+    verbatim. `text`
+    is first split with `str.splitlines()`, which recognizes `\\r\\n`, `\\r`,
+    and `\\n` alike, so CRLF input round-trips identically to LF — no line
+    in the parsed result ever holds an embedded `\\r`.
+
+    Two outcomes when the strict bulleted grammar does not hold:
+    - No line anywhere starts with `"- "`: the whole text is one opaque
+      entry, verbatim (covers legacy pre-ticket content and any plain-string
+      caller). Preserved as exactly one entry, never split at internal
+      newlines, so it round-trips as one entry through every subsequent
+      merge once this function's caller re-serializes it in canonical form.
+    - At least one line starts with `"- "`, but some other line is neither a
+      new entry's start nor a continuation of one (not indented): a
+      malformed mixture. Partial bullet intent with a structurally invalid
+      remainder is a bug to surface, not to silently reinterpret — raises
+      `ValueError` naming the offending line.
+    """
+    lines = text.splitlines()
+    if not any(line.startswith(_BULLET_PREFIX) for line in lines):
+        return ("\n".join(lines),)
+
+    entries: list[list[str]] = []
+    for line in lines:
+        if line.startswith(_BULLET_PREFIX):
+            entries.append([line[len(_BULLET_PREFIX):]])
+        elif line.startswith(_CONTINUATION_INDENT) and entries:
+            entries[-1].append(line[len(_CONTINUATION_INDENT):])
+        elif line[:1].isspace() and entries:
+            entries[-1].append(line[1:])
+        else:
+            raise ValueError(
+                "memory document is malformed: line "
+                f"{line!r} is neither a '- '-prefixed entry nor an indented "
+                "continuation of one"
+            )
+    return tuple("\n".join(entry_lines) for entry_lines in entries)
+
+
+def _serialize_memory_document(entries: Sequence[str]) -> str:
+    """The canonical wire form of `entries`: `"- "` first line, `"  "`-indented
+    continuation lines, one entry after another. The inverse of
+    `_parse_memory_document` for canonical and legacy content alike — a
+    legacy entry, once serialized here, is a bulleted entry on every
+    subsequent parse.
+    """
+    rendered: list[str] = []
+    for entry in entries:
+        entry_lines = entry.split("\n")
+        rendered.append(_BULLET_PREFIX + entry_lines[0])
+        rendered.extend(_CONTINUATION_INDENT + line for line in entry_lines[1:])
+    return "\n".join(rendered)
+
+
+def _merge_memory_content(
+    existing: str | None, new_entries: Sequence[str], *, max_lessons: int
+) -> tuple[str, int, int]:
+    """Merge `new_entries` into `existing`'s own entries and prune to `max_lessons`.
+
+    Order: existing entries first, then new — deduped by exact,
+    case-sensitive string equality, first occurrence wins position (so a
+    reaffirmed lesson keeps its original, older position rather than moving
+    to the end). Bound enforcement is plain FIFO: once the deduped count
+    exceeds `max_lessons`, the oldest-positioned entries are dropped first.
+
+    Returns `(candidate, added_count, pruned_count)`: `added_count` is how
+    many *distinct* `new_entries` were not already present in `existing`
+    (a duplicate within `new_entries` itself is counted once, not once per
+    occurrence); `pruned_count` is how many entries FIFO eviction dropped.
+    """
+    existing_entries = _parse_memory_document(existing) if existing else ()
+
+    merged: list[str] = []
+    seen: set[str] = set()
+    for entry in (*existing_entries, *new_entries):
+        if entry in seen:
+            continue
+        seen.add(entry)
+        merged.append(entry)
+
+    added_count = len(set(new_entries) - set(existing_entries))
+    pruned_count = 0
+    if len(merged) > max_lessons:
+        pruned_count = len(merged) - max_lessons
+        merged = merged[pruned_count:]
+
+    return _serialize_memory_document(merged), added_count, pruned_count
 
 
 def _require_aware_now(now: datetime) -> None:
@@ -113,16 +254,31 @@ def _adopt_with_idempotency(
     root_dir: Path,
     now: datetime,
     change_id: str | None = None,
+    expected_current: Mapping[LearnedDocument, str | None] | None = None,
 ) -> tuple[ApplicationStatus, bool, VersionEntry | None, str | None]:
-    """Adopt changes, treating an identical-content refusal as a successful no-op."""
+    """Adopt changes, treating an identical-content refusal as a successful
+    no-op and a stale `expected_current` precondition as a private
+    `_StaleReadConflict` for `apply_memory_lesson`'s own retry loop to catch
+    — never surfaced to a `TierOutcome`, since a caller only ever sees the
+    eventual settled outcome, not the transient races behind it.
+    """
     try:
-        entry = learned_state.adopt(changes, root_dir=root_dir, now=now, change_id=change_id)
+        entry = learned_state.adopt(
+            changes,
+            root_dir=root_dir,
+            now=now,
+            change_id=change_id,
+            expected_current=expected_current,
+        )
         return "applied", True, entry, None
     except ValueError as exc:
-        if "changes describe no actual difference from the current version" in str(exc):
+        message = str(exc)
+        if "changes describe no actual difference from the current version" in message:
             history = learned_state.read_history(root_dir)
             current_entry = history[-1] if history else None
             return "no_op", True, current_entry, "content identical to current version"
+        if "current state changed since expected_current was captured" in message:
+            raise _StaleReadConflict from exc
         raise
 
 
@@ -132,23 +288,130 @@ def apply_memory_lesson(
     root_dir: Path,
     now: datetime,
     change_id: str | None = None,
+    reject_if_candidate_digest: str | None = None,
 ) -> TierOutcome:
-    """Tier 1: Auto-apply a memory lesson directly into learned_state."""
+    """Tier 1: merge a memory lesson into the accumulated memory document and
+    auto-apply the merged result directly into learned_state (ADR 0010).
+
+    Owns cross-run accumulation. Unlike `apply_routing_table_update` and
+    `submit_brief_proposal`, which adopt `content` as a document's entire
+    new value, this function reads the current memory document, merges
+    `content`'s entries into it (existing entries first, then new, deduped
+    by exact case-sensitive string equality), prunes to
+    `DEFAULT_MAX_MEMORY_LESSONS` via FIFO eviction of the oldest entries,
+    and adopts the merged candidate — never `content` verbatim. See
+    `_parse_memory_document` for the parsing grammar and
+    `_merge_memory_content` for the merge/prune rules.
+
+    `content` must not be blank (empty after stripping); that is rejected
+    before any read happens, so a blank call never creates an empty
+    version.
+
+    The read-merge-write is atomic against a concurrent writer of the same
+    `root_dir`. Each iteration reads `learned_state.read_current`, computes
+    a merge candidate, and adopts it with `expected_current` set to exactly
+    what was just read for `"memory"` — `learned_state.adopt` verifies that
+    precondition inside its own lock (see its docstring), so a writer that
+    adopts or rolls back between this function's read and its adopt call is
+    detected as a `_StaleReadConflict` rather than silently overwritten, and
+    this loop simply retries against a fresh read. `_MAX_MERGE_RETRIES = 8`
+    is generous for real contention, which is expected to be rare — the two
+    cadences that call this run per-session and per-week, not concurrently
+    against the same `root_dir` in normal operation.
+
+    `reject_if_candidate_digest`, when given, is compared against the
+    digest of the actual merged candidate — not the raw `content` — inside
+    the same atomic step: a candidate identical to content a caller's own
+    revert just undid for a regression is rejected outright rather than
+    silently re-adopted the moment merge would reconstruct it. Because that
+    comparison happens after the merge but before another read, a
+    concurrent writer could change `"memory"` in the gap between this
+    iteration's read and the rejection decision; before returning
+    `rejected`, `learned_state.read_current` is consulted once more, and a
+    changed `"memory"` value sends this iteration back through the retry
+    loop against a fresh read rather than rejecting on a state that is
+    already stale. Replaces a
+    two-call preview-then-apply interface, which would have been stale by
+    the time a real call adopted.
+    """
     _require_aware_now(now)
-    change = DocumentChange(document="memory", content=content)
-    status, applied, entry, reason = _adopt_with_idempotency(
-        [change],
-        root_dir=root_dir,
-        now=now,
-        change_id=change_id,
-    )
-    return TierOutcome(
-        document="memory",
-        status=status,
-        applied=applied,
-        version_entry=entry,
-        change_id=change_id,
-        reason=reason,
+    if not isinstance(content, str):
+        raise ValueError(  # noqa: TRY004 - one rejection contract; see learning_journal.py
+            f"apply_memory_lesson: content must be a string, got {type(content).__name__}"
+        )
+    if not content.strip():
+        raise ValueError("apply_memory_lesson: content must not be blank")
+    if reject_if_candidate_digest is not None:
+        if not isinstance(reject_if_candidate_digest, str):
+            raise ValueError(
+                "apply_memory_lesson: reject_if_candidate_digest must be a string, "
+                f"got {type(reject_if_candidate_digest).__name__}"
+            )
+        if not _DIGEST_RE.fullmatch(reject_if_candidate_digest):
+            raise ValueError(
+                "apply_memory_lesson: reject_if_candidate_digest must match "
+                f"{_DIGEST_RE.pattern}, got {reject_if_candidate_digest!r}"
+            )
+    new_entries = _parse_memory_document(content.strip())
+
+    for _ in range(_MAX_MERGE_RETRIES):
+        current = learned_state.read_current(root_dir)
+        existing = current.get("memory")
+        candidate, added_count, pruned_count = _merge_memory_content(
+            existing, new_entries, max_lessons=DEFAULT_MAX_MEMORY_LESSONS
+        )
+
+        if (
+            reject_if_candidate_digest is not None
+            and _digest(candidate) == reject_if_candidate_digest
+        ):
+            if learned_state.read_current(root_dir).get("memory") != existing:
+                continue
+            return TierOutcome(
+                document="memory",
+                status="rejected",
+                applied=False,
+                change_id=change_id,
+                reason=(
+                    "anti-flapping guard: merged candidate identical to "
+                    "content this run just reverted for a regression"
+                ),
+            )
+
+        change = DocumentChange(document="memory", content=candidate)
+        try:
+            status, applied, entry, reason = _adopt_with_idempotency(
+                [change],
+                root_dir=root_dir,
+                now=now,
+                change_id=change_id,
+                expected_current={"memory": existing},
+            )
+        except _StaleReadConflict:
+            continue
+
+        if reason is None and (added_count or pruned_count):
+            parts = []
+            if added_count:
+                parts.append(f"merged {added_count} new lesson(s)")
+            if pruned_count:
+                parts.append(
+                    f"pruned {pruned_count} oldest to stay within "
+                    f"max_lessons={DEFAULT_MAX_MEMORY_LESSONS}"
+                )
+            reason = "; ".join(parts)
+
+        return TierOutcome(
+            document="memory",
+            status=status,
+            applied=applied,
+            version_entry=entry,
+            change_id=change_id,
+            reason=reason,
+        )
+
+    raise RuntimeError(
+        "apply_memory_lesson: exceeded retry budget under sustained contention"
     )
 
 
@@ -465,6 +728,7 @@ def revert_attributable_regression(
 
 
 __all__ = [
+    "DEFAULT_MAX_MEMORY_LESSONS",
     "ApplicationStatus",
     "PendingProposal",
     "RevertOutcome",

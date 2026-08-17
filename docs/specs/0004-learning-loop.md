@@ -146,10 +146,13 @@ non-benchmark metric (discipline, critique authenticity, or efficiency) regresse
 adopted system state. A single winning run is explicitly insufficient. The learner never grades its
 own proposal by self-assessment — scores come only from the external runner.
 
-**Risk-tiered application.** Memory lessons: auto-apply, listed in the weekly report.
-Routing-table updates: auto-apply after passing the gate, one report line each. Brief diffs:
-held as pending proposals until the human approves. The protocol: unreachable by construction —
-the learner has no code path that writes it.
+**Risk-tiered application.** Memory lessons: auto-apply, listed in the weekly report. Unlike the
+other two tiers, this one accumulates rather than replaces — each call reads the current memory
+document, merges its new entries in (deduped, oldest-first-evicted past a fixed bound), and adopts
+the merged result atomically against concurrent writers (ADR 0010). Routing-table updates:
+auto-apply after passing the gate, one report line each. Brief diffs: held as pending proposals
+until the human approves. The protocol: unreachable by construction — the learner has no code path
+that writes it.
 
 **Versioning and auto-revert.** Every adopted change is a git-tracked version of the learned
 state; manual rollback is always one step. The weekly run compares the scoreboard against the
@@ -187,6 +190,10 @@ returns scripted scores in tests and drives the real evaluator in production.
   good run is rejected; a concurrent non-benchmark metric regression rejects (ADR 0008).
 - Tier routing: a memory lesson auto-applies; a routing update applies only post-gate; a brief
   diff is held pending and applies only on recorded human approval.
+- Memory-lesson accumulation (ADR 0010): a second call's lessons merge with, rather than replace,
+  a first call's; exact-duplicate lessons dedupe as a no-op; the document-wide bound evicts the
+  oldest entries first once exceeded; two concurrent calls against the same root both survive via
+  the compare-and-swap retry.
 - Auto-revert: a scripted post-adoption regression reverts the change and writes the report
   entry; the reverted state matches the prior version exactly.
 - The weekly report contains every metric family, every adopted and reverted change, and every

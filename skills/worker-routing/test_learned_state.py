@@ -754,6 +754,90 @@ class AdoptValidationTests(unittest.TestCase):
             self._assert_store_still_only_has_v0001(root)
 
 
+class ExpectedCurrentCASTests(unittest.TestCase):
+    """`adopt`'s `expected_current` compare-and-swap precondition (ADR 0010,
+    Ticket 33) — a content-agnostic guard `risk_tiered_application.
+    apply_memory_lesson` relies on to make its read-merge-write atomic
+    against a concurrent writer, without this module ever learning what a
+    lesson is."""
+
+    def test_matching_expected_current_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "v1")], root_dir=root, now=_NOW)
+
+            entry = learned_state.adopt(
+                [_change("memory", "v2")],
+                root_dir=root,
+                now=_LATER,
+                expected_current={"memory": "v1"},
+            )
+
+            self.assertEqual(entry.version, 2)
+            self.assertEqual(learned_state.read_current(root).get("memory"), "v2")
+
+    def test_stale_expected_current_raises_a_distinct_message_and_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "v1")], root_dir=root, now=_NOW)
+            # A third-party writer changes "memory" out from under a caller
+            # that captured "v1" as its own expected_current.
+            learned_state.adopt([_change("memory", "v1.5")], root_dir=root, now=_LATER)
+
+            with self.assertRaises(ValueError) as ctx:
+                learned_state.adopt(
+                    [_change("memory", "v2")],
+                    root_dir=root,
+                    now=_LATEST,
+                    expected_current={"memory": "v1"},
+                )
+
+            message = str(ctx.exception)
+            self.assertIn("current state changed since expected_current", message)
+            self.assertNotIn("no actual difference", message)
+            self.assertEqual(len(learned_state.read_history(root)), 2, "the refusal writes nothing")
+
+    def test_expected_current_none_matches_a_document_that_has_never_been_adopted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = learned_state.adopt(
+                [_change("memory", "v1")],
+                root_dir=root,
+                now=_NOW,
+                expected_current={"memory": None, "briefs": None},
+            )
+
+            self.assertEqual(entry.version, 1)
+
+    def test_expected_current_default_none_skips_the_check_entirely(self) -> None:
+        """Every existing caller of `adopt` passes no `expected_current` —
+        confirming the default omits the check is what keeps them all
+        unaffected by this precondition's addition."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learned_state.adopt([_change("memory", "v1")], root_dir=root, now=_NOW)
+
+            # No expected_current given at all: succeeds regardless of what
+            # the caller does or does not know about current state.
+            entry = learned_state.adopt(
+                [_change("memory", "v2")], root_dir=root, now=_LATER
+            )
+
+            self.assertEqual(entry.version, 2)
+
+    def test_expected_current_with_an_unknown_document_key_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with self.assertRaises(ValueError):
+                learned_state.adopt(
+                    [_change("memory", "v1")],
+                    root_dir=root,
+                    now=_NOW,
+                    expected_current={"protocol": "x"},  # type: ignore[dict-item]
+                )
+            self.assertEqual(learned_state.read_history(root), ())
+
+
 class RollBackValidationTests(unittest.TestCase):
     def _two_versions(self, tmp: str) -> Path:
         root = Path(tmp)

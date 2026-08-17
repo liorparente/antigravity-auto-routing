@@ -229,6 +229,21 @@ def _extract_json_object(response: str) -> dict[str, object] | None:
     return None
 
 
+def _format_lesson_entry(lesson: str) -> str:
+    """Render one worker-proposed lesson as one `_parse_memory_document`-shaped
+    entry: a leading `"- "` on the first line and a two-space-indented
+    continuation on every line after. Mirrors
+    `risk_tiered_application._BULLET_PREFIX`/`_CONTINUATION_INDENT` so a
+    multiline lesson round-trips through that module's merge grammar instead
+    of tripping `_parse_memory_document`'s "neither prefixed nor indented"
+    rejection on its second and later lines.
+    """
+    lesson_lines = lesson.splitlines() or [lesson]
+    return "\n".join(
+        [f"- {lesson_lines[0]}"] + [f"  {line}" for line in lesson_lines[1:]]
+    )
+
+
 def _string_tuple(value: object) -> tuple[str, ...]:
     """Coerce a parsed JSON value into a tuple of non-empty, stripped
     strings. Never raises: a worker response's shape is untrusted input, so
@@ -539,19 +554,17 @@ def run_session_end_light(
     `_string_tuple`.
 
     Every lesson from one run is folded into a single `apply_memory_lesson`
-    call, never one call per lesson: `learned_state.adopt` replaces the
-    current memory version wholesale, so applying lessons one at a time
-    would have each call overwrite the previous lesson rather than add to
-    it, leaving only the last lesson of a multi-lesson run actually adopted.
+    call, never one call per lesson, so this pass's own several lessons are
+    merged with each other before they ever reach that call rather than
+    made to overwrite one another.
 
-    This consolidation is intra-run only: it merges the several lessons *one*
-    call to this function proposes into one `apply_memory_lesson` call. It
-    does not accumulate lessons *across* separate runs — each call to this
-    function still replaces `learned_state`'s current memory version
-    wholesale via the tier it goes through, the same way a second run's
-    lessons would replace a first run's rather than merge with them. Whether
-    and how to accumulate memory lessons across multiple sessions/runs is an
-    open design question, not yet addressed here — see issue 33.
+    Accumulation *across* separate runs — this run's lessons merging with,
+    rather than replacing, whatever an earlier session or the weekly deep
+    pass already adopted — is owned by `apply_memory_lesson` itself (ADR
+    0010, Ticket 33), not by this function: every call this function makes
+    reads the current memory document, merges in, dedupes, and prunes to a
+    bound before adopting. This function's own contribution is only the
+    intra-run consolidation above.
     """
     _require_aware_now(now)
     journal = _session_journal(root_dir, now=now, session_id=session_id, run_id=run_id)
@@ -566,7 +579,7 @@ def run_session_end_light(
     seed = session_id or run_id or _compact_timestamp(now)
     outcomes: tuple[TierOutcome, ...] = ()
     if lessons:
-        consolidated = "\n".join(f"- {lesson}" for lesson in lessons)
+        consolidated = "\n".join(_format_lesson_entry(lesson) for lesson in lessons)
         outcome = risk_tiered_application.apply_memory_lesson(
             consolidated,
             root_dir=root_dir,
@@ -711,6 +724,16 @@ def run_weekly_deep(
     same run's own proposals: a proposal identical to the just-reverted
     content is rejected rather than reapplied, so one run can never both
     revert a change and immediately readopt it on the same evidence.
+
+    For routing-table and brief proposals — both wholesale-replace tiers —
+    that check is this function's own `_flapping_guard`, comparing the
+    proposal's raw content digest before ever calling the tier. For memory
+    lessons, ADR 0010 moved the check inside `apply_memory_lesson` itself:
+    `reverted_before_digests.get("memory")` is passed straight through as
+    `reject_if_candidate_digest`, and it is compared there against the
+    *merged* candidate — not this run's raw `consolidated` proposal — since
+    `apply_memory_lesson` accumulates rather than replaces, and only the
+    merged result is ever actually adopted.
     """
     _require_aware_now(now)
     _require_valid_run_id(run_id)
@@ -841,16 +864,14 @@ def run_weekly_deep(
     lessons = _string_tuple(payload.get("memory_lessons"))
     memory_outcomes: tuple[TierOutcome, ...] = ()
     if lessons:
-        consolidated = "\n".join(f"- {lesson}" for lesson in lessons)
-        guarded = _flapping_guard("memory", consolidated)
+        consolidated = "\n".join(_format_lesson_entry(lesson) for lesson in lessons)
         memory_outcomes = (
-            guarded
-            if guarded is not None
-            else risk_tiered_application.apply_memory_lesson(
+            risk_tiered_application.apply_memory_lesson(
                 consolidated,
                 root_dir=root_dir,
                 now=now,
                 change_id=_change_id("learner-deep-memory", seed=seed, index=0),
+                reject_if_candidate_digest=reverted_before_digests.get("memory"),
             ),
         )
 
