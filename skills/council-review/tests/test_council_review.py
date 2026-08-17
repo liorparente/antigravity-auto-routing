@@ -21,6 +21,7 @@ from provider_adapters import (
     ClaudeAdapter,
     CodexAdapter,
     AgyAdapter,
+    CLIReviewerAdapter,
 )
 
 POLICY_PATH = str(Path(__file__).resolve().parent.parent / "references" / "council-policy.json")
@@ -169,6 +170,94 @@ class CouncilReviewTDDTests(unittest.TestCase):
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
         self.assertEqual(outcome.status, "SECURITY_HALT")
         self.assertEqual(outcome.unresolved_blockers, 1)
+
+
+class _FakeAsyncProcess:
+    """A minimal stand-in for the process handle `invoke_worker_async` awaits."""
+
+    def __init__(self, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0) -> None:
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        pass
+
+    async def wait(self) -> int:
+        return self.returncode
+
+
+def _runner_returning(process: "_FakeAsyncProcess"):
+    async def _runner(*args, **kwargs):
+        return process
+
+    return _runner
+
+
+def _runner_raising(exc: Exception):
+    async def _runner(*args, **kwargs):
+        raise exc
+
+    return _runner
+
+
+class CLIReviewerAdapterReviewTests(unittest.TestCase):
+    # CLIReviewerAdapter.review() delegates to production_invoker.invoke_worker_async
+    # via an injected runner, rather than spawning its own subprocess.
+
+    def test_review_success_returns_parsed_payload_with_provider(self) -> None:
+        process = _FakeAsyncProcess(stdout=b'{"vote": "approve", "confidence": 0.9}')
+        adapter = CodexAdapter("gpt-5.6-sol", "high", runner=_runner_returning(process))
+
+        outcome = asyncio.run(adapter.review("proposal text", 1, 30))
+
+        self.assertEqual(outcome["provider"], "codex")
+        self.assertEqual(outcome["vote"], "approve")
+        self.assertEqual(outcome["confidence"], 0.9)
+
+    def test_review_nonzero_exit_returns_abstain_with_error(self) -> None:
+        process = _FakeAsyncProcess(stdout=b"", stderr=b"boom", returncode=1)
+        adapter = ClaudeAdapter("claude-sonnet-5", "high", runner=_runner_returning(process))
+
+        outcome = asyncio.run(adapter.review("proposal text", 1, 30))
+
+        self.assertEqual(outcome["provider"], "claude")
+        self.assertEqual(outcome["vote"], "abstain")
+        self.assertEqual(outcome["confidence"], 0.0)
+        self.assertIn("error", outcome)
+
+    def test_review_spawn_failure_returns_abstain_with_error(self) -> None:
+        adapter = AgyAdapter(
+            "gemini-3.1-pro", "high", runner=_runner_raising(RuntimeError("no such binary"))
+        )
+
+        outcome = asyncio.run(adapter.review("proposal text", 1, 30))
+
+        self.assertEqual(outcome["provider"], "gemini")
+        self.assertEqual(outcome["vote"], "abstain")
+        self.assertEqual(outcome["confidence"], 0.0)
+        self.assertIn("error", outcome)
+
+    def test_parse_output_tags_payload_with_provider_id(self) -> None:
+        adapter = CLIReviewerAdapter("codex", "gpt-5.6-sol", "high", "codex")
+
+        payload = adapter._parse_output('{"vote": "revise", "confidence": 0.2}')
+
+        self.assertEqual(payload["provider"], "codex")
+        self.assertEqual(payload["vote"], "revise")
+        self.assertEqual(payload["confidence"], 0.2)
+
+    def test_parse_output_empty_output_uses_defaults(self) -> None:
+        adapter = CLIReviewerAdapter("gemini", "gemini-3.1-pro", "high", "agy")
+
+        payload = adapter._parse_output("")
+
+        self.assertEqual(payload["provider"], "gemini")
+        self.assertEqual(payload["vote"], "approve")
+        self.assertEqual(payload["confidence"], 1.0)
 
 
 if __name__ == "__main__":

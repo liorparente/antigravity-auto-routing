@@ -4,8 +4,8 @@
 
 **Blocked by:** 02 — Async Worker Invocation Engine & Timeout Process Reaping
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Refactor `CLIReviewerAdapter.review()` to delegate subprocess execution to `production_invoker.invoke_worker_async`.
-- [ ] Remove duplicate subprocess spawning, duplicate argument lists, and redundant regex parsing from `provider_adapters.py`.
-- [ ] Verify that all 7 Council Review unit tests in `test_council_review.py` pass cleanly without errors.
+- [x] Refactor `CLIReviewerAdapter.review()` to delegate subprocess execution to `production_invoker.invoke_worker_async`.
+- [x] Remove duplicate subprocess spawning, duplicate argument lists, and redundant regex parsing from `provider_adapters.py`.
+- [x] Verify that all 7 Council Review unit tests in `test_council_review.py` pass cleanly without errors.
