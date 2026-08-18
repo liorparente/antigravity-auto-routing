@@ -21,7 +21,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 
 def _load_sibling(name: str) -> Any:
@@ -81,10 +81,6 @@ AdvisoryOutcome = Literal[
 CanaryResult = Literal["catch", "miss"]
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
 RosterTopology = Literal["pair", "panel"]
-
-if TYPE_CHECKING:
-    from advisory_consultation import AdvisoryDebateResult, CanaryFixture
-
 
 @dataclass(frozen=True)
 class ConsultationTranscript:
@@ -158,6 +154,72 @@ def _resolve_task_id(task_description: str, task_id: str | None, outcome: Adviso
     return _default_task_id(task_description)
 
 
+def format_transcript_markdown(
+    task_description: str,
+    rounds: Sequence[Any],
+    planner_model: str,
+    critic_model: str,
+    outcome: str,
+    *,
+    canary_fixture: Any | None = None,
+    canary_result: str | None = None,
+    degraded_independence: bool = False,
+    degradation_rung: int = 0,
+) -> str:
+    """Format the pure, non-sensitive consultation transcript markdown.
+
+    ``rounds`` and the optional canary fixture are structural inputs rather
+    than orchestrator types, keeping this layout helper usable by callers
+    that load the leaf module independently.
+    """
+    is_canary = outcome == "canary" and canary_fixture is not None
+    lines = [
+        "# AdvisoryConsultation Transcript", "", f"**Outcome:** {outcome}",
+        f"**Planner:** {planner_model}", f"**Critic:** {critic_model}",
+        f"**Rounds run:** {len(rounds)}", "",
+    ]
+    if degraded_independence:
+        lines.extend([
+            f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could not achieve "
+            "full cross-family independence. Treat its outcome with reduced confidence.",
+            "",
+        ])
+    if is_canary:
+        result_text = (
+            "approved the flawed fixture" if canary_result == "miss"
+            else "did not approve the flawed fixture"
+        )
+        lines.extend([
+            f"**{CANARY_MARKER}:** This dialogue reviewed seeded-flaw fixture "
+            f"`{canary_fixture.id}`, not a real mission artifact. No Planner was invoked.",
+            "", f"Seeded flaw: {canary_fixture.flaw_summary}", "",
+            f"Critic result: **{canary_result}** ({result_text}).", "",
+        ])
+    if degradation_rung > 0:
+        lines.extend([
+            f"**{BUDGET_DEGRADATION_MARKER}:** degradation rung {degradation_rung} "
+            f"({_DEGRADATION_RUNG_LABELS[degradation_rung]}).", "",
+        ])
+    lines.extend(["## Task", "", task_description, ""])
+    if outcome == "budget_skipped":
+        lines.append("_No Planner or Critic was contacted because the session budget was exhausted._")
+    elif not rounds:
+        lines.append("_No rounds were run._")
+    for index, round_ in enumerate(rounds, start=1):
+        panel = round_.critic_b_response is not None
+        planner_header = f"### Planner ({planner_model})"
+        if is_canary:
+            planner_header = f"### Seeded-flaw fixture (`{canary_fixture.id}`)"
+        critic_header = f"### Critic A ({critic_model})" if panel else f"### Critic ({critic_model})"
+        lines.extend([
+            f"## Round {index}", "", planner_header, "", round_.planner_proposal, "",
+            critic_header, "", round_.critic_response, "",
+        ])
+        if round_.critic_b_response is not None:
+            lines.extend(["### Critic B", "", round_.critic_b_response, ""])
+    return "\n".join(lines)
+
+
 def _render_consultation_transcript(
     task_description: str,
     result: AdvisoryDebateResult,
@@ -169,75 +231,12 @@ def _render_consultation_transcript(
     Only callers that have already passed sensitivity detection may use this
     renderer.  The separate halt renderer below never accepts task content.
     """
-    rounds = result.rounds
-    is_canary = result.outcome == "canary" and canary_fixture is not None
-    lines = [
-        "# AdvisoryConsultation Transcript",
-        "",
-        f"**Outcome:** {result.outcome}",
-        f"**Planner:** {result.planner_model}",
-        f"**Critic:** {result.critic_model}",
-        f"**Rounds run:** {len(rounds)}",
-        "",
-    ]
-    if result.degraded_independence:
-        lines.extend([
-            (
-                f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could not achieve "
-                "full cross-family independence. Treat its outcome with reduced confidence."
-            ),
-            "",
-        ])
-    if is_canary:
-        assert canary_fixture is not None
-        result_text = (
-            "approved the flawed fixture"
-            if result.canary_result == "miss"
-            else "did not approve the flawed fixture"
-        )
-        lines.extend([
-            (
-                f"**{CANARY_MARKER}:** This dialogue reviewed seeded-flaw fixture "
-                f"`{canary_fixture.id}`, not a real mission artifact. No Planner was invoked."
-            ),
-            "",
-            f"Seeded flaw: {canary_fixture.flaw_summary}",
-            "",
-            f"Critic result: **{result.canary_result}** ({result_text}).",
-            "",
-        ])
-    if result.degradation_rung > 0:
-        lines.extend([
-            (
-                f"**{BUDGET_DEGRADATION_MARKER}:** degradation rung {result.degradation_rung} "
-                f"({_DEGRADATION_RUNG_LABELS[result.degradation_rung]})."
-            ),
-            "",
-        ])
-    lines.extend(["## Task", "", task_description, ""])
-    if result.outcome == "budget_skipped":
-        lines.append("_No Planner or Critic was contacted because the session budget was exhausted._")
-    elif not rounds:
-        lines.append("_No rounds were run._")
-    for index, round_ in enumerate(rounds, start=1):
-        panel = round_.critic_b_response is not None
-        planner_header = f"### Planner ({result.planner_model})"
-        if is_canary:
-            assert canary_fixture is not None
-            planner_header = f"### Seeded-flaw fixture (`{canary_fixture.id}`)"
-        critic_header = (
-            f"### Critic A ({result.critic_model})"
-            if panel
-            else f"### Critic ({result.critic_model})"
-        )
-        lines.extend([
-            f"## Round {index}", "", planner_header, "", round_.planner_proposal, "",
-            critic_header, "", round_.critic_response, "",
-        ])
-        critic_b_response = round_.critic_b_response
-        if critic_b_response is not None:
-            lines.extend(["### Critic B", "", critic_b_response, ""])
-    return "\n".join(lines)
+    return format_transcript_markdown(
+        task_description, result.rounds, result.planner_model, result.critic_model, result.outcome,
+        canary_fixture=canary_fixture, canary_result=result.canary_result,
+        degraded_independence=result.degraded_independence,
+        degradation_rung=result.degradation_rung,
+    )
 
 
 def _render_sensitivity_halt_transcript(marker: str, task_id: str) -> str:
@@ -248,6 +247,11 @@ def _render_sensitivity_halt_transcript(marker: str, task_id: str) -> str:
         f"Task text matched sensitivity marker `{marker}`. Human approval is required before this task may proceed.",
         "", "No Planner or Critic was contacted. No task details are recorded here.",
     ])
+
+
+# Stable public rendering entry points, retaining private compatibility names.
+render_consultation_transcript = _render_consultation_transcript
+render_sensitivity_halt_transcript = _render_sensitivity_halt_transcript
 
 
 def _write_transcript(path: Path, content: str) -> str | None:

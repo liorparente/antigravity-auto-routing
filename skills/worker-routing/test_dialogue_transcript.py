@@ -59,6 +59,12 @@ class DialogueTranscriptTests(unittest.TestCase):
         self.assertNotIn("super-secret-value", rendered)
         self.assertNotIn("## Task", rendered)
 
+    def test_public_sensitivity_halt_renderer_matches_compatibility_renderer(self) -> None:
+        self.assertEqual(
+            dialogue_transcript.render_sensitivity_halt_transcript("api_key", "safe-id"),
+            dialogue_transcript._render_sensitivity_halt_transcript("api_key", "safe-id"),
+        )
+
     def test_transcript_marks_degradation_independence_and_canary(self) -> None:
         result = self._result(
             outcome="canary",
@@ -75,6 +81,28 @@ class DialogueTranscriptTests(unittest.TestCase):
         self.assertIn(dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER, rendered)
         self.assertIn(dialogue_transcript.CANARY_MARKER, rendered)
         self.assertIn(dialogue_transcript.BUDGET_DEGRADATION_MARKER, rendered)
+
+    def test_public_consultation_renderer_matches_compatibility_renderer(self) -> None:
+        result = self._result()
+        self.assertEqual(
+            dialogue_transcript.render_consultation_transcript("task", result),
+            dialogue_transcript._render_consultation_transcript("task", result),
+        )
+
+    def test_format_transcript_markdown_renders_round_layout_without_orchestrator_types(self) -> None:
+        class Round:
+            planner_proposal = "proposal"
+            critic_response = "VERDICT: REVISE"
+            critic_b_response = None
+
+        rendered = dialogue_transcript.format_transcript_markdown(
+            "task", [Round()], "Planner", "Critic", "revise",
+        )
+
+        self.assertIn("**Outcome:** revise", rendered)
+        self.assertIn("### Planner (Planner)", rendered)
+        self.assertIn("### Critic (Critic)", rendered)
+        self.assertIn("proposal", rendered)
 
     def test_telemetry_mapping_and_locked_write(self) -> None:
         record = dialogue_transcript.AdvisoryTelemetryRecord(

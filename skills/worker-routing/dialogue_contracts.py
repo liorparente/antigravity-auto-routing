@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from collections.abc import Sequence
 from typing import Literal
 
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
@@ -232,6 +233,40 @@ def _split_off_verdict_line(critic_response: str) -> tuple[str | None, list[str]
     return None, []
 
 
+def extract_quotes(body_lines: list[str]) -> list[str]:
+    """Extract ``QUOTE:`` engagement text, removing one surrounding quote pair.
+
+    The returned text is deliberately not verified here: callers may inspect
+    exactly what a Critic supplied before choosing the artifact to verify it
+    against.  Whitespace around the quote payload is formatting, not content.
+    """
+    quotes: list[str] = []
+    for line in body_lines:
+        quote_match = _QUOTE_LINE_PATTERN.match(line.strip())
+        if quote_match is None:
+            continue
+        candidate = quote_match.group(1).strip()
+        if len(candidate) >= 2 and candidate[0] == '"' and candidate[-1] == '"':
+            candidate = candidate[1:-1]
+        quotes.append(candidate)
+    return quotes
+
+
+def extract_objections(body_lines: list[str]) -> list[str]:
+    """Extract numbered objection lines in their normalized contract form."""
+    return [line.strip() for line in body_lines if _OBJECTION_LINE_PATTERN.match(line.strip())]
+
+
+def verify_quotes(quotes: Sequence[str], artifact_text: str) -> list[str]:
+    """Return quotes that occur verbatim in ``artifact_text``.
+
+    Empty payloads are excluded because they are not evidence that the Critic
+    engaged with the artifact, despite Python considering an empty string a
+    substring of every string.
+    """
+    return [quote for quote in quotes if quote and quote in artifact_text]
+
+
 def _count_engagement_units(body_lines: list[str], artifact_text: str) -> tuple[int, int]:
     """Count verified quotes and numbered objections among `body_lines`.
 
@@ -241,21 +276,9 @@ def _count_engagement_units(body_lines: list[str], artifact_text: str) -> tuple[
     `artifact_text` is dropped silently — it contributes to neither count —
     rather than being counted as a malformed line of any kind.
     """
-    verified_quotes = 0
-    objections = 0
-    for line in body_lines:
-        stripped = line.strip()
-        quote_match = _QUOTE_LINE_PATTERN.match(stripped)
-        if quote_match:
-            candidate = quote_match.group(1).strip()
-            if len(candidate) >= 2 and candidate[0] == '"' and candidate[-1] == '"':
-                candidate = candidate[1:-1]
-            if candidate and candidate in artifact_text:
-                verified_quotes += 1
-            continue
-        if _OBJECTION_LINE_PATTERN.match(stripped):
-            objections += 1
-    return verified_quotes, objections
+    verified_quotes = verify_quotes(extract_quotes(body_lines), artifact_text)
+    objections = extract_objections(body_lines)
+    return len(verified_quotes), len(objections)
 
 
 def _parse_critic_verdict(
@@ -311,3 +334,8 @@ def _parse_critic_verdict(
         return VerdictContractResult("revise", verified_quotes, objections)
 
     return VerdictContractResult("unparseable", verified_quotes, objections)
+
+
+# Public entry point.  Keep the historic private name for every existing
+# caller while giving leaf-module consumers a stable supported API.
+parse_verdict_contract = _parse_critic_verdict

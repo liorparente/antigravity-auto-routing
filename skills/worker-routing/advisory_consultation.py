@@ -34,11 +34,16 @@ _executive_dialogue_report = _load_sibling("executive_dialogue_report")
 _dialogue_degradation = _load_sibling("dialogue_degradation")
 _dialogue_contracts = _load_sibling("dialogue_contracts")
 _dialogue_transcript = _load_sibling("dialogue_transcript")
+_debate_state_machine = _load_sibling("debate_state_machine")
+_debate_transport = _load_sibling("debate_transport")
+
+DebateTransport = _debate_transport.DebateTransport
+RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
 
 _modules = (
     _debate_orchestrator, _prompt_assembler, _sensitivity_redactor,
     _executive_dialogue_report, _dialogue_degradation, _dialogue_contracts,
-    _dialogue_transcript,
+    _dialogue_transcript, _debate_state_machine, _debate_transport,
 )
 
 _CONFIG_PATH = Path(__file__).with_name("routing-config.json")
@@ -129,7 +134,10 @@ __all__ = (  # noqa: F822
     "CanaryFixture",
     "CanaryResult",
     "ConsultationTranscript",
+    "CriticResponse",
+    "DebateTransport",
     "CriticVerdict",
+    "DebateState",
     "DebateRoundRecord",
     "DebateSessionState",
     "DegradationLadderState",
@@ -144,6 +152,8 @@ __all__ = (  # noqa: F822
     "RosterResolutionError",
     "RosterRole",
     "RosterTopology",
+    "RoundTurnResult",
+    "RecurringFailureNotifier",
     "TaskIdentity",
     "VerdictContractResult",
     "advance_debate_state",
@@ -159,7 +169,11 @@ __all__ = (  # noqa: F822
     "detect_sensitivity_marker",
     "dispatch_post_mortem_consultation",
     "evaluate_round_verdicts",
+    "evaluate_quorum",
     "format_budget_degradation_alert",
+    "format_transcript_markdown",
+    "extract_objections",
+    "extract_quotes",
     "is_canary_dialogue",
     "is_local_family",
     "is_panel_topology",
@@ -174,5 +188,9 @@ __all__ = (  # noqa: F822
     "run_canary_dialogue",
     "run_debate_loop",
     "run_post_mortem_loop",
+    "parse_verdict_contract",
+    "render_consultation_transcript",
+    "render_sensitivity_halt_transcript",
     "scan_sensitivity_markers",
+    "verify_quotes",
 )

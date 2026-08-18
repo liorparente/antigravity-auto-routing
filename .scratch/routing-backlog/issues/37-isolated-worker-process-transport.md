@@ -5,9 +5,9 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Implement `DebateTransport` with robust subprocess execution, environment isolation, and PTY wrapping.
-- [ ] Convert unhandled exceptions and CLI timeouts into graceful `abstain` votes (`confidence=0.0`) so transient failures do not crash the deliberation loop.
-- [ ] Implement `RecurringFailureNotifier` logging repeated model errors to `ERRORS.md` and raising prominent alerts.
-- [ ] Comprehensive unit tests in `skills/worker-routing/test_debate_transport.py` covering timeout handling and failure alerts.
+- [x] Implement `DebateTransport` with robust subprocess execution, environment isolation, and PTY wrapping.
+- [x] Convert unhandled exceptions and CLI timeouts into graceful `abstain` votes (`confidence=0.0`) so transient failures do not crash the deliberation loop.
+- [x] Implement `RecurringFailureNotifier` logging repeated model errors to `ERRORS.md` and raising prominent alerts.
+- [x] Comprehensive unit tests in `skills/worker-routing/test_debate_transport.py` covering timeout handling and failure alerts.

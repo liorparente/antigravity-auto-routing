@@ -55,6 +55,8 @@ _executive_dialogue_report = _load_sibling("executive_dialogue_report")
 _dialogue_transcript = _load_sibling("dialogue_transcript")
 _learning_journal = _load_sibling("learning_journal")
 _learning_outcomes = _load_sibling("learning_outcomes")
+_debate_state_machine = _load_sibling("debate_state_machine")
+_debate_transport = _load_sibling("debate_transport")
 
 if not TYPE_CHECKING:
     Occasion = _dialogue_contracts.Occasion
@@ -71,6 +73,10 @@ if not TYPE_CHECKING:
 
 CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
 CRITIC_VERDICT_REVISE = _dialogue_contracts.CRITIC_VERDICT_REVISE
+extract_quotes = _dialogue_contracts.extract_quotes
+extract_objections = _dialogue_contracts.extract_objections
+verify_quotes = _dialogue_contracts.verify_quotes
+parse_verdict_contract = _dialogue_contracts.parse_verdict_contract
 _count_engagement_units = _dialogue_contracts._count_engagement_units
 _is_tolerant_revise = _dialogue_contracts._is_tolerant_revise
 _parse_critic_verdict = _dialogue_contracts._parse_critic_verdict
@@ -89,6 +95,24 @@ scan_sensitivity_markers = _sensitivity_redactor.scan_sensitivity_markers
 derive_safe_task_identity = _sensitivity_redactor.derive_safe_task_identity
 detect_sensitivity_marker = _sensitivity_redactor.detect_sensitivity_marker
 SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
+
+# Pure state-machine API, re-exported here for the historic orchestration API.
+PANEL_TOPOLOGY_OCCASIONS = _debate_state_machine.PANEL_TOPOLOGY_OCCASIONS
+is_panel_topology = _debate_state_machine.is_panel_topology
+build_stalemate_report = _debate_state_machine.build_stalemate_report
+evaluate_round_verdicts = _debate_state_machine.evaluate_round_verdicts
+DebateRoundRecord = _debate_state_machine.DebateRoundRecord
+DebateSessionState = _debate_state_machine.DebateSessionState
+advance_debate_state = _debate_state_machine.advance_debate_state
+CriticResponse = _debate_state_machine.CriticResponse
+DebateTransport = _debate_transport.DebateTransport
+RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
+RoundTurnResult = _debate_state_machine.RoundTurnResult
+DebateState = _debate_state_machine.DebateState
+evaluate_quorum = _debate_state_machine.evaluate_quorum
+_PANEL_TOPOLOGY_OCCASIONS = PANEL_TOPOLOGY_OCCASIONS
+_is_panel_topology = is_panel_topology
+_build_stalemate_report = build_stalemate_report
 
 
 def _resolve_task_id(
@@ -118,6 +142,9 @@ AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
 _default_task_id = _dialogue_transcript._default_task_id
 _render_consultation_transcript = _dialogue_transcript._render_consultation_transcript
 _render_sensitivity_halt_transcript = _dialogue_transcript._render_sensitivity_halt_transcript
+render_consultation_transcript = _dialogue_transcript.render_consultation_transcript
+render_sensitivity_halt_transcript = _dialogue_transcript.render_sensitivity_halt_transcript
+format_transcript_markdown = _dialogue_transcript.format_transcript_markdown
 _write_transcript = _dialogue_transcript._write_transcript
 _append_jsonl_locked = _dialogue_transcript._append_jsonl_locked
 _reduce_dialogue_round = _dialogue_transcript._reduce_dialogue_round
@@ -2767,148 +2794,6 @@ def dispatch_post_mortem_consultation(
     )
     thread.start()
     return thread
-
-
-# Immutable state-machine primitives retained at the orchestration boundary.
-PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
-_PANEL_TOPOLOGY_OCCASIONS = PANEL_TOPOLOGY_OCCASIONS
-
-
-def is_panel_topology(occasion: Occasion, complexity: str) -> bool:
-    """Return whether this occasion and complexity use two Critics."""
-    normalized = complexity.lower().strip()
-    return occasion in PANEL_TOPOLOGY_OCCASIONS and normalized == "complex"
-
-
-_is_panel_topology = is_panel_topology
-
-
-def build_stalemate_report(
-    planner_position: str,
-    critic_position: str,
-    critic_b_position: str | None = None,
-) -> AdvisoryStalemateReport:
-    """Build pair- or panel-topology human-resolution options."""
-    if critic_b_position is None:
-        return AdvisoryStalemateReport(
-            planner_position=planner_position,
-            critic_position=critic_position,
-            options=(
-                AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
-                AdvisoryResolutionOption(2, "Approve Critic Architecture", critic_position),
-                AdvisoryResolutionOption(
-                    3, "Escalate to Human Decision", "Halt execution and request user review"
-                ),
-            ),
-        )
-
-    combined_critics_description = (
-        f"Critic A:\n{critic_position}\n\nCritic B:\n{critic_b_position}"
-    )
-    return AdvisoryStalemateReport(
-        planner_position=planner_position,
-        critic_position=critic_position,
-        critic_b_position=critic_b_position,
-        options=(
-            AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
-            AdvisoryResolutionOption(
-                2, "Approve Critics' Architecture", combined_critics_description
-            ),
-            AdvisoryResolutionOption(
-                3, "Escalate to Human Decision", "Halt execution and request user review"
-            ),
-        ),
-    )
-
-
-_build_stalemate_report = build_stalemate_report
-
-
-def evaluate_round_verdicts(
-    critic_a_verdict: str | None,
-    critic_b_verdict: str | None = None,
-    *,
-    is_panel: bool = False,
-) -> tuple[bool, str | None]:
-    """Return consensus and any fail-closed malformed-verdict error."""
-    def normalize(verdict: str | None) -> str | None:
-        if not isinstance(verdict, str):
-            return None
-        normalized = verdict.strip().casefold()
-        if normalized in ("approve", "approved"):
-            return "APPROVE"
-        if normalized == "revise":
-            return "REVISE"
-        return None
-
-    normalized_a = normalize(critic_a_verdict)
-    normalized_b = normalize(critic_b_verdict)
-    if not is_panel:
-        return (
-            normalized_a == "APPROVE",
-            None
-            if normalized_a is not None
-            else f"unparseable verdict: {critic_a_verdict}",
-        )
-    return (
-        normalized_a == "APPROVE" and normalized_b == "APPROVE",
-        None
-        if (
-            normalized_a is not None
-            and normalized_b is not None
-        )
-        else f"unparseable verdict: critic_a={critic_a_verdict}, critic_b={critic_b_verdict}",
-    )
-
-
-@dataclass(frozen=True)
-class DebateRoundRecord:
-    round_index: int
-    planner_plan: str
-    critic_a_response: str
-    critic_b_response: str | None = None
-    critic_a_verdict: str | None = None
-    critic_b_verdict: str | None = None
-    is_consensus: bool = False
-    error: str | None = None
-
-
-@dataclass(frozen=True)
-class DebateSessionState:
-    occasion: Occasion
-    complexity: str
-    max_rounds: int
-    is_panel: bool
-    rounds: tuple[DebateRoundRecord, ...] = ()
-    consensus_reached: bool = False
-    final_plan: str | None = None
-    stalemate_report: AdvisoryStalemateReport | None = None
-    error: str | None = None
-
-
-
-
-def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord) -> DebateSessionState:
-    """Return a new state containing ``record``; never mutate the input state."""
-    if (
-        state.consensus_reached
-        or state.error is not None
-        or state.stalemate_report is not None
-        or len(state.rounds) >= state.max_rounds
-    ):
-        return state
-    consensus, error = evaluate_round_verdicts(
-        record.critic_a_verdict, record.critic_b_verdict, is_panel=state.is_panel
-    )
-    normalized_record = replace(record, is_consensus=consensus, error=error)
-    rounds = (*state.rounds, normalized_record)
-    if consensus:
-        return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, True, normalized_record.planner_plan, None, error)
-    if error:
-        return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, False, None, None, error)
-    if len(rounds) >= state.max_rounds:
-        return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, False, None, build_stalemate_report(normalized_record.planner_plan, normalized_record.critic_a_response, normalized_record.critic_b_response if state.is_panel else None), None)
-    return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds)
 
 
 def run_debate_loop(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:

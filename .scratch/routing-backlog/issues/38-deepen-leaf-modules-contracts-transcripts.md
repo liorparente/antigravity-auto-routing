@@ -5,9 +5,9 @@
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Move quote verification and atomic objection parsing into `dialogue_contracts.py`.
-- [ ] Move transcript markdown layout, executive summary rendering, and sensitivity redaction display into `dialogue_transcript.py`.
-- [ ] Ensure leaf modules remain pure with zero upward dependencies on the orchestrator or state machine.
-- [ ] Unit tests verifying that contract parsing and transcript generation function identically.
+- [x] Move quote verification and atomic objection parsing into `dialogue_contracts.py`.
+- [x] Move transcript markdown layout, executive summary rendering, and sensitivity redaction display into `dialogue_transcript.py`.
+- [x] Ensure leaf modules remain pure with zero upward dependencies on the orchestrator or state machine.
+- [x] Unit tests verifying that contract parsing and transcript generation function identically.
