@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import importlib.util
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Literal
 
 
 def _load_sibling(name: str) -> Any:
@@ -26,9 +26,9 @@ def _load_sibling(name: str) -> Any:
 _dialogue_degradation = _load_sibling("dialogue_degradation")
 _dialogue_contracts = _load_sibling("dialogue_contracts")
 
-if TYPE_CHECKING:
-    from dialogue_contracts import Occasion
-    from dialogue_degradation import DegradationRung
+# Runtime aliases are required because these annotations are introspected.
+Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
+DegradationRung = Literal[0, 1, 2, 3]
 
 
 def format_budget_degradation_alert(

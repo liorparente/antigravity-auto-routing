@@ -47,7 +47,7 @@ class BudgetDegradationAlertTests(unittest.TestCase):
 
 
 class ExecutiveSummaryTests(unittest.TestCase):
-    def test_summary_has_three_exact_lines_for_each_outcome(self) -> None:
+    def test_render_executive_summary(self) -> None:
         cases = (
             ("consensus", None, "Outcome: Approved plan stored at implementation_plan.md"),
             ("stalemate", None, "Outcome: Unresolved (stalemate) - Review required"),

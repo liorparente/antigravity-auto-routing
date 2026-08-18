@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -105,6 +106,40 @@ class DebateStateTests(unittest.TestCase):
         self.assertFalse(state.consensus_reached)
         state.rounds.append(record)
         self.assertEqual(state.rounds, [record])
+
+    def test_advance_returns_a_new_pair_or_panel_state(self) -> None:
+        pair = debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False)
+        revised = debate_orchestrator.advance_debate_state(
+            pair, debate_orchestrator.DebateRoundRecord(1, "plan", "critique", critic_a_verdict="REVISE")
+        )
+        approved = debate_orchestrator.advance_debate_state(
+            debate_orchestrator.DebateSessionState("plan-review", "complex", 2, True),
+            debate_orchestrator.DebateRoundRecord(1, "panel plan", "a", "b", "APPROVE", "APPROVE"),
+        )
+        self.assertEqual(pair.rounds, [])
+        self.assertEqual(len(revised.rounds), 1)
+        self.assertTrue(approved.consensus_reached)
+        self.assertEqual(approved.final_plan, "panel plan")
+
+
+class ProductionOrchestrationTests(unittest.TestCase):
+    def test_roster_resolution_prefers_distinct_reachable_families(self) -> None:
+        resolution = debate_orchestrator.resolve_roster(
+            "pair", is_family_reachable=lambda family: family in {"claude", "codex-gpt"}
+        )
+        self.assertEqual(resolution.model_for("planner"), "Claude Opus 5 (Thinking)")
+        self.assertEqual(resolution.model_for("critic_a"), "Codex 5.6 Sol")
+        self.assertFalse(resolution.degraded_independence)
+
+    def test_canary_execution_returns_a_measurement(self) -> None:
+        fixture = debate_orchestrator.CANARY_FIXTURES[0]
+        response = f'QUOTE: "{fixture.plan_text.splitlines()[0]}"\\n1. flaw found\\nVERDICT: REVISE'
+        with tempfile.TemporaryDirectory() as tmp:
+            result = debate_orchestrator.run_canary_dialogue(
+                "unused", lambda *_args: response, root_dir=Path(tmp), canary_fixture=fixture
+            )
+        self.assertEqual(result.outcome, "canary")
+        self.assertEqual(result.canary_result, "catch")
 
 
 if __name__ == "__main__":
