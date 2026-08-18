@@ -17,7 +17,6 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
 
 

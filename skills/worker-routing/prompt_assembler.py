@@ -5,10 +5,9 @@ It owns only the stable text contract presented to Planner and Critic workers.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import Literal
-
 
 # This leaf intentionally has no sibling imports or runtime loading.
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]

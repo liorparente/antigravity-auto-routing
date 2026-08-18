@@ -6,8 +6,8 @@ text.  Halted task identities are random rather than derived from input.
 from __future__ import annotations
 
 import secrets
-from dataclasses import dataclass
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 SENSITIVITY_MARKERS: tuple[str, ...] = (
     "AGY_CALIBRATION_SECRET", "api_key", "sk-", "bearer ",

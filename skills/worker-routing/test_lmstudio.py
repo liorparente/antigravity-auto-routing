@@ -98,7 +98,7 @@ class LMStudioAPITests(unittest.TestCase):
             )
         try:
             urlopen(Request(f"{BASE_URL}/models"), timeout=2)
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001
             raise unittest.SkipTest(
                 f"LM Studio is unreachable at {BASE_URL}: {error}. Skipping manual smoke tests."
             )

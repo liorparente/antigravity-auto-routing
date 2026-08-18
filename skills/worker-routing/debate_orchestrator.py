@@ -11,7 +11,26 @@ import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from dialogue_contracts import (
+        AdvisoryResolutionOption,
+        AdvisoryRoundVerdict,
+        AdvisoryStalemateReport,
+        CriticVerdict,
+        Occasion,
+        VerdictContractResult,
+    )
+    from dialogue_degradation import (
+        DegradationLadderState,
+        DegradationRung,
+    )
+    from executive_dialogue_report import (
+        ExecutiveDialogueReport,
+    )
+    from prompt_assembler import MissionCopy
+    from sensitivity_redactor import TaskIdentity
 
 
 def _load_sibling(name: str) -> Any:
@@ -37,19 +56,25 @@ _dialogue_transcript = _load_sibling("dialogue_transcript")
 _learning_journal = _load_sibling("learning_journal")
 _learning_outcomes = _load_sibling("learning_outcomes")
 
-Occasion = _dialogue_contracts.Occasion
-AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
-AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
-AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
+if not TYPE_CHECKING:
+    Occasion = _dialogue_contracts.Occasion
+    AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
+    AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
+    AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
+    CriticVerdict = _dialogue_contracts.CriticVerdict
+    VerdictContractResult = _dialogue_contracts.VerdictContractResult
+    MissionCopy = _prompt_assembler.MissionCopy
+    TaskIdentity = _sensitivity_redactor.TaskIdentity
+    DegradationLadderState = _dialogue_degradation.DegradationLadderState
+    DegradationRung = _dialogue_degradation.DegradationRung
+    ExecutiveDialogueReport = _executive_dialogue_report.ExecutiveDialogueReport
+
 CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
 CRITIC_VERDICT_REVISE = _dialogue_contracts.CRITIC_VERDICT_REVISE
-CriticVerdict = _dialogue_contracts.CriticVerdict
-VerdictContractResult = _dialogue_contracts.VerdictContractResult
 _count_engagement_units = _dialogue_contracts._count_engagement_units
 _is_tolerant_revise = _dialogue_contracts._is_tolerant_revise
 _parse_critic_verdict = _dialogue_contracts._parse_critic_verdict
 
-MissionCopy = _prompt_assembler.MissionCopy
 MISSION_COPY = _prompt_assembler.MISSION_COPY
 build_planner_prompt = _prompt_assembler.build_planner_prompt
 build_critic_prompt = _prompt_assembler.build_critic_prompt
@@ -60,11 +85,9 @@ combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
 _MISSION_COPY = _prompt_assembler._MISSION_COPY
 _MissionCopy = _prompt_assembler._MissionCopy
 
-TaskIdentity = _sensitivity_redactor.TaskIdentity
 scan_sensitivity_markers = _sensitivity_redactor.scan_sensitivity_markers
 derive_safe_task_identity = _sensitivity_redactor.derive_safe_task_identity
 detect_sensitivity_marker = _sensitivity_redactor.detect_sensitivity_marker
-_detect_sensitivity_marker = _sensitivity_redactor.detect_sensitivity_marker
 SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 
 
@@ -76,8 +99,6 @@ def _resolve_task_id(
 
 BUDGET_DEGRADATION_MARKER = _dialogue_degradation.BUDGET_DEGRADATION_MARKER
 DEFAULT_SESSION_DIALOGUE_CAP = _dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
-DegradationLadderState = _dialogue_degradation.DegradationLadderState
-DegradationRung = _dialogue_degradation.DegradationRung
 _DEFAULT_DEGRADED_ROSTER_MODEL = _dialogue_degradation._DEFAULT_DEGRADED_ROSTER_MODEL
 _DEGRADED_EFFORT = _dialogue_degradation._DEGRADED_EFFORT
 _DEGRADED_ROUND_CAP = _dialogue_degradation._DEGRADED_ROUND_CAP
@@ -88,7 +109,6 @@ resolve_degradation_rung = _dialogue_degradation.resolve_degradation_rung
 
 format_budget_degradation_alert = _executive_dialogue_report.format_budget_degradation_alert
 render_executive_summary = _executive_dialogue_report.render_executive_summary
-ExecutiveDialogueReport = _executive_dialogue_report.ExecutiveDialogueReport
 
 ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
 DEGRADED_INDEPENDENCE_MARKER = _dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER
