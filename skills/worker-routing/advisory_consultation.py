@@ -57,3 +57,37 @@ def __getattr__(name: str) -> Any:
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | {key for module in _modules for key in vars(module)})
+
+
+# A deliberately explicit star-export surface.  The facade resolves these
+# names lazily through `__getattr__`, preserving direct imports while making
+# `from advisory_consultation import *` expose the complete supported API.
+__all__ = (
+    "Occasion", "AdvisoryOutcome", "AdvisoryRoundVerdict",
+    "AdvisoryResolutionOption", "AdvisoryStalemateReport", "AdvisoryDebateRound",
+    "AdvisoryDebateResult", "AdvisoryTelemetryRecord", "ConsultationTranscript",
+    "CanaryFixture", "CanaryResult", "TaskIdentity", "MissionCopy",
+    "VerdictContractResult", "CriticVerdict", "DegradationLadderState",
+    "DegradationRung", "ExecutiveDialogueReport", "RosterAssignment",
+    "RosterResolution", "RosterResolutionError", "RosterTopology", "RosterRole",
+    "InvokeWorker", "IsFamilyReachable", "DebateRoundRecord", "DebateSessionState",
+    "CRITIC_VERDICT_APPROVE", "CRITIC_VERDICT_REVISE", "WORKER_MODE_TOKEN",
+    "MAX_DEBATE_ROUNDS", "ESCALATION_FAILURE_THRESHOLD", "SENSITIVITY_MARKERS",
+    "BUDGET_DEGRADATION_MARKER", "DEGRADED_INDEPENDENCE_MARKER", "CANARY_MARKER",
+    "DEFAULT_SESSION_DIALOGUE_CAP", "DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD",
+    "DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS", "DEFAULT_ROSTER_FALLBACK_CHAINS",
+    "DEFAULT_CANARY_DIALOGUES_PER_CANARY",
+    "DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES", "CANARY_FIXTURES", "MISSION_COPY",
+    "PANEL_TOPOLOGY_OCCASIONS",
+    "build_planner_prompt", "build_critic_prompt", "build_canary_prompt",
+    "build_adjudicator_prompt", "build_stalemate_prompt", "combine_panel_critic_feedback",
+    "format_budget_degradation_alert", "render_executive_summary",
+    "scan_sensitivity_markers", "derive_safe_task_identity", "detect_sensitivity_marker",
+    "classify_model_family", "is_local_family", "resolve_degradation_rung",
+    "resolve_roster", "is_canary_dialogue", "is_panel_topology",
+    "build_stalemate_report", "evaluate_round_verdicts", "advance_debate_state",
+    "needs_advisory_consultation", "needs_plan_review_consultation",
+    "needs_code_review_consultation", "needs_post_mortem_consultation",
+    "run_advisory_consultation_debate", "run_debate_loop", "run_canary_dialogue",
+    "run_post_mortem_loop", "dispatch_post_mortem_consultation",
+)

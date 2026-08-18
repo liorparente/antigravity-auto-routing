@@ -1756,7 +1756,10 @@ def run_advisory_consultation_debate(
                 max_rounds,
                 planner_model,
                 result_critic_model,
-                session_spend=session_spend_so_far,
+                # A completed dialogue consumes one session unit, regardless
+                # of how many revision rounds it needed. A pre-flight or
+                # mid-round failure has no completed dialogue to report.
+                session_spend=session_spend_so_far + (1 if rounds else 0),
                 plan_path=str(plan_path),
                 error=error,
             ),
@@ -2141,6 +2144,12 @@ def run_advisory_consultation_debate(
             # alone — see this block's own comment above for why.
             roster_degraded_independence = True
 
+    # The production loop below keeps its outcome decisions in this immutable
+    # state machine. Presentation-oriented round lists remain in parallel for
+    # the established result/transcript contract, while consensus, malformed
+    # verdict, and terminal stalemate decisions all flow through `state`.
+    state = DebateSessionState(occasion, complexity, max_rounds, panel_mode)
+
     # Spec 0003 (CriticalDialogue) ticket 08: the seeded-flaw canary round.
     # Placed after the sensitivity gate and (if opted into) roster
     # resolution, so a canary still fails closed on sensitive task text and
@@ -2301,27 +2310,40 @@ def run_advisory_consultation_debate(
             # entry, rather than as two separately-indexed lists that could
             # drift out of sync. See `AdvisoryRoundVerdict`'s docstring.
             round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_a, critic_b=verdict_b))
+            state = advance_debate_state(
+                state,
+                DebateRoundRecord(
+                    _round_number,
+                    planner_plan,
+                    critic_a_response,
+                    critic_b_response,
+                    verdict_a.verdict,
+                    verdict_b.verdict,
+                ),
+            )
 
             # An unparseable verdict from either Critic ends the panel
-            # immediately, exactly as pair mode's single unparseable verdict
-            # does: a malformed response must halt, never be folded into
-            # "the panel asked for a revision" as if it were a reasoned
-            # objection from whichever Critic actually engaged.
-            if verdict_a.verdict == "unparseable" or verdict_b.verdict == "unparseable":
+            # immediately; `advance_debate_state` is the authoritative
+            # verdict transition for this decision.
+            if state.error:
                 cleanup_error = _remove_stale_plan_artifact(plan_path)
-                return _result("unparseable_verdict", error=cleanup_error)
+                return _result("unparseable_verdict", error=_fold_error(state.error, cleanup_error))
 
-            if verdict_a.verdict == "approved" and verdict_b.verdict == "approved":
+            if state.consensus_reached:
                 panel_write_error: str | None = None
                 try:
-                    _atomic_text_write(plan_path, planner_plan)
+                    _atomic_text_write(plan_path, state.final_plan or planner_plan)
                 except OSError as exc:
                     panel_write_error = (
                         f"failed to write plan artifact at {plan_path}: {exc}"
                     )
                 return _result(
-                    "consensus", final_plan=planner_plan, error=panel_write_error
+                    "consensus", final_plan=state.final_plan or planner_plan, error=panel_write_error
                 )
+
+            if state.stalemate_report is not None:
+                cleanup_error = _remove_stale_plan_artifact(plan_path)
+                return _result("stalemate", stalemate=state.stalemate_report, error=cleanup_error)
 
             # Any other combination — one approves and one objects, or both
             # object — is not consensus and starts another round.
@@ -2355,18 +2377,31 @@ def run_advisory_consultation_debate(
         # above, `critic_b=None` since this is a pair-mode round. See
         # `AdvisoryDebateResult.round_verdicts`'s docstring.
         round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_result))
+        state = advance_debate_state(
+            state,
+            DebateRoundRecord(
+                _round_number,
+                planner_plan,
+                critic_response,
+                critic_a_verdict=verdict_result.verdict,
+            ),
+        )
 
-        if verdict_result.verdict == "approved":
+        if state.consensus_reached:
             write_error: str | None = None
             try:
-                _atomic_text_write(plan_path, planner_plan)
+                _atomic_text_write(plan_path, state.final_plan or planner_plan)
             except OSError as exc:
                 write_error = f"failed to write plan artifact at {plan_path}: {exc}"
-            return _result("consensus", final_plan=planner_plan, error=write_error)
+            return _result("consensus", final_plan=state.final_plan or planner_plan, error=write_error)
 
-        if verdict_result.verdict == "unparseable":
+        if state.error:
             cleanup_error = _remove_stale_plan_artifact(plan_path)
-            return _result("unparseable_verdict", error=cleanup_error)
+            return _result("unparseable_verdict", error=_fold_error(state.error, cleanup_error))
+
+        if state.stalemate_report is not None:
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            return _result("stalemate", stalemate=state.stalemate_report, error=cleanup_error)
 
         previous_plan = planner_plan
         previous_critique = critic_response
@@ -2378,7 +2413,9 @@ def run_advisory_consultation_debate(
     # `critic_b_position` parameter. Pair mode's call below is completely
     # unchanged: two positional arguments, `critic_b_position` left at its
     # `None` default, byte-for-byte the same report shape spec 0001 shipped.
-    if panel_mode:
+    if state.stalemate_report is not None:
+        stalemate = state.stalemate_report
+    elif panel_mode:
         stalemate = _build_stalemate_report(
             previous_plan or "",
             previous_critic_a_response or "",
@@ -2814,13 +2851,13 @@ class DebateRoundRecord:
     error: str | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class DebateSessionState:
     occasion: Occasion
     complexity: str
     max_rounds: int
     is_panel: bool
-    rounds: list[DebateRoundRecord] = field(default_factory=list)
+    rounds: tuple[DebateRoundRecord, ...] = ()
     consensus_reached: bool = False
     final_plan: str | None = None
     stalemate_report: AdvisoryStalemateReport | None = None
@@ -2834,7 +2871,7 @@ def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord) -
     consensus, error = evaluate_round_verdicts(
         record.critic_a_verdict, record.critic_b_verdict, is_panel=state.is_panel
     )
-    rounds = [*state.rounds, record]
+    rounds = (*state.rounds, record)
     if consensus:
         return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, True, record.planner_plan, None, error)
     if error:

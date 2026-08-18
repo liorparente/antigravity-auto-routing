@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import tempfile
 import unittest
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 
 
@@ -102,10 +103,10 @@ class DebateStateTests(unittest.TestCase):
 
         self.assertEqual(record.round_index, 1)
         self.assertFalse(record.is_consensus)
-        self.assertEqual(state.rounds, [])
+        self.assertEqual(state.rounds, ())
         self.assertFalse(state.consensus_reached)
-        state.rounds.append(record)
-        self.assertEqual(state.rounds, [record])
+        with self.assertRaises(FrozenInstanceError):
+            state.rounds = (record,)
 
     def test_advance_returns_a_new_pair_or_panel_state(self) -> None:
         pair = debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False)
@@ -116,7 +117,8 @@ class DebateStateTests(unittest.TestCase):
             debate_orchestrator.DebateSessionState("plan-review", "complex", 2, True),
             debate_orchestrator.DebateRoundRecord(1, "panel plan", "a", "b", "APPROVE", "APPROVE"),
         )
-        self.assertEqual(pair.rounds, [])
+        self.assertEqual(pair.rounds, ())
+        self.assertIsInstance(revised.rounds, tuple)
         self.assertEqual(len(revised.rounds), 1)
         self.assertTrue(approved.consensus_reached)
         self.assertEqual(approved.final_plan, "panel plan")

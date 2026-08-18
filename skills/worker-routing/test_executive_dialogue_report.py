@@ -84,6 +84,11 @@ class ExecutiveSummaryTests(unittest.TestCase):
         lines = executive_dialogue_report.render_executive_summary(
             "consensus", "ambiguity", 1, 1, "Planner", "Critic"
         )
+        alert = executive_dialogue_report.format_budget_degradation_alert(1, 10, 10)
+        self.assertEqual(
+            executive_dialogue_report.ExecutiveDialogueReport(lines, alert).render(),
+            "\n".join(lines) + "\n" + alert,
+        )
 
     def test_consensus_with_persistence_error_does_not_claim_artifact_was_written(self) -> None:
         lines = executive_dialogue_report.render_executive_summary(
