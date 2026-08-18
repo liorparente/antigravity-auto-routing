@@ -49,7 +49,7 @@ Complete the decomposition of `advisory_consultation.py` into deep, cohesive mod
    - When `resolve_degradation_rung` returns rung >= 1, `executive_dialogue_report.py` formats a high-visibility warning block:
      ```
      ⚠️ [BUDGET DEGRADATION ALERT - Rung {rung}: {label}]
-     Session dialogue spend has exceeded cap ({count}/{cap}). 
+     Session dialogue spend has exceeded cap ({count}/{cap}).
      Reduced debate depth active. Operator action required: [CONTINUE | PAUSE].
      ```
 

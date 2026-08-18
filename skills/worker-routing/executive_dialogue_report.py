@@ -2,9 +2,29 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+import importlib.util
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-import dialogue_degradation
+
+def _load_sibling(name: str) -> Any:
+    """Load a sibling module when this module was imported directly by path."""
+    try:
+        return __import__(name)
+    except ModuleNotFoundError as exc:
+        if exc.name != name:
+            raise
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_dialogue_degradation = _load_sibling("dialogue_degradation")
+_dialogue_contracts = _load_sibling("dialogue_contracts")
 
 if TYPE_CHECKING:
     from dialogue_contracts import Occasion
@@ -12,7 +32,7 @@ if TYPE_CHECKING:
 
 
 def format_budget_degradation_alert(
-    rung: int,
+    rung: DegradationRung,
     session_spend_so_far: int,
     cap: int,
     *,
@@ -22,7 +42,7 @@ def format_budget_degradation_alert(
     if rung <= 0:
         return None
 
-    resolved_label = label or dialogue_degradation._DEGRADATION_RUNG_LABELS.get(
+    resolved_label = label or _dialogue_degradation._DEGRADATION_RUNG_LABELS.get(
         rung, "budget degraded"
     )
     return (
@@ -34,7 +54,7 @@ def format_budget_degradation_alert(
 
 def render_executive_summary(
     outcome: str,
-    occasion: str,
+    occasion: Occasion,
     rounds_used: int,
     max_rounds: int,
     planner_model: str,
@@ -54,7 +74,11 @@ def render_executive_summary(
         f"| Spend={session_spend} dialogue(s)"
     )
     if outcome == "consensus":
-        outcome_line = f"Outcome: Approved plan stored at {plan_path}"
+        outcome_line = (
+            f"Outcome: Approved plan; persistence failed ({error})"
+            if error
+            else f"Outcome: Approved plan stored at {plan_path}"
+        )
     elif error:
         outcome_line = f"Outcome: Unresolved ({outcome}) - Error: {error}"
     else:

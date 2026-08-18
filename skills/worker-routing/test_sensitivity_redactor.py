@@ -32,7 +32,9 @@ class SensitivityRedactorTests(unittest.TestCase):
 
     def test_halted_identity_is_random_and_never_derived_from_task_text(self) -> None:
         identity = sensitivity_redactor.derive_safe_task_identity(
-            marker="secret", token_factory=lambda size: "random-token"
+            "contains secret",
+            outcome="sensitivity_halt",
+            token_factory=lambda size: "random-token",
         )
 
         self.assertEqual(identity.task_id, "random-token")
@@ -41,10 +43,26 @@ class SensitivityRedactorTests(unittest.TestCase):
         self.assertFalse(identity.caller_supplied)
 
     def test_caller_identity_is_preserved(self) -> None:
-        identity = sensitivity_redactor.derive_safe_task_identity("task-123")
+        identity = sensitivity_redactor.derive_safe_task_identity(
+            "ordinary task", "task-123"
+        )
 
         self.assertEqual(identity.task_id, "task-123")
         self.assertFalse(identity.sensitivity_halted)
         self.assertIsNone(identity.marker)
         self.assertTrue(identity.caller_supplied)
 
+    def test_halt_ignores_a_caller_supplied_identity(self) -> None:
+        identity = sensitivity_redactor.derive_safe_task_identity(
+            "password=top-secret",
+            "leaking-id",
+            outcome="sensitivity_halt",
+            token_factory=lambda size: "random-token",
+        )
+
+        self.assertEqual(identity.task_id, "random-token")
+        self.assertFalse(identity.caller_supplied)
+
+
+if __name__ == "__main__":
+    unittest.main()

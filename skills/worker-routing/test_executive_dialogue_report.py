@@ -5,9 +5,10 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 
 
-def _load_module(name: str) -> object:
+def _load_module(name: str) -> Any:
     path = Path(__file__).with_name(f"{name}.py")
     spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
@@ -83,11 +84,29 @@ class ExecutiveSummaryTests(unittest.TestCase):
         lines = executive_dialogue_report.render_executive_summary(
             "consensus", "ambiguity", 1, 1, "Planner", "Critic"
         )
+
+    def test_consensus_with_persistence_error_does_not_claim_artifact_was_written(self) -> None:
+        lines = executive_dialogue_report.render_executive_summary(
+            "consensus", "ambiguity", 1, 1, "Planner", "Critic", error="disk full"
+        )
+
+        self.assertEqual(
+            lines[2], "Outcome: Approved plan; persistence failed (disk full)"
+        )
         alert = executive_dialogue_report.format_budget_degradation_alert(1, 10, 10)
         self.assertEqual(
             executive_dialogue_report.ExecutiveDialogueReport(lines, alert).render(),
             "\n".join(lines) + "\n" + alert,
         )
+
+    def test_standalone_import_loads_its_siblings(self) -> None:
+        for name in ("dialogue_degradation", "dialogue_contracts", "executive_dialogue_report"):
+            sys.modules.pop(name, None)
+
+        standalone = _load_module("executive_dialogue_report")
+
+        self.assertIsNotNone(standalone._dialogue_degradation)
+        self.assertIsNotNone(standalone._dialogue_contracts)
 
 
 if __name__ == "__main__":

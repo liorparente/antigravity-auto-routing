@@ -38,14 +38,34 @@ def scan_sensitivity_markers(text: str, markers: Sequence[str] = SENSITIVITY_MAR
     return None
 
 
-def derive_safe_task_identity(task_id: str | None = None, *, marker: str | None = None, token_factory: Callable[[int], str] = secrets.token_hex) -> TaskIdentity:
-    """Return caller identity when supplied, otherwise a non-derived random token.
+def derive_safe_task_identity(
+    task_description: str,
+    task_id: str | None = None,
+    *,
+    outcome: str | None = None,
+    token_factory: Callable[[int], str] = secrets.token_hex,
+) -> TaskIdentity:
+    """Return a safe identity without deriving halted sensitive task identities.
 
     The optional factory keeps the random boundary deterministic in unit tests.
     """
+    marker = detect_sensitivity_marker(task_description)
+    if marker is not None and outcome == "sensitivity_halt":
+        return TaskIdentity(token_factory(8), True, marker, False)
     if task_id is not None:
         return TaskIdentity(task_id, marker is not None, marker, True)
-    return TaskIdentity(token_factory(8), marker is not None, marker, False)
+    if outcome == "canary":
+        return TaskIdentity(token_factory(8), marker is not None, marker, False)
+    if outcome == "sensitivity_halt":
+        return TaskIdentity(token_factory(8), marker is not None, marker, False)
+    import hashlib
+
+    return TaskIdentity(
+        hashlib.sha256(task_description.encode("utf-8")).hexdigest()[:16],
+        marker is not None,
+        marker,
+        False,
+    )
 
 
 def detect_sensitivity_marker(text: str) -> str | None:

@@ -61,6 +61,7 @@ MissionCopy = _prompt_assembler.MissionCopy
 MISSION_COPY = _prompt_assembler.MISSION_COPY
 build_planner_prompt = _prompt_assembler.build_planner_prompt
 build_critic_prompt = _prompt_assembler.build_critic_prompt
+build_canary_prompt = _prompt_assembler.build_canary_prompt
 build_adjudicator_prompt = _prompt_assembler.build_adjudicator_prompt
 build_stalemate_prompt = _prompt_assembler.build_stalemate_prompt
 _build_adjudicator_prompt = _prompt_assembler._build_adjudicator_prompt
@@ -119,7 +120,6 @@ CANARY_MARKER = _dialogue_transcript.CANARY_MARKER
 _atomic_text_write = _dialogue_transcript._atomic_text_write
 AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
 _default_task_id = _dialogue_transcript._default_task_id
-_resolve_task_id = _dialogue_transcript._resolve_task_id
 _render_consultation_transcript = _dialogue_transcript._render_consultation_transcript
 _render_sensitivity_halt_transcript = _dialogue_transcript._render_sensitivity_halt_transcript
 _write_transcript = _dialogue_transcript._write_transcript
@@ -140,6 +140,22 @@ _build_stalemate_report = _debate_orchestrator._build_stalemate_report
 evaluate_round_verdicts = _debate_orchestrator.evaluate_round_verdicts
 DebateRoundRecord = _debate_orchestrator.DebateRoundRecord
 DebateSessionState = _debate_orchestrator.DebateSessionState
+CodeReviewRiskConfig = _debate_orchestrator.CodeReviewRiskConfig
+PostMortemTriggerConfig = _debate_orchestrator.PostMortemTriggerConfig
+DEFAULT_POST_MORTEM_TRIGGER_FAILURE_THRESHOLD = (
+    _debate_orchestrator.DEFAULT_POST_MORTEM_TRIGGER_FAILURE_THRESHOLD
+)
+DEFAULT_POST_MORTEM_TRIGGER_PATTERNS = _debate_orchestrator.DEFAULT_POST_MORTEM_TRIGGER_PATTERNS
+_load_post_mortem_trigger_config = _debate_orchestrator._load_post_mortem_trigger_config
+
+
+def _resolve_task_id(
+    task_description: str, task_id: str | None, outcome: AdvisoryOutcome
+) -> str:
+    """Resolve identities through the sensitivity-safe pure helper."""
+    return _sensitivity_redactor.derive_safe_task_identity(
+        task_description, task_id, outcome=outcome
+    ).task_id
 
 # Keep the facade-only names observably referenced while retaining the
 # module's historically broad import surface.  An ``__all__`` declaration
@@ -1015,6 +1031,7 @@ class AdvisoryDebateResult:
     degradation_rung: _DegradationRung = 0
     topology: RosterTopology = "pair"
     round_verdicts: tuple[_AdvisoryRoundVerdict, ...] = ()
+    executive_report: ExecutiveDialogueReport | None = None
 
     @property
     def consensus_reached(self) -> bool:
@@ -1298,31 +1315,8 @@ def _fold_error(existing: str | None, addition: str | None) -> str | None:
 
 
 
-def _combine_panel_critic_feedback(critic_a_response: str, critic_b_response: str) -> str:
-    """Fold both Critics' responses into the single feedback string
-    `_build_planner_prompt`'s `critic_feedback` parameter expects, for the
-    Planner's next revision round.
-
-    `_build_planner_prompt` is one-critic shaped, and ticket 05 reuses it
-    completely unmodified rather than forking a panel-only variant (see the
-    ticket's own instructions: extend the round loop, don't write a parallel
-    one). This is the seam that makes that reuse possible: collapse two
-    responses into the one string the existing single-critic-shaped
-    machinery already knows how to hold as revision context for the Planner.
-    It is deliberately not fancier than a labeled concatenation — nothing
-    about *this* feedback string needs the two voices kept separate, since
-    the Planner is meant to read and address both at once.
-
-    Ticket 05 also fed this same folded string into `_build_stalemate_report`
-    as a stand-in `critic_position` when a panel exhausted its rounds without
-    consensus; ticket 06 replaced that specific use with a proper three-voice
-    report (`_build_stalemate_report`'s `critic_b_position` parameter) that
-    keeps Critic A's and Critic B's final positions separate instead of
-    folding them — see `AdvisoryStalemateReport`'s docstring for why. This
-    function's only remaining caller is the per-round Planner-feedback path
-    below.
-    """
-    return f"Critic A:\n{critic_a_response}\n\nCritic B:\n{critic_b_response}"
+combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
+_combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
 
 
 def run_advisory_consultation_debate(
@@ -1752,6 +1746,9 @@ def run_advisory_consultation_debate(
     # budget check at all, and correctly reports no degradation for a
     # dialogue that never ran.
     degradation_rung: _DegradationRung = 0
+    # `_result` must never perform configuration I/O. Early outcomes use the
+    # safe policy default; normal dialogue paths replace it once below.
+    budget_cap = DEFAULT_SESSION_DIALOGUE_CAP
 
     rounds: list[AdvisoryDebateRound] = []
     # Spec 0003 (CriticalDialogue) ticket 10: kept parallel with `rounds`
@@ -1831,6 +1828,22 @@ def run_advisory_consultation_debate(
         # before the write happens — so a renderer must never read `.error`
         # off this object; neither renderer does today, but nothing enforces
         # that beyond this comment.
+        executive_report = ExecutiveDialogueReport(
+            _executive_dialogue_report.render_executive_summary(
+                outcome,
+                occasion,
+                len(rounds),
+                max_rounds,
+                planner_model,
+                result_critic_model,
+                session_spend=session_spend_so_far,
+                plan_path=str(plan_path),
+                error=error,
+            ),
+            _executive_dialogue_report.format_budget_degradation_alert(
+                degradation_rung, session_spend_so_far, budget_cap
+            ),
+        )
         provisional_result = AdvisoryDebateResult(
             rounds_run=len(rounds),
             final_plan=final_plan,
@@ -1846,6 +1859,7 @@ def run_advisory_consultation_debate(
             degradation_rung=degradation_rung,
             topology=result_topology,
             round_verdicts=tuple(round_verdicts),
+            executive_report=executive_report,
         )
 
         resolved_task_id = _resolve_task_id(task_description, task_id, outcome)
@@ -1997,6 +2011,7 @@ def run_advisory_consultation_debate(
     # immediately too. Rung 2's model/effort cheapening is deliberately
     # NOT applied here — see the block below the roster-resolution block
     # further down for why it has to run after roster resolution instead.
+    budget_cap = _load_dialogue_budget_config(budget_config_path)
     degradation_rung = resolve_degradation_rung(
         session_spend_so_far, config_path=budget_config_path
     )
@@ -2248,7 +2263,7 @@ def run_advisory_consultation_debate(
                 return _result("worker_error", error=str(exc))
             invoke_worker = production_invoke_worker
 
-        canary_critic_prompt = _build_critic_prompt(
+        canary_critic_prompt = build_canary_prompt(
             task_description, fixture.plan_text, occasion=occasion
         )
         try:

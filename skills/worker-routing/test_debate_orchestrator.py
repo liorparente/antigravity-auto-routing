@@ -61,6 +61,22 @@ class VerdictEvaluationTests(unittest.TestCase):
             (False, "unparseable verdict: None"),
         )
 
+    def test_canonical_contract_verdicts_are_case_insensitive(self) -> None:
+        approved = dialogue_contracts.VerdictContractResult("approved", 1, 0)
+        revise = dialogue_contracts.VerdictContractResult("revise", 1, 1)
+        malformed = dialogue_contracts.VerdictContractResult("unparseable", 0, 0)
+
+        self.assertEqual(
+            debate_orchestrator.evaluate_round_verdicts(approved.verdict), (True, None)
+        )
+        self.assertEqual(
+            debate_orchestrator.evaluate_round_verdicts(revise.verdict), (False, None)
+        )
+        self.assertEqual(
+            debate_orchestrator.evaluate_round_verdicts(malformed.verdict),
+            (False, "unparseable verdict: unparseable"),
+        )
+
     def test_panel_verdicts_require_both_approvals(self) -> None:
         self.assertEqual(
             debate_orchestrator.evaluate_round_verdicts("APPROVE", "APPROVE", is_panel=True),
