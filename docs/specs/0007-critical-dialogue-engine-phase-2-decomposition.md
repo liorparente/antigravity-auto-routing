@@ -1,6 +1,6 @@
 # Spec 0007 — Critical Dialogue Engine Phase 2 Decomposition: Pure Prompt Assembly, Debate State Machine, and Executive Budget Alerts
 
-* Status: ready-for-agent
+* Status: implemented (follow-up tracked in .scratch/routing-backlog/issues/31-debate-orchestrator-modular-decomposition.md)
 * Date: 2026-08-18
 * Related: Spec 0001 (Advisory Consultation), Spec 0003 (Critical Dialogue), Spec 0004 (Learning Loop), Spec 0006 (Advisory Consultation Decomposition Phase 1), ADR 0001, ADR 0004, ADR 0007, ADR 0010
 * Glossary: **CriticalDialogue**, **AdvisoryConsultation**, **VerdictContract**, **DegradationLadder**, **ConsultationTranscript**, **AdvisoryTelemetryRecord**, **TaskIdentity**, **AdvisoryStalemateReport** (`CONTEXT.md`)
