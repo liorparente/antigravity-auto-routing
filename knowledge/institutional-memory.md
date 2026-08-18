@@ -1,11 +1,14 @@
 # 🏛️ Institutional Memory
 
 ## 📊 Metadata
-- **עדכון אחרון:** 2026-08-17
-- **סה"כ תובנות:** 86
+- **עדכון אחרון:** 2026-08-18
+- **סה"כ תובנות:** 89
 
 ## התובנות
 
+- `[2026-08-18] [auto-routing] [importance:5] [architecture]` - **פירוק מודולרי מלא של מנוע הייעוץ הביקורתי (`advisory_consultation.py` - Spec 0007):** פירוק מודול `advisory_consultation.py` המונופוליטי לשלושה מודולי על ממוקדים: מרכיב פרומפטים טהור ללא תלויות (`prompt_assembler.py`), רדקטור מידע רגיש וזהויות משימה (`sensitivity_redactor.py`), ומנוע ניהול הדיון וההסכמות (`debate_orchestrator.py`). מודול הבסיס כווץ למעטפת דקה (Facade) של כ-130 שורות תוך שימור 100% תאימות לאחור (74 סמלים מיוצאים) וכל 466 הבדיקות ירוקות.
+- `[2026-08-18] [auto-routing] [importance:5] [gotcha]` - **מגבלות ניתוח סטטי (AST) בלינטרים (`ruff F822`/`RUF022`) ובודקי טיפוסים (`mypy`) על מעטפות Facade דינמיות:** כאשר מודול Facade מגדיר `__all__` אך טוען סמלים באופן דינמי דרך `__getattr__`, סורקי AST כמו Ruff מייצרים שגיאת `F822`. הטיפול התקני כולל הגדרת `# noqa: F822` ומיון אלפביתי של הרשימה (`RUF022`). בנוסף, השמת שמות טיפוסים ממודולים טעונים דינמית דורשת ייבוא טיפוסים סטטי תחת `if TYPE_CHECKING:` והגנה על השמות הריצה תחת `if not TYPE_CHECKING:` כדי למנוע שגיאות טיפוס ב-Mypy.
+- `[2026-08-18] [auto-routing] [importance:4] [workflow]` - **שחזור מקומי מלא של צנרת האימות של ה-CI (4-Step Verification Gate) לפני Commit:** צנרת ה-CI ב-GitHub Actions מריצה 4 שלבים קבועים: (1) כל 16 סוויטות הבדיקה של הפרויקט, (2) סריקת סגנון וייבוא עם `ruff check $PYTHON_MODULES`, (3) אימות טיפוסים עם `mypy $PYTHON_MODULES`, ו-(4) בדיקת תקינות סקריפטים עם `shellcheck`. הרצה מקומית מלאה של כל 4 השלבים בסביבה מבודדת לפני Commit מונעת רגרסיות שקטות וכישלונות בשרת הבדיקות.
 - `[2026-08-17] [auto-routing] [importance:5] [architecture]` - **פירוק מודול שיחת הייעוץ המונופוליטי (Spec 0006) ל-3 מודולי-על בעלי תפרי בדיקה טהורים:** פירוק `advisory_consultation.py` משכבה אחת של 4,000+ שורות לשלושה מודולים עמוקים: חוזים ופענוח ציטוטים (`dialogue_contracts.py`), מדיניות שחיקת תקציב טהורה ללא I/O (`dialogue_degradation.py`), ורישום תמלילים וטלמטריה מאובטחת תחת נעילה (`dialogue_transcript.py`), תוך שימור מלא של תאימות ממשק אחורנית באמצעות טוען אחים דינמי.
 - `[2026-08-17] [auto-routing] [importance:4] [gotcha]` - **זיהום משתפי תהליכים (Process Handler Mocks) בין סוויטות בדיקה באותו תהליך Python:** הרצת `test_routing.py` ו-`test_production_invoker.py` באותו תהליך `unittest` יחיד גרמה ל-Mocks של תהליכים מודולריים לדלוף ולפגוע בבדיקות תהליכים אמיתיות. הפרדת הריצה לתהליכי Python עצמאיים (כפי ש-CI מבצע בלולאת Bash) מבטיחה בידוד זיכרון מוחלט.
 - `[2026-08-17] [auto-routing] [importance:4] [architecture]` - **קליטת שגיאות חסינה במתאמי ביקורת אסינכרוניים (`provider_adapters.CLIReviewerAdapter`):** מתאמי CLI במערך `asyncio.gather` חייבים ללכוד כל חריגת ריצה (`except Exception: # noqa: BLE001`) ולהמירה ל-Payload בטוח (`vote: "abstain"`). צמצום החריגה ל-`ValueError` בלבד מסכן את הפאנל כולו בקריסה בעת Timeout או שגיאות I/O.

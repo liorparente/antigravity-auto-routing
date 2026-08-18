@@ -1,5 +1,20 @@
 # Worker Routing Fallbacks
 
+## 2026-08-18 — Static Analysis (Ruff AST & Mypy) Failures on Dynamic Facade Modules in CI
+
+- Mission: Resolve GitHub Actions CI failure on commit `4b6a850` (`Test / unit-tests`).
+- Failure: CI pipeline running `ruff check $PYTHON_MODULES` and `mypy $PYTHON_MODULES` failed with multiple static analysis errors:
+  1. `ruff F822` / `RUF022`: Exported symbols in `__all__` resolved dynamically via `__getattr__` were flagged as undefined by Ruff's static AST analyzer, and `__all__` was not sorted alphabetically.
+  2. `mypy` type errors: Reassigning dynamically loaded module attributes to uppercase variables (e.g. `Occasion = _dialogue_contracts.Occasion`) was treated by mypy as invalid runtime variable assignments rather than valid type aliases when used in annotations like `occasion: Occasion`.
+  3. `debate_orchestrator.py` duplicate definition of `_detect_sensitivity_marker` (line 67 and line 1179).
+  4. Leaf module unsorted imports (`I001`) and blind exception in manual smoke test (`BLE001`).
+- Resolution:
+  1. Added `# noqa: F822` to `__all__ = (` in `advisory_consultation.py` and sorted all exported symbol names alphabetically (`RUF022`).
+  2. Wrapped dynamic module type aliases in `if not TYPE_CHECKING:` in `debate_orchestrator.py`, while importing exact types inside `if TYPE_CHECKING:` from sibling leaves.
+  3. Removed duplicate `_detect_sensitivity_marker` definition in `debate_orchestrator.py`.
+  4. Added `# noqa: BLE001` to `test_lmstudio.py` and sorted leaf imports with `ruff check --fix`.
+- Lesson: Dynamic facades delegating via `__getattr__` require explicit static typing annotations under `if TYPE_CHECKING:` and `# noqa: F822` on `__all__` to satisfy static linters (Ruff/Mypy) without sacrificing dynamic backwards-compatibility.
+
 ## 2026-08-17 — Subprocess Mock State Leak Across In-Process Unittest Invocations
 
 - Mission: Run full regression and unit test suite across decomposed advisory consultation and production invoker.
