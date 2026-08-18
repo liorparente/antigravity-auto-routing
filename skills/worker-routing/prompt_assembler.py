@@ -6,6 +6,7 @@ It owns only the stable text contract presented to Planner and Critic workers.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Literal
 
 
@@ -15,6 +16,8 @@ Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
 WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 CRITIC_VERDICT_APPROVE = "VERDICT: APPROVE"
 CRITIC_VERDICT_REVISE = "VERDICT: REVISE"
+
+_DELIMITER_RE = re.compile(r"===\s*(BEGIN|END)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -61,8 +64,10 @@ _MISSION_COPY = MISSION_COPY
 
 
 def escape_delimiters(text: str) -> str:
-    """Escape delimiter patterns to prevent prompt frame injection."""
-    return text.replace("=== BEGIN", "= = = BEGIN").replace("=== END", "= = = END")
+    """Escape delimiter patterns (case-insensitive, whitespace-tolerant) to prevent prompt injection."""
+    if not text:
+        return text
+    return _DELIMITER_RE.sub(lambda m: f"= = = {m.group(1).upper()}", text)
 
 
 def build_planner_prompt(task_description: str, *, occasion: Occasion = "ambiguity", previous_plan: str | None = None, critic_feedback: str | None = None) -> str:

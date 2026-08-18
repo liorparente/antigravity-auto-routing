@@ -2,33 +2,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib.util
-import sys
-from pathlib import Path
-from typing import Any, Literal
-
-
-def _load_sibling(name: str) -> Any:
-    """Load a sibling module when this module was imported directly by path."""
-    try:
-        return __import__(name)
-    except ModuleNotFoundError as exc:
-        if exc.name != name:
-            raise
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_dialogue_degradation = _load_sibling("dialogue_degradation")
-_dialogue_contracts = _load_sibling("dialogue_contracts")
+from typing import Literal
 
 # Runtime aliases are required because these annotations are introspected.
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
 DegradationRung = Literal[0, 1, 2, 3]
+DEGRADATION_RUNG_LABELS: dict[int, str] = {
+    1: "reduce rounds",
+    2: "cheapen roster: model + effort",
+    3: "skip the dialogue entirely",
+}
 
 
 def format_budget_degradation_alert(
@@ -42,9 +25,7 @@ def format_budget_degradation_alert(
     if rung <= 0:
         return None
 
-    resolved_label = label or _dialogue_degradation._DEGRADATION_RUNG_LABELS.get(
-        rung, "budget degraded"
-    )
+    resolved_label = label or DEGRADATION_RUNG_LABELS.get(rung, "budget degraded")
     return (
         f"⚠️ [BUDGET DEGRADATION ALERT - Rung {rung}: {resolved_label}]\n"
         f"Session dialogue spend has exceeded cap ({session_spend_so_far}/{cap}).\n"

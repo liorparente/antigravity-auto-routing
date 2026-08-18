@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -123,6 +125,38 @@ class DebateStateTests(unittest.TestCase):
         self.assertTrue(approved.consensus_reached)
         self.assertEqual(approved.final_plan, "panel plan")
 
+    def test_advance_normalizes_record_outcome_fields(self) -> None:
+        state = debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False)
+        result = debate_orchestrator.advance_debate_state(
+            state,
+            debate_orchestrator.DebateRoundRecord(
+                1, "plan", "critique", critic_a_verdict="APPROVE", is_consensus=False, error="stale"
+            ),
+        )
+
+        self.assertTrue(result.consensus_reached)
+        self.assertTrue(result.rounds[0].is_consensus)
+        self.assertIsNone(result.rounds[0].error)
+
+    def test_advance_leaves_terminal_states_unchanged(self) -> None:
+        record = debate_orchestrator.DebateRoundRecord(2, "new", "critic", critic_a_verdict="APPROVE")
+        terminal_states = (
+            debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False, consensus_reached=True),
+            debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False, error="failed"),
+            debate_orchestrator.DebateSessionState(
+                "ambiguity", "medium", 2, False,
+                stalemate_report=debate_orchestrator.build_stalemate_report("plan", "critic"),
+            ),
+            debate_orchestrator.DebateSessionState(
+                "ambiguity", "medium", 1, False,
+                rounds=(debate_orchestrator.DebateRoundRecord(1, "plan", "critic"),),
+            ),
+        )
+
+        for state in terminal_states:
+            with self.subTest(state=state):
+                self.assertIs(debate_orchestrator.advance_debate_state(state, record), state)
+
 
 class ProductionOrchestrationTests(unittest.TestCase):
     def test_roster_resolution_prefers_distinct_reachable_families(self) -> None:
@@ -142,6 +176,27 @@ class ProductionOrchestrationTests(unittest.TestCase):
             )
         self.assertEqual(result.outcome, "canary")
         self.assertEqual(result.canary_result, "catch")
+
+    def test_budget_degradation_alert_is_emitted_to_stderr(self) -> None:
+        def invoker(_model: str, _effort: str, prompt: str) -> str:
+            if "You are the Planner" in prompt:
+                return "Proposed plan"
+            return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
+
+        stderr = io.StringIO()
+        cap = debate_orchestrator._load_dialogue_budget_config(
+            debate_orchestrator._CONFIG_PATH
+        )
+        with tempfile.TemporaryDirectory() as tmp, redirect_stderr(stderr):
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                "Plan the implementation",
+                invoker,
+                root_dir=Path(tmp),
+                session_spend_so_far=cap,
+            )
+
+        self.assertEqual(result.degradation_rung, 1)
+        self.assertEqual(stderr.getvalue(), result.executive_report.budget_alert)
 
 
 if __name__ == "__main__":

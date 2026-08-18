@@ -9,7 +9,7 @@ import secrets
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1767,6 +1767,8 @@ def run_advisory_consultation_debate(
                 degradation_rung, session_spend_so_far, budget_cap
             ),
         )
+        if executive_report.budget_alert:
+            print(executive_report.budget_alert, file=sys.stderr, end="")
         provisional_result = AdvisoryDebateResult(
             rounds_run=len(rounds),
             final_plan=final_plan,
@@ -2868,16 +2870,24 @@ class DebateSessionState:
 
 def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord) -> DebateSessionState:
     """Return a new state containing ``record``; never mutate the input state."""
+    if (
+        state.consensus_reached
+        or state.error is not None
+        or state.stalemate_report is not None
+        or len(state.rounds) >= state.max_rounds
+    ):
+        return state
     consensus, error = evaluate_round_verdicts(
         record.critic_a_verdict, record.critic_b_verdict, is_panel=state.is_panel
     )
-    rounds = (*state.rounds, record)
+    normalized_record = replace(record, is_consensus=consensus, error=error)
+    rounds = (*state.rounds, normalized_record)
     if consensus:
-        return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, True, record.planner_plan, None, error)
+        return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, True, normalized_record.planner_plan, None, error)
     if error:
         return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, False, None, None, error)
     if len(rounds) >= state.max_rounds:
-        return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, False, None, build_stalemate_report(record.planner_plan, record.critic_a_response, record.critic_b_response if state.is_panel else None), None)
+        return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds, False, None, build_stalemate_report(normalized_record.planner_plan, normalized_record.critic_a_response, normalized_record.critic_b_response if state.is_panel else None), None)
     return DebateSessionState(state.occasion, state.complexity, state.max_rounds, state.is_panel, rounds)
 
 

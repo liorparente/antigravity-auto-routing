@@ -18,7 +18,6 @@ def _load_module(name: str) -> Any:
     return module
 
 
-_load_module("dialogue_degradation")
 executive_dialogue_report = _load_module("executive_dialogue_report")
 
 
@@ -104,14 +103,17 @@ class ExecutiveSummaryTests(unittest.TestCase):
             "\n".join(lines) + "\n" + alert,
         )
 
-    def test_standalone_import_loads_its_siblings(self) -> None:
-        for name in ("dialogue_degradation", "dialogue_contracts", "executive_dialogue_report"):
-            sys.modules.pop(name, None)
-
-        standalone = _load_module("executive_dialogue_report")
-
-        self.assertIsNotNone(standalone._dialogue_degradation)
-        self.assertIsNotNone(standalone._dialogue_contracts)
+    def test_module_has_static_degradation_labels_without_sibling_loading(self) -> None:
+        self.assertEqual(
+            executive_dialogue_report.DEGRADATION_RUNG_LABELS,
+            {
+                1: "reduce rounds",
+                2: "cheapen roster: model + effort",
+                3: "skip the dialogue entirely",
+            },
+        )
+        self.assertNotIn("dialogue_degradation", executive_dialogue_report.__dict__)
+        self.assertNotIn("dialogue_contracts", executive_dialogue_report.__dict__)
 
 
 if __name__ == "__main__":

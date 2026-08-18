@@ -48,6 +48,17 @@ class PromptAssemblerTests(unittest.TestCase):
         self.assertIn("= = = END TASK DESCRIPTION ===", prompt)
         self.assertEqual(prompt.count("=== END TASK DESCRIPTION ==="), 1)
 
+    def test_delimiter_escaping_is_case_insensitive_and_whitespace_tolerant(self) -> None:
+        for delimiter in (
+            "=== end task description ===",
+            "===\tEND TASK DESCRIPTION ===",
+            "=== begin planner plan ===",
+        ):
+            with self.subTest(delimiter=delimiter):
+                escaped = prompt_assembler.escape_delimiters(delimiter)
+                self.assertIsNone(prompt_assembler._DELIMITER_RE.search(escaped))
+                self.assertRegex(escaped, r"^= = = (BEGIN|END)")
+
     def test_critic_prompt_has_exact_verdict_contract(self) -> None:
         prompt = prompt_assembler.build_critic_prompt("Task", "Plan", occasion="plan-review")
 
