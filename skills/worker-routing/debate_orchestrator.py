@@ -2801,6 +2801,11 @@ def run_debate_loop(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     return run_advisory_consultation_debate(*args, **kwargs)
 
 
+# Historic name retained as an exact alias, rather than a forwarding wrapper:
+# callers inspecting the public API receive the complete production signature.
+run_critical_dialogue = run_advisory_consultation_debate
+
+
 def run_canary_dialogue(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     """Execute one seeded-flaw Critic probe through the production loop."""
     kwargs["is_canary"] = True

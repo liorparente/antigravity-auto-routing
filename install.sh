@@ -41,6 +41,17 @@ LEGACY_MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
 # appear below, whether or not a sibling already imports it.
 MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py dialogue_contracts.py dialogue_degradation.py executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py debate_transport.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py risk_tiered_application.py learner_worker.py protocol.md)
 
+# Preserve the audited static manifest above while also propagating future
+# production modules automatically. Tests remain deliberately excluded: they
+# are development artifacts, never part of an installed routing harness.
+for python_module in "$SRC_DIR"/*.py; do
+    python_module_name="$(basename "$python_module")"
+    [[ "$python_module_name" == test_* ]] && continue
+    if [[ " ${MANAGED_FILES[*]} " != *" $python_module_name "* ]]; then
+        MANAGED_FILES+=("$python_module_name")
+    fi
+done
+
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
 TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-rollback.XXXXXX")"
 touch "$TRANSACTION_DIR/entries"

@@ -8388,6 +8388,23 @@ class _InstalledHarness:
         )
 
 
+class CriticalDialogueFacadeCompatibilityTests(unittest.TestCase):
+    """The historic facade exposes the full production entry-point surface."""
+
+    def test_run_critical_dialogue_is_exported_with_the_production_signature(self) -> None:
+        import inspect
+        import importlib
+
+        debate_orchestrator = importlib.import_module("debate_orchestrator")
+        self.assertIn("run_critical_dialogue", advisory_consultation.__all__)
+        for module in (advisory_consultation, debate_orchestrator):
+            with self.subTest(module=module.__name__):
+                self.assertEqual(
+                    inspect.signature(module.run_critical_dialogue),
+                    inspect.signature(module.run_advisory_consultation_debate),
+                )
+
+
 class ManagedFileClosureTests(unittest.TestCase):
     """`install.sh`'s `MANAGED_FILES` must be closed under sibling imports.
 

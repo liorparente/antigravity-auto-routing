@@ -51,6 +51,7 @@ MAX_DEBATE_ROUNDS = _debate_orchestrator.MAX_DEBATE_ROUNDS
 
 # Bind the execution entry points explicitly for static callers and type checkers.
 run_advisory_consultation_debate = _debate_orchestrator.run_advisory_consultation_debate
+run_critical_dialogue = _debate_orchestrator.run_critical_dialogue
 run_debate_loop = _debate_orchestrator.run_debate_loop
 run_canary_dialogue = _debate_orchestrator.run_canary_dialogue
 run_post_mortem_loop = _debate_orchestrator.run_post_mortem_loop
@@ -185,6 +186,7 @@ __all__ = (  # noqa: F822
     "resolve_degradation_rung",
     "resolve_roster",
     "run_advisory_consultation_debate",
+    "run_critical_dialogue",
     "run_canary_dialogue",
     "run_debate_loop",
     "run_post_mortem_loop",

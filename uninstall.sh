@@ -97,6 +97,14 @@ for i in "${!TARGET_DIRS[@]}"; do
         for installed_file in "${INSTALLED_FILES[@]}"; do
             rm -f "$target_dir/$installed_file"
         done
+        # Future production modules are discovered dynamically by install.sh.
+        # Remove those installed Python files too, while retaining test files
+        # a user may have placed in the dedicated skill directory.
+        for python_module in "$target_dir"/*.py; do
+            [ -e "$python_module" ] || continue
+            python_module_name="$(basename "$python_module")"
+            [[ "$python_module_name" == test_* ]] || rm -f "$python_module"
+        done
         rm -rf "$target_dir/learned-state"
         rmdir "$target_dir" 2>/dev/null || true
         if [ -d "$target_dir" ]; then

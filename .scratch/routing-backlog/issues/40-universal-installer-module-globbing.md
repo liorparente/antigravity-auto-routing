@@ -5,9 +5,9 @@
 
 **Blocked by:** 39 — Slim Facade Integration & 100% Test Compatibility
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] Update `install.sh` to copy all `skills/worker-routing/*.py` files into target directories dynamically.
-- [ ] Update `uninstall.sh` to cleanly remove all installed python modules without affecting other tools.
-- [ ] Run `shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh` with 0 warnings.
-- [ ] Test `./install.sh .` and `./uninstall.sh .` ensuring clean multi-harness synchronization.
+- [x] Update `install.sh` to copy all `skills/worker-routing/*.py` files into target directories dynamically.
+- [x] Update `uninstall.sh` to cleanly remove all installed python modules without affecting other tools.
+- [x] Run `shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh` with 0 warnings.
+- [x] Test `./install.sh .` and `./uninstall.sh .` ensuring clean multi-harness synchronization.
