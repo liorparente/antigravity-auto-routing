@@ -198,6 +198,26 @@ class ProductionOrchestrationTests(unittest.TestCase):
         self.assertEqual(result.degradation_rung, 1)
         self.assertEqual(stderr.getvalue(), result.executive_report.budget_alert)
 
+    def test_facade_and_orchestrator_signatures_match(self) -> None:
+        import inspect
+
+        advisory_consultation = _load("advisory_consultation")
+
+        for symbol in (
+            "run_advisory_consultation_debate",
+            "run_debate_loop",
+            "run_canary_dialogue",
+            "run_post_mortem_loop",
+            "dispatch_post_mortem_consultation",
+        ):
+            facade_fn = getattr(advisory_consultation, symbol)
+            orch_fn = getattr(debate_orchestrator, symbol)
+            self.assertEqual(
+                inspect.signature(facade_fn),
+                inspect.signature(orch_fn),
+                f"Signature mismatch on {symbol}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

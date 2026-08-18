@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from dialogue_contracts import InvokeWorker, IsFamilyReachable
 
 
 def _load_sibling(name: str) -> Any:
@@ -37,15 +41,49 @@ _modules = (
     _dialogue_transcript,
 )
 
+_CONFIG_PATH = Path(__file__).with_name("routing-config.json")
+MAX_DEBATE_ROUNDS = _debate_orchestrator.MAX_DEBATE_ROUNDS
+
 # Bind the execution entry points explicitly for static callers and type checkers.
 run_advisory_consultation_debate = _debate_orchestrator.run_advisory_consultation_debate
 run_debate_loop = _debate_orchestrator.run_debate_loop
 run_canary_dialogue = _debate_orchestrator.run_canary_dialogue
 run_post_mortem_loop = _debate_orchestrator.run_post_mortem_loop
-def dispatch_post_mortem_consultation(*args: Any, **kwargs: Any) -> Any:
+
+
+def dispatch_post_mortem_consultation(
+    task_description: str,
+    invoke_worker: InvokeWorker | None = None,
+    *,
+    root_dir: Path,
+    max_rounds: int = MAX_DEBATE_ROUNDS,
+    planner_model: str = "Claude Opus 5 (Thinking)",
+    critic_model: str = "Codex 5.6 Sol",
+    planner_effort: str = "high",
+    critic_effort: str = "high",
+    task_id: str | None = None,
+    reachability_check: IsFamilyReachable | None = None,
+    roster_config_path: Path = _CONFIG_PATH,
+    session_spend_so_far: int = 0,
+    budget_config_path: Path = _CONFIG_PATH,
+) -> threading.Thread:
     """Compatibility wrapper preserving patches to the historic facade API."""
     _debate_orchestrator.run_advisory_consultation_debate = run_advisory_consultation_debate
-    return _debate_orchestrator.dispatch_post_mortem_consultation(*args, **kwargs)
+    return _debate_orchestrator.dispatch_post_mortem_consultation(
+        task_description,
+        invoke_worker,
+        root_dir=root_dir,
+        max_rounds=max_rounds,
+        planner_model=planner_model,
+        critic_model=critic_model,
+        planner_effort=planner_effort,
+        critic_effort=critic_effort,
+        task_id=task_id,
+        reachability_check=reachability_check,
+        roster_config_path=roster_config_path,
+        session_spend_so_far=session_spend_so_far,
+        budget_config_path=budget_config_path,
+    )
 
 def __getattr__(name: str) -> Any:
     for module in _modules:
