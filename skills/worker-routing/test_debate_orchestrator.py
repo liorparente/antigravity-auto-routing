@@ -1,0 +1,95 @@
+"""Hermetic unit tests for pure debate orchestration state."""
+from __future__ import annotations
+
+import importlib.util
+import sys
+import unittest
+from pathlib import Path
+
+
+def _load(name: str):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+dialogue_contracts = _load("dialogue_contracts")
+debate_orchestrator = _load("debate_orchestrator")
+
+
+class PanelTopologyTests(unittest.TestCase):
+    def test_only_complex_reviews_use_the_panel(self) -> None:
+        for occasion in ("plan-review", "code-review"):
+            self.assertTrue(debate_orchestrator.is_panel_topology(occasion, " Complex "))
+        for occasion in ("ambiguity", "post-mortem"):
+            self.assertFalse(debate_orchestrator.is_panel_topology(occasion, "complex"))
+        for complexity in ("trivial", "simple", "medium", "unknown"):
+            self.assertFalse(debate_orchestrator.is_panel_topology("plan-review", complexity))
+
+
+class StalemateReportTests(unittest.TestCase):
+    def test_pair_report_keeps_one_critic_and_three_options(self) -> None:
+        report = debate_orchestrator.build_stalemate_report("planner", "critic")
+
+        self.assertEqual(report.planner_position, "planner")
+        self.assertEqual(report.critic_position, "critic")
+        self.assertIsNone(report.critic_b_position)
+        self.assertEqual([option.id for option in report.options], [1, 2, 3])
+        self.assertEqual(report.options[1].label, "Approve Critic Architecture")
+
+    def test_panel_report_preserves_each_critic_and_combines_option_text(self) -> None:
+        report = debate_orchestrator.build_stalemate_report("planner", "critic a", "critic b")
+
+        self.assertEqual(report.critic_position, "critic a")
+        self.assertEqual(report.critic_b_position, "critic b")
+        self.assertEqual(report.options[1].label, "Approve Critics' Architecture")
+        self.assertEqual(
+            report.options[1].description,
+            "Critic A:\ncritic a\n\nCritic B:\ncritic b",
+        )
+
+
+class VerdictEvaluationTests(unittest.TestCase):
+    def test_single_critic_verdicts(self) -> None:
+        self.assertEqual(debate_orchestrator.evaluate_round_verdicts("APPROVE"), (True, None))
+        self.assertEqual(debate_orchestrator.evaluate_round_verdicts("REVISE"), (False, None))
+        self.assertEqual(
+            debate_orchestrator.evaluate_round_verdicts(None),
+            (False, "unparseable verdict: None"),
+        )
+
+    def test_panel_verdicts_require_both_approvals(self) -> None:
+        self.assertEqual(
+            debate_orchestrator.evaluate_round_verdicts("APPROVE", "APPROVE", is_panel=True),
+            (True, None),
+        )
+        self.assertEqual(
+            debate_orchestrator.evaluate_round_verdicts("APPROVE", "REVISE", is_panel=True),
+            (False, None),
+        )
+        self.assertEqual(
+            debate_orchestrator.evaluate_round_verdicts("APPROVE", None, is_panel=True),
+            (False, "unparseable verdict: critic_a=APPROVE, critic_b=None"),
+        )
+
+
+class DebateStateTests(unittest.TestCase):
+    def test_round_and_session_state_construct_with_safe_defaults(self) -> None:
+        record = debate_orchestrator.DebateRoundRecord(
+            1, "plan", "critic", "critic b", "REVISE", "APPROVE"
+        )
+        state = debate_orchestrator.DebateSessionState("plan-review", "complex", 3, True)
+
+        self.assertEqual(record.round_index, 1)
+        self.assertFalse(record.is_consensus)
+        self.assertEqual(state.rounds, [])
+        self.assertFalse(state.consensus_reached)
+        state.rounds.append(record)
+        self.assertEqual(state.rounds, [record])
+
+
+if __name__ == "__main__":
+    unittest.main()

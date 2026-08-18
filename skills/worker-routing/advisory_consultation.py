@@ -54,7 +54,28 @@ def _load_sibling(name: str) -> Any:
 # both cases so the facade's historical surface remains unchanged.
 _dialogue_contracts = _load_sibling("dialogue_contracts")
 
+# Prompt construction and sensitivity scanning are pure modules.  Keep the
+# historic facade names below so file-loaded callers do not need to migrate.
+_prompt_assembler = _load_sibling("prompt_assembler")
+MissionCopy = _prompt_assembler.MissionCopy
+MISSION_COPY = _prompt_assembler.MISSION_COPY
+build_planner_prompt = _prompt_assembler.build_planner_prompt
+build_critic_prompt = _prompt_assembler.build_critic_prompt
+build_adjudicator_prompt = _prompt_assembler.build_adjudicator_prompt
+build_stalemate_prompt = _prompt_assembler.build_stalemate_prompt
+_build_adjudicator_prompt = _prompt_assembler._build_adjudicator_prompt
+_build_stalemate_prompt = _prompt_assembler._build_stalemate_prompt
+
+_sensitivity_redactor = _load_sibling("sensitivity_redactor")
+TaskIdentity = _sensitivity_redactor.TaskIdentity
+scan_sensitivity_markers = _sensitivity_redactor.scan_sensitivity_markers
+derive_safe_task_identity = _sensitivity_redactor.derive_safe_task_identity
+detect_sensitivity_marker = _sensitivity_redactor.detect_sensitivity_marker
+
 AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
+AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
+AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
+Occasion = _dialogue_contracts.Occasion
 CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
 CRITIC_VERDICT_REVISE = _dialogue_contracts.CRITIC_VERDICT_REVISE
 CriticVerdict = _dialogue_contracts.CriticVerdict
@@ -84,6 +105,13 @@ _load_degraded_roster_model = _dialogue_degradation._load_degraded_roster_model
 _load_dialogue_budget_config = _dialogue_degradation._load_dialogue_budget_config
 resolve_degradation_rung = _dialogue_degradation.resolve_degradation_rung
 
+_executive_dialogue_report = _load_sibling("executive_dialogue_report")
+format_budget_degradation_alert = (
+    _executive_dialogue_report.format_budget_degradation_alert
+)
+render_executive_summary = _executive_dialogue_report.render_executive_summary
+ExecutiveDialogueReport = _executive_dialogue_report.ExecutiveDialogueReport
+
 _dialogue_transcript = _load_sibling("dialogue_transcript")
 ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
 DEGRADED_INDEPENDENCE_MARKER = _dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER
@@ -101,6 +129,17 @@ _build_telemetry_record = _dialogue_transcript._build_telemetry_record
 _write_telemetry_record = _dialogue_transcript._write_telemetry_record
 _write_dialogue_quality_record = _dialogue_transcript._write_dialogue_quality_record
 _write_plan_outcome_record = _dialogue_transcript._write_plan_outcome_record
+
+_debate_orchestrator = _load_sibling("debate_orchestrator")
+PANEL_TOPOLOGY_OCCASIONS = _debate_orchestrator.PANEL_TOPOLOGY_OCCASIONS
+_PANEL_TOPOLOGY_OCCASIONS = _debate_orchestrator._PANEL_TOPOLOGY_OCCASIONS
+is_panel_topology = _debate_orchestrator.is_panel_topology
+_is_panel_topology = _debate_orchestrator._is_panel_topology
+build_stalemate_report = _debate_orchestrator.build_stalemate_report
+_build_stalemate_report = _debate_orchestrator._build_stalemate_report
+evaluate_round_verdicts = _debate_orchestrator.evaluate_round_verdicts
+DebateRoundRecord = _debate_orchestrator.DebateRoundRecord
+DebateSessionState = _debate_orchestrator.DebateSessionState
 
 # Keep the facade-only names observably referenced while retaining the
 # module's historically broad import surface.  An ``__all__`` declaration
@@ -184,15 +223,6 @@ AdvisoryOutcome = Literal[
     "budget_skipped",
 ]
 
-# Spec 0003 (CriticalDialogue) ticket 01: the occasion a consultation runs
-# under. "ambiguity" is the sole occasion spec 0001 shipped — every default
-# below resolves to it, so an existing call site that never mentions
-# `occasion` keeps behaving exactly as it did before this type existed. The
-# other three are the seam this ticket builds: `_MISSION_COPY` backs each
-# with prompt content, but wiring their real trigger predicates (spec 0003's
-# ticket 03) and blocking stance (ticket 04) is deliberately not done here.
-Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
-
 # Spec 0004 ticket 25 (fix pass 2): the occasions whose artifact under debate
 # is actually a plan. "ambiguity" and "plan-review" both debate a Planner's
 # architecture, so a consensus reached under either one is honestly describable
@@ -211,16 +241,7 @@ _PLAN_PRODUCING_OCCASIONS: tuple[Occasion, ...] = ("ambiguity", "plan-review")
 # already loads both modules and asserts this tuple is a superset of
 # `agent_council.SENSITIVE_PATTERNS`, so the duplication cannot silently
 # drift apart. Same precedent this module already set for `MAX_DEBATE_ROUNDS`.
-SENSITIVITY_MARKERS = (
-    "AGY_CALIBRATION_SECRET",
-    "api_key",
-    "sk-",
-    "bearer ",
-    "BEGIN PRIVATE KEY",
-    "password",
-    "secret",
-    "[SENSITIVE]",
-)
+SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 
 # Spec 0003 (CriticalDialogue) ticket 03: the code-review occasion's risk
 # signals — an oversized diff or a security-sensitive changed path — must be
@@ -879,52 +900,6 @@ class AdvisoryDebateRound:
 
 
 @dataclass(frozen=True)
-class AdvisoryResolutionOption:
-    """One way a human can resolve a stalemate."""
-
-    id: int
-    label: str
-    description: str
-
-
-@dataclass(frozen=True)
-class AdvisoryStalemateReport:
-    """Every final position of an unresolved consultation, plus the human's options.
-
-    Carries no winner: the consultation does not pick one, so this structure
-    has no field capable of holding one.
-
-    Two voices in pair mode (spec 0001, unchanged): `planner_position` and
-    `critic_position` are the Planner's and the sole Critic's last
-    positions, and `critic_b_position` stays `None` — see the additive-field
-    note below.
-
-    Three voices in panel mode (spec 0003 ticket 06): `critic_b_position` is
-    populated with Critic B's own final position, kept completely separate
-    from `critic_position`, which in panel mode carries Critic A's final
-    position — the same "`critic_position` means Critic A in panel mode"
-    convention `AdvisoryDebateRound.critic_response` already established.
-    Never a folded/concatenated string of both Critics (that was ticket 05's
-    deliberately-temporary `_combine_panel_critic_feedback`, which this
-    report replaces for stalemate purposes): a human resolving a panel
-    stalemate reads each Critic's actual final words, not a summary this
-    module wrote of them.
-
-    `critic_b_position` is appended last with a `None` default so this stays
-    additive, not a reshape: every pre-ticket-06 construction of this
-    dataclass — in this module and in tests — that never mentions
-    `critic_b_position` keeps meaning exactly what it meant before this field
-    existed, and `_build_stalemate_report`'s existing two-argument pair-mode
-    call site needs no change at all.
-    """
-
-    planner_position: str
-    critic_position: str
-    options: tuple[AdvisoryResolutionOption, AdvisoryResolutionOption, AdvisoryResolutionOption]
-    critic_b_position: str | None = None
-
-
-@dataclass(frozen=True)
 class AdvisoryDebateResult:
     """`occasion` records which of the four `Occasion` values this
     consultation ran under (spec 0003 ticket 01). Defaulted to "ambiguity",
@@ -1205,99 +1180,10 @@ def needs_post_mortem_consultation(
 
 
 
-
-@dataclass(frozen=True)
-class _MissionCopy:
-    """The occasion-specific framing sentences `_build_planner_prompt` and
-    `_build_critic_prompt` select between (spec 0003 ticket 01).
-
-    One instance per `Occasion` value, held in `_MISSION_COPY` — an
-    exhaustive mapping, not a partial one with a fallback, so selecting an
-    occasion this module doesn't know about fails loudly (a `KeyError` from
-    the lookup) rather than silently borrowing another occasion's mission.
-    `ambiguity`'s two sentences and `artifact_label` are spec 0001's
-    hardcoded prompt text verbatim: selecting it must reproduce
-    byte-identical prompts to before this module became occasion-aware.
-    The other three occasions' copy is deliberately minimal — proving the
-    routing seam works is this ticket's job; writing each occasion's real
-    mission content belongs to the ticket that wires its triggers.
-    """
-
-    planner_intro: str
-    planner_revision_intro: str
-    artifact_label: str
-    critic_intro: str
-
-
-_MISSION_COPY: dict[Occasion, _MissionCopy] = {
-    "ambiguity": _MissionCopy(
-        planner_intro=(
-            "You are the Planner in an AdvisoryConsultation. Propose a "
-            "concise, concrete implementation plan for the task below."
-        ),
-        planner_revision_intro=(
-            "You are the Planner in an AdvisoryConsultation. The Critic did "
-            "not approve your previous plan. Revise your plan to address "
-            "the Critic's objection below."
-        ),
-        artifact_label="plan",
-        critic_intro=(
-            "You are the Critic in an AdvisoryConsultation. Judge the "
-            "Planner's plan below on its merits."
-        ),
-    ),
-    "plan-review": _MissionCopy(
-        planner_intro=(
-            "You are the Planner in a CriticalDialogue plan review. "
-            "Propose a concise, concrete implementation plan for the task "
-            "below."
-        ),
-        planner_revision_intro=(
-            "You are the Planner in a CriticalDialogue plan review. The "
-            "Critic did not approve your previous plan. Revise your plan "
-            "to address the Critic's objection below."
-        ),
-        artifact_label="plan",
-        critic_intro=(
-            "You are the Critic in a CriticalDialogue plan review. Judge "
-            "the Planner's plan below on its merits."
-        ),
-    ),
-    "code-review": _MissionCopy(
-        planner_intro=(
-            "You are the Planner in a CriticalDialogue code review, "
-            "defending the diff under review. Propose a concise, concrete "
-            "rationale for the diff below."
-        ),
-        planner_revision_intro=(
-            "You are the Planner in a CriticalDialogue code review. The "
-            "Critic did not approve your previous defense of the diff. "
-            "Revise it to address the Critic's objection below."
-        ),
-        artifact_label="diff defense",
-        critic_intro=(
-            "You are the Critic in a CriticalDialogue code review. Judge "
-            "the diff below on its merits."
-        ),
-    ),
-    "post-mortem": _MissionCopy(
-        planner_intro=(
-            "You are the Planner in a CriticalDialogue post-mortem. "
-            "Propose a concise, concrete lesson to record for the failure "
-            "below."
-        ),
-        planner_revision_intro=(
-            "You are the Planner in a CriticalDialogue post-mortem. The "
-            "Critic did not approve your previous lesson. Revise it to "
-            "address the Critic's objection below."
-        ),
-        artifact_label="lesson",
-        critic_intro=(
-            "You are the Critic in a CriticalDialogue post-mortem. Judge "
-            "the lesson below on its merits."
-        ),
-    ),
-}
+# Prompt generation is owned by the extracted module. Retain the historical
+# private names as aliases for direct legacy callers.
+_MISSION_COPY = _prompt_assembler._MISSION_COPY
+_MissionCopy = _prompt_assembler._MissionCopy
 
 
 def _build_planner_prompt(
@@ -1307,19 +1193,11 @@ def _build_planner_prompt(
     previous_plan: str | None = None,
     critic_feedback: str | None = None,
 ) -> str:
-    mission = _MISSION_COPY[occasion]
-    if previous_plan is None or critic_feedback is None:
-        return (
-            f"{WORKER_MODE_TOKEN}\n"
-            f"{mission.planner_intro}\n\n"
-            f"Task: {task_description}"
-        )
-    return (
-        f"{WORKER_MODE_TOKEN}\n"
-        f"{mission.planner_revision_intro}\n\n"
-        f"Task: {task_description}\n\n"
-        f"Your previous {mission.artifact_label}:\n{previous_plan}\n\n"
-        f"Critic's response:\n{critic_feedback}"
+    return build_planner_prompt(
+        task_description,
+        occasion=occasion,
+        previous_plan=previous_plan,
+        critic_feedback=critic_feedback,
     )
 
 
@@ -1352,21 +1230,12 @@ def _build_critic_prompt(
     # encouraged and still counted, but — per `_parse_critic_verdict` — they
     # can never substitute for a quote in the approval decision, so the
     # prompt must not imply they can.
-    mission = _MISSION_COPY[occasion]
-    return (
-        f"{WORKER_MODE_TOKEN}\n"
-        f"{mission.critic_intro}\n\n"
-        "Write your rationale first. Before you verdict, show your "
-        "engagement with it: quote the exact passages you are judging, one "
-        "per line, as QUOTE: \"<verbatim text copied from what you were "
-        "given>\", and list any concrete objections as a numbered list, one "
-        "per line, like \"1. <objection>\". End your response with exactly "
-        f"one verdict line, LAST: either \"{CRITIC_VERDICT_APPROVE}\" if it "
-        "is sound as written, or \"VERDICT: REVISE\" if it is not. An "
-        "APPROVE backed by zero verified quotes will be treated as invalid, "
-        "even if it lists objections.\n\n"
-        f"Task: {task_description}\n\n"
-        f"Planner's plan:\n{planner_plan}"
+    return build_critic_prompt(
+        task_description,
+        planner_plan,
+        occasion=occasion,
+        approve_verdict=CRITIC_VERDICT_APPROVE,
+        revise_verdict=CRITIC_VERDICT_REVISE,
     )
 
 
@@ -1379,11 +1248,7 @@ def _detect_sensitivity_marker(text: str) -> str | None:
     the halt without ever repeating the task text or the secret value that
     tripped it.
     """
-    lowered = text.lower()
-    for marker in SENSITIVITY_MARKERS:
-        if marker.lower() in lowered:
-            return marker
-    return None
+    return scan_sensitivity_markers(text, SENSITIVITY_MARKERS)
 
 
 def _remove_stale_plan_artifact(plan_path: Path) -> str | None:
@@ -1431,103 +1296,6 @@ def _fold_error(existing: str | None, addition: str | None) -> str | None:
     return f"{existing}; {addition}"
 
 
-
-
-def _build_stalemate_report(
-    planner_position: str,
-    critic_position: str,
-    critic_b_position: str | None = None,
-) -> AdvisoryStalemateReport:
-    """Build the report a caller receives when a consultation exhausts its
-    rounds without consensus.
-
-    `critic_b_position` is `None` for pair mode (every pre-ticket-06 call
-    site) and this function's pair-mode branch is byte-for-byte what it was
-    before this parameter existed — same two `AdvisoryResolutionOption`
-    labels, same `critic_position`-only content, same field values. Spec
-    0003 ticket 06: a caller now passing a non-`None` `critic_b_position`
-    (a panel stalemate) instead takes the three-voice branch, which reports
-    `critic_position` (Critic A's position) and `critic_b_position` (Critic
-    B's position) as their own separate `AdvisoryStalemateReport` fields —
-    never folded into one string — and rewords the second option's label
-    from singular "Critic" to plural "Critics'" so it reads correctly for
-    two reviewers. That option's `description` is the one place this
-    function still joins the two Critics' text: `AdvisoryResolutionOption`
-    has a single `description` field, so representing "approve the Critics'
-    architecture" as one string necessarily needs both voices in it; this is
-    a convenience summary for that one option only; it never replaces or
-    substitutes for the report's own `critic_position`/`critic_b_position`
-    fields, which stay separate and verbatim. Neither branch ever computes
-    or reports a winner — see `AdvisoryStalemateReport`'s docstring.
-    """
-    if critic_b_position is None:
-        return AdvisoryStalemateReport(
-            planner_position=planner_position,
-            critic_position=critic_position,
-            options=(
-                AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
-                AdvisoryResolutionOption(2, "Approve Critic Architecture", critic_position),
-                AdvisoryResolutionOption(
-                    3,
-                    "Escalate to Human Decision",
-                    "Halt execution and request user review",
-                ),
-            ),
-        )
-
-    combined_critics_description = (
-        f"Critic A:\n{critic_position}\n\nCritic B:\n{critic_b_position}"
-    )
-    return AdvisoryStalemateReport(
-        planner_position=planner_position,
-        critic_position=critic_position,
-        critic_b_position=critic_b_position,
-        options=(
-            AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
-            AdvisoryResolutionOption(
-                2, "Approve Critics' Architecture", combined_critics_description
-            ),
-            AdvisoryResolutionOption(
-                3,
-                "Escalate to Human Decision",
-                "Halt execution and request user review",
-            ),
-        ),
-    )
-
-
-# Spec 0003 (CriticalDialogue) ticket 05: which occasion/complexity
-# combinations run the panel topology (one Planner, two Critics) instead of
-# the pair topology (one Planner, one Critic) spec 0001 shipped. Only these
-# two occasions, and only at Complex tier: the spec's "Tiered topology"
-# paragraph names plan-review and code-review specifically ("for Complex
-# tasks, a panel of one Planner and two Critics from two families other than
-# the Planner's"), and the ticket's own acceptance criteria are explicit that
-# ambiguity and post-mortem keep the pair topology "unchanged" even at
-# Complex tier — a panel is not simply "whatever runs at Complex complexity."
-_PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
-
-
-def _is_panel_topology(occasion: Occasion, complexity: str) -> bool:
-    """True when `occasion`/`complexity` select the panel topology.
-
-    Normalizes `complexity` with the same `.lower().strip()` idiom every
-    other complexity-reading function in this module already uses
-    (`needs_advisory_consultation`, `needs_plan_review_consultation`,
-    `needs_code_review_consultation`) — convergent reuse of that
-    normalization, not a dependency on any of them. Deliberately permissive
-    like those three, not validated like `occasion`/`max_rounds` below: a
-    `complexity` value this function doesn't recognize as `"complex"` simply
-    keeps the pair topology, exactly as `needs_plan_review_consultation`
-    treats any complexity outside `("medium", "complex")` as "does not fire"
-    rather than raising. `VALID_COMPLEXITIES` in `agent_council.py` is this
-    repo's complexity vocabulary (`trivial`/`simple`/`medium`/`complex`);
-    this function is not the place that enforces membership in it — the
-    caller's own complexity-classification step already did, before this
-    function is ever reached.
-    """
-    normalized = complexity.lower().strip()
-    return occasion in _PANEL_TOPOLOGY_OCCASIONS and normalized == "complex"
 
 
 def _combine_panel_critic_feedback(critic_a_response: str, critic_b_response: str) -> str:

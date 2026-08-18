@@ -17,6 +17,28 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+
+Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
+
+
+@dataclass(frozen=True)
+class AdvisoryResolutionOption:
+    """One way a human can resolve a stalled consultation."""
+
+    id: int
+    label: str
+    description: str
+
+
+@dataclass(frozen=True)
+class AdvisoryStalemateReport:
+    """The final positions of an unresolved consultation and resolution options."""
+
+    planner_position: str
+    critic_position: str
+    options: tuple[AdvisoryResolutionOption, AdvisoryResolutionOption, AdvisoryResolutionOption]
+    critic_b_position: str | None = None
+
 CRITIC_VERDICT_APPROVE = "VERDICT: APPROVE"
 CRITIC_VERDICT_REVISE = "VERDICT: REVISE"
 

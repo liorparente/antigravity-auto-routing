@@ -39,7 +39,7 @@ LEGACY_MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
 # and then `acceptance_gate.py`, each shipped a ticket ahead of its caller — so
 # the same test now also requires every non-test `.py` in the skill directory to
 # appear below, whether or not a sibling already imports it.
-MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py dialogue_contracts.py dialogue_degradation.py dialogue_transcript.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py risk_tiered_application.py learner_worker.py protocol.md)
+MANAGED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py dialogue_contracts.py dialogue_degradation.py executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py sensitivity_redactor.py debate_orchestrator.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py risk_tiered_application.py learner_worker.py protocol.md)
 
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
 TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-rollback.XXXXXX")"
