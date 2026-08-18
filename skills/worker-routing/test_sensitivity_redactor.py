@@ -52,7 +52,7 @@ class SensitivityRedactorTests(unittest.TestCase):
         self.assertIsNone(identity.marker)
         self.assertTrue(identity.caller_supplied)
 
-    def test_halt_ignores_a_caller_supplied_identity(self) -> None:
+    def test_halt_preserves_a_caller_supplied_identity(self) -> None:
         identity = sensitivity_redactor.derive_safe_task_identity(
             "password=top-secret",
             "leaking-id",
@@ -60,8 +60,10 @@ class SensitivityRedactorTests(unittest.TestCase):
             token_factory=lambda size: "random-token",
         )
 
-        self.assertEqual(identity.task_id, "random-token")
-        self.assertFalse(identity.caller_supplied)
+        self.assertEqual(identity.task_id, "leaking-id")
+        self.assertTrue(identity.sensitivity_halted)
+        self.assertEqual(identity.marker, "password")
+        self.assertTrue(identity.caller_supplied)
 
 
 if __name__ == "__main__":

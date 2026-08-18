@@ -49,11 +49,12 @@ def derive_safe_task_identity(
 
     The optional factory keeps the random boundary deterministic in unit tests.
     """
+    if task_id is not None:
+        marker = detect_sensitivity_marker(task_description)
+        return TaskIdentity(task_id, marker is not None, marker, True)
     marker = detect_sensitivity_marker(task_description)
     if marker is not None and outcome == "sensitivity_halt":
         return TaskIdentity(token_factory(8), True, marker, False)
-    if task_id is not None:
-        return TaskIdentity(task_id, marker is not None, marker, True)
     if outcome == "canary":
         return TaskIdentity(token_factory(8), marker is not None, marker, False)
     if outcome == "sensitivity_halt":

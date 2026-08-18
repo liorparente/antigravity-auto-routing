@@ -9,9 +9,9 @@ import secrets
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 
 def _load_sibling(name: str) -> Any:
@@ -948,9 +948,9 @@ class AdvisoryDebateResult:
     occasion: Occasion = "ambiguity"
     degraded_independence: bool = False
     canary_result: CanaryResult | None = None
-    degradation_rung: _DegradationRung = 0
+    degradation_rung: DegradationRung = 0
     topology: RosterTopology = "pair"
-    round_verdicts: tuple[_AdvisoryRoundVerdict, ...] = ()
+    round_verdicts: tuple[AdvisoryRoundVerdict, ...] = ()
     executive_report: ExecutiveDialogueReport | None = None
 
     @property
@@ -1665,7 +1665,7 @@ def run_advisory_consultation_debate(
     # than raising `UnboundLocalError` — a halted task never reaches the
     # budget check at all, and correctly reports no degradation for a
     # dialogue that never ran.
-    degradation_rung: _DegradationRung = 0
+    degradation_rung: DegradationRung = 0
     # `_result` must never perform configuration I/O. Early outcomes use the
     # safe policy default; normal dialogue paths replace it once below.
     budget_cap = DEFAULT_SESSION_DIALOGUE_CAP
@@ -1677,7 +1677,7 @@ def run_advisory_consultation_debate(
     # `_parse_critic_verdict` is called for that round, so the two
     # sequences can never drift out of sync (same length, same order, every
     # outcome). See `AdvisoryDebateResult.round_verdicts`'s docstring.
-    round_verdicts: list[_AdvisoryRoundVerdict] = []
+    round_verdicts: list[AdvisoryRoundVerdict] = []
     previous_plan: str | None = None
     previous_critique: str | None = None
     # Panel mode only (spec 0003 ticket 06): each Critic's own last response,
