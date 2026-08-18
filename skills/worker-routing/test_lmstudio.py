@@ -90,6 +90,19 @@ def completion_text(messages: list[dict[str, str]]) -> str:
 class LMStudioAPITests(unittest.TestCase):
     """Verify the local model responds correctly through all required API paths."""
 
+    @classmethod
+    def setUpClass(cls) -> None:
+        if os.environ.get("LMSTUDIO_LIVE_TEST") != "true" and __name__ != "__main__":
+            raise unittest.SkipTest(
+                "LM Studio manual smoke tests run only when targeted directly with python3 test_lmstudio.py or LMSTUDIO_LIVE_TEST=true."
+            )
+        try:
+            urlopen(Request(f"{BASE_URL}/models"), timeout=2)
+        except Exception as error:
+            raise unittest.SkipTest(
+                f"LM Studio is unreachable at {BASE_URL}: {error}. Skipping manual smoke tests."
+            )
+
     def test_1_health_check_ping_returns_ready(self) -> None:
         reply = completion_text(
             [{"role": "user", "content": "Reply with exactly: READY"}]
