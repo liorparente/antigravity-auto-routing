@@ -1,6 +1,6 @@
 # Issue 31 — Further decompose `debate_orchestrator.py`
 
-**Status:** backlog (deferred from Spec 0007 / Review Round 8)
+**Status:** ready-for-agent (Spec 0008: `docs/specs/0008-debate-engine-modular-decomposition.md`)
 
 ## Problem Statement
 
