@@ -261,6 +261,7 @@ NON_ROLE_CONFIG_KEYS = {
     "orchestrator",
     "critical_dialogue",
     "roster_topology",
+    "consultation_policy",
 }
 
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s+")

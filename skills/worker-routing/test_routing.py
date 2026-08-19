@@ -157,6 +157,16 @@ class RoutingCheckUnitTests(unittest.TestCase):
         # calls on their own.
         self.assertNotIn("orchestrator", self.config)
 
+    def test_consultation_policy_is_not_a_worker_role(self) -> None:
+        self.assertIn("consultation_policy", routing_check.NON_ROLE_CONFIG_KEYS)
+        patterns = routing_check.load_patterns(
+            {
+                "light_doer": {"patterns": ["expected-worker"]},
+                "consultation_policy": {"patterns": ["must-not-be-a-worker"]},
+            }
+        )
+        self.assertEqual(patterns, ["expected-worker"])
+
     def test_load_code_extensions_matches_config(self) -> None:
         extensions = routing_check.load_code_extensions(self.config)
         self.assertIn("py", extensions)

@@ -5,10 +5,70 @@ import json
 import os
 import uuid
 from collections.abc import Sequence
+from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from provider_adapters import ReviewerAdapter, build_adapter
+
+
+ROUTING_CONFIG_PATH = Path(__file__).resolve().parents[2] / "worker-routing" / "routing-config.json"
+DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
+    "providers": [
+        {"id": "claude", "model": "claude-opus-5", "effort_mapping": {"high": "high"}},
+        {"id": "codex", "model": "gpt-5.6-sol", "effort_mapping": {"high": "high"}},
+        {"id": "gemini", "model": "gemini-3.1-pro", "effort_mapping": {"high": "high"}},
+    ],
+    "adjudicators": [
+        {"id": "lm-studio", "model": "qwen3-coder-30b", "effort_mapping": {"high": "high"}}
+    ],
+    "deadlines_seconds": {"round_1": 120, "round_2": 60, "round_3": 60},
+    "consensus_policy": [
+        "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED",
+    ],
+    "weighting": {
+        "initial_weights": {"claude": 0.40, "codex": 0.40, "gemini": 0.20},
+        "min_weight": 0.05,
+        "max_weight": 0.65,
+        "quorum_threshold": 0.60,
+        "dynamic_weights_path": ".ralph/council_weights.json",
+    },
+    "security_veto": {
+        "enabled": True,
+        "veto_severities": ["critical", "high"],
+        "security_threshold": 0.80,
+    },
+}
+
+
+def _merge_policy_defaults(defaults: dict[str, Any], configured: object) -> dict[str, Any]:
+    """Overlay a policy section onto its schema defaults without sharing state."""
+    if not isinstance(configured, dict):
+        return deepcopy(defaults)
+
+    merged = deepcopy(defaults)
+    for key, default_value in defaults.items():
+        value = configured.get(key)
+        if isinstance(default_value, dict):
+            merged[key] = _merge_policy_defaults(default_value, value)
+        elif value is not None and isinstance(value, type(default_value)):
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def load_consultation_policy(config_path: Path = ROUTING_CONFIG_PATH) -> dict[str, Any]:
+    """Load ``consultation_policy`` with safe defaults for absent policy keys.
+
+    File and JSON parsing errors deliberately raise, matching the existing
+    routing configuration loaders' fail-safe contract.
+    """
+    with open(config_path, "r", encoding="utf-8") as stream:
+        config = json.load(stream)
+    return _merge_policy_defaults(DEFAULT_CONSULTATION_POLICY, config.get("consultation_policy", {}))
+
+
+_load_consultation_policy = load_consultation_policy
 
 
 class PrivacyMode:
@@ -148,9 +208,8 @@ class SecurityVetoHandler:
 
 
 class ReviewCouncil:
-    def __init__(self, policy_path: str) -> None:
-        with open(policy_path, "r") as f:
-            self.policy = json.load(f)
+    def __init__(self, config_path: str | Path = ROUTING_CONFIG_PATH) -> None:
+        self.policy = load_consultation_policy(Path(config_path))
 
     def _resolve_secret(self, workspace_root: str) -> bytes:
         # Check AGY_CALIBRATION_SECRET or COUNCIL_REVIEW_SECRET

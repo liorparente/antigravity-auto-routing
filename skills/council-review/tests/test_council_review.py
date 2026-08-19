@@ -12,10 +12,12 @@ if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
 from council_review import (
+    DEFAULT_CONSULTATION_POLICY,
     PrivacyMode,
     ReviewCouncil,
     ReviewRequest,
     SecurityVetoHandler,
+    load_consultation_policy,
 )
 from provider_adapters import (
     AgyAdapter,
@@ -25,7 +27,9 @@ from provider_adapters import (
     FakeReviewerAdapter,
 )
 
-POLICY_PATH = str(Path(__file__).resolve().parent.parent / "references" / "council-policy.json")
+ROUTING_CONFIG_PATH = (
+    Path(__file__).resolve().parents[2] / "worker-routing" / "routing-config.json"
+)
 
 
 class CouncilReviewTDDTests(unittest.TestCase):
@@ -63,7 +67,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
 
     # Slice 2: Dynamic Weights Bounds and Unknown Provider Filtering
     def test_dynamic_weights_clamping_and_filtering(self) -> None:
-        council = ReviewCouncil(POLICY_PATH)
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
         weights_file = os.path.join(self.workspace_root, ".ralph", "council_weights.json")
         os.makedirs(os.path.dirname(weights_file), exist_ok=True)
         with open(weights_file, "w") as f:
@@ -100,7 +104,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
 
     # Slice 4: Privacy Mode Local-Only Enforcement
     def test_local_only_privacy_mode_enforcement(self) -> None:
-        council = ReviewCouncil(POLICY_PATH)
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
         req = ReviewRequest(
             objective="Sensitive task review",
             workspace_root=self.workspace_root,
@@ -117,7 +121,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
 
     # Slice 5: Secret Key Resolution with AGY_CALIBRATION_SECRET & Fallback
     def test_hmac_secret_resolution_fallback(self) -> None:
-        council = ReviewCouncil(POLICY_PATH)
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
         # Clear env vars if set
         old_agy = os.environ.pop("AGY_CALIBRATION_SECRET", None)
         old_council = os.environ.pop("COUNCIL_REVIEW_SECRET", None)
@@ -138,7 +142,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
 
     # Slice 6: End-to-End Async Review with Custom Adapters (Unanimous Approval)
     def test_async_review_unanimous_approval(self) -> None:
-        council = ReviewCouncil(POLICY_PATH)
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
         req = ReviewRequest(
             objective="Feature implementation plan",
             workspace_root=self.workspace_root,
@@ -155,7 +159,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
 
     # Slice 7: End-to-End Async Review with Security Veto Halt
     def test_async_review_security_veto_halt(self) -> None:
-        council = ReviewCouncil(POLICY_PATH)
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
         req = ReviewRequest(
             objective="Feature implementation with vulnerability",
             workspace_root=self.workspace_root,
@@ -173,6 +177,44 @@ class CouncilReviewTDDTests(unittest.TestCase):
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
         self.assertEqual(outcome.status, "SECURITY_HALT")
         self.assertEqual(outcome.unresolved_blockers, 1)
+
+
+class ConsultationPolicyConfigTests(unittest.TestCase):
+    def test_loads_complete_policy_from_real_routing_config(self) -> None:
+        policy = load_consultation_policy(ROUTING_CONFIG_PATH)
+
+        self.assertEqual([provider["id"] for provider in policy["providers"]], ["claude", "codex", "gemini"])
+        self.assertEqual(policy["adjudicators"][0]["model"], "qwen3-coder-30b")
+        self.assertEqual(policy["deadlines_seconds"], {"round_1": 120, "round_2": 60, "round_3": 60})
+        self.assertEqual(policy["weighting"]["quorum_threshold"], 0.60)
+
+    def test_missing_or_partial_policy_uses_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routing-config.json"
+            path.write_text(json.dumps({}), encoding="utf-8")
+            self.assertEqual(load_consultation_policy(path), DEFAULT_CONSULTATION_POLICY)
+
+            path.write_text(
+                json.dumps({"consultation_policy": {"weighting": {"quorum_threshold": 0.75}}}),
+                encoding="utf-8",
+            )
+            policy = load_consultation_policy(path)
+
+        self.assertEqual(policy["weighting"]["quorum_threshold"], 0.75)
+        self.assertEqual(policy["weighting"]["min_weight"], 0.05)
+        self.assertEqual(policy["providers"], DEFAULT_CONSULTATION_POLICY["providers"])
+
+    def test_missing_config_file_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(FileNotFoundError):
+                load_consultation_policy(Path(tmp) / "missing.json")
+
+    def test_malformed_config_file_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routing-config.json"
+            path.write_text("{not json", encoding="utf-8")
+            with self.assertRaises(json.JSONDecodeError):
+                load_consultation_policy(path)
 
 
 class _FakeAsyncProcess:
