@@ -151,3 +151,9 @@ The canonical round-trip text format for learned memory documents. Each entry be
 ### WorkerInvocation
 A unified runtime execution module encapsulating process spawning, non-interactive stdin enforcement, process group termination upon timeout, model alias resolution, transparent wall-clock duration measurement, cost estimation, and safe journal emission for both synchronous single-worker calls and asynchronous multi-model review panels.
 
+### DebateQuorumPolicy
+A pure voting aggregation rule evaluated over arbitrary sequences of critic responses in [[AdvisoryConsultation]] debates: `unanimous` (requires all participating critics to approve), `majority` (`count // 2 + 1` approvals), and `qualified` (`(2 * count + 2) // 3` approvals, e.g. 2 of 2, 2 of 3, 3 of 4).
+
+### AbstentionHandling
+The deliberate normalization of `"abstain"` / timeout critic responses into valid non-approval votes without triggering unparseable verdict errors or terminating the debate. Abstentions increment total participant count without contributing to affirmative approvals, allowing quorum policies to evaluate gracefully under partial panel availability.
+

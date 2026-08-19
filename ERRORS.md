@@ -1,5 +1,19 @@
 # Worker Routing Fallbacks
 
+## 2026-08-19 — Module-Identity Split with Monkeypatching in Path-Loaded Sibling Modules
+
+- Mission: Verify and test isolated worker transport and recurring failure notifier in `debate_transport.py` and `debate_orchestrator.py` (Spec 0008).
+- Failure: `DebateTransport` cached `_production_invoker = _load_sibling("production_invoker")` at module import time. Tests attempting to mock `production_invoker.invoke_worker` by patching `sys.modules["production_invoker"]` failed to intercept calls made by `DebateTransport`, because the sibling loader held a separate module instance. The test bypassed the mock and executed real subprocess worker commands, causing the test runner to hang.
+- Resolution: Updated `DebateTransport` to resolve `production_invoker` dynamically from `sys.modules` on every invocation (`sys.modules.get("production_invoker", _production_invoker)`), ensuring test monkeypatching is respected across all path-loaded harnesses.
+- Lesson: In repos using path-based sibling loaders (`importlib.util.spec_from_file_location`), never assume module identity is identical across distinct file loads. Resolve mutable runtime dependencies dynamically from `sys.modules` or inject them explicitly via constructors.
+
+## 2026-08-19 — Target-Directory Globbing in Uninstaller Scripts Risks Deleting Unrelated Files
+
+- Mission: Universal module discovery and clean uninstallation in `install.sh` and `uninstall.sh` (Ticket 40).
+- Failure: `uninstall.sh` dynamically globbed `*.py` files directly inside `target_dir` to remove installed modules. Because target convention directories like `.agents/skills` or `.codex/skills` are shared across multiple tools, globbing target directories indiscriminately deleted user files and third-party skills.
+- Resolution: Refactored `uninstall.sh` to dynamically discover production modules from the *source* repository directory (`$SRC_DIR`), appending them to `INSTALLED_FILES` and surgically deleting only known repository files.
+- Lesson: Installers and uninstallers targeting shared multi-tool convention directories must always discover managed files from source directories, never by wildcard globbing the target installation folder.
+
 ## 2026-08-18 — Static Analysis (Ruff AST & Mypy) Failures on Dynamic Facade Modules in CI
 
 - Mission: Resolve GitHub Actions CI failure on commit `4b6a850` (`Test / unit-tests`).
