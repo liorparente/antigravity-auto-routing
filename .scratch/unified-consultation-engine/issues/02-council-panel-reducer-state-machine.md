@@ -4,8 +4,8 @@
 
 **Blocked by:** 01 — Centralize Consultation Policy in `routing-config.json`
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Add `CouncilPanel` support in `debate_state_machine.py`.
-- [ ] Implement pure weighted consensus calculation and quorum threshold comparison.
-- [ ] Add 100% offline unit tests in `skills/worker-routing/test_debate_state_machine.py`.
+- [x] Add `CouncilPanel` support in `debate_state_machine.py`.
+- [x] Implement pure weighted consensus calculation and quorum threshold comparison.
+- [x] Add 100% offline unit tests in `skills/worker-routing/test_debate_state_machine.py`.

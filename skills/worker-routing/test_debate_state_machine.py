@@ -123,6 +123,93 @@ class DebateStateMachineTests(unittest.TestCase):
         self.assertEqual(state.status, "stalemate")
         self.assertEqual(state.stalemate_report.critic_b_position, "revise")
 
+    def test_consensus_table_scores_weights_defaults_and_negative_loss(self) -> None:
+        table = machine.ConsensusTable(weights={"a": 3.0, "b": 1.0})
+        votes = (
+            {"provider": "a", "vote": "approve", "confidence": 2},
+            {"provider": "b", "vote": "revise", "confidence": -2},
+        )
+        # Confidence clamps to +/-1, and negative confidence carries a 1.5x loss.
+        self.assertEqual(table.weighted_score(votes), (3.0 - 1.5) / 4.0)
+        self.assertEqual(machine.ConsensusTable()._confidence({"vote": "revise"}), -0.3)
+        self.assertEqual(machine.ConsensusTable()._confidence({"vote": "block"}), -1.0)
+        self.assertEqual(machine.ConsensusTable()._confidence({"vote": "abstain"}), 0.0)
+        self.assertEqual(machine.ConsensusTable()._confidence({"vote": "unknown"}), 0.0)
+
+    def test_consensus_table_evaluates_dicts_and_responses(self) -> None:
+        table = machine.ConsensusTable(policy=("a", "b"), quorum_threshold=0.50)
+        self.assertEqual(table.evaluate((
+            {"provider": "a", "vote": "approve", "candidate_hash": "one"},
+            {"provider": "b", "vote": "approve", "candidate_hash": "one"},
+        )), "UNANIMOUS")
+        self.assertEqual(table.evaluate((
+            machine.CriticResponse("a", "", "approve", candidate_hash="one"),
+            machine.CriticResponse("b", "", "revise", confidence=0.0, candidate_hash="one"),
+        )), "QUALIFIED")
+        self.assertEqual(table.evaluate((
+            {"provider": "a", "vote": "approve", "candidate_hash": "one"},
+            {"provider": "b", "vote": "approve", "candidate_hash": "two"},
+        )), "MATERIAL_DISAGREEMENT")
+        self.assertEqual(table.evaluate(({"vote": "approve"},)), "INCOMPLETE")
+        self.assertEqual(machine.ConsensusTable().evaluate((
+            machine.CriticResponse("a", "", "abstain", confidence=0.0),
+        )), "UNRESOLVED")
+
+    def test_weighted_quorum_helper(self) -> None:
+        approvals = (
+            machine.CriticResponse("a", "", "approve", candidate_hash="one"),
+            machine.CriticResponse("b", "", "revise", confidence=0.0, candidate_hash="one"),
+        )
+        self.assertEqual(
+            machine.evaluate_weighted_quorum(approvals, {"a": 3, "b": 1}, 0.70),
+            (True, "QUALIFIED", 0.75, None),
+        )
+        disagreement = (
+            machine.CriticResponse("a", "", "approve", candidate_hash="one"),
+            machine.CriticResponse("b", "", "approve", candidate_hash="two"),
+        )
+        result = machine.evaluate_weighted_quorum(disagreement)
+        self.assertFalse(result[0])
+        self.assertEqual(result[1], "MATERIAL_DISAGREEMENT")
+        self.assertEqual(result[3], "material disagreement in candidate hashes")
+
+    def test_weighted_state_transitions(self) -> None:
+        state = machine.DebateState("plan-review", "task", "task-1", 0, 2, (), (), "in_progress")
+        consensus = machine.advance_debate_state(
+            state,
+            machine.RoundTurnResult(1, "plan", (
+                machine.CriticResponse("a", "ok", "approve", candidate_hash="one"),
+                machine.CriticResponse("b", "minor", "revise", confidence=0.0, candidate_hash="one"),
+            )),
+            "weighted", weights={"a": 3, "b": 1}, quorum_threshold=0.70,
+        )
+        self.assertEqual(consensus.status, "consensus")
+        self.assertEqual(consensus.final_plan, "plan")
+
+        error = machine.advance_debate_state(
+            state,
+            machine.RoundTurnResult(1, "plan", (
+                machine.CriticResponse("a", "one", "approve", candidate_hash="one"),
+                machine.CriticResponse("b", "two", "approve", candidate_hash="two"),
+            )),
+            "weighted",
+        )
+        self.assertEqual(error.status, "error")
+        self.assertEqual(error.error, "material disagreement in candidate hashes")
+
+        pending = machine.advance_debate_state(
+            state,
+            machine.RoundTurnResult(1, "plan one", (machine.CriticResponse("a", "abstain", "abstain", confidence=0.0),)),
+            "weighted",
+        )
+        stalemate = machine.advance_debate_state(
+            pending,
+            machine.RoundTurnResult(2, "plan two", (machine.CriticResponse("a", "abstain", "abstain", confidence=0.0),)),
+            "weighted",
+        )
+        self.assertEqual(stalemate.status, "stalemate")
+        self.assertIsNotNone(stalemate.stalemate_report)
+
 
 if __name__ == "__main__":
     unittest.main()

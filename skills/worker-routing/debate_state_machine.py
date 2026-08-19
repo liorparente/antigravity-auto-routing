@@ -43,6 +43,14 @@ if not TYPE_CHECKING:
 
 PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
 
+DEFAULT_VOTE_CONFIDENCE: dict[str, float] = {
+    "approve": 1.0,
+    "revise": -0.3,
+    "block": -1.0,
+    "abstain": 0.0,
+}
+NEGATIVE_LOSS_MULTIPLIER = 1.5
+
 
 def is_panel_topology(occasion: Occasion, complexity: str) -> bool:
     """Return whether an occasion uses two independent Critics."""
@@ -97,6 +105,84 @@ class CriticResponse:
     response: str
     verdict: str | None = None
     confidence: float = 1.0
+    candidate_hash: str | None = None
+    findings: tuple[dict[str, Any], ...] = ()
+
+
+class ConsensusTable:
+    """Pure weighted reducer for a council's structured critic votes."""
+
+    def __init__(
+        self,
+        policy: list[str] | tuple[str, ...] | None = None,
+        weights: dict[str, float] | None = None,
+        quorum_threshold: float = 0.60,
+    ) -> None:
+        self.policy = tuple(policy or ())
+        self.weights = weights or {}
+        self.quorum_threshold = quorum_threshold
+
+    @staticmethod
+    def _field(vote: dict[str, Any] | CriticResponse, name: str, default: Any = None) -> Any:
+        return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
+
+    def _confidence(self, vote: dict[str, Any] | CriticResponse) -> float:
+        confidence = self._field(vote, "confidence")
+        if confidence is None:
+            verdict = self._field(vote, "vote", self._field(vote, "verdict", ""))
+            confidence = DEFAULT_VOTE_CONFIDENCE.get(str(verdict).strip().casefold(), 0.0)
+        try:
+            value = float(confidence)
+        except (TypeError, ValueError):
+            value = 0.0
+        return max(-1.0, min(1.0, value))
+
+    def _identity(self, vote: dict[str, Any] | CriticResponse) -> str:
+        return str(self._field(vote, "provider", self._field(vote, "critic_id", "")) or "")
+
+    def weighted_score(self, votes: Sequence[dict[str, Any] | CriticResponse]) -> float:
+        if not votes:
+            return 0.0
+        raw_weights = [self.weights.get(self._identity(vote), 0.0) for vote in votes]
+        total_weight = sum(raw_weights)
+        effective_weights = raw_weights if total_weight > 0 else [1.0] * len(votes)
+        total_weight = total_weight if total_weight > 0 else float(len(votes))
+        score = 0.0
+        for vote, weight in zip(votes, effective_weights):
+            confidence = self._confidence(vote)
+            if confidence < 0:
+                confidence *= NEGATIVE_LOSS_MULTIPLIER
+            score += weight * confidence
+        return score / total_weight
+
+    def evaluate(self, votes: Sequence[dict[str, Any] | CriticResponse]) -> str:
+        if not votes or any(not self._identity(vote) for vote in votes):
+            return "INCOMPLETE"
+        hashes = {self._field(vote, "candidate_hash") for vote in votes if self._field(vote, "candidate_hash")}
+        if len(hashes) > 1:
+            return "MATERIAL_DISAGREEMENT"
+        score = self.weighted_score(votes)
+        if score < self.quorum_threshold:
+            # An all-abstain panel has no competing proposal to reconcile.
+            if all(self._confidence(vote) == 0 for vote in votes):
+                return "UNRESOLVED"
+            return "MATERIAL_DISAGREEMENT"
+        vote_names = [str(self._field(vote, "vote", self._field(vote, "verdict", ""))).strip().casefold() for vote in votes]
+        return "UNANIMOUS" if all(vote in {"approve", "approved"} for vote in vote_names) else "QUALIFIED"
+
+
+def evaluate_weighted_quorum(
+    responses: Sequence[CriticResponse],
+    weights: dict[str, float] | None = None,
+    quorum_threshold: float = 0.60,
+) -> tuple[bool, str, float, str | None]:
+    """Evaluate a critic panel, returning consensus, outcome, score, and error."""
+    table = ConsensusTable(weights=weights, quorum_threshold=quorum_threshold)
+    outcome = table.evaluate(responses)
+    score = table.weighted_score(responses)
+    consensus = outcome in {"UNANIMOUS", "QUALIFIED"}
+    error = "material disagreement in candidate hashes" if outcome == "MATERIAL_DISAGREEMENT" else None
+    return consensus, outcome, score, error
 
 
 def evaluate_quorum(
@@ -217,10 +303,21 @@ def _advance_session_state(state: DebateSessionState, record: DebateRoundRecord)
     return replace(state, rounds=rounds)
 
 
-def _advance_general_state(state: DebateState, turn: RoundTurnResult, quorum_policy: str) -> DebateState:
+def _advance_general_state(
+    state: DebateState,
+    turn: RoundTurnResult,
+    quorum_policy: str,
+    weights: dict[str, float] | None = None,
+    quorum_threshold: float = 0.60,
+) -> DebateState:
     if state.status != "in_progress":
         return state
-    consensus, error = evaluate_quorum(turn.critic_responses, quorum_policy)
+    if quorum_policy.strip().casefold() == "weighted":
+        consensus, _outcome, _score, error = evaluate_weighted_quorum(
+            turn.critic_responses, weights, quorum_threshold
+        )
+    else:
+        consensus, error = evaluate_quorum(turn.critic_responses, quorum_policy)
     recorded_turn = replace(turn, is_consensus=consensus, error=error)
     proposals = (*state.planner_proposals, turn.planner_proposal)
     responses = (*state.critic_responses, turn.critic_responses)
@@ -236,21 +333,24 @@ def _advance_general_state(state: DebateState, turn: RoundTurnResult, quorum_pol
 
 
 @overload
-def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord, quorum_policy: str = "unanimous") -> DebateSessionState: ...
+def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60) -> DebateSessionState: ...
 
 
 @overload
-def advance_debate_state(state: DebateState, record: RoundTurnResult, quorum_policy: str = "unanimous") -> DebateState: ...
+def advance_debate_state(state: DebateState, record: RoundTurnResult, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60) -> DebateState: ...
 
 
 def advance_debate_state(
     state: DebateSessionState | DebateState,
     record: DebateRoundRecord | RoundTurnResult,
     quorum_policy: str = "unanimous",
+    *,
+    weights: dict[str, float] | None = None,
+    quorum_threshold: float = 0.60,
 ) -> DebateSessionState | DebateState:
     """Advance either supported immutable debate state without side effects."""
     if isinstance(state, DebateSessionState) and isinstance(record, DebateRoundRecord):
         return _advance_session_state(state, record)
     if isinstance(state, DebateState) and isinstance(record, RoundTurnResult):
-        return _advance_general_state(state, record, quorum_policy)
+        return _advance_general_state(state, record, quorum_policy, weights, quorum_threshold)
     raise TypeError("state and record must use the same debate state-machine API")
