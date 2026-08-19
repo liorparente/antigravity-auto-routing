@@ -8392,8 +8392,8 @@ class CriticalDialogueFacadeCompatibilityTests(unittest.TestCase):
     """The historic facade exposes the full production entry-point surface."""
 
     def test_run_critical_dialogue_is_exported_with_the_production_signature(self) -> None:
-        import inspect
         import importlib
+        import inspect
 
         debate_orchestrator = importlib.import_module("debate_orchestrator")
         self.assertIn("run_critical_dialogue", advisory_consultation.__all__)

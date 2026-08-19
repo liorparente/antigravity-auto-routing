@@ -9,7 +9,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 MODULE_PATH = Path(__file__).with_name("debate_transport.py")
 SPEC = importlib.util.spec_from_file_location("debate_transport", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None

@@ -14,8 +14,8 @@ rejection is never agreement.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Literal
 
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]

@@ -2236,7 +2236,7 @@ def run_advisory_consultation_debate(
 
         if invoke_worker is None:
             try:
-                import production_invoker  # noqa: F401 - validates availability before wiring the shared transport below.
+                import production_invoker
             except Exception as exc:  # noqa: BLE001 - a production worker failure fails closed.
                 return _result("worker_error", error=str(exc))
             invoke_worker = DebateTransport(
