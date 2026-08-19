@@ -21,7 +21,10 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from debate_orchestrator import AdvisoryDebateResult, CanaryFixture
 
 
 def _load_sibling(name: str) -> Any:
@@ -161,10 +164,10 @@ def format_transcript_markdown(
     critic_model: str,
     outcome: str,
     *,
-    canary_fixture: Any | None = None,
+    canary_fixture: CanaryFixture | None = None,
     canary_result: str | None = None,
     degraded_independence: bool = False,
-    degradation_rung: int = 0,
+    degradation_rung: DegradationRung = 0,
 ) -> str:
     """Format the pure, non-sensitive consultation transcript markdown.
 
@@ -179,27 +182,32 @@ def format_transcript_markdown(
         f"**Rounds run:** {len(rounds)}", "",
     ]
     if degraded_independence:
-        lines.extend([
+        degraded_line = (
             f"**{DEGRADED_INDEPENDENCE_MARKER}:** This dialogue could not achieve "
-            "full cross-family independence. Treat its outcome with reduced confidence.",
-            "",
-        ])
+            "full cross-family independence. Treat its outcome with reduced confidence."
+        )
+        lines.extend([degraded_line, ""])
     if is_canary:
+        assert canary_fixture is not None
         result_text = (
             "approved the flawed fixture" if canary_result == "miss"
             else "did not approve the flawed fixture"
         )
-        lines.extend([
+        canary_line = (
             f"**{CANARY_MARKER}:** This dialogue reviewed seeded-flaw fixture "
-            f"`{canary_fixture.id}`, not a real mission artifact. No Planner was invoked.",
+            f"`{canary_fixture.id}`, not a real mission artifact. No Planner was invoked."
+        )
+        lines.extend([
+            canary_line,
             "", f"Seeded flaw: {canary_fixture.flaw_summary}", "",
             f"Critic result: **{canary_result}** ({result_text}).", "",
         ])
     if degradation_rung > 0:
-        lines.extend([
+        degradation_line = (
             f"**{BUDGET_DEGRADATION_MARKER}:** degradation rung {degradation_rung} "
-            f"({_DEGRADATION_RUNG_LABELS[degradation_rung]}).", "",
-        ])
+            f"({_DEGRADATION_RUNG_LABELS[degradation_rung]})."
+        )
+        lines.extend([degradation_line, ""])
     lines.extend(["## Task", "", task_description, ""])
     if outcome == "budget_skipped":
         lines.append("_No Planner or Critic was contacted because the session budget was exhausted._")
@@ -209,6 +217,7 @@ def format_transcript_markdown(
         panel = round_.critic_b_response is not None
         planner_header = f"### Planner ({planner_model})"
         if is_canary:
+            assert canary_fixture is not None
             planner_header = f"### Seeded-flaw fixture (`{canary_fixture.id}`)"
         critic_header = f"### Critic A ({critic_model})" if panel else f"### Critic ({critic_model})"
         lines.extend([

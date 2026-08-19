@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Isolated, failure-aware transport for Planner/Critic worker processes.
 
 The transport deliberately owns no dialogue policy.  It delegates the actual
@@ -18,7 +17,10 @@ import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from debate_state_machine import CriticResponse
 
 
 def _load_sibling(name: str) -> Any:
@@ -46,7 +48,26 @@ _dialogue_contracts = _load_sibling("dialogue_contracts")
 _debate_state_machine = _load_sibling("debate_state_machine")
 _production_invoker = _load_sibling("production_invoker")
 
-CriticResponse = _debate_state_machine.CriticResponse
+
+def _current_production_invoker() -> Any:
+    """Resolve ``production_invoker`` fresh from ``sys.modules`` on every call.
+
+    A harness that path-loads its own copy of ``production_invoker`` (a test
+    module doing the same by-path load this file's own ``_load_sibling``
+    does) and registers it under ``sys.modules["production_invoker"]`` after
+    this module was first imported would otherwise leave the module-level
+    ``_production_invoker`` pointing at a stale, unpatchable copy — a caller
+    monkeypatching ``production_invoker.invoke_worker`` for a hermetic test
+    would silently miss every call this transport makes. Re-resolving here
+    mirrors what a fresh ``import production_invoker`` statement does on
+    every execution: it always binds to whatever ``sys.modules`` currently
+    holds, never a snapshot from this module's own load time.
+    """
+    return sys.modules.get("production_invoker", _production_invoker)
+
+
+if not TYPE_CHECKING:
+    CriticResponse = _debate_state_machine.CriticResponse
 ESCALATION_FAILURE_THRESHOLD = 2
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -137,8 +158,8 @@ class DebateTransport:
         if self.runner is not None:
             kwargs["runner"] = self.runner
         try:
-            output = _production_invoker.invoke_worker(model, effort, prompt, **kwargs)
-        except Exception as exc:  # noqa: BLE001 - every process failure is tracked.
+            output = _current_production_invoker().invoke_worker(model, effort, prompt, **kwargs)
+        except Exception as exc:
             self.notifier.record_failure(model, str(exc), self.root_dir)
             raise
         self.notifier.record_success(model)
@@ -158,7 +179,7 @@ class DebateTransport:
                 confidence=0.0,
             )
 
-        payload = _production_invoker.extract_review_payload(output)
+        payload = _current_production_invoker().extract_review_payload(output)
         vote = str(payload.get("vote", "abstain")).strip().casefold()
         verdict = vote if vote in {"approve", "revise"} else "abstain"
         confidence = float(payload.get("confidence", 0.0))

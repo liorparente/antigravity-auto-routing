@@ -9,7 +9,7 @@ import secrets
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -2236,10 +2236,13 @@ def run_advisory_consultation_debate(
 
         if invoke_worker is None:
             try:
-                from production_invoker import invoke_worker as production_invoke_worker
+                import production_invoker  # noqa: F401 - validates availability before wiring the shared transport below.
             except Exception as exc:  # noqa: BLE001 - a production worker failure fails closed.
                 return _result("worker_error", error=str(exc))
-            invoke_worker = production_invoke_worker
+            invoke_worker = DebateTransport(
+                root_dir=root_dir,
+                notifier=RecurringFailureNotifier(threshold=ESCALATION_FAILURE_THRESHOLD),
+            ).invoke_worker
 
         canary_critic_prompt = build_canary_prompt(
             task_description, fixture.plan_text, occasion=occasion
@@ -2287,7 +2290,24 @@ def run_advisory_consultation_debate(
             cleanup_error = _remove_stale_plan_artifact(plan_path)
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
-        invoke_worker = production_invoker.invoke_worker
+        # `DebateTransport` (re-exported above but previously never
+        # instantiated from this loop) is now the single source of truth for
+        # isolated default-path process execution and for the failure
+        # alerting `RecurringFailureNotifier` provides: it tracks consecutive
+        # per-model failures and appends a durable `ERRORS.md` alert once
+        # `ESCALATION_FAILURE_THRESHOLD` is reached -- the same escalation
+        # rule this module's own `ESCALATION_FAILURE_THRESHOLD` constant
+        # already documents. The base (unjournaled) path delegates straight
+        # to `_transport.invoke_worker`; the journaled path below still runs
+        # process execution through `production_invoker`'s own journaling
+        # wrapper (which needs to time the raw subprocess call itself) but
+        # shares this exact `_transport.notifier` instance for alerting, so
+        # there is never more than one notifier tracking this run's failures.
+        _transport = DebateTransport(
+            notifier=RecurringFailureNotifier(threshold=ESCALATION_FAILURE_THRESHOLD),
+            root_dir=root_dir,
+        )
+        invoke_worker = _transport.invoke_worker
         try:
             # Any non-`sensitivity_halt` outcome resolves the same task_id
             # (see `_resolve_task_id`); the sensitivity gate above already
@@ -2297,10 +2317,20 @@ def run_advisory_consultation_debate(
             # this run's telemetry record stay correlated by TaskIdentity.
             journaled_task_id = _resolve_task_id(task_description, task_id, "consensus")
             journal_run_id = secrets.token_hex(8)
-            invoke_worker = production_invoker.make_journaled_invoke_worker(
+            journaled_invoke_worker = production_invoker.make_journaled_invoke_worker(
                 journaled_task_id, root_dir=root_dir, run_id=journal_run_id
             )
             dialogue_run_id = journal_run_id
+
+            def invoke_worker(model: str, effort: str, prompt: str) -> str:
+                """Journal via production_invoker, alerting through DebateTransport's shared notifier."""
+                try:
+                    output = journaled_invoke_worker(model, effort, prompt)
+                except Exception as exc:  # re-raised untouched below; only tracked here.
+                    _transport.notifier.record_failure(model, str(exc), _transport.root_dir)
+                    raise
+                _transport.notifier.record_success(model)
+                return output
         except Exception as exc:  # noqa: BLE001 - instrumentation never aborts what it observes.
             journal_wiring_error = (
                 f"worker-execution journaling disabled for this run: {exc}"

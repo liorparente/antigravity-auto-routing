@@ -12,6 +12,9 @@
 #                         to the current directory.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
+
 TARGET_PROJECT_DIR="${1:-.}"
 if [ ! -d "$TARGET_PROJECT_DIR" ]; then
     echo "❌ Target project directory does not exist: $TARGET_PROJECT_DIR"
@@ -65,6 +68,26 @@ CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 # left `learning_journal.py` behind cannot recur silently in either script.
 INSTALLED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py dialogue_contracts.py dialogue_degradation.py executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py debate_transport.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py risk_tiered_application.py learner_worker.py protocol.md routing-config.json)
 
+# Mirrors install.sh's own dynamic discovery of future production modules —
+# every non-test `.py` file in THIS repo's own skills/worker-routing/ source
+# directory is a module install.sh would have propagated, whether or not it
+# already appears in the static list above. Discovering from this script's
+# own source directory (never by globbing the target directory) is what
+# keeps removal surgical: TARGET_DIRS's own comment documents ".agents/",
+# ".agent/", and ".codex/" as convention directories other tools may also
+# populate, so only files this installer is actually responsible for are
+# ever removed from them.
+if [ -d "$SRC_DIR" ]; then
+    for python_module in "$SRC_DIR"/*.py; do
+        [ -e "$python_module" ] || continue
+        python_module_name="$(basename "$python_module")"
+        [[ "$python_module_name" == test_* ]] && continue
+        if [[ " ${INSTALLED_FILES[*]} " != *" $python_module_name "* ]]; then
+            INSTALLED_FILES+=("$python_module_name")
+        fi
+    done
+fi
+
 # Same versionless sentinel markers install.sh writes/looks for.
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END="# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
@@ -96,14 +119,6 @@ for i in "${!TARGET_DIRS[@]}"; do
     if [ -d "$target_dir" ]; then
         for installed_file in "${INSTALLED_FILES[@]}"; do
             rm -f "$target_dir/$installed_file"
-        done
-        # Future production modules are discovered dynamically by install.sh.
-        # Remove those installed Python files too, while retaining test files
-        # a user may have placed in the dedicated skill directory.
-        for python_module in "$target_dir"/*.py; do
-            [ -e "$python_module" ] || continue
-            python_module_name="$(basename "$python_module")"
-            [[ "$python_module_name" == test_* ]] || rm -f "$python_module"
         done
         rm -rf "$target_dir/learned-state"
         rmdir "$target_dir" 2>/dev/null || true

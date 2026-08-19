@@ -10,7 +10,14 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, overload
+from typing import TYPE_CHECKING, Any, overload
+
+if TYPE_CHECKING:
+    from dialogue_contracts import (
+        AdvisoryResolutionOption,
+        AdvisoryStalemateReport,
+        Occasion,
+    )
 
 
 def _load_sibling(name: str) -> Any:
@@ -28,9 +35,11 @@ def _load_sibling(name: str) -> Any:
 
 
 _dialogue_contracts = _load_sibling("dialogue_contracts")
-Occasion = _dialogue_contracts.Occasion
-AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
-AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
+
+if not TYPE_CHECKING:
+    Occasion = _dialogue_contracts.Occasion
+    AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
+    AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
 
 PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
 
@@ -77,6 +86,8 @@ def _normalize_verdict(verdict: str | None) -> str | None:
         return "APPROVE"
     if normalized == "revise":
         return "REVISE"
+    if normalized == "abstain":
+        return "ABSTAIN"
     return None
 
 

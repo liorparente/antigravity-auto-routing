@@ -72,6 +72,50 @@ class DebateStateMachineTests(unittest.TestCase):
         self.assertEqual(accepted.final_plan, "plan two")
         self.assertIs(machine.advance_debate_state(accepted, revise), accepted)
 
+    def test_three_critic_panel_quorum_with_abstentions(self) -> None:
+        """A 3-critic panel split under each quorum policy, including abstentions.
+
+        An "abstain" verdict must normalize like any other valid vote (never
+        joining the `invalid`/"unparseable verdict" set) while never counting
+        toward `approvals` either -- a valid non-approval vote, distinct from
+        both an approval and a malformed response.
+        """
+        two_approve_one_abstain = (
+            machine.CriticResponse("a", "", "approve"),
+            machine.CriticResponse("b", "", "APPROVED"),
+            machine.CriticResponse("c", "", " Abstain "),
+        )
+        self.assertEqual(machine.evaluate_quorum(two_approve_one_abstain, "unanimous"), (False, None))
+        self.assertEqual(machine.evaluate_quorum(two_approve_one_abstain, "majority"), (True, None))
+        self.assertEqual(machine.evaluate_quorum(two_approve_one_abstain, "qualified"), (True, None))
+
+        one_approve_one_abstain_one_revise = (
+            machine.CriticResponse("a", "", "approve"),
+            machine.CriticResponse("b", "", "abstain"),
+            machine.CriticResponse("c", "", "revise"),
+        )
+        self.assertEqual(machine.evaluate_quorum(one_approve_one_abstain_one_revise, "unanimous"), (False, None))
+        self.assertEqual(machine.evaluate_quorum(one_approve_one_abstain_one_revise, "majority"), (False, None))
+        self.assertEqual(machine.evaluate_quorum(one_approve_one_abstain_one_revise, "qualified"), (False, None))
+
+        all_abstain = tuple(machine.CriticResponse(str(index), "", "abstain") for index in range(3))
+        self.assertEqual(machine.evaluate_quorum(all_abstain, "unanimous"), (False, None))
+        self.assertEqual(machine.evaluate_quorum(all_abstain, "majority"), (False, None))
+        self.assertEqual(machine.evaluate_quorum(all_abstain, "qualified"), (False, None))
+
+        # A genuinely malformed vote alongside an abstention still fails
+        # closed with the unparseable-verdict error -- abstention is not a
+        # blanket excuse that swallows other critics' unreadable votes.
+        abstain_and_malformed = (
+            machine.CriticResponse("a", "", "abstain"),
+            machine.CriticResponse("b", "", "approve"),
+            machine.CriticResponse("c", "", "maybe"),
+        )
+        self.assertEqual(
+            machine.evaluate_quorum(abstain_and_malformed, "unanimous"),
+            (False, "unparseable verdict: c=maybe"),
+        )
+
     def test_general_reducer_escalates_after_third_round(self) -> None:
         state = machine.DebateState("code-review", "task", "task-1", 0, 3, (), (), "in_progress")
         for index in range(1, 4):

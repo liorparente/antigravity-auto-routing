@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest.mock import patch
 
 
 def _load(name: str):
@@ -197,6 +199,76 @@ class ProductionOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(result.degradation_rung, 1)
         self.assertEqual(stderr.getvalue(), result.executive_report.budget_alert)
+
+    def test_consecutive_default_path_worker_failures_alert_to_errors_md(self) -> None:
+        """debate_orchestrator's default worker path routes isolated process
+        execution and failure alerting through its re-exported DebateTransport
+        / RecurringFailureNotifier (see `run_advisory_consultation_debate`'s
+        `invoke_worker is None` branch), rather than a hand-rolled notifier
+        closure. This exercises that wiring directly through the same
+        symbols the orchestrator itself instantiates.
+        """
+
+        def failing_runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(command, 1, stdout="", stderr="worker unreachable")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            transport = debate_orchestrator.DebateTransport(
+                runner=failing_runner,
+                notifier=debate_orchestrator.RecurringFailureNotifier(
+                    threshold=debate_orchestrator.ESCALATION_FAILURE_THRESHOLD
+                ),
+                root_dir=root_dir,
+            )
+            errors_path = root_dir / "ERRORS.md"
+
+            with self.assertRaises(RuntimeError):
+                transport.invoke_worker("Codex 5.6 Sol", "high", "prompt one")
+            self.assertFalse(errors_path.exists())
+
+            with self.assertRaises(RuntimeError):
+                transport.invoke_worker("Codex 5.6 Sol", "high", "prompt two")
+
+            self.assertTrue(errors_path.exists())
+            contents = errors_path.read_text(encoding="utf-8")
+            self.assertIn("## Recurring worker failure", contents)
+            self.assertIn("Model: `Codex 5.6 Sol`", contents)
+            self.assertIn("Consecutive failures: 2", contents)
+
+    def test_default_path_invoke_worker_none_alerts_through_run_advisory_consultation_debate(
+        self,
+    ) -> None:
+        """`run_advisory_consultation_debate`'s own `invoke_worker is None`
+        default path (not `DebateTransport` invoked directly, as
+        `test_consecutive_default_path_worker_failures_alert_to_errors_md`
+        above does) must still wire through the shared transport/notifier
+        pair, so a real production outage escalates to `ERRORS.md` from the
+        orchestrator entry point production callers actually use. The
+        escalation threshold is patched to 1 here: every `invoke_worker`
+        failure inside `run_advisory_consultation_debate` returns
+        immediately (fail-closed), so a single call can never produce two
+        failures for the same model and reach the real threshold of 2.
+        """
+
+        def failing_invoke_worker(model: str, effort: str, prompt: str, **_kwargs: object) -> str:
+            raise RuntimeError("simulated production_invoker failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root_dir = Path(tmp)
+            errors_path = root_dir / "ERRORS.md"
+            with patch.object(
+                sys.modules["production_invoker"], "invoke_worker", failing_invoke_worker
+            ), patch.object(debate_orchestrator, "ESCALATION_FAILURE_THRESHOLD", 1):
+                result = debate_orchestrator.run_advisory_consultation_debate(
+                    "Plan the implementation", invoke_worker=None, root_dir=root_dir
+                )
+
+            self.assertEqual(result.outcome, "worker_error")
+            self.assertTrue(errors_path.exists())
+            contents = errors_path.read_text(encoding="utf-8")
+            self.assertIn("## Recurring worker failure", contents)
+            self.assertIn("Consecutive failures: 1", contents)
 
     def test_facade_and_orchestrator_signatures_match(self) -> None:
         import inspect
