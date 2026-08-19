@@ -6,11 +6,13 @@ only sibling dependency is the dialogue contract that owns shared wire types.
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, overload
+from types import MappingProxyType
 
 if TYPE_CHECKING:
     from dialogue_contracts import (
@@ -50,6 +52,9 @@ DEFAULT_VOTE_CONFIDENCE: dict[str, float] = {
     "abstain": 0.0,
 }
 NEGATIVE_LOSS_MULTIPLIER = 1.5
+VALID_CONSENSUS_OUTCOMES = frozenset({
+    "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED",
+})
 
 
 def is_panel_topology(occasion: Occasion, complexity: str) -> bool:
@@ -94,9 +99,22 @@ def _normalize_verdict(verdict: str | None) -> str | None:
         return "APPROVE"
     if normalized == "revise":
         return "REVISE"
+    if normalized == "block":
+        return "BLOCK"
     if normalized == "abstain":
         return "ABSTAIN"
     return None
+
+
+def _deep_freeze(value: Any) -> Any:
+    """Recursively detach findings from mutable caller-owned values."""
+    if isinstance(value, dict):
+        return MappingProxyType({key: _deep_freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_deep_freeze(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -104,9 +122,13 @@ class CriticResponse:
     critic_id: str
     response: str
     verdict: str | None = None
-    confidence: float = 1.0
+    confidence: float | None = None
     candidate_hash: str | None = None
     findings: tuple[dict[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        """Recursively detach the immutable response from caller-owned findings."""
+        object.__setattr__(self, "findings", tuple(_deep_freeze(finding) for finding in self.findings))
 
 
 class ConsensusTable:
@@ -119,26 +141,67 @@ class ConsensusTable:
         quorum_threshold: float = 0.60,
     ) -> None:
         self.policy = tuple(policy or ())
-        self.weights = weights or {}
-        self.quorum_threshold = quorum_threshold
+        self._policy_is_valid = all(
+            isinstance(outcome, str) and outcome in VALID_CONSENSUS_OUTCOMES
+            for outcome in self.policy
+        )
+        # Ignore malformed weights rather than letting them corrupt the reducer.
+        clean_weights: dict[str, float] = {}
+        for provider, raw_weight in (weights or {}).items():
+            if isinstance(raw_weight, bool):
+                continue
+            try:
+                weight = float(raw_weight)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(weight) and weight >= 0.0:
+                clean_weights[provider] = weight
+        self.weights = MappingProxyType(clean_weights)
+        if isinstance(quorum_threshold, bool):
+            threshold = 0.60
+        else:
+            try:
+                threshold = float(quorum_threshold)
+            except (TypeError, ValueError):
+                threshold = 0.60
+        self.quorum_threshold = threshold if math.isfinite(threshold) and 0.0 <= threshold <= 1.0 else 0.60
 
     @staticmethod
     def _field(vote: dict[str, Any] | CriticResponse, name: str, default: Any = None) -> Any:
         return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
 
     def _confidence(self, vote: dict[str, Any] | CriticResponse) -> float:
+        verdict = self._field(vote, "vote", self._field(vote, "verdict", ""))
+        if _normalize_verdict(verdict) is None:
+            return 0.0
         confidence = self._field(vote, "confidence")
         if confidence is None:
-            verdict = self._field(vote, "vote", self._field(vote, "verdict", ""))
             confidence = DEFAULT_VOTE_CONFIDENCE.get(str(verdict).strip().casefold(), 0.0)
         try:
             value = float(confidence)
         except (TypeError, ValueError):
             value = 0.0
+        if not math.isfinite(value):
+            return 0.0
         return max(-1.0, min(1.0, value))
 
     def _identity(self, vote: dict[str, Any] | CriticResponse) -> str:
         return str(self._field(vote, "provider", self._field(vote, "critic_id", "")) or "")
+
+    def _invalid_voters(self, votes: Sequence[dict[str, Any] | CriticResponse]) -> str:
+        invalid = []
+        for vote in votes:
+            verdict = self._field(vote, "vote", self._field(vote, "verdict", ""))
+            if _normalize_verdict(verdict) is None:
+                invalid.append(f"{self._identity(vote)}={verdict}")
+        return ", ".join(invalid)
+
+    def _enforce_policy(self, outcome: str) -> str:
+        if not self._policy_is_valid:
+            return "INCOMPLETE"
+        if self.policy and outcome not in self.policy:
+            return "INCOMPLETE"
+        return outcome
 
     def weighted_score(self, votes: Sequence[dict[str, Any] | CriticResponse]) -> float:
         if not votes:
@@ -155,30 +218,52 @@ class ConsensusTable:
             score += weight * confidence
         return score / total_weight
 
-    def evaluate(self, votes: Sequence[dict[str, Any] | CriticResponse]) -> str:
-        if not votes or any(not self._identity(vote) for vote in votes):
-            return "INCOMPLETE"
-        hashes = {self._field(vote, "candidate_hash") for vote in votes if self._field(vote, "candidate_hash")}
-        if len(hashes) > 1:
-            return "MATERIAL_DISAGREEMENT"
+    def evaluate(
+        self,
+        votes: Sequence[dict[str, Any] | CriticResponse],
+        expected_hash: str | None = None,
+        require_candidate_hashes: bool = False,
+    ) -> str:
+        if not votes or any(not self._identity(vote) for vote in votes) or self._invalid_voters(votes):
+            return self._enforce_policy("INCOMPLETE")
+        hashes = [self._field(vote, "candidate_hash") for vote in votes]
+        ratification_required = (
+            expected_hash is not None
+            or require_candidate_hashes
+            or any(candidate_hash is not None for candidate_hash in hashes)
+        )
+        if ratification_required:
+            if any(not isinstance(candidate_hash, str) or not candidate_hash for candidate_hash in hashes):
+                return self._enforce_policy("MATERIAL_DISAGREEMENT")
+            if expected_hash is not None:
+                if any(candidate_hash != expected_hash for candidate_hash in hashes):
+                    return self._enforce_policy("MATERIAL_DISAGREEMENT")
+            elif len(set(hashes)) != 1:
+                return self._enforce_policy("MATERIAL_DISAGREEMENT")
         score = self.weighted_score(votes)
         if score < self.quorum_threshold:
-            # An all-abstain panel has no competing proposal to reconcile.
-            if all(self._confidence(vote) == 0 for vote in votes):
-                return "UNRESOLVED"
-            return "MATERIAL_DISAGREEMENT"
+            return self._enforce_policy("UNRESOLVED")
         vote_names = [str(self._field(vote, "vote", self._field(vote, "verdict", ""))).strip().casefold() for vote in votes]
-        return "UNANIMOUS" if all(vote in {"approve", "approved"} for vote in vote_names) else "QUALIFIED"
+        return self._enforce_policy("UNANIMOUS" if all(vote in {"approve", "approved"} for vote in vote_names) else "QUALIFIED")
 
 
 def evaluate_weighted_quorum(
     responses: Sequence[CriticResponse],
     weights: dict[str, float] | None = None,
     quorum_threshold: float = 0.60,
+    require_candidate_hashes: bool = False,
+    expected_hash: str | None = None,
 ) -> tuple[bool, str, float, str | None]:
     """Evaluate a critic panel, returning consensus, outcome, score, and error."""
     table = ConsensusTable(weights=weights, quorum_threshold=quorum_threshold)
-    outcome = table.evaluate(responses)
+    outcome = table.evaluate(
+        responses,
+        expected_hash=expected_hash,
+        require_candidate_hashes=require_candidate_hashes,
+    )
+    invalid_voters = table._invalid_voters(responses)
+    if invalid_voters:
+        return False, "INCOMPLETE", 0.0, f"unparseable verdict: {invalid_voters}"
     score = table.weighted_score(responses)
     consensus = outcome in {"UNANIMOUS", "QUALIFIED"}
     error = "material disagreement in candidate hashes" if outcome == "MATERIAL_DISAGREEMENT" else None
@@ -309,12 +394,19 @@ def _advance_general_state(
     quorum_policy: str,
     weights: dict[str, float] | None = None,
     quorum_threshold: float = 0.60,
+    *,
+    require_candidate_hashes: bool = False,
+    expected_hash: str | None = None,
 ) -> DebateState:
     if state.status != "in_progress":
         return state
     if quorum_policy.strip().casefold() == "weighted":
         consensus, _outcome, _score, error = evaluate_weighted_quorum(
-            turn.critic_responses, weights, quorum_threshold
+            turn.critic_responses,
+            weights,
+            quorum_threshold,
+            require_candidate_hashes=require_candidate_hashes,
+            expected_hash=expected_hash,
         )
     else:
         consensus, error = evaluate_quorum(turn.critic_responses, quorum_policy)
@@ -333,11 +425,11 @@ def _advance_general_state(
 
 
 @overload
-def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60) -> DebateSessionState: ...
+def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60, require_candidate_hashes: bool = False, expected_hash: str | None = None) -> DebateSessionState: ...
 
 
 @overload
-def advance_debate_state(state: DebateState, record: RoundTurnResult, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60) -> DebateState: ...
+def advance_debate_state(state: DebateState, record: RoundTurnResult, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60, require_candidate_hashes: bool = False, expected_hash: str | None = None) -> DebateState: ...
 
 
 def advance_debate_state(
@@ -347,10 +439,20 @@ def advance_debate_state(
     *,
     weights: dict[str, float] | None = None,
     quorum_threshold: float = 0.60,
+    require_candidate_hashes: bool = False,
+    expected_hash: str | None = None,
 ) -> DebateSessionState | DebateState:
     """Advance either supported immutable debate state without side effects."""
     if isinstance(state, DebateSessionState) and isinstance(record, DebateRoundRecord):
         return _advance_session_state(state, record)
     if isinstance(state, DebateState) and isinstance(record, RoundTurnResult):
-        return _advance_general_state(state, record, quorum_policy, weights, quorum_threshold)
+        return _advance_general_state(
+            state,
+            record,
+            quorum_policy,
+            weights,
+            quorum_threshold,
+            require_candidate_hashes=require_candidate_hashes,
+            expected_hash=expected_hash,
+        )
     raise TypeError("state and record must use the same debate state-machine API")

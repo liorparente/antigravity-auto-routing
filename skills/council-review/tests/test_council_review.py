@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import sys
 import tempfile
@@ -64,6 +65,12 @@ class CouncilReviewTDDTests(unittest.TestCase):
         assert veto is not None
         self.assertEqual(veto.provider, "codex")
         self.assertEqual(veto.finding["id"], "SEC-01")
+
+    def test_nonfinite_or_out_of_range_security_confidence_fails_closed(self) -> None:
+        handler = SecurityVetoHandler(["high"], 0.80)
+        for confidence in (math.nan, math.inf, -math.inf, 1.1, -0.1):
+            veto = handler.check([{"provider": "codex", "findings": [{"severity": "high", "confidence": confidence}]}])
+            self.assertIsNotNone(veto)
 
     # Slice 2: Dynamic Weights Bounds and Unknown Provider Filtering
     def test_dynamic_weights_clamping_and_filtering(self) -> None:
@@ -203,6 +210,84 @@ class ConsultationPolicyConfigTests(unittest.TestCase):
         self.assertEqual(policy["weighting"]["quorum_threshold"], 0.75)
         self.assertEqual(policy["weighting"]["min_weight"], 0.05)
         self.assertEqual(policy["providers"], DEFAULT_CONSULTATION_POLICY["providers"])
+
+    def test_loads_legacy_flat_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy-policy.json"
+            path.write_text(json.dumps({
+                "providers": [{"id": "local", "model": "test"}],
+                "weighting": {"quorum_threshold": 0.75},
+            }), encoding="utf-8")
+            policy = load_consultation_policy(path)
+            self.assertEqual(ReviewCouncil(policy_path=path).policy, policy)
+        self.assertEqual(policy["providers"], [{"id": "local", "model": "test"}])
+        self.assertEqual(policy["weighting"]["quorum_threshold"], 0.75)
+
+    def test_invalid_policy_values_revert_to_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routing-config.json"
+            path.write_text(json.dumps({"consultation_policy": {
+                "providers": {"not": "a list"},
+                "adjudicators": ["not a dict"],
+                "deadlines_seconds": {"round_1": True, "round_2": -1},
+                "weighting": {
+                    "quorum_threshold": True,
+                    "min_weight": 0.9,
+                    "max_weight": 0.2,
+                },
+                "security_veto": {"security_threshold": 1.2},
+            }}), encoding="utf-8")
+            policy = load_consultation_policy(path)
+        self.assertEqual(policy["providers"], DEFAULT_CONSULTATION_POLICY["providers"])
+        self.assertEqual(policy["adjudicators"], DEFAULT_CONSULTATION_POLICY["adjudicators"])
+        self.assertEqual(policy["deadlines_seconds"], DEFAULT_CONSULTATION_POLICY["deadlines_seconds"])
+        self.assertEqual(policy["weighting"]["quorum_threshold"], 0.60)
+        self.assertEqual(policy["weighting"]["min_weight"], 0.05)
+        self.assertEqual(policy["weighting"]["max_weight"], 0.65)
+        self.assertEqual(policy["security_veto"]["security_threshold"], 0.80)
+
+    def test_malformed_provider_mapping_and_consensus_policy_use_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routing-config.json"
+            path.write_text(json.dumps({"consultation_policy": {
+                "providers": [{"id": "codex", "model": "gpt-5.6-sol", "effort_mapping": {"high": 1}}],
+                "consensus_policy": ["UNANIMOUS", "MAYBE"],
+            }}), encoding="utf-8")
+            policy = load_consultation_policy(path)
+        self.assertEqual(policy["providers"], DEFAULT_CONSULTATION_POLICY["providers"])
+        self.assertEqual(policy["consensus_policy"], DEFAULT_CONSULTATION_POLICY["consensus_policy"])
+
+    def test_deep_schema_validation_reverts_each_invalid_field_to_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routing-config.json"
+            path.write_text(json.dumps({"consultation_policy": {
+                "providers": [{"id": "", "model": "model"}],
+                "adjudicators": [{"id": "local"}],
+                "deadlines_seconds": {"round_1": False, "round_2": -1, "round_3": 30},
+                "weighting": {
+                    "initial_weights": {"codex": float("nan")},
+                    "min_weight": float("inf"),
+                    "max_weight": 0.5,
+                    "quorum_threshold": float("nan"),
+                },
+                "security_veto": {
+                    "security_threshold": float("inf"),
+                    "veto_severities": ["high", ""],
+                },
+            }}), encoding="utf-8")
+            policy = load_consultation_policy(path)
+
+        self.assertEqual(policy["providers"], DEFAULT_CONSULTATION_POLICY["providers"])
+        self.assertEqual(policy["adjudicators"], DEFAULT_CONSULTATION_POLICY["adjudicators"])
+        self.assertEqual(policy["deadlines_seconds"]["round_1"], 120)
+        self.assertEqual(policy["deadlines_seconds"]["round_2"], 60)
+        self.assertEqual(policy["deadlines_seconds"]["round_3"], 30)
+        self.assertEqual(policy["weighting"]["initial_weights"], DEFAULT_CONSULTATION_POLICY["weighting"]["initial_weights"])
+        self.assertEqual(policy["weighting"]["min_weight"], 0.05)
+        self.assertEqual(policy["weighting"]["max_weight"], 0.5)
+        self.assertEqual(policy["weighting"]["quorum_threshold"], 0.60)
+        self.assertEqual(policy["security_veto"]["security_threshold"], 0.80)
+        self.assertEqual(policy["security_veto"]["veto_severities"], ["critical", "high"])
 
     def test_missing_config_file_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
