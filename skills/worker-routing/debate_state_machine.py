@@ -47,11 +47,12 @@ PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
 
 DEFAULT_VOTE_CONFIDENCE: dict[str, float] = {
     "approve": 1.0,
+    "approved": 1.0,
+    "unanimous": 1.0,
     "revise": -0.3,
     "block": -1.0,
     "abstain": 0.0,
 }
-NEGATIVE_LOSS_MULTIPLIER = 1.5
 VALID_CONSENSUS_OUTCOMES = frozenset({
     "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED",
 })
@@ -95,7 +96,7 @@ def _normalize_verdict(verdict: str | None) -> str | None:
     if not isinstance(verdict, str):
         return None
     normalized = verdict.strip().casefold()
-    if normalized in ("approve", "approved"):
+    if normalized in ("approve", "approved", "unanimous"):
         return "APPROVE"
     if normalized == "revise":
         return "REVISE"
@@ -185,7 +186,7 @@ class SecurityVetoHandler:
         self.enabled = enabled
 
     @staticmethod
-    def _confidence(finding: dict[str, Any]) -> float:
+    def _confidence(finding: Mapping[str, Any]) -> float:
         raw_confidence = finding.get("confidence", 1.0)
         if isinstance(raw_confidence, bool):
             return 1.0
@@ -305,10 +306,9 @@ class ConsensusTable:
         total_weight = total_weight if total_weight > 0 else float(len(votes))
         score = 0.0
         for vote, weight in zip(votes, effective_weights):
-            confidence = self._confidence(vote)
-            if confidence < 0:
-                confidence *= NEGATIVE_LOSS_MULTIPLIER
-            score += weight * confidence
+            verdict = _field(vote, "vote", _field(vote, "verdict", ""))
+            if _normalize_verdict(verdict) == "APPROVE":
+                score += weight * max(0.0, self._confidence(vote))
         return score / total_weight
 
     def evaluate(
@@ -337,7 +337,7 @@ class ConsensusTable:
         if score < self.quorum_threshold:
             return self._enforce_policy("UNRESOLVED")
         vote_names = [str(_field(vote, "vote", _field(vote, "verdict", ""))).strip().casefold() for vote in votes]
-        return self._enforce_policy("UNANIMOUS" if all(vote in {"approve", "approved"} for vote in vote_names) else "QUALIFIED")
+        return self._enforce_policy("UNANIMOUS" if all(_normalize_verdict(vote) == "APPROVE" for vote in vote_names) else "QUALIFIED")
 
 
 def evaluate_weighted_quorum(

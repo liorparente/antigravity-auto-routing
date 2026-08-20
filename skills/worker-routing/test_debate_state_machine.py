@@ -185,14 +185,20 @@ class DebateStateMachineTests(unittest.TestCase):
         self.assertEqual(state.status, "stalemate")
         self.assertEqual(state.stalemate_report.critic_b_position, "revise")
 
-    def test_consensus_table_scores_weights_defaults_and_negative_loss(self) -> None:
+    def test_consensus_table_scores_only_positive_approvals(self) -> None:
         table = machine.ConsensusTable(weights={"a": 3.0, "b": 1.0})
         votes = (
             {"provider": "a", "vote": "approve", "confidence": 2},
             {"provider": "b", "vote": "revise", "confidence": -2},
         )
-        # Confidence clamps to +/-1, and negative confidence carries a 1.5x loss.
-        self.assertEqual(table.weighted_score(votes), (3.0 - 1.5) / 4.0)
+        self.assertEqual(table.weighted_score(votes), 3.0 / 4.0)
+        self.assertEqual(table.weighted_score((
+            {"provider": "a", "vote": "unanimous", "confidence": 1.0},
+            {"provider": "b", "vote": "block", "confidence": 1.0},
+        )), 3.0 / 4.0)
+        self.assertEqual(table.weighted_score((
+            {"provider": "a", "vote": "approve", "confidence": -1.0},
+        )), 0.0)
         self.assertEqual(machine.ConsensusTable()._confidence({"vote": "revise"}), -0.3)
         self.assertEqual(machine.ConsensusTable()._confidence({"vote": "block"}), -1.0)
         self.assertEqual(machine.ConsensusTable()._confidence({"vote": "abstain"}), 0.0)

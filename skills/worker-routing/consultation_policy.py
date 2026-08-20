@@ -5,7 +5,7 @@ import json
 import math
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeGuard
 
 from debate_state_machine import VALID_CONSENSUS_OUTCOMES
 
@@ -79,7 +79,7 @@ def _merge_policy_defaults(
     return merged
 
 
-def _is_number(value: object) -> bool:
+def _is_number(value: object) -> TypeGuard[int | float]:
     return not isinstance(value, bool) and isinstance(value, (int, float))
 
 
@@ -127,6 +127,7 @@ def _validated_policy(configured: object) -> dict[str, Any]:
                 )
                 for entry in entries
             )
+            or len({entry["id"].strip() for entry in entries}) != len(entries)
         ):
             valid.pop(field)
 

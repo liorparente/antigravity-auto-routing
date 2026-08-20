@@ -218,6 +218,7 @@ class ExtractReviewPayloadTests(unittest.TestCase):
             '{"vote": "block"}\nNo SQL injection is present',
             '{"vote": "revise"}\nCVE-2026-1234 is resolved',
             '{"vote": "block"}\nThe query is parameterized against SQL injection',
+            '{"vote": "block"}\nThe source and resource paths are valid',
         )
 
         for output in cases:

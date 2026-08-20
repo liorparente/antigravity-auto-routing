@@ -314,6 +314,19 @@ class ConsultationPolicyConfigTests(unittest.TestCase):
         self.assertEqual(policy["providers"], DEFAULT_CONSULTATION_POLICY["providers"])
         self.assertEqual(policy["consensus_policy"], DEFAULT_CONSULTATION_POLICY["consensus_policy"])
 
+    def test_duplicate_provider_ids_use_safe_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "routing-config.json"
+            path.write_text(json.dumps({"consultation_policy": {
+                "providers": [
+                    {"id": "codex", "model": "gpt-5.6-sol"},
+                    {"id": "codex", "model": "gpt-5.6-terra"},
+                ],
+            }}), encoding="utf-8")
+            policy = load_consultation_policy(path)
+
+        self.assertEqual(policy["providers"], DEFAULT_CONSULTATION_POLICY["providers"])
+
     def test_deep_schema_validation_reverts_each_invalid_field_to_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "routing-config.json"

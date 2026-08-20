@@ -2983,7 +2983,9 @@ def run_advisory_consultation_debate(
         )
     else:
         stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
-    manifest_path = _write_panel_manifest("STALEMATE") if panel_mode else None
+    manifest_path: str | None = (
+        _write_panel_manifest("STALEMATE") if panel_mode else None
+    )
     return _result(
         "stalemate",
         stalemate=stalemate,

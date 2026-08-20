@@ -151,22 +151,25 @@ def extract_review_payload(
         return defaults
 
     normalized_text = raw_output.casefold()
-    security_indicators = (
-        "arbitrary file read",
-        "arbitrary file write",
-        "auth bypass",
-        "authentication bypass",
-        "command injection",
-        "critical severity",
-        "critical vulnerability",
-        "cve-",
-        "cwe-",
-        "high severity",
-        "privilege escalation",
-        "rce",
-        "remote code execution",
-        "sql injection",
-        "unauthorized access",
+    security_indicator_patterns = (
+        r"\barbitrary\s+file\s+read\b",
+        r"\barbitrary\s+file\s+write\b",
+        r"\bauth\s+bypass\b",
+        r"\bauthentication\s+bypass\b",
+        r"\bcommand\s+injection\b",
+        r"\bcritical\s+severity\b",
+        r"\bcritical\s+vulnerability\b",
+        r"\bcve-[a-z0-9][a-z0-9.-]*\b",
+        r"\bcwe-[a-z0-9][a-z0-9.-]*\b",
+        r"\bhigh\s+severity\b",
+        r"\bprivilege\s+escalation\b",
+        r"\brce\b",
+        r"\bremote\s+code\s+execution\b",
+        r"\bsql\s+injection\b",
+        r"\bunauthorized\s+access\b",
+    )
+    security_indicator_res = tuple(
+        re.compile(pattern) for pattern in security_indicator_patterns
     )
     security_term = (
         r"(?:critical\s+vulnerabilit(?:y|ies)|sql\s+injection|"
@@ -188,8 +191,8 @@ def extract_review_payload(
     def has_unnegated_security_indicator() -> bool:
         return any(
             any(
-                indicator in security_resolution_re.sub("", line)
-                for indicator in security_indicators
+                indicator.search(security_resolution_re.sub("", line))
+                for indicator in security_indicator_res
             )
             for line in normalized_text.splitlines()
         )
