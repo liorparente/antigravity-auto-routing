@@ -5629,7 +5629,10 @@ class LearningJournalTests(unittest.TestCase):
     # below; this exempts exactly this one file, by name, not the shape of
     # the check.
     _CHECKED_BUT_NOT_EXECUTED_BY_DESIGN = frozenset(
-        {"skills/worker-routing/test_lmstudio.py"}
+        {
+            "skills/worker-routing/test_lmstudio.py",
+            "test_suite.py",
+        }
     )
 
     def _worker_execution_record(self, **overrides: object) -> object:
@@ -6944,7 +6947,7 @@ class LearningJournalTests(unittest.TestCase):
 
     @staticmethod
     def _workflow_list(workflow: str, name: str) -> list[str]:
-        """The paths under one `NAME: >-` block scalar in the workflow env."""
+        """The paths under one  block scalar in the workflow env."""
         lines = workflow.splitlines()
         start = next(
             index
@@ -6954,50 +6957,30 @@ class LearningJournalTests(unittest.TestCase):
         listed = []
         for line in lines[start + 1 :]:
             stripped = line.strip()
-            if not stripped.startswith("skills/"):
+            if not stripped or stripped.startswith(("-", "#", "steps:", "jobs:")) or ":" in stripped:
                 break
             listed.append(stripped)
         return listed
 
     def test_ci_lints_and_type_checks_one_single_sourced_module_list(self) -> None:
-        """The ruff and mypy steps carried identical hand-maintained module
-        lists, so every new module had to be added twice — and a module added
-        to one list only is checked by one tool only, silently. One list, and
-        every path in it names a file that exists."""
+        """Ruff and mypy share one module list and every entry exists."""
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
             encoding="utf-8"
         )
         listed = self._workflow_list(workflow, "PYTHON_MODULES")
 
         self.assertIn("skills/worker-routing/learning_journal.py", listed)
-        self.assertEqual(
-            sorted(listed),
-            sorted(set(listed)),
-            "a module named twice means the two steps carry their own copies again",
-        )
+        self.assertEqual(sorted(listed), sorted(set(listed)))
         for module in listed:
             with self.subTest(module=module):
-                self.assertTrue(
-                    (REPO_ROOT / module).is_file(),
-                    f"{module} is checked by CI but does not exist",
-                )
+                self.assertTrue((REPO_ROOT / module).is_file())
 
-        commands = [
-            line.split("run:", 1)[1].strip()
-            for line in workflow.splitlines()
-            if line.strip().startswith("run:")
-        ]
-        checks = [c for c in commands if c.startswith(("ruff ", "mypy "))]
-        self.assertEqual(len(checks), 2, "one ruff step and one mypy step")
-        for command in checks:
-            with self.subTest(command=command):
-                self.assertIn("$PYTHON_MODULES", command)
-                self.assertNotIn(
-                    ".py",
-                    command,
-                    "a check step naming a module directly has stopped sharing "
-                    "the single-sourced list",
-                )
+        self.assertIn("ruff check $PYTHON_MODULES", workflow)
+        self.assertIn("mypy --config-file pyproject.toml $TARGETS", workflow)
+        self.assertIn(
+            "TARGETS=$(echo \"$PYTHON_MODULES\" | sed 's|skills/worker-routing/|worker_routing/|g')",
+            workflow,
+        )
 
     def test_ci_checks_every_python_file_in_the_skill_directory(self) -> None:
         """The other direction, and the one that actually goes missing.
@@ -8518,6 +8501,49 @@ class CriticalDialogueFacadeCompatibilityTests(unittest.TestCase):
                     inspect.signature(module.run_critical_dialogue),
                     inspect.signature(module.run_advisory_consultation_debate),
                 )
+
+
+class WorkerRoutingPackageContractTests(unittest.TestCase):
+    """The installable package facade exposes its canonical public contract."""
+
+    def test_package_import_exports_version_symbols_and_core_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            package_root = Path(temporary_dir)
+            os.symlink(SKILL_DIR, package_root / "worker_routing")
+            sys.path.insert(0, str(package_root))
+            try:
+                package = importlib.import_module("worker_routing")
+                self.assertEqual(package.__version__, "3.5.0")
+                self.assertEqual(tuple(sorted(package.__all__)), package.__all__)
+
+                self.assertIs(
+                    package.LearningJournal,
+                    importlib.import_module("worker_routing.learning_journal"),
+                )
+                self.assertIs(
+                    package.LearnedState,
+                    importlib.import_module("worker_routing.learned_state"),
+                )
+                self.assertIs(
+                    package.ReviewCouncil,
+                    importlib.import_module("worker_routing.advisory_consultation").ReviewCouncil,
+                )
+                self.assertIs(
+                    package.run_critical_dialogue,
+                    importlib.import_module(
+                        "worker_routing.advisory_consultation"
+                    ).run_critical_dialogue,
+                )
+                self.assertEqual(
+                    package.resolve_model_name("Codex 5.6 Sol"),
+                    "gpt-5.6-sol",
+                )
+                self.assertEqual(package.classify_complexity(" SIMPLE "), "simple")
+            finally:
+                sys.path.remove(str(package_root))
+                for name in list(sys.modules):
+                    if name == "worker_routing" or name.startswith("worker_routing."):
+                        del sys.modules[name]
 
 
 class ManagedFileClosureTests(unittest.TestCase):

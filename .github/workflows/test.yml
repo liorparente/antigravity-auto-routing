@@ -14,8 +14,10 @@ jobs:
     # only one of them, silently.
     env:
       PYTHON_MODULES: >-
+        skills/worker-routing/__init__.py
         skills/worker-routing/routing_check.py
         skills/worker-routing/test_routing.py
+        test_suite.py
         skills/worker-routing/agent_council.py
         skills/worker-routing/dialogue_contracts.py
         skills/worker-routing/dialogue_degradation.py
@@ -102,11 +104,19 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Symlink package for type-checking
+        run: ln -sfn skills/worker-routing worker_routing
+
       - name: Lint with ruff
         run: ruff check $PYTHON_MODULES
 
       - name: Type-check with mypy
-        run: mypy $PYTHON_MODULES
+        run: |
+          TARGETS=$(echo "$PYTHON_MODULES" | sed 's|skills/worker-routing/|worker_routing/|g')
+          mypy --config-file pyproject.toml $TARGETS
+
+      - name: Clean up type-checking symlink
+        run: rm -f worker_routing
 
       - name: Shellcheck installer and audit scripts
         run: shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh

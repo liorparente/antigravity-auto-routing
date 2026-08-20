@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "antigravity-auto-routing"
+version = "3.5.0"
+description = "Deterministic quality-first multi-agent orchestration and calibrated worker routing protocol."
+requires-python = ">=3.10"
+authors = [{ name = "Lior Parente" }]
+dependencies = []
+
+[tool.setuptools]
+package-dir = {"worker_routing" = "skills/worker-routing"}
+packages = ["worker_routing"]
+
+[tool.pytest.ini_options]
+testpaths = ["skills/worker-routing", "skills/council-review/tests"]
+python_files = ["test_*.py"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = ["N999"]
