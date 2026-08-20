@@ -1,9 +1,9 @@
 """Hermetic unit tests for pure debate orchestration state."""
 from __future__ import annotations
 
-import importlib.util
 import hashlib
 import hmac
+import importlib.util
 import io
 import json
 import os
@@ -119,6 +119,15 @@ class CriticResponsePayloadTests(unittest.TestCase):
                     critic_id, raw_response, model_name
                 )
                 self.assertEqual(response.critic_id, expected_identity)
+
+    def test_missing_candidate_hash_is_not_replaced_with_expected_hash(self) -> None:
+        response = debate_orchestrator._critic_response_from_payload(
+            "critic_a",
+            '{"vote": "approve", "confidence": 1.0}',
+            "Codex 5.6 Sol",
+        )
+
+        self.assertIsNone(response.candidate_hash)
 
 
 class DebateStateTests(unittest.TestCase):
@@ -313,6 +322,24 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         self.assertEqual(manifest["metadata"]["status"], expected_status)
         return manifest
 
+    def test_manifest_filename_sanitizes_run_id_without_changing_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_secret(root)
+
+            manifest_path = Path(
+                debate_orchestrator.write_council_manifest(
+                    "UNANIMOUS", "../unsafe/run:id", root
+                )
+            )
+
+            self.assertEqual(
+                manifest_path,
+                root / ".ralph" / "council-manifest-___unsafe_run_id.json",
+            )
+            manifest = self._assert_valid_manifest(str(manifest_path), "UNANIMOUS")
+            self.assertEqual(manifest["metadata"]["run_id"], "../unsafe/run:id")
+
     @staticmethod
     def _review_response(
         plan: str,
@@ -429,7 +456,12 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                 root = Path(tmp)
                 self._write_secret(root)
 
-                def invoker(model: str, _effort: str, prompt: str) -> str:
+                def invoker(
+                    model: str,
+                    _effort: str,
+                    prompt: str,
+                    panel_status: str = panel_status,
+                ) -> str:
                     if "You are the Planner" in prompt:
                         return "Proposed plan"
                     if panel_status == "UNRESOLVED":
@@ -522,7 +554,9 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                 root = Path(tmp)
                 self._write_secret(root)
 
-                def invoker(model: str, _effort: str, prompt: str) -> str:
+                def invoker(
+                    model: str, _effort: str, prompt: str, failure: str = failure
+                ) -> str:
                     if "You are the Planner" in prompt:
                         return "Proposed plan"
                     if failure == "worker_error" and "Codex" in model:
@@ -578,7 +612,12 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             with self.subTest(outcome=expected_outcome), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
 
-                def invoker(_model: str, _effort: str, prompt: str) -> str:
+                def invoker(
+                    _model: str,
+                    _effort: str,
+                    prompt: str,
+                    verdict: str = verdict,
+                ) -> str:
                     if "You are the Planner" in prompt:
                         return "Proposed plan"
                     return self._review_response(

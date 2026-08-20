@@ -639,6 +639,44 @@ class ProtocolSyncTests(unittest.TestCase):
                 self.assertTrue(installed_protocol.exists(), installed_protocol)
                 self.assertEqual(installed_protocol.read_text(), protocol_text)
 
+    def test_install_sh_synchronizes_council_review_and_removes_legacy_policy(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+            worker_targets = _target_dirs(
+                INSTALL_SH,
+                home=fake_home,
+                target_project_dir=target_dir,
+            )
+            council_targets = tuple(
+                target.parent / "council-review" for target in worker_targets
+            )
+            for council_target in council_targets:
+                legacy_policy = council_target / "references" / "council-policy.json"
+                legacy_policy.parent.mkdir(parents=True, exist_ok=True)
+                legacy_policy.write_text("{}\n", encoding="utf-8")
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertEqual(
+                        (council_target / "SKILL.md").read_text(encoding="utf-8"),
+                        (
+                            REPO_ROOT / "skills" / "council-review" / "SKILL.md"
+                        ).read_text(encoding="utf-8"),
+                    )
+                    self.assertTrue(
+                        (council_target / "scripts" / "council_review.py").exists()
+                    )
+                    self.assertFalse(
+                        (council_target / "references" / "council-policy.json").exists()
+                    )
+
     def test_install_sh_merges_missing_consultation_policy_into_custom_config(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             missing_policy_dir = (
@@ -998,6 +1036,11 @@ class LearnedStatePropagationTests(unittest.TestCase):
         worker_routing_dir.mkdir(parents=True)
         for name in [*_bash_array(INSTALL_SH, "MANAGED_FILES"), "routing-config.json"]:
             shutil.copy(SKILL_DIR / name, worker_routing_dir / name)
+        shutil.copytree(
+            REPO_ROOT / "skills" / "council-review",
+            source_root / "skills" / "council-review",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
         return source_root
 
     def _adopt(self, source_root: Path, **document_contents: str) -> None:
@@ -1919,7 +1962,9 @@ def _approve(artifact_text: str, note: str = "Looks solid.") -> str:
     `VerdictContractParserTests` and build their response text by hand,
     per spec 0003's pinned exception for VerdictContract parse behavior.
     """
-    return f'{note}\nQUOTE: "{artifact_text}"\nVERDICT: APPROVE'
+    candidate_hash = hashlib.sha256(artifact_text.encode("utf-8")).hexdigest()
+    payload = json.dumps({"candidate_hash": candidate_hash})
+    return f'{payload}\n{note}\nQUOTE: "{artifact_text}"\nVERDICT: APPROVE'
 
 
 def _revise(note: str) -> str:
@@ -1952,7 +1997,9 @@ def _approve_fixture(
     quote verification actually requires for `verified_quote_count >= 1`.
     """
     quotable_line = fixture.plan_text.splitlines()[0]
-    return f'{note}\nQUOTE: "{quotable_line}"\nVERDICT: APPROVE'
+    candidate_hash = hashlib.sha256(fixture.plan_text.encode("utf-8")).hexdigest()
+    payload = json.dumps({"candidate_hash": candidate_hash})
+    return f'{payload}\n{note}\nQUOTE: "{quotable_line}"\nVERDICT: APPROVE'
 
 
 def _reachable(*families: str) -> IsFamilyReachable:

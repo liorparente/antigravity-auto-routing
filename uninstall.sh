@@ -14,6 +14,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
+COUNCIL_SRC_DIR="$SCRIPT_DIR/skills/council-review"
 
 TARGET_PROJECT_DIR="${1:-.}"
 if [ ! -d "$TARGET_PROJECT_DIR" ]; then
@@ -116,6 +117,32 @@ echo "---"
 #    resolves to "$HOME" itself. Each removal is echoed as it happens.
 for i in "${!TARGET_DIRS[@]}"; do
     target_dir="${TARGET_DIRS[$i]}"
+    council_target_dir="$(dirname "$target_dir")/council-review"
+    if [ -d "$council_target_dir" ]; then
+        if [ -d "$COUNCIL_SRC_DIR" ]; then
+            while IFS= read -r -d '' council_file; do
+                relative="${council_file#"$COUNCIL_SRC_DIR/"}"
+                rm -f "$council_target_dir/$relative"
+            done < <(
+                find "$COUNCIL_SRC_DIR" -type f \
+                    ! -path '*/__pycache__/*' \
+                    ! -name '*.pyc' \
+                    -print0 | LC_ALL=C sort -z
+            )
+        fi
+        rm -f \
+            "$council_target_dir/council-policy.json" \
+            "$council_target_dir/references/council-policy.json"
+        while IFS= read -r -d '' council_dir; do
+            rmdir "$council_dir" 2>/dev/null || true
+        done < <(find "$council_target_dir" -depth -type d -print0)
+        if [ -d "$council_target_dir" ]; then
+            echo "✅ Removed council-review skill files from $council_target_dir " \
+                "(other content preserved)"
+        else
+            echo "✅ Removed $council_target_dir"
+        fi
+    fi
     if [ -d "$target_dir" ]; then
         for installed_file in "${INSTALLED_FILES[@]}"; do
             rm -f "$target_dir/$installed_file"

@@ -179,6 +179,35 @@ class ExtractReviewPayloadTests(unittest.TestCase):
                     payload["findings"],
                 )
 
+    def test_additional_security_indicators_populate_fail_closed_finding(self) -> None:
+        indicators = (
+            "remote code execution",
+            "rce",
+            "command injection",
+            "privilege escalation",
+            "auth bypass",
+            "authentication bypass",
+            "unauthorized access",
+            "arbitrary file read",
+            "arbitrary file write",
+            "high severity",
+            "critical severity",
+        )
+
+        for indicator in indicators:
+            with self.subTest(indicator=indicator):
+                payload = production_invoker.extract_review_payload(
+                    f'{{"vote": "revise"}}\n{indicator} remains exploitable'
+                )
+                self.assertIn(
+                    "PROSE-VETO",
+                    [
+                        finding.get("id")
+                        for finding in payload["findings"]
+                        if isinstance(finding, dict)
+                    ],
+                )
+
     def test_benign_security_prose_does_not_populate_prose_veto(self) -> None:
         cases = (
             "SQL injection is prevented by query parameterization",

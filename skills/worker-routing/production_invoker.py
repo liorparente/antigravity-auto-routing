@@ -133,7 +133,7 @@ class WorkerExecutionResult:
 
 
 def extract_review_payload(
-    raw_output: str, *, default_candidate_hash: str = "synth1"
+    raw_output: str, *, default_candidate_hash: str | None = "synth1"
 ) -> dict[str, Any]:
     """Extract a normalized review payload from worker stdout.
 
@@ -152,10 +152,21 @@ def extract_review_payload(
 
     normalized_text = raw_output.casefold()
     security_indicators = (
+        "arbitrary file read",
+        "arbitrary file write",
+        "auth bypass",
+        "authentication bypass",
+        "command injection",
+        "critical severity",
         "critical vulnerability",
-        "sql injection",
-        "cwe-",
         "cve-",
+        "cwe-",
+        "high severity",
+        "privilege escalation",
+        "rce",
+        "remote code execution",
+        "sql injection",
+        "unauthorized access",
     )
     security_term = (
         r"(?:critical\s+vulnerabilit(?:y|ies)|sql\s+injection|"

@@ -5,11 +5,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
+COUNCIL_SRC_DIR="$SCRIPT_DIR/skills/council-review"
 PROTOCOL_SRC="$SRC_DIR/protocol.md"
 TARGET_PROJECT_DIR="${1:-.}"
 
-if [ ! -d "$TARGET_PROJECT_DIR" ] || [ ! -r "$PROTOCOL_SRC" ]; then
-    echo "❌ Target project or protocol source is unavailable." >&2
+if [ ! -d "$TARGET_PROJECT_DIR" ] \
+    || [ ! -r "$PROTOCOL_SRC" ] \
+    || [ ! -d "$COUNCIL_SRC_DIR" ]; then
+    echo "❌ Target project, protocol source, or council-review source is unavailable." \
+        >&2
     exit 1
 fi
 TARGET_PROJECT_DIR="$(cd "$TARGET_PROJECT_DIR" && pwd)"
@@ -204,6 +208,22 @@ for file in "${MANAGED_FILES[@]}"; do
     cp "$SRC_DIR/$file" "$STAGING_DIR/files/$file"
 done
 
+# Stage the complete Council Review skill alongside worker-routing. Ignore
+# interpreter caches, which are runtime artifacts rather than installable
+# skill content. Relative paths are retained so scripts, references, tests,
+# and agent metadata reach the same sibling skill directory in every harness.
+mkdir -p "$STAGING_DIR/council-review"
+while IFS= read -r -d '' council_file; do
+    relative="${council_file#"$COUNCIL_SRC_DIR/"}"
+    mkdir -p "$STAGING_DIR/council-review/$(dirname "$relative")"
+    cp "$council_file" "$STAGING_DIR/council-review/$relative"
+done < <(
+    find "$COUNCIL_SRC_DIR" -type f \
+        ! -path '*/__pycache__/*' \
+        ! -name '*.pyc' \
+        -print0 | LC_ALL=C sort -z
+)
+
 # Adopted learned state (spec 0004 ticket 23) joins the same atomic
 # staging/sync mechanism as every other managed artifact rather than getting
 # a second, parallel one. `learned_state.py`'s `root_dir` for this repo's own
@@ -315,6 +335,26 @@ for target_dir in "${TARGET_DIRS[@]}"; do
             copy_managed "$version_file" "$target_dir/$LEARNED_STATE_RELATIVE/versions/$relative"
         done < <(find "$STAGING_DIR/learned-state/versions" -type f -print0 | LC_ALL=C sort -z)
     fi
+
+    council_target_dir="$(dirname "$target_dir")/council-review"
+    while IFS= read -r -d '' council_file; do
+        relative="${council_file#"$STAGING_DIR/council-review/"}"
+        copy_managed "$council_file" "$council_target_dir/$relative"
+    done < <(
+        find "$STAGING_DIR/council-review" -type f -print0 | LC_ALL=C sort -z
+    )
+
+    # council-policy.json was superseded by worker-routing/routing-config.json.
+    # Remove both historic placements transactionally so a failed install can
+    # restore an existing legacy policy exactly as it was.
+    for legacy_policy in \
+        "$council_target_dir/council-policy.json" \
+        "$council_target_dir/references/council-policy.json"; do
+        if [ -e "$legacy_policy" ]; then
+            snapshot_file "$legacy_policy"
+            rm -f "$legacy_policy"
+        fi
+    done
 done
 
 atomic_copy "$STAGING_DIR/claude-rule.md" "$CLAUDE_RULE"

@@ -328,7 +328,10 @@ def write_council_manifest(
     events: Sequence[dict[str, Any]] | None = None,
 ) -> str:
     """Atomically write an HMAC-signed CouncilPanel manifest and return its path."""
-    manifest_path = Path(workspace_root) / ".ralph" / f"council-manifest-{run_id}.json"
+    sanitized_run_id = re.sub(r"[^a-zA-Z0-9_-]", "_", run_id)
+    manifest_path = (
+        Path(workspace_root) / ".ralph" / f"council-manifest-{sanitized_run_id}.json"
+    )
     manifest: dict[str, Any] = {
         "metadata": {"status": status, "run_id": run_id},
         "events": _manifest_json_value(list(events or ())),
@@ -597,12 +600,11 @@ def _critic_response_from_payload(
     critic_id: str,
     raw_response: str,
     model_name: str | None = None,
-    *,
-    default_candidate_hash: str = "synth1",
 ) -> CriticResponse:
     """Build the state-machine vote used by veto and panel manifest policy."""
     payload = _production_invoker.extract_review_payload(
-        raw_response, default_candidate_hash=default_candidate_hash
+        raw_response,
+        default_candidate_hash=None,
     )
     findings = payload.get("findings", ())
     if not isinstance(findings, (list, tuple)):
@@ -2809,13 +2811,11 @@ def run_advisory_consultation_debate(
                 "critic_a",
                 critic_a_response,
                 critic_a_model,
-                default_candidate_hash=candidate_hash,
             )
             critic_b_resp = _critic_response_from_payload(
                 "critic_b",
                 critic_b_response,
                 critic_b_model,
-                default_candidate_hash=candidate_hash,
             )
             # Same VerdictContract parser (ticket 02), applied independently
             # to each Critic's response, both checked against the same
