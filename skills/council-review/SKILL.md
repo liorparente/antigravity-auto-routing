@@ -14,9 +14,9 @@ The Council Review skill implements a formalized multi-agent peer review system.
 - **Verifiable Artifacts**: Generates structured, deterministic review reports mapped back to the origin branch.
 
 ## Architecture
-- `scripts/council_review.py`: Main orchestration logic and file aggregation.
+- `scripts/council_review.py`: Compatibility facade for the unified debate orchestrator.
 - `scripts/provider_adapters.py`: CLI adapters for Claude, Codex, and Antigravity.
-- `references/council-policy.json`: The rules and timeouts the council must follow.
+- `skills/worker-routing/routing-config.json`: The shared rules and timeouts the council must follow.
 - `agents/openai.yaml`: Standard agent manifest format.
 
 ## Usage

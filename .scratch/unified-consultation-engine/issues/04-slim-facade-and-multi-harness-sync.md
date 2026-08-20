@@ -4,9 +4,9 @@
 
 **Blocked by:** 03 — Universal Security Veto & Selective HMAC Manifest Signing in `debate_orchestrator.py`
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Reduce `skills/council-review/scripts/council_review.py` to a thin facade under 30 lines.
-- [ ] Ensure all 12 tests in `skills/council-review/tests/test_council_review.py` pass.
-- [ ] Ensure all 1,010 tests in `skills/worker-routing/` pass.
-- [ ] Run `./install.sh .` and verify clean multi-harness sync.
+- [x] Reduce `skills/council-review/scripts/council_review.py` to a thin facade under 30 lines.
+- [x] Ensure all 12 tests in `skills/council-review/tests/test_council_review.py` pass.
+- [x] Ensure all 1,010 tests in `skills/worker-routing/` pass.
+- [x] Run `./install.sh .` and verify clean multi-harness sync.
