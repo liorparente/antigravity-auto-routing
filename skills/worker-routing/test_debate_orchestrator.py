@@ -394,7 +394,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
 
     def test_panel_consensus_manifests_record_genuine_status_and_are_signed(self) -> None:
         cases = (
-            ("UNANIMOUS", None),
+            ("UNANIMOUS", None, "consensus", "UNANIMOUS"),
             (
                 "QUALIFIED",
                 {
@@ -406,6 +406,8 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                         "quorum_threshold": 0.7,
                     },
                 },
+                "consensus",
+                "QUALIFIED",
             ),
             (
                 "UNRESOLVED",
@@ -418,21 +420,23 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                         "quorum_threshold": 0.7,
                     },
                 },
+                "stalemate",
+                "STALEMATE",
             ),
         )
-        for expected_status, policy in cases:
-            with self.subTest(status=expected_status), tempfile.TemporaryDirectory() as tmp:
+        for panel_status, policy, expected_outcome, manifest_status in cases:
+            with self.subTest(status=panel_status), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 self._write_secret(root)
 
                 def invoker(model: str, _effort: str, prompt: str) -> str:
                     if "You are the Planner" in prompt:
                         return "Proposed plan"
-                    if expected_status == "UNRESOLVED":
+                    if panel_status == "UNRESOLVED":
                         return self._review_response(
                             "Proposed plan", vote="revise", verdict="APPROVE", confidence=0.0
                         )
-                    if expected_status == "QUALIFIED" and "Gemini" in model:
+                    if panel_status == "QUALIFIED" and "Gemini" in model:
                         return self._review_response(
                             "Proposed plan", vote="revise", verdict="APPROVE", confidence=0.0
                         )
@@ -447,8 +451,8 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                     consultation_policy=policy,
                 )
 
-                self.assertEqual(result.outcome, "consensus")
-                self._assert_valid_manifest(result.manifest_path, expected_status)
+                self.assertEqual(result.outcome, expected_outcome)
+                self._assert_valid_manifest(result.manifest_path, manifest_status)
 
     def test_panel_stalemate_manifest_is_signed(self) -> None:
         def invoker(_model: str, _effort: str, prompt: str) -> str:

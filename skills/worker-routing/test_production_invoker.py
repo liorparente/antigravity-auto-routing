@@ -139,19 +139,52 @@ class ExtractReviewPayloadTests(unittest.TestCase):
 
     def test_invalid_or_non_object_json_uses_text_heuristics(self) -> None:
         cases = (
-            ("{not valid} critical concern", "block", -1.0),
-            ("[1, 2] changes requested", "revise", -0.3),
-            ("plain output: approve", "approve", 1.0),
-            ("unstructured output", "approve", 1.0),
+            ("{not valid} critical concern", "block", -1.0, True),
+            ("[1, 2] changes requested", "revise", -0.3, False),
+            ("plain output: approve", "approve", 1.0, False),
+            ("unstructured output", "approve", 1.0, False),
         )
 
-        for output, vote, confidence in cases:
+        for output, vote, confidence, has_veto in cases:
             with self.subTest(output=output):
                 payload = production_invoker.extract_review_payload(output)
                 self.assertEqual(payload["vote"], vote)
                 self.assertEqual(payload["confidence"], confidence)
-                self.assertEqual(payload["findings"], [])
+                if has_veto:
+                    self.assertEqual(payload["findings"][0]["id"], "PROSE-VETO")
+                    self.assertEqual(payload["findings"][0]["severity"], "critical")
+                else:
+                    self.assertEqual(payload["findings"], [])
                 self.assertEqual(payload["candidate_hash"], "synth1")
+
+    def test_security_prose_and_structured_block_populate_fail_closed_finding(self) -> None:
+        cases = (
+            "Critical vulnerability found in request validation",
+            "Possible SQL injection in the query builder",
+            "CWE-89 applies here",
+            "CVE-2026-1234 is exploitable",
+            '{"vote": "block", "findings": []}',
+        )
+
+        for output in cases:
+            with self.subTest(output=output):
+                payload = production_invoker.extract_review_payload(output)
+                self.assertIn(
+                    {
+                        "id": "PROSE-VETO",
+                        "severity": "critical",
+                        "confidence": 1.0,
+                        "claim": "Critical security finding detected in review prose",
+                    },
+                    payload["findings"],
+                )
+
+    def test_revised_plan_prose_does_not_become_a_revise_vote(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            'QUOTE: "Planner\'s revised plan."\nVERDICT: APPROVE'
+        )
+
+        self.assertEqual(payload["vote"], "approve")
 
 
 class BuildWorkerCommandTests(unittest.TestCase):

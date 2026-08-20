@@ -44,6 +44,7 @@ def _load_sibling(name: str) -> Any:
 
 try:
     from dialogue_contracts import (
+        AdvisoryOutcome,
         AdvisoryRoundVerdict,
         CriticVerdict,
         VerdictContractResult,
@@ -53,6 +54,7 @@ except ModuleNotFoundError as exc:
         raise
     _load_sibling("dialogue_contracts")
     from dialogue_contracts import (
+        AdvisoryOutcome,
         AdvisoryRoundVerdict,
         CriticVerdict,
         VerdictContractResult,
@@ -77,10 +79,6 @@ except ModuleNotFoundError as exc:
 DEGRADED_INDEPENDENCE_MARKER = "DEGRADED INDEPENDENCE"
 CANARY_MARKER = "CANARY DIALOGUE"
 
-AdvisoryOutcome = Literal[
-    "consensus", "stalemate", "unparseable_verdict", "worker_error",
-    "sensitivity_halt", "security_halt", "canary", "budget_skipped",
-]
 CanaryResult = Literal["catch", "miss"]
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
 RosterTopology = Literal["pair", "panel"]

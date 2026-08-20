@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import hmac
 import importlib.util
 import json
 import os
@@ -29,9 +28,12 @@ def _load_worker_routing_module(module_name: str) -> Any:
 
 _debate_state_machine = _load_worker_routing_module("debate_state_machine")
 _consultation_policy = _load_worker_routing_module("consultation_policy")
+_debate_orchestrator = _load_worker_routing_module("debate_orchestrator")
 ConsensusTable = _debate_state_machine.ConsensusTable
 SecurityVeto = _debate_state_machine.SecurityVeto
 SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
+resolve_hmac_secret = _debate_orchestrator.resolve_hmac_secret
+write_council_manifest = _debate_orchestrator.write_council_manifest
 
 ROUTING_CONFIG_PATH = _consultation_policy.ROUTING_CONFIG_PATH
 DEFAULT_CONSULTATION_POLICY = _consultation_policy.DEFAULT_CONSULTATION_POLICY
@@ -71,23 +73,7 @@ class ReviewCouncil:
     def __init__(self, policy_path: str | Path = ROUTING_CONFIG_PATH) -> None:
         self.policy = load_consultation_policy(Path(policy_path))
 
-    def _resolve_secret(self, workspace_root: str) -> bytes:
-        # Check AGY_CALIBRATION_SECRET or COUNCIL_REVIEW_SECRET
-        for env_var in ["AGY_CALIBRATION_SECRET", "COUNCIL_REVIEW_SECRET"]:
-            if env_var in os.environ and os.environ[env_var].strip():
-                return os.environ[env_var].strip().encode()
-
-        cal_key_path = os.path.join(workspace_root or ".", ".ralph", "cache", "calibration.key")
-        if os.path.isfile(cal_key_path):
-            with open(cal_key_path, "rb") as f:
-                content = f.read().strip()
-                if content:
-                    return content
-
-        raise RuntimeError(
-            "Council HMAC secret resolution failed: AGY_CALIBRATION_SECRET is unset "
-            "and no workspace key found at .ralph/cache/calibration.key."
-        )
+    _resolve_secret = staticmethod(resolve_hmac_secret)
 
     def _load_weights(self, workspace_root: str) -> dict[str, float]:
         weighting = self.policy.get("weighting", {})
@@ -168,30 +154,7 @@ class ReviewCouncil:
                 valid_results.append(r)
         return valid_results
 
-    def _write_manifest(
-        self, status: str, run_id: str, workspace_root: str, security_veto: SecurityVeto | None = None
-    ) -> str:
-        manifest_path = os.path.join(workspace_root, ".ralph", f"council-manifest-{run_id}.json")
-        os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
-
-        manifest: dict[str, Any] = {
-            "metadata": {"status": status, "run_id": run_id},
-            "events": [],
-        }
-        if security_veto:
-            manifest["security_veto"] = {
-                "provider": security_veto.provider,
-                "finding": security_veto.finding,
-            }
-
-        canonical = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode()
-        secret = self._resolve_secret(workspace_root)
-        manifest["council_hmac"] = hmac.new(secret, canonical, hashlib.sha256).hexdigest()
-
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
-
-        return manifest_path
+    _write_manifest = staticmethod(write_council_manifest)
 
     async def review(
         self, request: ReviewRequest, custom_adapters: Sequence[ReviewerAdapter] | None = None

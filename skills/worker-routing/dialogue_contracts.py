@@ -19,6 +19,16 @@ from dataclasses import dataclass
 from typing import Literal
 
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
+AdvisoryOutcome = Literal[
+    "consensus",
+    "stalemate",
+    "unparseable_verdict",
+    "worker_error",
+    "sensitivity_halt",
+    "security_halt",
+    "canary",
+    "budget_skipped",
+]
 
 
 @dataclass(frozen=True)

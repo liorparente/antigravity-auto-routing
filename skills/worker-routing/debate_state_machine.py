@@ -131,6 +131,13 @@ class CriticResponse:
         object.__setattr__(self, "findings", tuple(_deep_freeze(finding) for finding in self.findings))
 
 
+def _field(
+    vote: dict[str, Any] | CriticResponse, name: str, default: Any = None
+) -> Any:
+    """Read a field from either supported critic-vote representation."""
+    return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
+
+
 class SecurityVeto(Exception):
     """A unilateral security finding that halts a consultation."""
 
@@ -178,12 +185,6 @@ class SecurityVetoHandler:
         self.enabled = enabled
 
     @staticmethod
-    def _field(
-        vote: dict[str, Any] | CriticResponse, name: str, default: Any = None
-    ) -> Any:
-        return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
-
-    @staticmethod
     def _confidence(finding: dict[str, Any]) -> float:
         raw_confidence = finding.get("confidence", 1.0)
         if isinstance(raw_confidence, bool):
@@ -203,7 +204,7 @@ class SecurityVetoHandler:
         if not self.enabled:
             return None
         for vote in votes:
-            findings = self._field(vote, "findings", ())
+            findings = _field(vote, "findings", ())
             if not isinstance(findings, (list, tuple)):
                 continue
             for finding in findings:
@@ -214,10 +215,10 @@ class SecurityVetoHandler:
                     continue
                 if self._confidence(finding) >= self.security_threshold:
                     provider = str(
-                        self._field(
+                        _field(
                             vote,
                             "provider",
-                            self._field(vote, "critic_id", "unknown"),
+                            _field(vote, "critic_id", "unknown"),
                         )
                         or "unknown"
                     )
@@ -260,15 +261,11 @@ class ConsensusTable:
                 threshold = 0.60
         self.quorum_threshold = threshold if math.isfinite(threshold) and 0.0 <= threshold <= 1.0 else 0.60
 
-    @staticmethod
-    def _field(vote: dict[str, Any] | CriticResponse, name: str, default: Any = None) -> Any:
-        return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
-
     def _confidence(self, vote: dict[str, Any] | CriticResponse) -> float:
-        verdict = self._field(vote, "vote", self._field(vote, "verdict", ""))
+        verdict = _field(vote, "vote", _field(vote, "verdict", ""))
         if _normalize_verdict(verdict) is None:
             return 0.0
-        confidence = self._field(vote, "confidence")
+        confidence = _field(vote, "confidence")
         if confidence is None:
             confidence = DEFAULT_VOTE_CONFIDENCE.get(str(verdict).strip().casefold(), 0.0)
         try:
@@ -280,14 +277,14 @@ class ConsensusTable:
         return max(-1.0, min(1.0, value))
 
     def _identity(self, vote: dict[str, Any] | CriticResponse) -> str:
-        return str(self._field(vote, "provider", self._field(vote, "critic_id", "")) or "")
+        return str(_field(vote, "provider", _field(vote, "critic_id", "")) or "")
 
     def invalid_voters(
         self, votes: Sequence[dict[str, Any] | CriticResponse]
     ) -> tuple[str, ...]:
         invalid = []
         for vote in votes:
-            verdict = self._field(vote, "vote", self._field(vote, "verdict", ""))
+            verdict = _field(vote, "vote", _field(vote, "verdict", ""))
             if _normalize_verdict(verdict) is None:
                 invalid.append(f"{self._identity(vote)}={verdict}")
         return tuple(invalid)
@@ -322,7 +319,7 @@ class ConsensusTable:
     ) -> str:
         if not votes or any(not self._identity(vote) for vote in votes) or self.invalid_voters(votes):
             return self._enforce_policy("INCOMPLETE")
-        hashes = [self._field(vote, "candidate_hash") for vote in votes]
+        hashes = [_field(vote, "candidate_hash") for vote in votes]
         ratification_required = (
             expected_hash is not None
             or require_candidate_hashes
@@ -339,7 +336,7 @@ class ConsensusTable:
         score = self.weighted_score(votes)
         if score < self.quorum_threshold:
             return self._enforce_policy("UNRESOLVED")
-        vote_names = [str(self._field(vote, "vote", self._field(vote, "verdict", ""))).strip().casefold() for vote in votes]
+        vote_names = [str(_field(vote, "vote", _field(vote, "verdict", ""))).strip().casefold() for vote in votes]
         return self._enforce_policy("UNANIMOUS" if all(vote in {"approve", "approved"} for vote in vote_names) else "QUALIFIED")
 
 

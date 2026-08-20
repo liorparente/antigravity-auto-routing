@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from dialogue_contracts import (
+        AdvisoryOutcome,
         AdvisoryResolutionOption,
         AdvisoryRoundVerdict,
         AdvisoryStalemateReport,
@@ -206,16 +207,7 @@ InvokeWorker = Callable[[str, str, str], str]
 # than silently getting "no dialogue happened" with no trace. See
 # `resolve_degradation_rung` below for the pure decision this outcome is
 # reported for.
-AdvisoryOutcome = Literal[
-    "consensus",
-    "stalemate",
-    "unparseable_verdict",
-    "worker_error",
-    "sensitivity_halt",
-    "security_halt",
-    "canary",
-    "budget_skipped",
-]
+AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
 
 # Spec 0004 ticket 25 (fix pass 2): the occasions whose artifact under debate
 # is actually a plan. "ambiguity" and "plan-review" both debate a Planner's
@@ -2582,19 +2574,44 @@ def run_advisory_consultation_debate(
                 panel_status = panel_consensus_table.evaluate(
                     (critic_a_resp, critic_b_resp)
                 )
-                manifest_path = _write_panel_manifest(panel_status)
-                panel_write_error: str | None = None
-                try:
-                    _atomic_text_write(plan_path, state.final_plan or planner_plan)
-                except OSError as exc:
-                    panel_write_error = (
-                        f"failed to write plan artifact at {plan_path}: {exc}"
+                if panel_status in {"UNANIMOUS", "QUALIFIED"}:
+                    manifest_path = _write_panel_manifest(panel_status)
+                    panel_write_error: str | None = None
+                    try:
+                        _atomic_text_write(plan_path, state.final_plan or planner_plan)
+                    except OSError as exc:
+                        panel_write_error = (
+                            f"failed to write plan artifact at {plan_path}: {exc}"
+                        )
+                    return _result(
+                        "consensus",
+                        final_plan=state.final_plan or planner_plan,
+                        error=panel_write_error,
+                        manifest_path=manifest_path,
                     )
-                return _result(
-                    "consensus",
-                    final_plan=state.final_plan or planner_plan,
-                    error=panel_write_error,
-                    manifest_path=manifest_path,
+
+                if _round_number >= max_rounds:
+                    cleanup_error = _remove_stale_plan_artifact(plan_path)
+                    state = dataclasses.replace(
+                        state,
+                        consensus_reached=False,
+                        final_plan=None,
+                        stalemate_report=_build_stalemate_report(
+                            planner_plan, critic_a_response, critic_b_response
+                        ),
+                    )
+                    manifest_path = _write_panel_manifest("STALEMATE")
+                    return _result(
+                        "stalemate",
+                        stalemate=state.stalemate_report,
+                        manifest_path=manifest_path,
+                        error=cleanup_error,
+                    )
+
+                state = dataclasses.replace(
+                    state,
+                    consensus_reached=False,
+                    final_plan=None,
                 )
 
             if state.stalemate_report is not None:

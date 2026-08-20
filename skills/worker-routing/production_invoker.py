@@ -150,6 +150,37 @@ def extract_review_payload(
     if not raw_output.strip():
         return defaults
 
+    normalized_text = raw_output.casefold()
+    security_indicators = (
+        "security_halt",
+        "critical vulnerability",
+        "sql injection",
+        "cwe-",
+        "cve-",
+    )
+
+    def populate_prose_veto(payload: dict[str, Any]) -> dict[str, Any]:
+        if (
+            str(payload.get("vote", "")).casefold() == "block"
+            or any(indicator in normalized_text for indicator in security_indicators)
+        ):
+            prose_veto = {
+                "id": "PROSE-VETO",
+                "severity": "critical",
+                "confidence": 1.0,
+                "claim": "Critical security finding detected in review prose",
+            }
+            findings = payload.get("findings")
+            if not isinstance(findings, list):
+                findings = []
+            if not any(
+                isinstance(finding, dict) and finding.get("id") == "PROSE-VETO"
+                for finding in findings
+            ):
+                findings = [*findings, prose_veto]
+            payload["findings"] = findings
+        return payload
+
     decoder = json.JSONDecoder()
     for match in re.finditer(r"\{", raw_output):
         try:
@@ -170,14 +201,14 @@ def extract_review_payload(
                 result["findings"] = []
             if not isinstance(result["candidate_hash"], str):
                 result["candidate_hash"] = default_candidate_hash
-            return result
+            return populate_prose_veto(result)
 
-    text = raw_output.lower()
+    text = normalized_text
     if any(keyword in text for keyword in ("block", "security_halt", "critical")):
-        return {**defaults, "vote": "block", "confidence": -1.0}
-    if "revise" in text or "changes requested" in text:
-        return {**defaults, "vote": "revise", "confidence": -0.3}
-    return defaults
+        return populate_prose_veto({**defaults, "vote": "block", "confidence": -1.0})
+    if re.search(r"\brevise\b", text) or "changes requested" in text:
+        return populate_prose_veto({**defaults, "vote": "revise", "confidence": -0.3})
+    return populate_prose_veto(defaults)
 
 
 def _with_worker_mode_token(prompt: str) -> str:
