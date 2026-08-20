@@ -101,7 +101,7 @@ To swap in different models or tools, edit `routing-config.json` — no changes 
 
 Patterns are treated as literal substrings (regex-escaped internally), so no special quoting is needed — just list the exact text that appears in your logs when that worker is invoked.
 
-After editing the repo's copy, re-run `bash install.sh` — the installer only copies `routing-config.json` into `~/.gemini/config/skills/worker-routing/` if it isn't already there, so your installed customizations are preserved across upgrades. To force-refresh an installed config, delete the installed copy first, then re-run `install.sh`.
+After editing the repo's copy, re-run `bash install.sh`. For a new installation, the installer copies `routing-config.json`; for an existing installation, it preserves custom values while merging in missing managed top-level sections such as `consultation_policy`. An existing customized `consultation_policy` is never overwritten. To force-refresh the entire installed config, delete the installed copy first, then re-run `install.sh`.
 
 ---
 

@@ -325,7 +325,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         payload = {
             "vote": vote,
             "confidence": confidence,
-            "candidate_hash": "candidate-1",
+            "candidate_hash": hashlib.sha256(plan.encode("utf-8")).hexdigest(),
             "findings": findings or [],
         }
         return f'{json.dumps(payload)}\nQUOTE: "{plan}"\nVERDICT: {verdict}'

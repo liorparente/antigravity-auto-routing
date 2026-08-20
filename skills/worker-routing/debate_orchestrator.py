@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from dialogue_contracts import (
@@ -186,6 +186,15 @@ ESCALATION_FAILURE_THRESHOLD = 2
 WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 
 InvokeWorker = Callable[[str, str, str], str]
+
+
+class ReviewerAdapterProtocol(Protocol):
+    provider_id: str
+
+    async def review(
+        self, envelope: str, round_spec: int, deadline: int
+    ) -> dict[str, Any]: ...
+
 
 # Discriminates how a consultation ended. `consensus_reached` on the result
 # stays consistent with this: True only when outcome == "consensus". The
@@ -393,7 +402,10 @@ def _load_provider_adapters() -> Any:
 
 class ReviewCouncil:
     def __init__(self, policy_path: str | Path = ROUTING_CONFIG_PATH) -> None:
-        self.policy = load_consultation_policy(Path(policy_path))
+        resolved_policy_path = Path(policy_path)
+        if not resolved_policy_path.exists() and ROUTING_CONFIG_PATH.exists():
+            resolved_policy_path = ROUTING_CONFIG_PATH
+        self.policy = load_consultation_policy(resolved_policy_path)
 
     _resolve_secret = staticmethod(resolve_hmac_secret)
 
@@ -426,7 +438,9 @@ class ReviewCouncil:
 
         return weights
 
-    def _resolve_adapters(self, request: ReviewRequest) -> list[Any]:
+    def _resolve_adapters(
+        self, request: ReviewRequest
+    ) -> list[ReviewerAdapterProtocol]:
         build_adapter = _load_provider_adapters().build_adapter
         if request.privacy_mode == PrivacyMode.LOCAL_ONLY:
             adapters = [build_adapter(config) for config in self.policy.get("adjudicators", [])]
@@ -457,7 +471,7 @@ class ReviewCouncil:
 
     async def _execute_round(
         self,
-        adapters: Sequence[Any],
+        adapters: Sequence[ReviewerAdapterProtocol],
         envelope: str,
         round_num: int,
         deadline: int,
@@ -478,14 +492,43 @@ class ReviewCouncil:
                 )
             elif isinstance(result, dict):
                 valid_results.append(result)
+            else:
+                valid_results.append(
+                    {
+                        "provider": getattr(adapter, "provider_id", "unknown"),
+                        "vote": "abstain",
+                        "confidence": 0.0,
+                        "error": "Invalid adapter response payload",
+                    }
+                )
         return valid_results
 
     _write_manifest = staticmethod(write_council_manifest)
 
+    def _check_veto_and_halt(
+        self,
+        votes: Sequence[dict[str, Any]],
+        veto_handler: SecurityVetoHandler,
+        run_id: str,
+        workspace_root: str,
+    ) -> ReviewOutcome | None:
+        veto = veto_handler.check(votes)
+        if veto is None:
+            return None
+        manifest_path = self._write_manifest(
+            "SECURITY_HALT", run_id, workspace_root, veto
+        )
+        return ReviewOutcome(
+            status="SECURITY_HALT",
+            run_id=run_id,
+            unresolved_blockers=1,
+            manifest_path=manifest_path,
+        )
+
     async def review(
         self,
         request: ReviewRequest,
-        custom_adapters: Sequence[Any] | None = None,
+        custom_adapters: Sequence[ReviewerAdapterProtocol] | None = None,
     ) -> ReviewOutcome:
         initial_hash = self._hash_source(request.subject)
         weights = self._load_weights(request.workspace_root)
@@ -507,44 +550,30 @@ class ReviewCouncil:
 
         deadline_r1 = self.policy.get("deadlines_seconds", {}).get("round_1", 120)
         round1_votes = await self._execute_round(adapters, request.objective, 1, deadline_r1)
-        veto = veto_handler.check(round1_votes)
-        if veto is not None:
-            manifest_path = self._write_manifest("SECURITY_HALT", run_id, request.workspace_root, veto)
-            return ReviewOutcome(
-                status="SECURITY_HALT",
-                run_id=run_id,
-                unresolved_blockers=1,
-                manifest_path=manifest_path,
-            )
+        veto_outcome = self._check_veto_and_halt(
+            round1_votes, veto_handler, run_id, request.workspace_root
+        )
+        if veto_outcome is not None:
+            return veto_outcome
 
         candidate_hash = hashlib.sha256(request.objective.encode("utf-8")).hexdigest()
         deadline_r2 = self.policy.get("deadlines_seconds", {}).get("round_2", 60)
         round2_votes = await self._execute_round(adapters, candidate_hash, 2, deadline_r2)
-        veto = veto_handler.check(round2_votes)
-        if veto is not None:
-            manifest_path = self._write_manifest("SECURITY_HALT", run_id, request.workspace_root, veto)
-            return ReviewOutcome(
-                status="SECURITY_HALT",
-                run_id=run_id,
-                unresolved_blockers=1,
-                manifest_path=manifest_path,
-            )
+        veto_outcome = self._check_veto_and_halt(
+            round2_votes, veto_handler, run_id, request.workspace_root
+        )
+        if veto_outcome is not None:
+            return veto_outcome
 
         consensus = table.evaluate(round2_votes, expected_hash=candidate_hash)
         if consensus in ("MATERIAL_DISAGREEMENT", "UNRESOLVED"):
             deadline_r3 = self.policy.get("deadlines_seconds", {}).get("round_3", 60)
             round3_votes = await self._execute_round(adapters, candidate_hash, 3, deadline_r3)
-            veto = veto_handler.check(round3_votes)
-            if veto is not None:
-                manifest_path = self._write_manifest(
-                    "SECURITY_HALT", run_id, request.workspace_root, veto
-                )
-                return ReviewOutcome(
-                    status="SECURITY_HALT",
-                    run_id=run_id,
-                    unresolved_blockers=1,
-                    manifest_path=manifest_path,
-                )
+            veto_outcome = self._check_veto_and_halt(
+                round3_votes, veto_handler, run_id, request.workspace_root
+            )
+            if veto_outcome is not None:
+                return veto_outcome
 
             consensus = table.evaluate(round3_votes, expected_hash=candidate_hash)
             if consensus == "MATERIAL_DISAGREEMENT":
@@ -565,10 +594,16 @@ class ReviewCouncil:
 
 
 def _critic_response_from_payload(
-    critic_id: str, raw_response: str, model_name: str | None = None
+    critic_id: str,
+    raw_response: str,
+    model_name: str | None = None,
+    *,
+    default_candidate_hash: str = "synth1",
 ) -> CriticResponse:
     """Build the state-machine vote used by veto and panel manifest policy."""
-    payload = _production_invoker.extract_review_payload(raw_response)
+    payload = _production_invoker.extract_review_payload(
+        raw_response, default_candidate_hash=default_candidate_hash
+    )
     findings = payload.get("findings", ())
     if not isinstance(findings, (list, tuple)):
         findings = ()
@@ -2749,6 +2784,7 @@ def run_advisory_consultation_debate(
         critic_prompt = _build_critic_prompt(
             task_description, planner_plan, occasion=occasion
         )
+        candidate_hash = hashlib.sha256(planner_plan.encode("utf-8")).hexdigest()
 
         if panel_mode:
             try:
@@ -2770,10 +2806,16 @@ def run_advisory_consultation_debate(
                 AdvisoryDebateRound(planner_plan, critic_a_response, critic_b_response)
             )
             critic_a_resp = _critic_response_from_payload(
-                "critic_a", critic_a_response, critic_a_model
+                "critic_a",
+                critic_a_response,
+                critic_a_model,
+                default_candidate_hash=candidate_hash,
             )
             critic_b_resp = _critic_response_from_payload(
-                "critic_b", critic_b_response, critic_b_model
+                "critic_b",
+                critic_b_response,
+                critic_b_model,
+                default_candidate_hash=candidate_hash,
             )
             # Same VerdictContract parser (ticket 02), applied independently
             # to each Critic's response, both checked against the same
@@ -2817,7 +2859,7 @@ def run_advisory_consultation_debate(
                 return _result("unparseable_verdict", error=_fold_error(state.error, cleanup_error))
 
             panel_status = panel_consensus_table.evaluate(
-                (critic_a_resp, critic_b_resp)
+                (critic_a_resp, critic_b_resp), expected_hash=candidate_hash
             )
             if panel_status in {"UNANIMOUS", "QUALIFIED"}:
                 panel_write_error: str | None = None

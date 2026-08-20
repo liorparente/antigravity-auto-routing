@@ -218,6 +218,23 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertEqual(outcome.status, "SECURITY_HALT")
         self.assertEqual(outcome.unresolved_blockers, 1)
 
+    def test_invalid_adapter_payload_is_recorded_as_abstention(self) -> None:
+        class InvalidAdapter:
+            provider_id = "invalid-provider"
+
+            async def review(self, _envelope: str, _round: int, _deadline: int) -> object:
+                return ["not", "a", "mapping"]
+
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        votes = asyncio.run(council._execute_round([InvalidAdapter()], "proposal", 1, 1))
+
+        self.assertEqual(votes, [{
+            "provider": "invalid-provider",
+            "vote": "abstain",
+            "confidence": 0.0,
+            "error": "Invalid adapter response payload",
+        }])
+
 
 class ConsultationPolicyConfigTests(unittest.TestCase):
     def test_loads_complete_policy_from_real_routing_config(self) -> None:
@@ -255,6 +272,13 @@ class ConsultationPolicyConfigTests(unittest.TestCase):
             self.assertEqual(ReviewCouncil(policy_path=path).policy, policy)
         self.assertEqual(policy["providers"], [{"id": "local", "model": "test"}])
         self.assertEqual(policy["weighting"]["quorum_threshold"], 0.75)
+
+    def test_missing_legacy_policy_path_falls_back_to_routing_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_path = Path(tmp) / "references" / "council-policy.json"
+            council = ReviewCouncil(policy_path=missing_path)
+
+        self.assertEqual(council.policy, load_consultation_policy(ROUTING_CONFIG_PATH))
 
     def test_invalid_policy_values_revert_to_safe_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
