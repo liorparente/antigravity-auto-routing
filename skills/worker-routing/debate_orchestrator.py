@@ -517,7 +517,7 @@ class ReviewCouncil:
                 manifest_path=manifest_path,
             )
 
-        candidate_hash = "synth1"
+        candidate_hash = hashlib.sha256(request.objective.encode("utf-8")).hexdigest()
         deadline_r2 = self.policy.get("deadlines_seconds", {}).get("round_2", 60)
         round2_votes = await self._execute_round(adapters, candidate_hash, 2, deadline_r2)
         veto = veto_handler.check(round2_votes)
@@ -2138,6 +2138,15 @@ def run_advisory_consultation_debate(
         returns immediately through it), resolving per-call here is exactly
         as "once" as resolving up front would have been.
         """
+        if (
+            result_topology == "panel"
+            and outcome in {"worker_error", "unparseable_verdict"}
+            and manifest_path is None
+        ):
+            manifest_path = _write_panel_manifest(
+                "WORKER_ERROR" if outcome == "worker_error" else "MALFORMED_VERDICT"
+            )
+
         # Provisional: its `error` is pre-fold (the transcript- and
         # telemetry-write failures below haven't been folded in yet), and it
         # is what the renderers below actually see. The caller instead gets
@@ -2623,6 +2632,17 @@ def run_advisory_consultation_debate(
             )
         except Exception as exc:  # noqa: BLE001 - a worker failure must fail closed.
             return _result("worker_error", error=str(exc))
+
+        canary_critic_vote = _critic_response_from_payload(
+            "critic", canary_critic_response, critic_model
+        )
+        security_veto = veto_handler.check((canary_critic_vote,))
+        if security_veto is not None:
+            return _result(
+                "security_halt",
+                security_veto=security_veto,
+                error=str(security_veto),
+            )
 
         canary_verdict = _parse_critic_verdict(canary_critic_response, fixture.plan_text)
         # Any non-approval is a catch (a reasoned objection or an

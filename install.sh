@@ -106,6 +106,42 @@ atomic_copy() {
     mv -f "$temporary" "$target"
 }
 
+merge_consultation_policy() {
+    local source="$1" target="$2" merged
+    merged="$STAGING_DIR/routing-config-merged-$routing_config_index.json"
+    routing_config_index=$((routing_config_index + 1))
+    python3 - "$source" "$target" "$merged" <<'PYEOF'
+import json
+import shutil
+import sys
+
+source_path, target_path, output_path = sys.argv[1:]
+try:
+    with open(source_path, "r", encoding="utf-8") as stream:
+        source = json.load(stream)
+    with open(target_path, "r", encoding="utf-8") as stream:
+        target = json.load(stream)
+except (OSError, json.JSONDecodeError):
+    shutil.copyfile(target_path, output_path)
+else:
+    if (
+        isinstance(source, dict)
+        and isinstance(target, dict)
+        and "consultation_policy" not in target
+        and "consultation_policy" in source
+    ):
+        target["consultation_policy"] = source["consultation_policy"]
+        with open(output_path, "w", encoding="utf-8") as stream:
+            json.dump(target, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+    else:
+        shutil.copyfile(target_path, output_path)
+PYEOF
+    if ! cmp -s "$target" "$merged"; then
+        atomic_copy "$merged" "$target"
+    fi
+}
+
 backup_once() {
     local target="$1"
     if [ -f "$target" ] && [ ! -f "$target.bak" ]; then
@@ -241,6 +277,7 @@ if [ "${AUTO_ROUTING_FAIL_AFTER_STAGE:-0}" = "1" ]; then
 fi
 
 write_count=0
+routing_config_index=0
 # One helper shared by every managed write below (MANAGED_FILES and, when
 # staged, learned state) so both count against the same
 # AUTO_ROUTING_FAIL_AFTER_WRITES fault-injection hook and roll back through
@@ -262,6 +299,10 @@ for target_dir in "${TARGET_DIRS[@]}"; do
     # Preserve customized routing configuration; install only the default.
     if [ ! -f "$target_dir/routing-config.json" ]; then
         atomic_copy "$SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
+    else
+        merge_consultation_policy \
+            "$SRC_DIR/routing-config.json" \
+            "$target_dir/routing-config.json"
     fi
     chmod +x "$target_dir/routing-audit.sh" "$target_dir/agent_council.py"
 

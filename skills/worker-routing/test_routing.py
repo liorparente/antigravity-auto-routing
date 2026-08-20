@@ -639,6 +639,46 @@ class ProtocolSyncTests(unittest.TestCase):
                 self.assertTrue(installed_protocol.exists(), installed_protocol)
                 self.assertEqual(installed_protocol.read_text(), protocol_text)
 
+    def test_install_sh_merges_missing_consultation_policy_into_custom_config(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            missing_policy_dir = (
+                Path(target_dir) / ".agents" / "skills" / "worker-routing"
+            )
+            existing_policy_dir = (
+                Path(target_dir) / ".codex" / "skills" / "worker-routing"
+            )
+            missing_policy_dir.mkdir(parents=True)
+            existing_policy_dir.mkdir(parents=True)
+            (missing_policy_dir / "routing-config.json").write_text(
+                json.dumps({"custom": {"preserved": True}}), encoding="utf-8"
+            )
+            existing_policy = {"custom_policy": True}
+            (existing_policy_dir / "routing-config.json").write_text(
+                json.dumps(
+                    {
+                        "custom": {"preserved": True},
+                        "consultation_policy": existing_policy,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            source_config = json.loads((SKILL_DIR / "routing-config.json").read_text())
+            merged = json.loads(
+                (missing_policy_dir / "routing-config.json").read_text(encoding="utf-8")
+            )
+            preserved = json.loads(
+                (existing_policy_dir / "routing-config.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(merged["custom"], {"preserved": True})
+            self.assertEqual(
+                merged["consultation_policy"], source_config["consultation_policy"]
+            )
+            self.assertEqual(preserved["consultation_policy"], existing_policy)
+
     def test_install_sh_copies_protocol_to_claude_rules(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             result = self._run(INSTALL_SH, target_dir, home=fake_home)

@@ -111,7 +111,7 @@ class LMStudioAdapter(ReviewerAdapter):
             "vote": "approve",
             "confidence": 1.0,
             "findings": [],
-            "candidate_hash": "synth1",
+            "candidate_hash": envelope,
         }
 
 

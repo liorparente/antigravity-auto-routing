@@ -203,6 +203,14 @@ class ExtractReviewPayloadTests(unittest.TestCase):
                     ],
                 )
 
+    def test_resolved_security_phrase_does_not_hide_active_finding_on_same_line(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            '{"vote": "block"}\n'
+            "SQL injection remains exploitable; the other query is parameterized"
+        )
+
+        self.assertIn("PROSE-VETO", [finding["id"] for finding in payload["findings"]])
+
     def test_approve_vote_with_unnegated_security_indicator_does_not_veto(self) -> None:
         payload = production_invoker.extract_review_payload(
             '{"vote": "approve"}\nSQL injection remains exploitable'

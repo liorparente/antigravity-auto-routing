@@ -183,8 +183,8 @@ def _validated_policy(configured: object) -> dict[str, Any]:
                 DEFAULT_CONSULTATION_POLICY["weighting"]["max_weight"],
             )
             if float(lo) > float(hi):
-                clean_weighting.pop("min_weight")
-                clean_weighting.pop("max_weight")
+                clean_weighting.pop("min_weight", None)
+                clean_weighting.pop("max_weight", None)
             valid["weighting"] = clean_weighting
 
     security = valid.get("security_veto")

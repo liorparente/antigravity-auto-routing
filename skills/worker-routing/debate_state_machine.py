@@ -8,7 +8,7 @@ from __future__ import annotations
 import importlib.util
 import math
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -124,7 +124,7 @@ class CriticResponse:
     verdict: str | None = None
     confidence: float | None = None
     candidate_hash: str | None = None
-    findings: tuple[dict[str, Any], ...] = ()
+    findings: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         """Recursively detach the immutable response from caller-owned findings."""

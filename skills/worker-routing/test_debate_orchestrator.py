@@ -515,6 +515,64 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             self.assertEqual(result.outcome, "stalemate")
             self._assert_valid_manifest(result.manifest_path, "STALEMATE")
 
+    def test_panel_worker_error_and_malformed_verdict_manifests_are_signed(self) -> None:
+        cases = (("worker_error", "WORKER_ERROR"), ("malformed", "MALFORMED_VERDICT"))
+        for failure, manifest_status in cases:
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self._write_secret(root)
+
+                def invoker(model: str, _effort: str, prompt: str) -> str:
+                    if "You are the Planner" in prompt:
+                        return "Proposed plan"
+                    if failure == "worker_error" and "Codex" in model:
+                        raise RuntimeError("critic unavailable")
+                    if failure == "malformed" and "Codex" in model:
+                        return "response without a verdict"
+                    return self._review_response("Proposed plan")
+
+                result = debate_orchestrator.run_advisory_consultation_debate(
+                    "Review architecture",
+                    invoker,
+                    root_dir=root,
+                    occasion="plan-review",
+                    complexity="complex",
+                )
+
+                expected_outcome = (
+                    "worker_error" if failure == "worker_error" else "unparseable_verdict"
+                )
+                self.assertEqual(result.outcome, expected_outcome)
+                self._assert_valid_manifest(result.manifest_path, manifest_status)
+
+    def test_canary_security_finding_runs_veto_handler(self) -> None:
+        fixture = debate_orchestrator.CANARY_FIXTURES[0]
+        finding = {"id": "SEC-CANARY", "severity": "high", "confidence": 0.95}
+
+        def invoker(_model: str, _effort: str, _prompt: str) -> str:
+            return self._review_response(
+                fixture.plan_text,
+                vote="block",
+                verdict="REVISE",
+                findings=[finding],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "implementation_plan.md"
+            plan_path.write_text("current plan", encoding="utf-8")
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                "Run canary",
+                invoker,
+                root_dir=root,
+                is_canary=True,
+                canary_fixture=fixture,
+            )
+
+            self.assertEqual(result.outcome, "security_halt")
+            self.assertEqual(result.security_veto.finding["id"], "SEC-CANARY")
+            self.assertEqual(plan_path.read_text(encoding="utf-8"), "current plan")
+
     def test_normal_dyad_outcomes_do_not_write_manifests(self) -> None:
         for verdict, expected_outcome in (("APPROVE", "consensus"), ("REVISE", "stalemate")):
             with self.subTest(outcome=expected_outcome), tempfile.TemporaryDirectory() as tmp:

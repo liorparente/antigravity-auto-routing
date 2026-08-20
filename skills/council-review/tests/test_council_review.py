@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import math
 import os
@@ -154,10 +155,11 @@ class CouncilReviewTDDTests(unittest.TestCase):
             objective="Feature implementation plan",
             workspace_root=self.workspace_root,
         )
+        candidate_hash = hashlib.sha256(req.objective.encode("utf-8")).hexdigest()
         adapters = [
-            FakeReviewerAdapter("claude", [{"provider": "claude", "vote": "approve", "confidence": 1.0, "candidate_hash": "synth1"}] * 3),
-            FakeReviewerAdapter("codex", [{"provider": "codex", "vote": "approve", "confidence": 1.0, "candidate_hash": "synth1"}] * 3),
-            FakeReviewerAdapter("gemini", [{"provider": "gemini", "vote": "approve", "confidence": 0.9, "candidate_hash": "synth1"}] * 3),
+            FakeReviewerAdapter("claude", [{"provider": "claude", "vote": "approve", "confidence": 1.0, "candidate_hash": candidate_hash}] * 3),
+            FakeReviewerAdapter("codex", [{"provider": "codex", "vote": "approve", "confidence": 1.0, "candidate_hash": candidate_hash}] * 3),
+            FakeReviewerAdapter("gemini", [{"provider": "gemini", "vote": "approve", "confidence": 0.9, "candidate_hash": candidate_hash}] * 3),
         ]
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
         self.assertEqual(outcome.status, "UNANIMOUS")
@@ -170,6 +172,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
             objective="Feature implementation plan",
             workspace_root=self.workspace_root,
         )
+        candidate_hash = hashlib.sha256(req.objective.encode("utf-8")).hexdigest()
         adapters = [
             FakeReviewerAdapter(provider, [
                 {"provider": provider, "vote": "approve", "confidence": 1.0},
@@ -177,13 +180,13 @@ class CouncilReviewTDDTests(unittest.TestCase):
                     "provider": provider,
                     "vote": "approve",
                     "confidence": 0.5,
-                    "candidate_hash": "synth1",
+                    "candidate_hash": candidate_hash,
                 },
                 {
                     "provider": provider,
                     "vote": "approve",
                     "confidence": 1.0,
-                    "candidate_hash": "synth1",
+                    "candidate_hash": candidate_hash,
                 },
             ])
             for provider in ("claude", "codex", "gemini")

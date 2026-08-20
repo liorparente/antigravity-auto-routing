@@ -157,16 +157,29 @@ def extract_review_payload(
         "cwe-",
         "cve-",
     )
+    security_term = (
+        r"(?:critical\s+vulnerabilit(?:y|ies)|sql\s+injection|"
+        r"cwe-[a-z0-9.-]+|cve-[a-z0-9.-]+)"
+    )
     security_resolution_re = re.compile(
-        r"(?:\bno\s+(?:critical\s+vulnerability|sql\s+injection|cwe-|cve-)|"
-        r"(?<!not\s)\b(?:prevented|prevents|resolved|parameteri[sz]ed|"
-        r"parameteri[sz]ation)\b)"
+        rf"(?:"
+        rf"\bno\s+{security_term}(?:\s+(?:is|are)\s+(?:present|found|remaining))?\b|"
+        rf"\b{security_term}\s+(?:(?:is|was|has\s+been)\s+)?"
+        rf"(?:prevented|resolved|fixed|mitigated)\b"
+        rf"(?:\s+by\s+(?:query\s+)?parameteri[sz]ation)?|"
+        rf"(?<!not\s)\b(?:prevents?|prevented|resolves?|resolved|fixes?|fixed|"
+        rf"mitigates?|mitigated)\s+(?:the\s+)?{security_term}\b|"
+        rf"\b(?:the\s+)?quer(?:y|ies)\s+(?:(?:is|are|was|were|has\s+been)\s+)?"
+        rf"parameteri[sz]ed\s+(?:against|to\s+prevent)\s+{security_term}\b"
+        rf")"
     )
 
     def has_unnegated_security_indicator() -> bool:
         return any(
-            any(indicator in line for indicator in security_indicators)
-            and security_resolution_re.search(line) is None
+            any(
+                indicator in security_resolution_re.sub("", line)
+                for indicator in security_indicators
+            )
             for line in normalized_text.splitlines()
         )
 
