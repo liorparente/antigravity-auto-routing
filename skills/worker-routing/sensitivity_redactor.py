@@ -9,6 +9,14 @@ import secrets
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+__all__ = [
+    "SENSITIVITY_MARKERS",
+    "TaskIdentity",
+    "derive_safe_task_identity",
+    "detect_sensitivity_marker",
+    "scan_sensitivity_markers",
+]
+
 SENSITIVITY_MARKERS: tuple[str, ...] = (
     "AGY_CALIBRATION_SECRET", "api_key", "sk-", "bearer ",
     "BEGIN PRIVATE KEY", "password", "secret", "[SENSITIVE]",

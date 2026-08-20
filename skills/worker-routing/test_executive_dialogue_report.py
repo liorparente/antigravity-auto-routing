@@ -1,24 +1,17 @@
 """Hermetic tests for executive dialogue reporting helpers."""
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
-from typing import Any
 
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-def _load_module(name: str) -> Any:
-    path = Path(__file__).with_name(f"{name}.py")
-    spec = importlib.util.spec_from_file_location(name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-executive_dialogue_report = _load_module("executive_dialogue_report")
+try:
+    from . import executive_dialogue_report
+except (ImportError, ValueError):
+    import executive_dialogue_report
 
 
 class BudgetDegradationAlertTests(unittest.TestCase):

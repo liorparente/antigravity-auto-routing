@@ -1,17 +1,17 @@
 """Focused, hermetic tests for the pure VerdictContract parser."""
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).with_name("dialogue_contracts.py")
-SPEC = importlib.util.spec_from_file_location("dialogue_contracts", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-dialogue_contracts = importlib.util.module_from_spec(SPEC)
-sys.modules["dialogue_contracts"] = dialogue_contracts
-SPEC.loader.exec_module(dialogue_contracts)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from . import dialogue_contracts
+except (ImportError, ValueError):
+    import dialogue_contracts
 
 
 class DialogueContractsTests(unittest.TestCase):

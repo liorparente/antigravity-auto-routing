@@ -5,8 +5,8 @@
 
 **Blocked by:** None — [01 — Hybrid Package Infrastructure & Root Config (#10)](https://github.com/liorparente/antigravity-auto-routing/issues/10) is completed. (Frontier)
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] Remove `_load_sibling` and `importlib.util` imports from all 6 leaf contract/helper modules.
-- [ ] Add clean relative imports (`from .dialogue_contracts import ...`).
-- [ ] Verify `test_dialogue_contracts.py`, `test_dialogue_degradation.py`, and `test_sensitivity_redactor.py` pass.
+- [x] Remove `_load_sibling` and `importlib.util` imports from all 6 leaf contract/helper modules.
+- [x] Add clean relative imports (`from .dialogue_contracts import ...`).
+- [x] Verify `test_dialogue_contracts.py`, `test_dialogue_degradation.py`, and `test_sensitivity_redactor.py` pass.

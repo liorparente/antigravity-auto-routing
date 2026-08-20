@@ -2,11 +2,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
 
-# Runtime aliases are required because these annotations are introspected.
-Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]
-DegradationRung = Literal[0, 1, 2, 3]
+try:
+    from .dialogue_contracts import Occasion
+    from .dialogue_degradation import DegradationRung
+except (ImportError, ValueError):
+    from dialogue_contracts import Occasion  # type: ignore[no-redef]
+    from dialogue_degradation import DegradationRung  # type: ignore[no-redef]
+
+__all__ = [
+    "DEGRADATION_RUNG_LABELS",
+    "DegradationRung",
+    "ExecutiveDialogueReport",
+    "Occasion",
+    "format_budget_degradation_alert",
+    "render_executive_summary",
+]
+
 DEGRADATION_RUNG_LABELS: dict[int, str] = {
     1: "reduce rounds",
     2: "cheapen roster: model + effort",

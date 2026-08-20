@@ -1,17 +1,17 @@
 """Hermetic coverage for pure sensitivity scanning and safe identities."""
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).with_name("sensitivity_redactor.py")
-SPEC = importlib.util.spec_from_file_location("sensitivity_redactor", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-sensitivity_redactor = importlib.util.module_from_spec(SPEC)
-sys.modules["sensitivity_redactor"] = sensitivity_redactor
-SPEC.loader.exec_module(sensitivity_redactor)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from . import sensitivity_redactor
+except (ImportError, ValueError):
+    import sensitivity_redactor
 
 
 class SensitivityRedactorTests(unittest.TestCase):

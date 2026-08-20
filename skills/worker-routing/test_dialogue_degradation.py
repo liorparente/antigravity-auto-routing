@@ -1,7 +1,6 @@
 """Focused, hermetic tests for the dialogue budget degradation policy."""
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 import tempfile
@@ -9,12 +8,13 @@ import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).with_name("dialogue_degradation.py")
-SPEC = importlib.util.spec_from_file_location("dialogue_degradation", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-dialogue_degradation = importlib.util.module_from_spec(SPEC)
-sys.modules["dialogue_degradation"] = dialogue_degradation
-SPEC.loader.exec_module(dialogue_degradation)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from . import dialogue_degradation
+except (ImportError, ValueError):
+    import dialogue_degradation
 
 
 class DegradationRungTests(unittest.TestCase):

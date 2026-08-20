@@ -1,17 +1,17 @@
 """Hermetic coverage for the pure CriticalDialogue prompt assembler."""
 from __future__ import annotations
 
-import importlib.util
 import sys
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).with_name("prompt_assembler.py")
-SPEC = importlib.util.spec_from_file_location("prompt_assembler", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-prompt_assembler = importlib.util.module_from_spec(SPEC)
-sys.modules["prompt_assembler"] = prompt_assembler
-SPEC.loader.exec_module(prompt_assembler)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+try:
+    from . import prompt_assembler
+except (ImportError, ValueError):
+    import prompt_assembler
 
 
 class PromptAssemblerTests(unittest.TestCase):

@@ -22,6 +22,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+__all__ = [
+    "BUDGET_DEGRADATION_MARKER",
+    "DEFAULT_SESSION_DIALOGUE_CAP",
+    "DegradationLadderState",
+    "DegradationRung",
+    "resolve_degradation_rung",
+]
+
 DegradationRung = Literal[0, 1, 2, 3]
 
 DEFAULT_SESSION_DIALOGUE_CAP = 10

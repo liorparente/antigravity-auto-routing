@@ -7,7 +7,10 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, TypeGuard
 
-from debate_state_machine import VALID_CONSENSUS_OUTCOMES
+try:
+    from .debate_state_machine import VALID_CONSENSUS_OUTCOMES
+except (ImportError, ValueError):
+    from debate_state_machine import VALID_CONSENSUS_OUTCOMES  # type: ignore[no-redef]
 
 ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
 DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
