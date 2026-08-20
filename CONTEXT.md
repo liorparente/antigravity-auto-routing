@@ -156,3 +156,15 @@ A pure voting aggregation rule evaluated over arbitrary sequences of critic resp
 
 ### AbstentionHandling
 The deliberate normalization of `"abstain"` / timeout critic responses into valid non-approval votes without triggering unparseable verdict errors or terminating the debate. Abstentions increment total participant count without contributing to affirmative approvals, allowing quorum policies to evaluate gracefully under partial panel availability.
+
+### CouncilPanel
+A concurrent multi-model review ensemble evaluated under weighted scoring, soft confidence metrics, and selective HMAC-SHA256 manifest signing, orchestrated within `debate_orchestrator.py`. Spec 0009.
+
+### ReviewCouncilFacade
+The lightweight, backward-compatible 19-line delegating module in `skills/council-review/scripts/council_review.py` that routes external CLI and library callers directly to `debate_orchestrator.ReviewCouncil` without duplicating state machines or policy files. Spec 0009.
+
+### SecurityVetoHandler
+The universal veto detection subsystem in `production_invoker.py` and `debate_orchestrator.py` combining structured finding severity analysis with word-boundary regex scanning over unformatted review prose to trigger immediate `SECURITY_HALT` upon detecting unnegated critical security indicators. Spec 0009.
+
+### DynamicCandidateHash
+The SHA-256 digest calculated over the exact proposal content reviewed by a council panel, verified against critic candidate hashes during consensus reduction to detect and reject prompt tampering or stale candidate reviews. Spec 0009.

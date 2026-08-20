@@ -1,5 +1,26 @@
 # Worker Routing Fallbacks
 
+## 2026-08-20 — Word-Boundary False Positives in Prose Security Indicator Scanner
+
+- Mission: Implement prose security veto for unstructured critic responses in `production_invoker.py` (Spec 0009).
+- Failure: Simple substring matching (`"rce" in text.lower()`, `"cwe" in text.lower()`) caused false-positive security halts on benign technical prose containing words like `"source"`, `"resource"`, or `"authentic"`.
+- Resolution: Replaced plain substring matching with compiled regexes using word boundaries (`re.compile(r"\b(rce|remote\s+code\s+execution)\b", re.IGNORECASE)`), while explicitly isolating unnegated findings from negated reassurance phrases.
+- Lesson: Any automated security veto scanning unstructured LLM review text must enforce regex word boundaries (`\b`) on short indicators to prevent catastrophic false-positive halts on ordinary English words.
+
+## 2026-08-20 — Cascading Dictionary Sanitization KeyError on Non-Idempotent `.pop()`
+
+- Mission: Validate and normalize mutually dependent configuration keys (`min_weight`, `max_weight`) in `consultation_policy.py`.
+- Failure: When both `min_weight` and `max_weight` were invalid or out of range, the validator popped `max_weight` in the first check and then attempted `config.pop("max_weight")` in a subsequent fallback branch, raising an unhandled `KeyError`.
+- Resolution: Standardized on safe dictionary popping (`config.pop("max_weight", None)`) across all policy sanitizers.
+- Lesson: In validation and sanitization pipelines that mutate dictionary copies, never call `.pop(key)` unconditionally; always use `.pop(key, None)` to ensure idempotent cleanup.
+
+## 2026-08-20 — Path Traversal Vulnerability in Generated Manifest Filenames
+
+- Mission: Implement signed manifest persistence in `debate_orchestrator.py` (`write_council_manifest`).
+- Failure: `write_council_manifest` interpolated user-supplied `run_id` directly into the manifest path (`root_dir / ".ralph" / f"council_manifest_{run_id}.json"`), allowing malicious or malformed `run_id` strings containing `../` to write manifests outside `.ralph/`.
+- Resolution: Sanitized `run_id` with `re.sub(r'[^a-zA-Z0-9_-]', '_', run_id)` before constructing the target path.
+- Lesson: All file persistence helpers accepting external identifiers must sanitize path components against directory traversal before joining with directory paths.
+
 ## 2026-08-19 — Module-Identity Split with Monkeypatching in Path-Loaded Sibling Modules
 
 - Mission: Verify and test isolated worker transport and recurring failure notifier in `debate_transport.py` and `debate_orchestrator.py` (Spec 0008).
