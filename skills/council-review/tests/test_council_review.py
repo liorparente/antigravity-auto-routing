@@ -222,7 +222,7 @@ class CouncilReviewTDDTests(unittest.TestCase):
         class InvalidAdapter:
             provider_id = "invalid-provider"
 
-            async def review(self, _envelope: str, _round: int, _deadline: int) -> object:
+            async def review(self, _envelope: str, _round: int, _deadline: int) -> Any:
                 return ["not", "a", "mapping"]
 
         council = ReviewCouncil(ROUTING_CONFIG_PATH)

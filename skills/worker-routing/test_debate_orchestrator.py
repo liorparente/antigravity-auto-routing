@@ -14,6 +14,7 @@ import unittest
 from contextlib import redirect_stderr
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 
@@ -312,7 +313,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         key_path.parent.mkdir(parents=True, exist_ok=True)
         key_path.write_bytes(secret)
 
-    def _assert_valid_manifest(self, path: str, expected_status: str) -> dict[str, object]:
+    def _assert_valid_manifest(self, path: str, expected_status: str) -> dict[str, Any]:
         manifest = json.loads(Path(path).read_text(encoding="utf-8"))
         signature = manifest.pop("council_hmac")
         canonical = json.dumps(

@@ -20,6 +20,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
+    from debate_state_machine import (
+        ConsensusTable,
+        CriticResponse,
+        DebateRoundRecord,
+        DebateSessionState,
+        DebateState,
+        RoundTurnResult,
+        SecurityVeto,
+        SecurityVetoHandler,
+    )
+    from debate_transport import (
+        DebateTransport,
+        RecurringFailureNotifier,
+    )
     from dialogue_contracts import (
         AdvisoryOutcome,
         AdvisoryResolutionOption,
@@ -68,6 +82,7 @@ _debate_transport = _load_sibling("debate_transport")
 _production_invoker = _load_sibling("production_invoker")
 
 if not TYPE_CHECKING:
+    AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
     Occasion = _dialogue_contracts.Occasion
     AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
     AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
@@ -79,6 +94,16 @@ if not TYPE_CHECKING:
     DegradationLadderState = _dialogue_degradation.DegradationLadderState
     DegradationRung = _dialogue_degradation.DegradationRung
     ExecutiveDialogueReport = _executive_dialogue_report.ExecutiveDialogueReport
+    CriticResponse = _debate_state_machine.CriticResponse
+    SecurityVeto = _debate_state_machine.SecurityVeto
+    SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
+    ConsensusTable = _debate_state_machine.ConsensusTable
+    DebateRoundRecord = _debate_state_machine.DebateRoundRecord
+    DebateSessionState = _debate_state_machine.DebateSessionState
+    DebateState = _debate_state_machine.DebateState
+    RoundTurnResult = _debate_state_machine.RoundTurnResult
+    DebateTransport = _debate_transport.DebateTransport
+    RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
 
 CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
 CRITIC_VERDICT_REVISE = _dialogue_contracts.CRITIC_VERDICT_REVISE
@@ -110,21 +135,11 @@ PANEL_TOPOLOGY_OCCASIONS = _debate_state_machine.PANEL_TOPOLOGY_OCCASIONS
 is_panel_topology = _debate_state_machine.is_panel_topology
 build_stalemate_report = _debate_state_machine.build_stalemate_report
 evaluate_round_verdicts = _debate_state_machine.evaluate_round_verdicts
-DebateRoundRecord = _debate_state_machine.DebateRoundRecord
-DebateSessionState = _debate_state_machine.DebateSessionState
 advance_debate_state = _debate_state_machine.advance_debate_state
-CriticResponse = _debate_state_machine.CriticResponse
-SecurityVeto = _debate_state_machine.SecurityVeto
-SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
-ConsensusTable = _debate_state_machine.ConsensusTable
 ROUTING_CONFIG_PATH = _consultation_policy.ROUTING_CONFIG_PATH
 DEFAULT_CONSULTATION_POLICY = _consultation_policy.DEFAULT_CONSULTATION_POLICY
 load_consultation_policy = _consultation_policy.load_consultation_policy
 _load_consultation_policy = load_consultation_policy
-DebateTransport = _debate_transport.DebateTransport
-RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
-RoundTurnResult = _debate_state_machine.RoundTurnResult
-DebateState = _debate_state_machine.DebateState
 evaluate_quorum = _debate_state_machine.evaluate_quorum
 _PANEL_TOPOLOGY_OCCASIONS = PANEL_TOPOLOGY_OCCASIONS
 _is_panel_topology = is_panel_topology
@@ -221,7 +236,6 @@ class ReviewerAdapterProtocol(Protocol):
 # than silently getting "no dialogue happened" with no trace. See
 # `resolve_degradation_rung` below for the pure decision this outcome is
 # reported for.
-AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
 
 # Spec 0004 ticket 25 (fix pass 2): the occasions whose artifact under debate
 # is actually a plan. "ambiguity" and "plan-review" both debate a Planner's
@@ -2763,6 +2777,7 @@ def run_advisory_consultation_debate(
                 f"worker-execution journaling disabled for this run: {exc}"
             )
 
+    manifest_path: str | None = None
     for _round_number in range(1, max_rounds + 1):
         planner_prompt = _build_planner_prompt(
             task_description,
@@ -2983,7 +2998,7 @@ def run_advisory_consultation_debate(
         )
     else:
         stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
-    manifest_path: str | None = (
+    manifest_path = (
         _write_panel_manifest("STALEMATE") if panel_mode else None
     )
     return _result(

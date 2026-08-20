@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 from unittest import mock
 
-
 _COUNCIL_SECRET_PATCHER: object | None = None
 
 

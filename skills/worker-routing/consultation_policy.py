@@ -9,7 +9,6 @@ from typing import Any, TypeGuard
 
 from debate_state_machine import VALID_CONSENSUS_OUTCOMES
 
-
 ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
 DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
     "providers": [
