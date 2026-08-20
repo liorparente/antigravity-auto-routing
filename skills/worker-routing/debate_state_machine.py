@@ -11,8 +11,8 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, overload
 from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, overload
 
 if TYPE_CHECKING:
     from dialogue_contracts import (
@@ -144,17 +144,37 @@ class SecurityVeto(Exception):
 class SecurityVetoHandler:
     """Detect configured high-confidence security findings in critic votes."""
 
+    DEFAULT_SECURITY_THRESHOLD = 0.80
+    DEFAULT_VETO_SEVERITIES = frozenset({"critical", "high"})
+
     def __init__(
         self,
         veto_severities: list[str] | tuple[str, ...] | set[str] | None = None,
         security_threshold: float = 0.80,
         enabled: bool = True,
     ) -> None:
-        severities = veto_severities if veto_severities is not None else {"critical", "high"}
-        self.veto_severities = {
-            str(severity).strip().casefold() for severity in severities
-        }
-        self.security_threshold = security_threshold
+        if (
+            not isinstance(veto_severities, (list, tuple, set, frozenset))
+            or not veto_severities
+            or not all(
+                isinstance(severity, str) and bool(severity.strip())
+                for severity in veto_severities
+            )
+        ):
+            self.veto_severities = set(self.DEFAULT_VETO_SEVERITIES)
+        else:
+            self.veto_severities = {
+                severity.strip().casefold() for severity in veto_severities
+            }
+        if (
+            isinstance(security_threshold, bool)
+            or not isinstance(security_threshold, (int, float))
+            or not math.isfinite(float(security_threshold))
+            or not 0.0 <= float(security_threshold) <= 1.0
+        ):
+            self.security_threshold = self.DEFAULT_SECURITY_THRESHOLD
+        else:
+            self.security_threshold = float(security_threshold)
         self.enabled = enabled
 
     @staticmethod

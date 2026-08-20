@@ -164,6 +164,36 @@ class CouncilReviewTDDTests(unittest.TestCase):
         assert outcome.manifest_path is not None
         self.assertTrue(os.path.isfile(outcome.manifest_path))
 
+    def test_below_quorum_round_2_triggers_round_3_reconciliation(self) -> None:
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Feature implementation plan",
+            workspace_root=self.workspace_root,
+        )
+        adapters = [
+            FakeReviewerAdapter(provider, [
+                {"provider": provider, "vote": "approve", "confidence": 1.0},
+                {
+                    "provider": provider,
+                    "vote": "approve",
+                    "confidence": 0.5,
+                    "candidate_hash": "synth1",
+                },
+                {
+                    "provider": provider,
+                    "vote": "approve",
+                    "confidence": 1.0,
+                    "candidate_hash": "synth1",
+                },
+            ])
+            for provider in ("claude", "codex", "gemini")
+        ]
+
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "UNANIMOUS")
+        self.assertEqual([adapter.call_count for adapter in adapters], [3, 3, 3])
+
     # Slice 7: End-to-End Async Review with Security Veto Halt
     def test_async_review_security_veto_halt(self) -> None:
         council = ReviewCouncil(ROUTING_CONFIG_PATH)

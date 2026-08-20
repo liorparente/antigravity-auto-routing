@@ -60,6 +60,7 @@ _dialogue_transcript = _load_sibling("dialogue_transcript")
 _learning_journal = _load_sibling("learning_journal")
 _learning_outcomes = _load_sibling("learning_outcomes")
 _debate_state_machine = _load_sibling("debate_state_machine")
+_consultation_policy = _load_sibling("consultation_policy")
 _debate_transport = _load_sibling("debate_transport")
 _production_invoker = _load_sibling("production_invoker")
 
@@ -113,6 +114,7 @@ CriticResponse = _debate_state_machine.CriticResponse
 SecurityVeto = _debate_state_machine.SecurityVeto
 SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
 ConsensusTable = _debate_state_machine.ConsensusTable
+_load_consultation_policy = _consultation_policy.load_consultation_policy
 DebateTransport = _debate_transport.DebateTransport
 RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
 RoundTurnResult = _debate_state_machine.RoundTurnResult
@@ -342,14 +344,6 @@ def write_council_manifest(
         json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
     )
     return str(manifest_path)
-
-
-def _load_consultation_policy(config_path: Path) -> dict[str, Any]:
-    """Load the unified consultation policy from the routing configuration."""
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    policy = config.get("consultation_policy", {})
-    return policy if isinstance(policy, dict) else {}
 
 
 def _critic_response_from_payload(

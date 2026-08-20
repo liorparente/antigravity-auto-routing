@@ -28,6 +28,7 @@ jobs:
         skills/worker-routing/test_sensitivity_redactor.py
         skills/worker-routing/debate_orchestrator.py
         skills/worker-routing/debate_state_machine.py
+        skills/worker-routing/consultation_policy.py
         skills/worker-routing/debate_transport.py
         skills/worker-routing/test_debate_orchestrator.py
         skills/worker-routing/test_debate_state_machine.py

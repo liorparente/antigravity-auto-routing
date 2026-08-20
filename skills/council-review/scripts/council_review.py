@@ -3,12 +3,10 @@ import hashlib
 import hmac
 import importlib.util
 import json
-import math
 import os
 import sys
 import uuid
 from collections.abc import Sequence
-from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,9 +14,8 @@ from typing import Any
 from provider_adapters import ReviewerAdapter, build_adapter
 
 
-def _load_debate_state_machine() -> Any:
-    """Load the shared reducer without relying on hyphenated directory imports."""
-    module_name = "debate_state_machine"
+def _load_worker_routing_module(module_name: str) -> Any:
+    """Load shared worker-routing code without relying on a hyphenated package."""
     if module_name in sys.modules:
         return sys.modules[module_name]
     path = Path(__file__).resolve().parents[2] / "worker-routing" / f"{module_name}.py"
@@ -30,171 +27,15 @@ def _load_debate_state_machine() -> Any:
     return module
 
 
-_debate_state_machine = _load_debate_state_machine()
+_debate_state_machine = _load_worker_routing_module("debate_state_machine")
+_consultation_policy = _load_worker_routing_module("consultation_policy")
 ConsensusTable = _debate_state_machine.ConsensusTable
-VALID_CONSENSUS_OUTCOMES = _debate_state_machine.VALID_CONSENSUS_OUTCOMES
+SecurityVeto = _debate_state_machine.SecurityVeto
+SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
 
-
-ROUTING_CONFIG_PATH = Path(__file__).resolve().parents[2] / "worker-routing" / "routing-config.json"
-DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
-    "providers": [
-        {"id": "claude", "model": "claude-opus-5", "effort_mapping": {"high": "high"}},
-        {"id": "codex", "model": "gpt-5.6-sol", "effort_mapping": {"high": "high"}},
-        {"id": "gemini", "model": "gemini-3.1-pro", "effort_mapping": {"high": "high"}},
-    ],
-    "adjudicators": [
-        {"id": "lm-studio", "model": "qwen3-coder-30b", "effort_mapping": {"high": "high"}}
-    ],
-    "deadlines_seconds": {"round_1": 120, "round_2": 60, "round_3": 60},
-    "consensus_policy": [
-        "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED",
-    ],
-    "weighting": {
-        "initial_weights": {"claude": 0.40, "codex": 0.40, "gemini": 0.20},
-        "min_weight": 0.05,
-        "max_weight": 0.65,
-        "quorum_threshold": 0.60,
-        "dynamic_weights_path": ".ralph/council_weights.json",
-    },
-    "security_veto": {
-        "enabled": True,
-        "veto_severities": ["critical", "high"],
-        "security_threshold": 0.80,
-    },
-}
-def _merge_policy_defaults(defaults: dict[str, Any], configured: object) -> dict[str, Any]:
-    """Overlay a policy section onto its schema defaults without sharing state."""
-    if not isinstance(configured, dict):
-        return deepcopy(defaults)
-
-    merged = deepcopy(defaults)
-    for key, default_value in defaults.items():
-        value = configured.get(key)
-        if isinstance(default_value, dict):
-            merged[key] = _merge_policy_defaults(default_value, value)
-        elif value is not None and (
-            isinstance(value, type(default_value))
-            or (isinstance(default_value, float) and _is_number(value))
-        ):
-            merged[key] = deepcopy(value)
-    return merged
-
-
-def _is_number(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, (int, float))
-
-
-def _is_unit_interval(value: object) -> bool:
-    return _is_number(value) and math.isfinite(float(value)) and 0.0 <= float(value) <= 1.0
-
-
-def _is_nonnegative_int(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, int) and value >= 0
-
-
-def _validated_policy(configured: object) -> dict[str, Any]:
-    """Discard malformed policy values so each invalid field gets its safe default."""
-    if not isinstance(configured, dict):
-        return {}
-    valid = deepcopy(configured)
-
-    for field, require_nonempty in (("providers", True), ("adjudicators", False)):
-        entries = valid.get(field)
-        if field in valid and (
-            not isinstance(entries, list)
-            or (require_nonempty and not entries)
-            or not all(
-                isinstance(entry, dict)
-                and isinstance(entry.get("id"), str) and bool(entry["id"].strip())
-                and isinstance(entry.get("model"), str) and bool(entry["model"].strip())
-                and (
-                    "effort_mapping" not in entry
-                    or (
-                        isinstance(entry["effort_mapping"], dict)
-                        and all(
-                            isinstance(effort, str) and isinstance(mapped_effort, str)
-                            for effort, mapped_effort in entry["effort_mapping"].items()
-                        )
-                    )
-                )
-                for entry in entries
-            )
-        ):
-            valid.pop(field)
-
-    consensus_policy = valid.get("consensus_policy")
-    if "consensus_policy" in valid and (
-        not isinstance(consensus_policy, list)
-        or not consensus_policy
-        or not all(isinstance(outcome, str) and outcome in VALID_CONSENSUS_OUTCOMES for outcome in consensus_policy)
-    ):
-        valid.pop("consensus_policy")
-
-    deadlines = valid.get("deadlines_seconds")
-    if deadlines is not None:
-        if not isinstance(deadlines, dict):
-            valid.pop("deadlines_seconds")
-        else:
-            valid["deadlines_seconds"] = {
-                key: value for key, value in deadlines.items() if _is_nonnegative_int(value)
-            }
-
-    weighting = valid.get("weighting")
-    if weighting is not None:
-        if not isinstance(weighting, dict):
-            valid.pop("weighting")
-        else:
-            clean_weighting = dict(weighting)
-            initial_weights = clean_weighting.get("initial_weights")
-            if "initial_weights" in clean_weighting and (
-                not isinstance(initial_weights, dict)
-                or not all(
-                    _is_number(value) and math.isfinite(float(value)) and float(value) >= 0.0
-                    for value in initial_weights.values()
-                )
-            ):
-                clean_weighting.pop("initial_weights")
-            for field in ("quorum_threshold", "min_weight", "max_weight"):
-                if field in clean_weighting and not _is_unit_interval(clean_weighting[field]):
-                    clean_weighting.pop(field)
-            lo = clean_weighting.get("min_weight", DEFAULT_CONSULTATION_POLICY["weighting"]["min_weight"])
-            hi = clean_weighting.get("max_weight", DEFAULT_CONSULTATION_POLICY["weighting"]["max_weight"])
-            if float(lo) > float(hi):
-                clean_weighting.pop("min_weight")
-                clean_weighting.pop("max_weight")
-            valid["weighting"] = clean_weighting
-
-    security = valid.get("security_veto")
-    if security is not None:
-        if not isinstance(security, dict):
-            valid.pop("security_veto")
-        else:
-            clean_security = dict(security)
-            if "security_threshold" in clean_security and not _is_unit_interval(clean_security["security_threshold"]):
-                clean_security.pop("security_threshold")
-            severities = clean_security.get("veto_severities")
-            if "veto_severities" in clean_security and (
-                not isinstance(severities, list)
-                or not all(isinstance(severity, str) and bool(severity.strip()) for severity in severities)
-            ):
-                clean_security.pop("veto_severities")
-            valid["security_veto"] = clean_security
-    return valid
-
-
-def load_consultation_policy(config_path: Path = ROUTING_CONFIG_PATH) -> dict[str, Any]:
-    """Load consultation policy defaults while propagating file and JSON errors."""
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    if not isinstance(config, dict):
-        return deepcopy(DEFAULT_CONSULTATION_POLICY)
-    if "consultation_policy" in config:
-        configured = config["consultation_policy"]
-    elif "providers" in config or "weighting" in config:
-        configured = config
-    else:
-        configured = {}
-    return _merge_policy_defaults(DEFAULT_CONSULTATION_POLICY, _validated_policy(configured))
+ROUTING_CONFIG_PATH = _consultation_policy.ROUTING_CONFIG_PATH
+DEFAULT_CONSULTATION_POLICY = _consultation_policy.DEFAULT_CONSULTATION_POLICY
+load_consultation_policy = _consultation_policy.load_consultation_policy
 
 
 class PrivacyMode:
@@ -224,45 +65,6 @@ class ReviewOutcome:
     manifest_path: str | None = None
     unresolved_blockers: int = 0
     source_changed: bool = False
-
-
-class SecurityVeto(Exception):
-    """A unilateral security veto that short-circuits the council before
-    weighted scoring runs — a majority of lenient votes must never override
-    a valid security finding from a single provider."""
-
-    def __init__(self, provider: str, finding: dict[str, Any]) -> None:
-        self.provider = provider
-        self.finding = finding
-        claim = finding.get("claim", finding.get("id", "unspecified"))
-        super().__init__(f"Security veto by {provider}: {claim}")
-
-
-class SecurityVetoHandler:
-    def __init__(self, veto_severities: list[str], security_threshold: float, enabled: bool = True) -> None:
-        self.veto_severities = {s.lower() for s in veto_severities}
-        self.security_threshold = security_threshold
-        self.enabled = enabled
-
-    def check(self, votes: list[dict[str, Any]]) -> SecurityVeto | None:
-        if not self.enabled:
-            return None
-        for vote in votes:
-            for finding in vote.get("findings", []):
-                severity = str(finding.get("severity", "")).lower()
-                if severity not in self.veto_severities:
-                    continue
-                raw_confidence = finding.get("confidence", 1.0)
-                try:
-                    confidence = float(raw_confidence)
-                except (TypeError, ValueError):
-                    confidence = 1.0  # Fail-closed: unparseable confidence is treated as certain
-                if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
-                    confidence = 1.0
-
-                if confidence >= self.security_threshold:
-                    return SecurityVeto(str(vote.get("provider", "unknown")), finding)
-        return None
 
 
 class ReviewCouncil:
@@ -446,7 +248,7 @@ class ReviewCouncil:
 
         consensus = table.evaluate(round2_votes, expected_hash=candidate_hash)
 
-        if consensus == "MATERIAL_DISAGREEMENT":
+        if consensus in ("MATERIAL_DISAGREEMENT", "UNRESOLVED"):
             # Round 3 reconciliation
             deadline_r3 = self.policy.get("deadlines_seconds", {}).get("round_3", 60)
             round3_votes = await self._execute_round(adapters, candidate_hash, 3, deadline_r3)

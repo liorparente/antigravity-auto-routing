@@ -134,7 +134,7 @@ A continuous evaluation metric where reviewers assign a score from -1.0 (strict 
 A unilateral, non-majority override mechanism where any single reviewer emitting a verified Critical or High severity security finding (e.g. CWE-89, CWE-78) immediately halts the review pipeline (`SECURITY_HALT`), preventing majority coalitions from overriding valid security vulnerabilities.
 
 ### ConsensusTable
-The deterministic aggregator that evaluates reviewer vote records against weighted quorum thresholds and candidate hashes, resolving outcomes into UNANIMOUS, QUALIFIED, MATERIAL_DISAGREEMENT, or SECURITY_HALT.
+The deterministic aggregator that evaluates reviewer vote records against weighted quorum thresholds and candidate hashes, resolving outcomes into UNANIMOUS, QUALIFIED, MATERIAL_DISAGREEMENT, INCOMPLETE, UNRESOLVED, or SECURITY_HALT.
 
 ### RiskTieredApplication
 The four-tier safety mechanism that governs how proposed updates from the [[LearningLoop]] are applied to system documents based on their blast radius: Tier 1 memory lessons auto-apply to [[LearnedState]], Tier 2 routing-table updates auto-apply only after clearing the [[AcceptanceGate]], Tier 3 brief diffs are held as [[PendingProposal]]s awaiting explicit human approval, and Tier 4 protocol files are unreachable by construction via the closed `LearnedDocument` vocabulary (`{"memory", "routing_table", "briefs"}`). Spec 0004 ticket 20.
@@ -156,4 +156,3 @@ A pure voting aggregation rule evaluated over arbitrary sequences of critic resp
 
 ### AbstentionHandling
 The deliberate normalization of `"abstain"` / timeout critic responses into valid non-approval votes without triggering unparseable verdict errors or terminating the debate. Abstentions increment total participant count without contributing to affirmative approvals, allowing quorum policies to evaluate gracefully under partial panel availability.
-

@@ -50,6 +50,34 @@ class DebateStateMachineTests(unittest.TestCase):
                 },))
                 self.assertIsNotNone(veto)
 
+    def test_invalid_security_threshold_uses_fail_closed_default(self) -> None:
+        for threshold in (
+            True,
+            False,
+            None,
+            "0.9",
+            math.nan,
+            math.inf,
+            -math.inf,
+            -0.1,
+            1.1,
+        ):
+            with self.subTest(threshold=threshold):
+                handler = machine.SecurityVetoHandler(
+                    ["high"], security_threshold=threshold
+                )
+                self.assertEqual(handler.security_threshold, 0.80)
+                self.assertIsNotNone(handler.check(({
+                    "provider": "critic",
+                    "findings": [{"severity": "high", "confidence": 0.80}],
+                },)))
+
+    def test_invalid_veto_severities_use_fail_closed_defaults(self) -> None:
+        for severities in (None, "high", [], [""], ["high", 1]):
+            with self.subTest(severities=severities):
+                handler = machine.SecurityVetoHandler(veto_severities=severities)
+                self.assertEqual(handler.veto_severities, {"critical", "high"})
+
     def test_security_veto_can_be_disabled_and_uses_default_confidence(self) -> None:
         vote = {"provider": "critic", "findings": [{"severity": "high"}]}
         self.assertIsNotNone(machine.SecurityVetoHandler().check((vote,)))

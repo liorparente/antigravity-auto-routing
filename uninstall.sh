@@ -66,7 +66,7 @@ CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 # forgotten here is visible; `test_routing.py`'s `ManagedFileClosureTests`
 # additionally asserts this list covers every managed file, so the drift that
 # left `learning_journal.py` behind cannot recur silently in either script.
-INSTALLED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py dialogue_contracts.py dialogue_degradation.py executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py debate_transport.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py risk_tiered_application.py learner_worker.py protocol.md routing-config.json)
+INSTALLED_FILES=(SKILL.md REFERENCE.md routing-audit.sh routing_check.py agent_council.py dialogue_contracts.py dialogue_degradation.py executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py consultation_policy.py debate_transport.py advisory_consultation.py production_invoker.py learning_journal.py learning_outcomes.py learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py risk_tiered_application.py learner_worker.py protocol.md routing-config.json)
 
 # Mirrors install.sh's own dynamic discovery of future production modules —
 # every non-test `.py` file in THIS repo's own skills/worker-routing/ source
