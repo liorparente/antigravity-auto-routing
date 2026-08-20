@@ -160,10 +160,7 @@ def extract_review_payload(
     )
 
     def populate_prose_veto(payload: dict[str, Any]) -> dict[str, Any]:
-        if (
-            str(payload.get("vote", "")).casefold() == "block"
-            or any(indicator in normalized_text for indicator in security_indicators)
-        ):
+        if any(indicator in normalized_text for indicator in security_indicators):
             prose_veto = {
                 "id": "PROSE-VETO",
                 "severity": "critical",

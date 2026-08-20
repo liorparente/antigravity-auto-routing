@@ -2570,28 +2570,28 @@ def run_advisory_consultation_debate(
                 cleanup_error = _remove_stale_plan_artifact(plan_path)
                 return _result("unparseable_verdict", error=_fold_error(state.error, cleanup_error))
 
-            if state.consensus_reached:
-                panel_status = panel_consensus_table.evaluate(
-                    (critic_a_resp, critic_b_resp)
-                )
-                if panel_status in {"UNANIMOUS", "QUALIFIED"}:
-                    manifest_path = _write_panel_manifest(panel_status)
-                    panel_write_error: str | None = None
-                    try:
-                        _atomic_text_write(plan_path, state.final_plan or planner_plan)
-                    except OSError as exc:
-                        panel_write_error = (
-                            f"failed to write plan artifact at {plan_path}: {exc}"
-                        )
-                    return _result(
-                        "consensus",
-                        final_plan=state.final_plan or planner_plan,
-                        error=panel_write_error,
-                        manifest_path=manifest_path,
+            panel_status = panel_consensus_table.evaluate(
+                (critic_a_resp, critic_b_resp)
+            )
+            if panel_status in {"UNANIMOUS", "QUALIFIED"}:
+                panel_write_error: str | None = None
+                try:
+                    _atomic_text_write(plan_path, state.final_plan or planner_plan)
+                except OSError as exc:
+                    panel_write_error = (
+                        f"failed to write plan artifact at {plan_path}: {exc}"
                     )
+                manifest_path = _write_panel_manifest(panel_status)
+                return _result(
+                    "consensus",
+                    final_plan=state.final_plan or planner_plan,
+                    error=panel_write_error,
+                    manifest_path=manifest_path,
+                )
 
-                if _round_number >= max_rounds:
-                    cleanup_error = _remove_stale_plan_artifact(plan_path)
+            if state.stalemate_report is not None or _round_number >= max_rounds:
+                cleanup_error = _remove_stale_plan_artifact(plan_path)
+                if state.stalemate_report is None:
                     state = dataclasses.replace(
                         state,
                         consensus_reached=False,
@@ -2600,22 +2600,6 @@ def run_advisory_consultation_debate(
                             planner_plan, critic_a_response, critic_b_response
                         ),
                     )
-                    manifest_path = _write_panel_manifest("STALEMATE")
-                    return _result(
-                        "stalemate",
-                        stalemate=state.stalemate_report,
-                        manifest_path=manifest_path,
-                        error=cleanup_error,
-                    )
-
-                state = dataclasses.replace(
-                    state,
-                    consensus_reached=False,
-                    final_plan=None,
-                )
-
-            if state.stalemate_report is not None:
-                cleanup_error = _remove_stale_plan_artifact(plan_path)
                 manifest_path = _write_panel_manifest("STALEMATE")
                 return _result(
                     "stalemate",

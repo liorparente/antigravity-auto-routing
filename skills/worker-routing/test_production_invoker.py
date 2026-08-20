@@ -139,7 +139,7 @@ class ExtractReviewPayloadTests(unittest.TestCase):
 
     def test_invalid_or_non_object_json_uses_text_heuristics(self) -> None:
         cases = (
-            ("{not valid} critical concern", "block", -1.0, True),
+            ("{not valid} critical concern", "block", -1.0, False),
             ("[1, 2] changes requested", "revise", -0.3, False),
             ("plain output: approve", "approve", 1.0, False),
             ("unstructured output", "approve", 1.0, False),
@@ -157,13 +157,13 @@ class ExtractReviewPayloadTests(unittest.TestCase):
                     self.assertEqual(payload["findings"], [])
                 self.assertEqual(payload["candidate_hash"], "synth1")
 
-    def test_security_prose_and_structured_block_populate_fail_closed_finding(self) -> None:
+    def test_security_prose_populates_fail_closed_finding(self) -> None:
         cases = (
+            "SECURITY_HALT: unsafe request validation",
             "Critical vulnerability found in request validation",
             "Possible SQL injection in the query builder",
             "CWE-89 applies here",
             "CVE-2026-1234 is exploitable",
-            '{"vote": "block", "findings": []}',
         )
 
         for output in cases:
@@ -178,6 +178,14 @@ class ExtractReviewPayloadTests(unittest.TestCase):
                     },
                     payload["findings"],
                 )
+
+    def test_generic_structured_block_does_not_populate_prose_veto(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            '{"vote": "block", "findings": []}'
+        )
+
+        self.assertEqual(payload["vote"], "block")
+        self.assertEqual(payload["findings"], [])
 
     def test_revised_plan_prose_does_not_become_a_revise_vote(self) -> None:
         payload = production_invoker.extract_review_payload(

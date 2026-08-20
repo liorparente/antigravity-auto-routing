@@ -438,7 +438,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                         )
                     if panel_status == "QUALIFIED" and "Gemini" in model:
                         return self._review_response(
-                            "Proposed plan", vote="revise", verdict="APPROVE", confidence=0.0
+                            "Proposed plan", vote="revise", verdict="REVISE", confidence=0.0
                         )
                     return self._review_response("Proposed plan")
 
@@ -454,11 +454,52 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                 self.assertEqual(result.outcome, expected_outcome)
                 self._assert_valid_manifest(result.manifest_path, manifest_status)
 
+    def test_panel_weighted_quorum_returns_qualified_consensus(self) -> None:
+        policy = {
+            "consensus_policy": [
+                "UNANIMOUS",
+                "QUALIFIED",
+                "MATERIAL_DISAGREEMENT",
+                "INCOMPLETE",
+                "UNRESOLVED",
+            ],
+            "weighting": {
+                "initial_weights": {"codex": 0.8, "gemini": 0.2},
+                "quorum_threshold": 0.7,
+            },
+        }
+
+        def invoker(model: str, _effort: str, prompt: str) -> str:
+            if "You are the Planner" in prompt:
+                return "Proposed plan"
+            if "Gemini" in model:
+                return self._review_response(
+                    "Proposed plan", vote="revise", verdict="REVISE", confidence=0.0
+                )
+            return self._review_response("Proposed plan")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_secret(root)
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                "Review architecture",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                consultation_policy=policy,
+            )
+
+            self.assertEqual(result.outcome, "consensus")
+            self._assert_valid_manifest(result.manifest_path, "QUALIFIED")
+
     def test_panel_stalemate_manifest_is_signed(self) -> None:
         def invoker(_model: str, _effort: str, prompt: str) -> str:
             if "You are the Planner" in prompt:
                 return "Proposed plan"
-            return self._review_response("Proposed plan", vote="revise", verdict="REVISE")
+            return self._review_response(
+                "Proposed plan", vote="revise", verdict="REVISE", confidence=0.0
+            )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
