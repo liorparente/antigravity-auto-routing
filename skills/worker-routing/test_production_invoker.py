@@ -161,9 +161,9 @@ class ExtractReviewPayloadTests(unittest.TestCase):
         cases = (
             "SECURITY_HALT: unsafe request validation",
             "Critical vulnerability found in request validation",
-            "Possible SQL injection in the query builder",
-            "CWE-89 applies here",
-            "CVE-2026-1234 is exploitable",
+            "BLOCK: Possible SQL injection in the query builder",
+            "REVISE: CWE-89 applies here",
+            '{"vote": "block"}\nCVE-2026-1234 is exploitable',
         )
 
         for output in cases:
@@ -178,6 +178,38 @@ class ExtractReviewPayloadTests(unittest.TestCase):
                     },
                     payload["findings"],
                 )
+
+    def test_benign_security_prose_does_not_populate_prose_veto(self) -> None:
+        cases = (
+            "SQL injection is prevented by query parameterization",
+            "This change prevents CWE-89",
+            "No vulnerabilities found",
+            '{"vote": "block"}\nSQL injection is prevented by query parameterization',
+            '{"vote": "revise"}\nThis change prevents CWE-89',
+            '{"vote": "block"}\nNo SQL injection is present',
+            '{"vote": "revise"}\nCVE-2026-1234 is resolved',
+            '{"vote": "block"}\nThe query is parameterized against SQL injection',
+        )
+
+        for output in cases:
+            with self.subTest(output=output):
+                payload = production_invoker.extract_review_payload(output)
+                self.assertNotIn(
+                    "PROSE-VETO",
+                    [
+                        finding.get("id")
+                        for finding in payload["findings"]
+                        if isinstance(finding, dict)
+                    ],
+                )
+
+    def test_approve_vote_with_unnegated_security_indicator_does_not_veto(self) -> None:
+        payload = production_invoker.extract_review_payload(
+            '{"vote": "approve"}\nSQL injection remains exploitable'
+        )
+
+        self.assertEqual(payload["vote"], "approve")
+        self.assertEqual(payload["findings"], [])
 
     def test_generic_structured_block_does_not_populate_prose_veto(self) -> None:
         payload = production_invoker.extract_review_payload(

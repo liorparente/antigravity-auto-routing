@@ -152,15 +152,30 @@ def extract_review_payload(
 
     normalized_text = raw_output.casefold()
     security_indicators = (
-        "security_halt",
         "critical vulnerability",
         "sql injection",
         "cwe-",
         "cve-",
     )
+    security_resolution_re = re.compile(
+        r"(?:\bno\s+(?:critical\s+vulnerability|sql\s+injection|cwe-|cve-)|"
+        r"(?<!not\s)\b(?:prevented|prevents|resolved|parameteri[sz]ed|"
+        r"parameteri[sz]ation)\b)"
+    )
+
+    def has_unnegated_security_indicator() -> bool:
+        return any(
+            any(indicator in line for indicator in security_indicators)
+            and security_resolution_re.search(line) is None
+            for line in normalized_text.splitlines()
+        )
 
     def populate_prose_veto(payload: dict[str, Any]) -> dict[str, Any]:
-        if any(indicator in normalized_text for indicator in security_indicators):
+        vote = str(payload.get("vote", "")).casefold()
+        should_veto = "security_halt" in normalized_text or (
+            vote in {"block", "revise"} and has_unnegated_security_indicator()
+        )
+        if should_veto:
             prose_veto = {
                 "id": "PROSE-VETO",
                 "severity": "critical",
