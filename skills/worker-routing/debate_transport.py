@@ -185,7 +185,14 @@ class DebateTransport:
         confidence = float(payload.get("confidence", 0.0))
         if verdict == "abstain":
             confidence = 0.0
-        return CriticResponse(critic_id, output, verdict, confidence)
+        return CriticResponse(
+            critic_id=critic_id,
+            response=output,
+            verdict=verdict,
+            confidence=confidence,
+            candidate_hash=payload.get("candidate_hash"),
+            findings=tuple(payload.get("findings", ())),
+        )
 
 
 __all__ = [

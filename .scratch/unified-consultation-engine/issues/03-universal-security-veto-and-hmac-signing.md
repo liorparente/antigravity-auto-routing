@@ -4,8 +4,8 @@
 
 **Blocked by:** 02 — Council Panel Reducer & Multi-Critic Weighted Quorum in `debate_state_machine.py`
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Wire `SecurityVetoHandler` across both `Dyad` and `CouncilPanel` execution paths.
-- [ ] Implement selective HMAC manifest signing in `.ralph/council-manifest-{run_id}.json` for `CouncilPanel` runs only.
-- [ ] Add unit tests in `skills/worker-routing/test_debate_orchestrator.py` verifying security halt and manifest generation.
+- [x] Wire `SecurityVetoHandler` across both `Dyad` and `CouncilPanel` execution paths.
+- [x] Implement selective HMAC manifest signing in `.ralph/council-manifest-{run_id}.json` for `CouncilPanel` runs only.
+- [x] Add unit tests in `skills/worker-routing/test_debate_orchestrator.py` verifying security halt and manifest generation.

@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import hmac
 import io
+import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -269,6 +273,205 @@ class ProductionOrchestrationTests(unittest.TestCase):
             contents = errors_path.read_text(encoding="utf-8")
             self.assertIn("## Recurring worker failure", contents)
             self.assertIn("Consecutive failures: 1", contents)
+
+
+class SecurityVetoAndManifestTests(unittest.TestCase):
+    SECRET = b"ticket-03-test-secret"
+
+    @staticmethod
+    def _write_secret(root: Path, secret: bytes = SECRET) -> None:
+        key_path = root / ".ralph" / "cache" / "calibration.key"
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(secret)
+
+    def _assert_valid_manifest(self, path: str, expected_status: str) -> dict[str, object]:
+        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+        signature = manifest.pop("council_hmac")
+        canonical = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        self.assertEqual(signature, hmac.new(self.SECRET, canonical, hashlib.sha256).hexdigest())
+        self.assertEqual(manifest["metadata"]["status"], expected_status)
+        return manifest
+
+    @staticmethod
+    def _review_response(
+        plan: str,
+        *,
+        vote: str = "approve",
+        verdict: str = "APPROVE",
+        findings: list[dict[str, object]] | None = None,
+        confidence: float = 1.0,
+    ) -> str:
+        payload = {
+            "vote": vote,
+            "confidence": confidence,
+            "candidate_hash": "candidate-1",
+            "findings": findings or [],
+        }
+        return f'{json.dumps(payload)}\nQUOTE: "{plan}"\nVERDICT: {verdict}'
+
+    def test_dyad_security_veto_halts_without_manifest(self) -> None:
+        calls: list[str] = []
+
+        def invoker(_model: str, _effort: str, prompt: str) -> str:
+            calls.append(prompt)
+            if "You are the Planner" in prompt:
+                return "Proposed plan"
+            return self._review_response(
+                "Proposed plan",
+                vote="block",
+                verdict="REVISE",
+                findings=[{"id": "SEC-DYAD", "severity": "HIGH", "confidence": 0.95}],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "implementation_plan.md").write_text("stale", encoding="utf-8")
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                "Plan safely", invoker, root_dir=root
+            )
+
+            self.assertEqual(result.outcome, "security_halt")
+            self.assertEqual(len(calls), 2)
+            self.assertIsNone(result.manifest_path)
+            self.assertEqual(result.security_veto.finding["id"], "SEC-DYAD")
+            self.assertFalse((root / "implementation_plan.md").exists())
+            self.assertEqual(list((root / ".ralph").glob("council-manifest-*.json")), [])
+
+    def test_panel_security_veto_halts_and_signs_manifest(self) -> None:
+        calls: list[str] = []
+
+        def invoker(model: str, _effort: str, prompt: str) -> str:
+            calls.append(model)
+            if "You are the Planner" in prompt:
+                return "Proposed plan"
+            if "Gemini" in model:
+                return self._review_response(
+                    "Proposed plan",
+                    vote="block",
+                    verdict="REVISE",
+                    findings=[{"id": "SEC-PANEL", "severity": "critical", "confidence": 0.9}],
+                )
+            return self._review_response("Proposed plan")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_secret(root)
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                "Review architecture",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+            )
+
+            self.assertEqual(result.outcome, "security_halt")
+            self.assertEqual(len(calls), 3)
+            self.assertIsNotNone(result.manifest_path)
+            self.assertEqual(result.security_veto.provider, "critic_b")
+            manifest = self._assert_valid_manifest(result.manifest_path, "SECURITY_HALT")
+            self.assertEqual(manifest["security_veto"]["finding"]["id"], "SEC-PANEL")
+
+    def test_panel_unanimous_and_qualified_consensus_manifests_are_signed(self) -> None:
+        cases = (
+            ("UNANIMOUS", None),
+            ("QUALIFIED", {
+                "consensus_policy": [
+                    "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"
+                ],
+                "weighting": {
+                    "initial_weights": {"critic_a": 0.8, "critic_b": 0.2},
+                    "quorum_threshold": 0.7,
+                },
+            }),
+        )
+        for expected_status, policy in cases:
+            with self.subTest(status=expected_status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self._write_secret(root)
+
+                def invoker(model: str, _effort: str, prompt: str) -> str:
+                    if "You are the Planner" in prompt:
+                        return "Proposed plan"
+                    if expected_status == "QUALIFIED" and "Gemini" in model:
+                        return self._review_response(
+                            "Proposed plan", vote="revise", verdict="APPROVE", confidence=0.0
+                        )
+                    return self._review_response("Proposed plan")
+
+                result = debate_orchestrator.run_advisory_consultation_debate(
+                    "Review architecture",
+                    invoker,
+                    root_dir=root,
+                    occasion="plan-review",
+                    complexity="complex",
+                    consultation_policy=policy,
+                )
+
+                self.assertEqual(result.outcome, "consensus")
+                self._assert_valid_manifest(result.manifest_path, expected_status)
+
+    def test_panel_stalemate_manifest_is_signed(self) -> None:
+        def invoker(_model: str, _effort: str, prompt: str) -> str:
+            if "You are the Planner" in prompt:
+                return "Proposed plan"
+            return self._review_response("Proposed plan", vote="revise", verdict="REVISE")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_secret(root)
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                "Review architecture",
+                invoker,
+                root_dir=root,
+                occasion="plan-review",
+                complexity="complex",
+                max_rounds=1,
+            )
+            self.assertEqual(result.outcome, "stalemate")
+            self._assert_valid_manifest(result.manifest_path, "STALEMATE")
+
+    def test_normal_dyad_outcomes_do_not_write_manifests(self) -> None:
+        for verdict, expected_outcome in (("APPROVE", "consensus"), ("REVISE", "stalemate")):
+            with self.subTest(outcome=expected_outcome), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+
+                def invoker(_model: str, _effort: str, prompt: str) -> str:
+                    if "You are the Planner" in prompt:
+                        return "Proposed plan"
+                    return self._review_response(
+                        "Proposed plan", vote=verdict.casefold(), verdict=verdict
+                    )
+
+                result = debate_orchestrator.run_advisory_consultation_debate(
+                    "Plan safely", invoker, root_dir=root, max_rounds=1
+                )
+                self.assertEqual(result.outcome, expected_outcome)
+                self.assertIsNone(result.manifest_path)
+                self.assertEqual(list((root / ".ralph").glob("council-manifest-*.json")), [])
+
+    def test_missing_panel_secret_fails_closed(self) -> None:
+        def invoker(_model: str, _effort: str, prompt: str) -> str:
+            if "You are the Planner" in prompt:
+                return "Proposed plan"
+            return self._review_response("Proposed plan")
+
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(
+            os.environ,
+            {"AGY_CALIBRATION_SECRET": "", "COUNCIL_REVIEW_SECRET": ""},
+        ):
+            root = Path(tmp)
+            with self.assertRaisesRegex(RuntimeError, "secret resolution failed"):
+                debate_orchestrator.run_advisory_consultation_debate(
+                    "Review architecture",
+                    invoker,
+                    root_dir=root,
+                    occasion="plan-review",
+                    complexity="complex",
+                )
+            self.assertFalse((root / "implementation_plan.md").exists())
+            self.assertEqual(list((root / ".ralph").glob("council-manifest-*.json")), [])
 
     def test_facade_and_orchestrator_signatures_match(self) -> None:
         import inspect

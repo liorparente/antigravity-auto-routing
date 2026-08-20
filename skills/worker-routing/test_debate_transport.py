@@ -62,13 +62,22 @@ class DebateTransportTests(unittest.TestCase):
     def test_successful_critic_uses_normalized_vote_and_confidence(self) -> None:
         def runner(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
             return subprocess.CompletedProcess(
-                command, 0, stdout='{"vote": "revise", "confidence": 0.75}', stderr=""
+                command,
+                0,
+                stdout=(
+                    '{"vote": "revise", "confidence": 0.75, '
+                    '"candidate_hash": "candidate-1", "findings": '
+                    '[{"severity": "high", "confidence": 0.9}]}'
+                ),
+                stderr="",
             )
 
         result = transport.DebateTransport(runner=runner).invoke_critic_safe(
             "gpt-5.6-sol", "high", "Review"
         )
         self.assertEqual((result.verdict, result.confidence), ("revise", 0.75))
+        self.assertEqual(result.candidate_hash, "candidate-1")
+        self.assertEqual(result.findings[0]["severity"], "high")
 
 
 class RecurringFailureNotifierTests(unittest.TestCase):

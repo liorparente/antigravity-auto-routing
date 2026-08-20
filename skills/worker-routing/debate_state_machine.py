@@ -131,6 +131,80 @@ class CriticResponse:
         object.__setattr__(self, "findings", tuple(_deep_freeze(finding) for finding in self.findings))
 
 
+class SecurityVeto(Exception):
+    """A unilateral security finding that halts a consultation."""
+
+    def __init__(self, provider: str, finding: dict[str, Any]) -> None:
+        self.provider = provider
+        self.finding = finding
+        claim = finding.get("claim", finding.get("id", "unspecified"))
+        super().__init__(f"Security veto by {provider}: {claim}")
+
+
+class SecurityVetoHandler:
+    """Detect configured high-confidence security findings in critic votes."""
+
+    def __init__(
+        self,
+        veto_severities: list[str] | tuple[str, ...] | set[str] | None = None,
+        security_threshold: float = 0.80,
+        enabled: bool = True,
+    ) -> None:
+        severities = veto_severities if veto_severities is not None else {"critical", "high"}
+        self.veto_severities = {
+            str(severity).strip().casefold() for severity in severities
+        }
+        self.security_threshold = security_threshold
+        self.enabled = enabled
+
+    @staticmethod
+    def _field(
+        vote: dict[str, Any] | CriticResponse, name: str, default: Any = None
+    ) -> Any:
+        return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
+
+    @staticmethod
+    def _confidence(finding: dict[str, Any]) -> float:
+        raw_confidence = finding.get("confidence", 1.0)
+        if isinstance(raw_confidence, bool):
+            return 1.0
+        try:
+            confidence = float(raw_confidence)
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            return 1.0
+        return confidence
+
+    def check(
+        self, votes: Sequence[dict[str, Any] | CriticResponse]
+    ) -> SecurityVeto | None:
+        """Return the first configured veto, treating malformed confidence as certain."""
+        if not self.enabled:
+            return None
+        for vote in votes:
+            findings = self._field(vote, "findings", ())
+            if not isinstance(findings, (list, tuple)):
+                continue
+            for finding in findings:
+                if not isinstance(finding, dict) and not isinstance(finding, MappingProxyType):
+                    continue
+                severity = str(finding.get("severity", "")).strip().casefold()
+                if severity not in self.veto_severities:
+                    continue
+                if self._confidence(finding) >= self.security_threshold:
+                    provider = str(
+                        self._field(
+                            vote,
+                            "provider",
+                            self._field(vote, "critic_id", "unknown"),
+                        )
+                        or "unknown"
+                    )
+                    return SecurityVeto(provider, dict(finding))
+        return None
+
+
 class ConsensusTable:
     """Pure weighted reducer for a council's structured critic votes."""
 

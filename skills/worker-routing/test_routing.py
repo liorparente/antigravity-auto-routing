@@ -28,6 +28,25 @@ from pathlib import Path
 from typing import TYPE_CHECKING, get_args
 from unittest import mock
 
+
+_COUNCIL_SECRET_PATCHER: object | None = None
+
+
+def setUpModule() -> None:
+    """Give legacy panel tests the signing secret CouncilPanel now requires."""
+    global _COUNCIL_SECRET_PATCHER
+    _COUNCIL_SECRET_PATCHER = mock.patch.object(
+        advisory_consultation._debate_orchestrator,
+        "resolve_hmac_secret",
+        return_value=b"worker-routing-test-secret",
+    )
+    _COUNCIL_SECRET_PATCHER.start()  # type: ignore[attr-defined]
+
+
+def tearDownModule() -> None:
+    if _COUNCIL_SECRET_PATCHER is not None:
+        _COUNCIL_SECRET_PATCHER.stop()  # type: ignore[attr-defined]
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 

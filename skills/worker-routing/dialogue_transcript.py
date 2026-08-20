@@ -79,7 +79,7 @@ CANARY_MARKER = "CANARY DIALOGUE"
 
 AdvisoryOutcome = Literal[
     "consensus", "stalemate", "unparseable_verdict", "worker_error",
-    "sensitivity_halt", "canary", "budget_skipped",
+    "sensitivity_halt", "security_halt", "canary", "budget_skipped",
 ]
 CanaryResult = Literal["catch", "miss"]
 Occasion = Literal["ambiguity", "plan-review", "code-review", "post-mortem"]

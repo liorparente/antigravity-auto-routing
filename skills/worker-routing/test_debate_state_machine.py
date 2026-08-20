@@ -22,6 +22,39 @@ machine = _load("debate_state_machine")
 
 
 class DebateStateMachineTests(unittest.TestCase):
+    def test_security_veto_supports_dicts_and_critic_responses(self) -> None:
+        handler = machine.SecurityVetoHandler()
+        dict_veto = handler.check(({
+            "provider": "codex",
+            "findings": [{"id": "SEC-1", "severity": "CRITICAL", "confidence": 0.9}],
+        },))
+        response_veto = handler.check((machine.CriticResponse(
+            "critic-a",
+            "",
+            findings=({"id": "SEC-2", "severity": "High", "confidence": 0.8},),
+        ),))
+
+        self.assertEqual((dict_veto.provider, dict_veto.finding["id"]), ("codex", "SEC-1"))
+        self.assertEqual(
+            (response_veto.provider, response_veto.finding["id"]),
+            ("critic-a", "SEC-2"),
+        )
+
+    def test_security_veto_confidence_validation_fails_closed(self) -> None:
+        handler = machine.SecurityVetoHandler(["high"], 0.8)
+        for confidence in (True, False, math.nan, math.inf, -math.inf, -0.1, 1.1, "bad"):
+            with self.subTest(confidence=confidence):
+                veto = handler.check(({
+                    "provider": "critic",
+                    "findings": [{"severity": "HIGH", "confidence": confidence}],
+                },))
+                self.assertIsNotNone(veto)
+
+    def test_security_veto_can_be_disabled_and_uses_default_confidence(self) -> None:
+        vote = {"provider": "critic", "findings": [{"severity": "high"}]}
+        self.assertIsNotNone(machine.SecurityVetoHandler().check((vote,)))
+        self.assertIsNone(machine.SecurityVetoHandler(enabled=False).check((vote,)))
+
     def test_panel_topology_and_reports(self) -> None:
         self.assertTrue(machine.is_panel_topology("plan-review", " Complex "))
         self.assertTrue(machine.is_panel_topology("code-review", "complex"))

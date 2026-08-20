@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import hmac
 import importlib.util
 import json
+import os
 import re
 import secrets
+import stat
 import sys
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -57,6 +61,7 @@ _learning_journal = _load_sibling("learning_journal")
 _learning_outcomes = _load_sibling("learning_outcomes")
 _debate_state_machine = _load_sibling("debate_state_machine")
 _debate_transport = _load_sibling("debate_transport")
+_production_invoker = _load_sibling("production_invoker")
 
 if not TYPE_CHECKING:
     Occasion = _dialogue_contracts.Occasion
@@ -105,6 +110,9 @@ DebateRoundRecord = _debate_state_machine.DebateRoundRecord
 DebateSessionState = _debate_state_machine.DebateSessionState
 advance_debate_state = _debate_state_machine.advance_debate_state
 CriticResponse = _debate_state_machine.CriticResponse
+SecurityVeto = _debate_state_machine.SecurityVeto
+SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
+ConsensusTable = _debate_state_machine.ConsensusTable
 DebateTransport = _debate_transport.DebateTransport
 RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
 RoundTurnResult = _debate_state_machine.RoundTurnResult
@@ -202,6 +210,7 @@ AdvisoryOutcome = Literal[
     "unparseable_verdict",
     "worker_error",
     "sensitivity_halt",
+    "security_halt",
     "canary",
     "budget_skipped",
 ]
@@ -261,6 +270,104 @@ DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
     "acl",
     "permission",
 )
+
+
+def resolve_hmac_secret(workspace_root: str | Path) -> bytes:
+    """Resolve the council signing secret, failing closed when none is usable."""
+    for variable in ("AGY_CALIBRATION_SECRET", "COUNCIL_REVIEW_SECRET"):
+        value = os.environ.get(variable, "").strip()
+        if value:
+            return value.encode("utf-8")
+
+    key_path = Path(workspace_root) / ".ralph" / "cache" / "calibration.key"
+    try:
+        key_stat = key_path.stat()
+    except FileNotFoundError:
+        key_stat = None
+    except OSError as exc:
+        raise RuntimeError(f"Council HMAC secret could not be read at {key_path}: {exc}") from exc
+    if key_stat is not None and stat.S_ISREG(key_stat.st_mode):
+        try:
+            secret = key_path.read_bytes().strip()
+        except OSError as exc:
+            raise RuntimeError(f"Council HMAC secret could not be read at {key_path}: {exc}") from exc
+        if secret:
+            return secret
+
+    raise RuntimeError(
+        "Council HMAC secret resolution failed: AGY_CALIBRATION_SECRET and "
+        "COUNCIL_REVIEW_SECRET are unset, and no non-empty workspace key was "
+        "found at .ralph/cache/calibration.key."
+    )
+
+
+def _manifest_json_value(value: Any) -> Any:
+    """Detach immutable state-machine values into JSON-serialisable values."""
+    if isinstance(value, Mapping):
+        return {str(key): _manifest_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_manifest_json_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return sorted(_manifest_json_value(item) for item in value)
+    return value
+
+
+def write_council_manifest(
+    status: str,
+    run_id: str,
+    workspace_root: str | Path,
+    security_veto: SecurityVeto | None = None,
+    events: Sequence[dict[str, Any]] | None = None,
+) -> str:
+    """Atomically write an HMAC-signed CouncilPanel manifest and return its path."""
+    manifest_path = Path(workspace_root) / ".ralph" / f"council-manifest-{run_id}.json"
+    manifest: dict[str, Any] = {
+        "metadata": {"status": status, "run_id": run_id},
+        "events": _manifest_json_value(list(events or ())),
+    }
+    if security_veto is not None:
+        manifest["security_veto"] = {
+            "provider": security_veto.provider,
+            "finding": _manifest_json_value(security_veto.finding),
+        }
+
+    canonical_json = json.dumps(
+        manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+    manifest["council_hmac"] = hmac.new(
+        resolve_hmac_secret(workspace_root), canonical_json, hashlib.sha256
+    ).hexdigest()
+    _atomic_text_write(
+        manifest_path,
+        json.dumps(manifest, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+    )
+    return str(manifest_path)
+
+
+def _load_consultation_policy(config_path: Path) -> dict[str, Any]:
+    """Load the unified consultation policy from the routing configuration."""
+    with open(config_path, "r", encoding="utf-8") as stream:
+        config = json.load(stream)
+    policy = config.get("consultation_policy", {})
+    return policy if isinstance(policy, dict) else {}
+
+
+def _critic_response_from_payload(
+    critic_id: str, raw_response: str
+) -> CriticResponse:
+    """Build the state-machine vote used by veto and panel manifest policy."""
+    payload = _production_invoker.extract_review_payload(raw_response)
+    findings = payload.get("findings", ())
+    if not isinstance(findings, (list, tuple)):
+        findings = ()
+    return CriticResponse(
+        critic_id=critic_id,
+        response=raw_response,
+        verdict=str(payload.get("vote", "abstain")),
+        confidence=payload.get("confidence"),
+        candidate_hash=payload.get("candidate_hash"),
+        findings=tuple(finding for finding in findings if isinstance(finding, dict)),
+    )
 
 # Spec 0003 (CriticalDialogue) ticket 07: "Family, not model, is the
 # independence unit" (spec's Implementation Decisions paragraph of the same
@@ -999,6 +1106,8 @@ class AdvisoryDebateResult:
     topology: RosterTopology = "pair"
     round_verdicts: tuple[AdvisoryRoundVerdict, ...] = ()
     executive_report: ExecutiveDialogueReport | None = None
+    manifest_path: str | None = None
+    security_veto: SecurityVeto | None = None
 
     @property
     def consensus_reached(self) -> bool:
@@ -1309,6 +1418,7 @@ def run_advisory_consultation_debate(
     canary_fixture: CanaryFixture | None = None,
     session_spend_so_far: int = 0,
     budget_config_path: Path = _CONFIG_PATH,
+    consultation_policy: dict[str, Any] | None = None,
 ) -> AdvisoryDebateResult:
     """Run the Planner/Critic exchange, revising on objection, and report the outcome.
 
@@ -1666,6 +1776,28 @@ def run_advisory_consultation_debate(
         )
 
     panel_mode = _is_panel_topology(occasion, complexity)
+    effective_consultation_policy = (
+        consultation_policy
+        if consultation_policy is not None
+        else _load_consultation_policy(roster_config_path)
+    )
+    security_policy = effective_consultation_policy.get("security_veto", {})
+    if not isinstance(security_policy, dict):
+        security_policy = {}
+    veto_handler = SecurityVetoHandler(
+        veto_severities=security_policy.get("veto_severities"),
+        security_threshold=security_policy.get("security_threshold", 0.80),
+        enabled=security_policy.get("enabled", True),
+    )
+    weighting_policy = effective_consultation_policy.get("weighting", {})
+    if not isinstance(weighting_policy, dict):
+        weighting_policy = {}
+    panel_consensus_table = ConsensusTable(
+        policy=effective_consultation_policy.get("consensus_policy"),
+        weights=weighting_policy.get("initial_weights"),
+        quorum_threshold=weighting_policy.get("quorum_threshold", 0.60),
+    )
+    council_run_id = f"run-{secrets.token_hex(8)}"
     # The `critic_model` the result/transcript/telemetry actually report.
     # Pair mode reports the `critic_model` parameter exactly as it always
     # has (every pre-ticket-05 assertion on `result.critic_model` stays
@@ -1768,6 +1900,8 @@ def run_advisory_consultation_debate(
         sensitivity_marker: str | None = None,
         canary_result: CanaryResult | None = None,
         resolved_canary_fixture: CanaryFixture | None = None,
+        manifest_path: str | None = None,
+        security_veto: SecurityVeto | None = None,
     ) -> AdvisoryDebateResult:
         """The single choke point every return passes through.
 
@@ -1832,6 +1966,8 @@ def run_advisory_consultation_debate(
             topology=result_topology,
             round_verdicts=tuple(round_verdicts),
             executive_report=executive_report,
+            manifest_path=manifest_path,
+            security_veto=security_veto,
         )
 
         resolved_task_id = _resolve_task_id(task_description, task_id, outcome)
@@ -1932,6 +2068,23 @@ def run_advisory_consultation_debate(
         folded_error = _fold_error(folded_error, journal_wiring_error)
 
         return dataclasses.replace(provisional_result, error=folded_error)
+
+    def _write_panel_manifest(
+        status: str, security_veto: SecurityVeto | None = None
+    ) -> str:
+        """Write a terminal panel manifest, removing any plan if signing fails."""
+        try:
+            return write_council_manifest(
+                status,
+                council_run_id,
+                root_dir,
+                security_veto=security_veto,
+            )
+        except (OSError, RuntimeError) as exc:
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            if cleanup_error is not None:
+                raise RuntimeError(_fold_error(str(exc), cleanup_error)) from exc
+            raise
 
     # Spec 0003 (CriticalDialogue) ticket 11: the gate now branches on
     # whether local reachability is even knowable, rather than halting on a
@@ -2379,6 +2532,8 @@ def run_advisory_consultation_debate(
             rounds.append(
                 AdvisoryDebateRound(planner_plan, critic_a_response, critic_b_response)
             )
+            critic_a_resp = _critic_response_from_payload("critic_a", critic_a_response)
+            critic_b_resp = _critic_response_from_payload("critic_b", critic_b_response)
             # Same VerdictContract parser (ticket 02), applied independently
             # to each Critic's response, both checked against the same
             # reviewed artifact `planner_plan` — never against each other.
@@ -2389,6 +2544,18 @@ def run_advisory_consultation_debate(
             # entry, rather than as two separately-indexed lists that could
             # drift out of sync. See `AdvisoryRoundVerdict`'s docstring.
             round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_a, critic_b=verdict_b))
+            security_veto = veto_handler.check((critic_a_resp, critic_b_resp))
+            if security_veto is not None:
+                cleanup_error = _remove_stale_plan_artifact(plan_path)
+                manifest_path = _write_panel_manifest(
+                    "SECURITY_HALT", security_veto=security_veto
+                )
+                return _result(
+                    "security_halt",
+                    security_veto=security_veto,
+                    manifest_path=manifest_path,
+                    error=_fold_error(str(security_veto), cleanup_error),
+                )
             state = advance_debate_state(
                 state,
                 DebateRoundRecord(
@@ -2409,6 +2576,12 @@ def run_advisory_consultation_debate(
                 return _result("unparseable_verdict", error=_fold_error(state.error, cleanup_error))
 
             if state.consensus_reached:
+                panel_status = panel_consensus_table.evaluate(
+                    (critic_a_resp, critic_b_resp)
+                )
+                if panel_status not in {"UNANIMOUS", "QUALIFIED"}:
+                    panel_status = "UNANIMOUS"
+                manifest_path = _write_panel_manifest(panel_status)
                 panel_write_error: str | None = None
                 try:
                     _atomic_text_write(plan_path, state.final_plan or planner_plan)
@@ -2417,12 +2590,21 @@ def run_advisory_consultation_debate(
                         f"failed to write plan artifact at {plan_path}: {exc}"
                     )
                 return _result(
-                    "consensus", final_plan=state.final_plan or planner_plan, error=panel_write_error
+                    "consensus",
+                    final_plan=state.final_plan or planner_plan,
+                    error=panel_write_error,
+                    manifest_path=manifest_path,
                 )
 
             if state.stalemate_report is not None:
                 cleanup_error = _remove_stale_plan_artifact(plan_path)
-                return _result("stalemate", stalemate=state.stalemate_report, error=cleanup_error)
+                manifest_path = _write_panel_manifest("STALEMATE")
+                return _result(
+                    "stalemate",
+                    stalemate=state.stalemate_report,
+                    error=cleanup_error,
+                    manifest_path=manifest_path,
+                )
 
             # Any other combination — one approves and one objects, or both
             # object — is not consensus and starts another round.
@@ -2447,6 +2629,7 @@ def run_advisory_consultation_debate(
             return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
 
         rounds.append(AdvisoryDebateRound(planner_plan, critic_response))
+        critic_resp = _critic_response_from_payload("critic", critic_response)
         # `planner_plan` is the reviewed artifact: the VerdictContract
         # (spec 0003 ticket 02) verifies the Critic's quotes against exactly
         # what the Critic was shown as "Planner's plan" in `critic_prompt`
@@ -2456,6 +2639,14 @@ def run_advisory_consultation_debate(
         # above, `critic_b=None` since this is a pair-mode round. See
         # `AdvisoryDebateResult.round_verdicts`'s docstring.
         round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_result))
+        security_veto = veto_handler.check((critic_resp,))
+        if security_veto is not None:
+            cleanup_error = _remove_stale_plan_artifact(plan_path)
+            return _result(
+                "security_halt",
+                security_veto=security_veto,
+                error=_fold_error(str(security_veto), cleanup_error),
+            )
         state = advance_debate_state(
             state,
             DebateRoundRecord(
@@ -2502,7 +2693,13 @@ def run_advisory_consultation_debate(
         )
     else:
         stalemate = _build_stalemate_report(previous_plan or "", previous_critique or "")
-    return _result("stalemate", stalemate=stalemate, error=cleanup_error)
+    manifest_path = _write_panel_manifest("STALEMATE") if panel_mode else None
+    return _result(
+        "stalemate",
+        stalemate=stalemate,
+        error=cleanup_error,
+        manifest_path=manifest_path,
+    )
 
 
 def _run_dispatched_post_mortem(
