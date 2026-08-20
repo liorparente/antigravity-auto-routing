@@ -353,15 +353,20 @@ def _load_consultation_policy(config_path: Path) -> dict[str, Any]:
 
 
 def _critic_response_from_payload(
-    critic_id: str, raw_response: str
+    critic_id: str, raw_response: str, model_name: str | None = None
 ) -> CriticResponse:
     """Build the state-machine vote used by veto and panel manifest policy."""
     payload = _production_invoker.extract_review_payload(raw_response)
     findings = payload.get("findings", ())
     if not isinstance(findings, (list, tuple)):
         findings = ()
+    identity_source = model_name if model_name is not None else critic_id
+    model_family = classify_model_family(identity_source)
+    provider_id = "codex" if model_family == "codex-gpt" else model_family
+    if model_name is None and provider_id not in {"claude", "codex", "gemini"}:
+        provider_id = critic_id
     return CriticResponse(
-        critic_id=critic_id,
+        critic_id=provider_id,
         response=raw_response,
         verdict=str(payload.get("vote", "abstain")),
         confidence=payload.get("confidence"),
@@ -2532,8 +2537,12 @@ def run_advisory_consultation_debate(
             rounds.append(
                 AdvisoryDebateRound(planner_plan, critic_a_response, critic_b_response)
             )
-            critic_a_resp = _critic_response_from_payload("critic_a", critic_a_response)
-            critic_b_resp = _critic_response_from_payload("critic_b", critic_b_response)
+            critic_a_resp = _critic_response_from_payload(
+                "critic_a", critic_a_response, critic_a_model
+            )
+            critic_b_resp = _critic_response_from_payload(
+                "critic_b", critic_b_response, critic_b_model
+            )
             # Same VerdictContract parser (ticket 02), applied independently
             # to each Critic's response, both checked against the same
             # reviewed artifact `planner_plan` — never against each other.
@@ -2579,8 +2588,6 @@ def run_advisory_consultation_debate(
                 panel_status = panel_consensus_table.evaluate(
                     (critic_a_resp, critic_b_resp)
                 )
-                if panel_status not in {"UNANIMOUS", "QUALIFIED"}:
-                    panel_status = "UNANIMOUS"
                 manifest_path = _write_panel_manifest(panel_status)
                 panel_write_error: str | None = None
                 try:

@@ -183,11 +183,7 @@ def _validated_policy(configured: object) -> dict[str, Any]:
 
 
 def load_consultation_policy(config_path: Path = ROUTING_CONFIG_PATH) -> dict[str, Any]:
-    """Load ``consultation_policy`` with safe defaults for absent policy keys.
-
-    File and JSON parsing errors deliberately raise, matching the existing
-    routing configuration loaders' fail-safe contract.
-    """
+    """Load consultation policy defaults while propagating file and JSON errors."""
     with open(config_path, "r", encoding="utf-8") as stream:
         config = json.load(stream)
     if not isinstance(config, dict):

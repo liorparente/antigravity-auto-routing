@@ -102,6 +102,25 @@ class VerdictEvaluationTests(unittest.TestCase):
         )
 
 
+class CriticResponsePayloadTests(unittest.TestCase):
+    def test_vote_identity_uses_provider_family_for_weight_lookup(self) -> None:
+        raw_response = '{"vote": "approve", "confidence": 1.0}'
+        cases = (
+            ("critic_a", "Claude Opus 5 (Thinking)", "claude"),
+            ("critic_a", "Codex 5.6 Sol", "codex"),
+            ("critic_b", "Gemini 3.6 Flash (High)", "gemini"),
+            ("codex", None, "codex"),
+            ("critic", None, "critic"),
+        )
+
+        for critic_id, model_name, expected_identity in cases:
+            with self.subTest(model_name=model_name, critic_id=critic_id):
+                response = debate_orchestrator._critic_response_from_payload(
+                    critic_id, raw_response, model_name
+                )
+                self.assertEqual(response.critic_id, expected_identity)
+
+
 class DebateStateTests(unittest.TestCase):
     def test_round_and_session_state_construct_with_safe_defaults(self) -> None:
         record = debate_orchestrator.DebateRoundRecord(
@@ -369,22 +388,37 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             self.assertEqual(result.outcome, "security_halt")
             self.assertEqual(len(calls), 3)
             self.assertIsNotNone(result.manifest_path)
-            self.assertEqual(result.security_veto.provider, "critic_b")
+            self.assertEqual(result.security_veto.provider, "gemini")
             manifest = self._assert_valid_manifest(result.manifest_path, "SECURITY_HALT")
             self.assertEqual(manifest["security_veto"]["finding"]["id"], "SEC-PANEL")
 
-    def test_panel_unanimous_and_qualified_consensus_manifests_are_signed(self) -> None:
+    def test_panel_consensus_manifests_record_genuine_status_and_are_signed(self) -> None:
         cases = (
             ("UNANIMOUS", None),
-            ("QUALIFIED", {
-                "consensus_policy": [
-                    "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"
-                ],
-                "weighting": {
-                    "initial_weights": {"critic_a": 0.8, "critic_b": 0.2},
-                    "quorum_threshold": 0.7,
+            (
+                "QUALIFIED",
+                {
+                    "consensus_policy": [
+                        "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"
+                    ],
+                    "weighting": {
+                        "initial_weights": {"codex": 0.8, "gemini": 0.2},
+                        "quorum_threshold": 0.7,
+                    },
                 },
-            }),
+            ),
+            (
+                "UNRESOLVED",
+                {
+                    "consensus_policy": [
+                        "UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"
+                    ],
+                    "weighting": {
+                        "initial_weights": {"codex": 0.8, "gemini": 0.2},
+                        "quorum_threshold": 0.7,
+                    },
+                },
+            ),
         )
         for expected_status, policy in cases:
             with self.subTest(status=expected_status), tempfile.TemporaryDirectory() as tmp:
@@ -394,6 +428,10 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                 def invoker(model: str, _effort: str, prompt: str) -> str:
                     if "You are the Planner" in prompt:
                         return "Proposed plan"
+                    if expected_status == "UNRESOLVED":
+                        return self._review_response(
+                            "Proposed plan", vote="revise", verdict="APPROVE", confidence=0.0
+                        )
                     if expected_status == "QUALIFIED" and "Gemini" in model:
                         return self._review_response(
                             "Proposed plan", vote="revise", verdict="APPROVE", confidence=0.0

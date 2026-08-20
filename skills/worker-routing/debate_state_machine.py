@@ -262,13 +262,15 @@ class ConsensusTable:
     def _identity(self, vote: dict[str, Any] | CriticResponse) -> str:
         return str(self._field(vote, "provider", self._field(vote, "critic_id", "")) or "")
 
-    def _invalid_voters(self, votes: Sequence[dict[str, Any] | CriticResponse]) -> str:
+    def invalid_voters(
+        self, votes: Sequence[dict[str, Any] | CriticResponse]
+    ) -> tuple[str, ...]:
         invalid = []
         for vote in votes:
             verdict = self._field(vote, "vote", self._field(vote, "verdict", ""))
             if _normalize_verdict(verdict) is None:
                 invalid.append(f"{self._identity(vote)}={verdict}")
-        return ", ".join(invalid)
+        return tuple(invalid)
 
     def _enforce_policy(self, outcome: str) -> str:
         if not self._policy_is_valid:
@@ -298,7 +300,7 @@ class ConsensusTable:
         expected_hash: str | None = None,
         require_candidate_hashes: bool = False,
     ) -> str:
-        if not votes or any(not self._identity(vote) for vote in votes) or self._invalid_voters(votes):
+        if not votes or any(not self._identity(vote) for vote in votes) or self.invalid_voters(votes):
             return self._enforce_policy("INCOMPLETE")
         hashes = [self._field(vote, "candidate_hash") for vote in votes]
         ratification_required = (
@@ -335,9 +337,9 @@ def evaluate_weighted_quorum(
         expected_hash=expected_hash,
         require_candidate_hashes=require_candidate_hashes,
     )
-    invalid_voters = table._invalid_voters(responses)
+    invalid_voters = table.invalid_voters(responses)
     if invalid_voters:
-        return False, "INCOMPLETE", 0.0, f"unparseable verdict: {invalid_voters}"
+        return False, "INCOMPLETE", 0.0, f"unparseable verdict: {', '.join(invalid_voters)}"
     score = table.weighted_score(responses)
     consensus = outcome in {"UNANIMOUS", "QUALIFIED"}
     error = "material disagreement in candidate hashes" if outcome == "MATERIAL_DISAGREEMENT" else None

@@ -290,9 +290,8 @@ class ConsultationPolicyConfigTests(unittest.TestCase):
         self.assertEqual(policy["security_veto"]["veto_severities"], ["critical", "high"])
 
     def test_missing_config_file_raises(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(FileNotFoundError):
-                load_consultation_policy(Path(tmp) / "missing.json")
+        with tempfile.TemporaryDirectory() as tmp, self.assertRaises(FileNotFoundError):
+            load_consultation_policy(Path(tmp) / "missing.json")
 
     def test_malformed_config_file_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

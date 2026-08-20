@@ -251,7 +251,9 @@ class DebateStateMachineTests(unittest.TestCase):
 
     def test_unparseable_weighted_verdict_fails_closed(self) -> None:
         votes = (machine.CriticResponse("a", "", "maybe", confidence=1.0),)
-        self.assertEqual(machine.ConsensusTable().evaluate(votes), "INCOMPLETE")
+        table = machine.ConsensusTable()
+        self.assertEqual(table.invalid_voters(votes), ("a=maybe",))
+        self.assertEqual(table.evaluate(votes), "INCOMPLETE")
         self.assertEqual(
             machine.evaluate_weighted_quorum(votes),
             (False, "INCOMPLETE", 0.0, "unparseable verdict: a=maybe"),
