@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import importlib.util
 import io
 import json
 import os
@@ -17,25 +16,24 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-def _load(name: str):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-dialogue_contracts = _load("dialogue_contracts")
-debate_orchestrator = _load("debate_orchestrator")
+if __package__:
+    from . import advisory_consultation, debate_orchestrator, dialogue_contracts
+else:
+    import advisory_consultation  # type: ignore[no-redef]
+    import debate_orchestrator  # type: ignore[no-redef]
+    import dialogue_contracts  # type: ignore[no-redef]
 
 
 class PanelTopologyTests(unittest.TestCase):
     def test_only_complex_reviews_use_the_panel(self) -> None:
-        for occasion in ("plan-review", "code-review"):
+        panel_occasions: tuple[dialogue_contracts.Occasion, ...] = ("plan-review", "code-review")
+        for occasion in panel_occasions:
             self.assertTrue(debate_orchestrator.is_panel_topology(occasion, " Complex "))
-        for occasion in ("ambiguity", "post-mortem"):
+        non_panel_occasions: tuple[dialogue_contracts.Occasion, ...] = ("ambiguity", "post-mortem")
+        for occasion in non_panel_occasions:
             self.assertFalse(debate_orchestrator.is_panel_topology(occasion, "complex"))
         for complexity in ("trivial", "simple", "medium", "unknown"):
             self.assertFalse(debate_orchestrator.is_panel_topology("plan-review", complexity))
@@ -231,6 +229,7 @@ class ProductionOrchestrationTests(unittest.TestCase):
             )
 
         self.assertEqual(result.degradation_rung, 1)
+        assert result.executive_report is not None
         self.assertEqual(stderr.getvalue(), result.executive_report.budget_alert)
 
     def test_consecutive_default_path_worker_failures_alert_to_errors_md(self) -> None:
@@ -291,7 +290,7 @@ class ProductionOrchestrationTests(unittest.TestCase):
             root_dir = Path(tmp)
             errors_path = root_dir / "ERRORS.md"
             with patch.object(
-                sys.modules["production_invoker"], "invoke_worker", failing_invoke_worker
+                debate_orchestrator._current_production_invoker(), "invoke_worker", failing_invoke_worker
             ), patch.object(debate_orchestrator, "ESCALATION_FAILURE_THRESHOLD", 1):
                 result = debate_orchestrator.run_advisory_consultation_debate(
                     "Plan the implementation", invoke_worker=None, root_dir=root_dir
@@ -382,6 +381,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             self.assertEqual(result.outcome, "security_halt")
             self.assertEqual(len(calls), 2)
             self.assertIsNone(result.manifest_path)
+            assert result.security_veto is not None
             self.assertEqual(result.security_veto.finding["id"], "SEC-DYAD")
             self.assertFalse((root / "implementation_plan.md").exists())
             self.assertEqual(list((root / ".ralph").glob("council-manifest-*.json")), [])
@@ -415,7 +415,8 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
 
             self.assertEqual(result.outcome, "security_halt")
             self.assertEqual(len(calls), 3)
-            self.assertIsNotNone(result.manifest_path)
+            assert result.manifest_path is not None
+            assert result.security_veto is not None
             self.assertEqual(result.security_veto.provider, "gemini")
             manifest = self._assert_valid_manifest(result.manifest_path, "SECURITY_HALT")
             self.assertEqual(manifest["security_veto"]["finding"]["id"], "SEC-PANEL")
@@ -485,6 +486,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                 )
 
                 self.assertEqual(result.outcome, expected_outcome)
+                assert result.manifest_path is not None
                 self._assert_valid_manifest(result.manifest_path, manifest_status)
 
     def test_panel_weighted_quorum_returns_qualified_consensus(self) -> None:
@@ -524,6 +526,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             )
 
             self.assertEqual(result.outcome, "consensus")
+            assert result.manifest_path is not None
             self._assert_valid_manifest(result.manifest_path, "QUALIFIED")
 
     def test_panel_stalemate_manifest_is_signed(self) -> None:
@@ -546,6 +549,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                 max_rounds=1,
             )
             self.assertEqual(result.outcome, "stalemate")
+            assert result.manifest_path is not None
             self._assert_valid_manifest(result.manifest_path, "STALEMATE")
 
     def test_panel_worker_error_and_malformed_verdict_manifests_are_signed(self) -> None:
@@ -578,6 +582,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                     "worker_error" if failure == "worker_error" else "unparseable_verdict"
                 )
                 self.assertEqual(result.outcome, expected_outcome)
+                assert result.manifest_path is not None
                 self._assert_valid_manifest(result.manifest_path, manifest_status)
 
     def test_canary_security_finding_runs_veto_handler(self) -> None:
@@ -605,6 +610,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             )
 
             self.assertEqual(result.outcome, "security_halt")
+            assert result.security_veto is not None
             self.assertEqual(result.security_veto.finding["id"], "SEC-CANARY")
             self.assertEqual(plan_path.read_text(encoding="utf-8"), "current plan")
 
@@ -656,8 +662,6 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
 
     def test_facade_and_orchestrator_signatures_match(self) -> None:
         import inspect
-
-        advisory_consultation = _load("advisory_consultation")
 
         for symbol in (
             "run_advisory_consultation_debate",

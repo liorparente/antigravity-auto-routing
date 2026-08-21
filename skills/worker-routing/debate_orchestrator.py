@@ -54,37 +54,37 @@ if TYPE_CHECKING:
     from sensitivity_redactor import TaskIdentity
 
 
-def _load_sibling(name: str) -> Any:
-    if __package__:
-        pkg_mod = sys.modules.get(f"{__package__}.{name}")
-        if pkg_mod is not None:
-            return pkg_mod
-        return __import__(f"{__package__}.{name}", fromlist=[name])
-    try:
-        return __import__(name)
-    except ModuleNotFoundError as exc:
-        if exc.name != name:
-            raise
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+if __package__:
+    from . import consultation_policy as _consultation_policy
+    from . import debate_state_machine as _debate_state_machine
+    from . import debate_transport as _debate_transport
+    from . import dialogue_contracts as _dialogue_contracts
+    from . import dialogue_degradation as _dialogue_degradation
+    from . import dialogue_transcript as _dialogue_transcript
+    from . import executive_dialogue_report as _executive_dialogue_report
+    from . import learning_journal as _learning_journal
+    from . import learning_outcomes as _learning_outcomes
+    from . import production_invoker as _production_invoker
+    from . import prompt_assembler as _prompt_assembler
+    from . import sensitivity_redactor as _sensitivity_redactor
+else:
+    import consultation_policy as _consultation_policy  # type: ignore[no-redef]
+    import debate_state_machine as _debate_state_machine  # type: ignore[no-redef]
+    import debate_transport as _debate_transport  # type: ignore[no-redef]
+    import dialogue_contracts as _dialogue_contracts  # type: ignore[no-redef]
+    import dialogue_degradation as _dialogue_degradation  # type: ignore[no-redef]
+    import dialogue_transcript as _dialogue_transcript  # type: ignore[no-redef]
+    import executive_dialogue_report as _executive_dialogue_report  # type: ignore[no-redef]
+    import learning_journal as _learning_journal  # type: ignore[no-redef]
+    import learning_outcomes as _learning_outcomes  # type: ignore[no-redef]
+    import production_invoker as _production_invoker  # type: ignore[no-redef]
+    import prompt_assembler as _prompt_assembler  # type: ignore[no-redef]
+    import sensitivity_redactor as _sensitivity_redactor  # type: ignore[no-redef]
 
-
-_dialogue_contracts = _load_sibling("dialogue_contracts")
-_prompt_assembler = _load_sibling("prompt_assembler")
-_sensitivity_redactor = _load_sibling("sensitivity_redactor")
-_dialogue_degradation = _load_sibling("dialogue_degradation")
-_executive_dialogue_report = _load_sibling("executive_dialogue_report")
-_dialogue_transcript = _load_sibling("dialogue_transcript")
-_learning_journal = _load_sibling("learning_journal")
-_learning_outcomes = _load_sibling("learning_outcomes")
-_debate_state_machine = _load_sibling("debate_state_machine")
-_consultation_policy = _load_sibling("consultation_policy")
-_debate_transport = _load_sibling("debate_transport")
-_production_invoker = _load_sibling("production_invoker")
+# `_learning_journal` and `_learning_outcomes` are imported to ensure sibling modules
+# are loaded into `sys.modules` for dynamic resolution across dialogue transcript callers,
+# so a static analyzer sees no direct attribute access on these two bindings here.
+_ = (_learning_journal, _learning_outcomes)
 
 
 def _current_production_invoker() -> Any:
@@ -629,7 +629,7 @@ def _critic_response_from_payload(
     model_name: str | None = None,
 ) -> CriticResponse:
     """Build the state-machine vote used by veto and panel manifest policy."""
-    payload = _production_invoker.extract_review_payload(
+    payload = _current_production_invoker().extract_review_payload(
         raw_response,
         default_candidate_hash=None,
     )
@@ -1551,13 +1551,6 @@ def needs_post_mortem_consultation(
     # `if ...: return True` rung: `stalemate_occurred` is already a bool, so
     # the rung and the fallthrough would say the same thing twice.
     return stalemate_occurred
-
-
-
-# Prompt generation is owned by the extracted module. Retain the historical
-# private names as aliases for direct legacy callers.
-_MISSION_COPY = _prompt_assembler._MISSION_COPY
-_MissionCopy = _prompt_assembler._MissionCopy
 
 
 def _build_planner_prompt(

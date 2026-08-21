@@ -7059,13 +7059,16 @@ class LearningJournalTests(unittest.TestCase):
         )
 
 
-production_invoker_spec = importlib.util.spec_from_file_location(
-    "production_invoker", SKILL_DIR / "production_invoker.py"
-)
-assert production_invoker_spec is not None and production_invoker_spec.loader is not None
-production_invoker = importlib.util.module_from_spec(production_invoker_spec)
-sys.modules["production_invoker"] = production_invoker
-production_invoker_spec.loader.exec_module(production_invoker)
+if "production_invoker" in sys.modules:
+    production_invoker = sys.modules["production_invoker"]
+else:
+    production_invoker_spec = importlib.util.spec_from_file_location(
+        "production_invoker", SKILL_DIR / "production_invoker.py"
+    )
+    assert production_invoker_spec is not None and production_invoker_spec.loader is not None
+    production_invoker = importlib.util.module_from_spec(production_invoker_spec)
+    sys.modules["production_invoker"] = production_invoker
+    production_invoker_spec.loader.exec_module(production_invoker)
 
 
 class WorkerExecutionJournalingTests(unittest.TestCase):

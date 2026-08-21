@@ -424,6 +424,14 @@ class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
         production_module.make_journaled_invoke_worker = (  # type: ignore[attr-defined]
             fake_make_journaled_invoke_worker
         )
+        # `_critic_response_from_payload` resolves the *current*
+        # production_invoker (via `_current_production_invoker()`) to parse
+        # the critic's VerdictContract payload, so this stand-in module must
+        # delegate that one function to the real implementation even though
+        # this test only fakes worker invocation.
+        production_module.extract_review_payload = (  # type: ignore[attr-defined]
+            production_invoker.extract_review_payload
+        )
         sys.modules["production_invoker"] = production_module
         try:
             with tempfile.TemporaryDirectory() as tmp:
