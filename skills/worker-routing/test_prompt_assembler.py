@@ -8,10 +8,10 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
+if __package__:
     from . import prompt_assembler
-except (ImportError, ValueError):
-    import prompt_assembler
+else:
+    import prompt_assembler  # type: ignore[no-redef]
 
 
 class PromptAssemblerTests(unittest.TestCase):

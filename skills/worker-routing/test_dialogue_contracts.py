@@ -8,10 +8,10 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
+if __package__:
     from . import dialogue_contracts
-except (ImportError, ValueError):
-    import dialogue_contracts
+else:
+    import dialogue_contracts  # type: ignore[no-redef]
 
 
 class DialogueContractsTests(unittest.TestCase):

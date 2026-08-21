@@ -1529,7 +1529,7 @@ class CalibrationSignatureTests(unittest.TestCase):
         return manifest
 
     def _metrics(
-        self, step: object, root_dir: Path | None = None
+        self, step: routing_check.Step, root_dir: Path | None = None
     ) -> dict[str, object]:
         security_ctx = routing_check.SecurityContext.create(root_dir=root_dir)
         return routing_check.compute_metrics(
@@ -5682,7 +5682,9 @@ class LearningJournalTests(unittest.TestCase):
         }
     )
 
-    def _worker_execution_record(self, **overrides: object) -> object:
+    def _worker_execution_record(
+        self, **overrides: object
+    ) -> learning_journal.WorkerExecutionRecord:
         fields: dict[str, object] = {
             "task": learning_journal.TaskLabel.for_task("task-1", task_type="bugfix"),
             "duration_ms": 4200,
@@ -5697,7 +5699,7 @@ class LearningJournalTests(unittest.TestCase):
         fields.update(overrides)
         return learning_journal.WorkerExecutionRecord(**fields)  # type: ignore[arg-type]
 
-    def _outcome_record(self, **overrides: object) -> object:
+    def _outcome_record(self, **overrides: object) -> learning_journal.OutcomeRecord:
         fields: dict[str, object] = {
             "task": learning_journal.TaskLabel.for_task("graded-decision-1"),
             "ground_truth": "tests",
@@ -5707,7 +5709,9 @@ class LearningJournalTests(unittest.TestCase):
         fields.update(overrides)
         return learning_journal.OutcomeRecord(**fields)  # type: ignore[arg-type]
 
-    def _dialogue_quality_record(self, **overrides: object) -> object:
+    def _dialogue_quality_record(
+        self, **overrides: object
+    ) -> learning_journal.DialogueQualityRecord:
         fields: dict[str, object] = {
             "task": learning_journal.TaskLabel.for_task("task-1"),
             "occasion": "plan-review",
@@ -5725,7 +5729,7 @@ class LearningJournalTests(unittest.TestCase):
         fields.update(overrides)
         return learning_journal.DialogueQualityRecord(**fields)  # type: ignore[arg-type]
 
-    def _task_label(self, **overrides: object) -> object:
+    def _task_label(self, **overrides: object) -> learning_journal.TaskLabel:
         """A `TaskLabel` built through its raw constructor.
 
         The classmethods are the production path; this one reaches fields
@@ -5736,7 +5740,9 @@ class LearningJournalTests(unittest.TestCase):
         fields.update(overrides)
         return learning_journal.TaskLabel(**fields)  # type: ignore[arg-type]
 
-    def _compliance_record(self, **overrides: object) -> object:
+    def _compliance_record(
+        self, **overrides: object
+    ) -> learning_journal.ComplianceRecord:
         fields: dict[str, object] = {
             "session_id": "session-2026-08-12",
             "total_writes": 12,
@@ -5753,7 +5759,9 @@ class LearningJournalTests(unittest.TestCase):
         fields.update(overrides)
         return learning_journal.ComplianceRecord(**fields)  # type: ignore[arg-type]
 
-    def _replay_benchmark_record(self, **overrides: object) -> object:
+    def _replay_benchmark_record(
+        self, **overrides: object
+    ) -> learning_journal.ReplayBenchmarkRecord:
         fields: dict[str, object] = {
             "task_set": "bench-v1",
             "success": True,
@@ -5763,7 +5771,9 @@ class LearningJournalTests(unittest.TestCase):
         fields.update(overrides)
         return learning_journal.ReplayBenchmarkRecord(**fields)  # type: ignore[arg-type]
 
-    def _write_and_read(self, records: list[object]) -> list[dict]:
+    def _write_and_read(
+        self, records: Sequence[learning_journal.JournalRecord]
+    ) -> list[dict]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             for record in records:
@@ -6745,7 +6755,7 @@ class LearningJournalTests(unittest.TestCase):
                 with self.assertRaises(TypeError):
                     build(kind="Prompt: reset the ACME account password")
                 with self.assertRaises(TypeError):
-                    dataclasses.replace(  # type: ignore[type-var]
+                    dataclasses.replace(  # type: ignore[type-var,call-arg]
                         record, kind="Prompt: reset the ACME account password"
                     )
 
@@ -6794,7 +6804,7 @@ class LearningJournalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._dialogue_quality_record(canaries_planted=True)
         with self.assertRaises(ValueError):
-            learning_journal.DialogueRound("approved", "four objections")
+            learning_journal.DialogueRound("approved", "four objections")  # type: ignore[arg-type]
         for value in ("a great score", None, True, float("nan"), float("inf")):
             with self.subTest(field="score", value=value), self.assertRaises(
                 ValueError

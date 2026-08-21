@@ -4,14 +4,15 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from typing import Literal
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
+if __package__:
     from . import executive_dialogue_report
-except (ImportError, ValueError):
-    import executive_dialogue_report
+else:
+    import executive_dialogue_report  # type: ignore[no-redef]
 
 
 class BudgetDegradationAlertTests(unittest.TestCase):
@@ -21,11 +22,12 @@ class BudgetDegradationAlertTests(unittest.TestCase):
         )
 
     def test_each_active_rung_uses_its_policy_label(self) -> None:
-        for rung, label in (
+        cases: tuple[tuple[Literal[1, 2, 3], str], ...] = (
             (1, "reduce rounds"),
             (2, "cheapen roster: model + effort"),
             (3, "skip the dialogue entirely"),
-        ):
+        )
+        for rung, label in cases:
             with self.subTest(rung=rung):
                 self.assertEqual(
                     executive_dialogue_report.format_budget_degradation_alert(
@@ -77,6 +79,7 @@ class ExecutiveSummaryTests(unittest.TestCase):
             "consensus", "ambiguity", 1, 1, "Planner", "Critic"
         )
         alert = executive_dialogue_report.format_budget_degradation_alert(1, 10, 10)
+        assert alert is not None
         self.assertEqual(
             executive_dialogue_report.ExecutiveDialogueReport(lines, alert).render(),
             "\n".join(lines) + "\n" + alert,
@@ -91,6 +94,7 @@ class ExecutiveSummaryTests(unittest.TestCase):
             lines[2], "Outcome: Approved plan; persistence failed (disk full)"
         )
         alert = executive_dialogue_report.format_budget_degradation_alert(1, 10, 10)
+        assert alert is not None
         self.assertEqual(
             executive_dialogue_report.ExecutiveDialogueReport(lines, alert).render(),
             "\n".join(lines) + "\n" + alert,

@@ -8,10 +8,10 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
+if __package__:
     from . import sensitivity_redactor
-except (ImportError, ValueError):
-    import sensitivity_redactor
+else:
+    import sensitivity_redactor  # type: ignore[no-redef]
 
 
 class SensitivityRedactorTests(unittest.TestCase):

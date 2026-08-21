@@ -11,10 +11,10 @@ from pathlib import Path
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-try:
+if __package__:
     from . import dialogue_degradation
-except (ImportError, ValueError):
-    import dialogue_degradation
+else:
+    import dialogue_degradation  # type: ignore[no-redef]
 
 
 class DegradationRungTests(unittest.TestCase):
@@ -108,7 +108,7 @@ class DegradationLadderStateTests(unittest.TestCase):
         self.assertTrue(state.is_degraded_independence)
         self.assertFalse(state.is_skipped)
         with self.assertRaises(FrozenInstanceError):
-            state.max_rounds = 2
+            state.max_rounds = 2  # type: ignore[misc]
 
 
 if __name__ == "__main__":
