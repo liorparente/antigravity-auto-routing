@@ -452,6 +452,16 @@ class RoutingCheckFixtureTests(unittest.TestCase):
         result = run_check("--strict", str(FIXTURES_DIR / "clean_log.txt"))
         self.assertEqual(result.returncode, 0)
 
+    def test_routing_check_resolves_transparently_in_standalone_and_package_mode(self) -> None:
+        res_direct = subprocess.run(
+            [sys.executable, str(ROUTING_CHECK), str(FIXTURES_DIR / "clean_log.txt")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(res_direct.returncode, 0, res_direct.stdout + res_direct.stderr)
+        self.assertIn("No violations detected", res_direct.stdout)
+
 
 class RoutingAuditIntegrationTests(unittest.TestCase):
     """Exercises routing-audit.sh end to end against a throwaway brain/ conversation dir."""
@@ -637,6 +647,23 @@ class ProtocolSyncTests(unittest.TestCase):
                 installed_protocol = installed_dir / "protocol.md"
                 self.assertTrue(installed_protocol.exists(), installed_protocol)
                 self.assertEqual(installed_protocol.read_text(), protocol_text)
+
+    def test_install_sh_copies_init_py_to_skill_dirs(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            init_text = (SKILL_DIR / "__init__.py").read_text()
+            for installed_dir in (
+                Path(fake_home) / ".gemini" / "config" / "skills" / "worker-routing",
+                Path(fake_home) / ".codex" / "skills" / "worker-routing",
+                Path(target_dir) / ".agents" / "skills" / "worker-routing",
+                Path(target_dir) / ".agent" / "skills" / "worker-routing",
+                Path(target_dir) / ".codex" / "skills" / "worker-routing",
+            ):
+                installed_init = installed_dir / "__init__.py"
+                self.assertTrue(installed_init.exists(), str(installed_init))
+                self.assertEqual(installed_init.read_text(), init_text)
 
     def test_install_sh_synchronizes_council_review_and_removes_legacy_policy(
         self,
@@ -8599,7 +8626,10 @@ class ManagedFileClosureTests(unittest.TestCase):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
             elif isinstance(node, ast.ImportFrom):
-                names = [node.module] if node.module and node.level == 0 else []
+                names = []
+                if node.module:
+                    names.append(node.module)
+                names.extend(alias.name for alias in node.names)
             else:
                 continue
             imported.update(

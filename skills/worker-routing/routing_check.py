@@ -117,6 +117,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 DIFF_FILE_RE = re.compile(r"^\+\+\+\s+b/(.+)$", re.MULTILINE)
 
 
@@ -600,7 +603,10 @@ def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
     """Read the verifier secret without creating or modifying project state."""
     # Keep this import lazy: routing_check.py is loaded directly by path in
     # standalone audit contexts, before its sibling module is on sys.path.
-    from agent_council import AgentCouncil
+    if __package__:
+        from .agent_council import AgentCouncil
+    else:
+        from agent_council import AgentCouncil  # type: ignore[no-redef]
 
     try:
         return AgentCouncil.load_secret(root_dir=root_dir, read_only=True)
@@ -630,7 +636,10 @@ class SecurityContext:
             return False
         # See get_calibration_secret: direct-path execution needs this sibling
         # import to remain lazy until the caller has installed it.
-        from agent_council import AgentCouncil
+        if __package__:
+            from .agent_council import AgentCouncil
+        else:
+            from agent_council import AgentCouncil  # type: ignore[no-redef]
 
         return AgentCouncil.verify_signature(
             manifest, secret=self.secret, root_dir=self.root_dir
@@ -1300,7 +1309,10 @@ def _journal_identifier_re() -> re.Pattern[str]:
     pins the two patterns identical, so the copy cannot drift.
     """
     try:
-        import learning_journal
+        if __package__:
+            from . import learning_journal
+        else:
+            import learning_journal  # type: ignore[no-redef]
     except ImportError:
         return re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
     return learning_journal.TASK_ID_RE
@@ -1458,7 +1470,10 @@ def _persist_compliance_record(
 
     journalable_session_id, _note = _journalable_session_id(session_id)
     try:
-        import learning_journal
+        if __package__:
+            from . import learning_journal
+        else:
+            import learning_journal  # type: ignore[no-redef]
 
         issue_codes = learning_journal.extract_issue_codes(
             itertools.chain(

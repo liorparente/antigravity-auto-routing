@@ -5,9 +5,9 @@
 
 **Blocked by:** [05 — Learning Journal & State Store Sibling Loader Elimination (#14)](https://github.com/liorparente/antigravity-auto-routing/issues/14)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Add transparent package resolution fallback to `routing_check.py`.
-- [ ] Verify `routing_check.py` and `routing-audit.sh` run directly from CLI without errors.
-- [ ] Update `install.sh` and `uninstall.sh` to synchronize `__init__.py`.
-- [ ] Execute complete suite `python3 -m unittest discover` (1,010+ tests passing) and verify Council Review gate.
+- [x] Add transparent package resolution fallback to `routing_check.py`.
+- [x] Verify `routing_check.py` and `routing-audit.sh` run directly from CLI without errors.
+- [x] Update `install.sh` and `uninstall.sh` to synchronize `__init__.py`.
+- [x] Execute complete suite `python3 -m unittest discover` (1,010+ tests passing) and verify Council Review gate.
