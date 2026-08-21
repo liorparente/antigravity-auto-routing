@@ -9,9 +9,9 @@ package/standalone imports of the now-package modules they load dynamically (`ro
 `production_invoker`). `debate_orchestrator.py:425` is out of scope: it is an external cross-skill
 adapter, not a test-file loader, and is not touched by this ticket.
 
-**Blocked by:** [06 — Transparent CLI Bootstrap & Multi-Harness Installer Sync (#15)](06-transparent-cli-bootstrap-and-installer-sync.md)
+**Blocked by:** [06 — Transparent CLI Bootstrap & Multi-Harness Installer Sync (#15)](https://github.com/liorparente/antigravity-auto-routing/issues/15)
 
-**Status:** ready-for-agent
+**Status:** backlog
 
 - [ ] Replace each `spec_from_file_location`/`module_from_spec`/`exec_module` triple in
       `test_routing.py` with the file's standard `if __package__: from . import x else: import x`
