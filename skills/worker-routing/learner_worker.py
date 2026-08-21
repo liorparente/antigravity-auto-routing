@@ -77,12 +77,22 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-import acceptance_gate
-import learning_journal
-import learning_report
-import learning_scoreboard
-import risk_tiered_application
-from risk_tiered_application import RevertOutcome, TierOutcome
+if __package__:
+    from . import (
+        acceptance_gate,
+        learning_journal,
+        learning_report,
+        learning_scoreboard,
+        risk_tiered_application,
+    )
+    from .risk_tiered_application import RevertOutcome, TierOutcome
+else:
+    import acceptance_gate  # type: ignore[no-redef]
+    import learning_journal  # type: ignore[no-redef]
+    import learning_report  # type: ignore[no-redef]
+    import learning_scoreboard  # type: ignore[no-redef]
+    import risk_tiered_application  # type: ignore[no-redef]
+    from risk_tiered_application import RevertOutcome, TierOutcome  # type: ignore[no-redef]
 
 # The seam every worker invocation in this repository shares: `(model,
 # effort, prompt) -> str`. Declared locally rather than imported from

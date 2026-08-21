@@ -7,28 +7,52 @@ no-op handling when adopting unchanged documents.
 """
 from __future__ import annotations
 
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import learned_state
-import learning_journal
-import risk_tiered_application
-from learned_state import DocumentChange
-from learning_scoreboard import MetricChange, MetricValue, ScoreboardComparison
-from risk_tiered_application import (
-    DEFAULT_MAX_MEMORY_LESSONS,
-    PendingProposal,
-    apply_memory_lesson,
-    apply_routing_table_update,
-    approve_pending_proposal,
-    read_pending_proposals,
-    reject_pending_proposal,
-    revert_attributable_regression,
-    submit_brief_proposal,
-)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __package__:
+    from . import learned_state, learning_journal, risk_tiered_application
+    from .learned_state import DocumentChange
+    from .learning_scoreboard import MetricChange, MetricValue, ScoreboardComparison
+    from .risk_tiered_application import (
+        DEFAULT_MAX_MEMORY_LESSONS,
+        PendingProposal,
+        apply_memory_lesson,
+        apply_routing_table_update,
+        approve_pending_proposal,
+        read_pending_proposals,
+        reject_pending_proposal,
+        revert_attributable_regression,
+        submit_brief_proposal,
+    )
+else:
+    import learned_state  # type: ignore[no-redef]
+    import learning_journal  # type: ignore[no-redef]
+    import risk_tiered_application  # type: ignore[no-redef]
+    from learned_state import DocumentChange  # type: ignore[no-redef]
+    from learning_scoreboard import (  # type: ignore[no-redef]
+        MetricChange,
+        MetricValue,
+        ScoreboardComparison,
+    )
+    from risk_tiered_application import (  # type: ignore[no-redef]
+        DEFAULT_MAX_MEMORY_LESSONS,
+        PendingProposal,
+        apply_memory_lesson,
+        apply_routing_table_update,
+        approve_pending_proposal,
+        read_pending_proposals,
+        reject_pending_proposal,
+        revert_attributable_regression,
+        submit_brief_proposal,
+    )
 
 _NOW = datetime(2026, 8, 15, 12, 0, 0, tzinfo=timezone.utc)
 _LATER = datetime(2026, 8, 15, 13, 0, 0, tzinfo=timezone.utc)
@@ -324,13 +348,12 @@ class Tier1MemoryLessonTests(unittest.TestCase):
 
         Patches `risk_tiered_application.learned_state.read_current` — the
         exact attribute `apply_memory_lesson`'s own code resolves through —
-        rather than this test file's own `learned_state` import. Several
-        other test files in this directory reload `learned_state` via
-        `importlib.util.spec_from_file_location` at import time (see
-        `test_routing.py`), which under `unittest discover`'s whole-suite
-        collection can leave this test file's `learned_state` name bound to
-        a different module object than the one `risk_tiered_application.py`
-        itself already imported — patching that copy would silently no-op.
+        rather than this test file's own `learned_state` import. `test_routing.py`
+        still reloads `learned_state` via `importlib.util.spec_from_file_location`
+        at import time, which under `unittest discover`'s whole-suite collection
+        can leave this test file's `learned_state` name bound to a different
+        module object than the one `risk_tiered_application.py` itself already
+        imported — patching that copy would silently no-op.
         """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

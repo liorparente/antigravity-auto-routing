@@ -51,8 +51,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TypeVar
 
-import learning_journal
-import learning_scoreboard
+if __package__:
+    from . import learning_journal, learning_scoreboard
+else:
+    import learning_journal  # type: ignore[no-redef]
+    import learning_scoreboard  # type: ignore[no-redef]
 
 # Re-exported from `learning_scoreboard` — one source, never a second
 # literal. See implementation_plan.md Section 2.

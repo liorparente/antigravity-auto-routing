@@ -106,8 +106,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-import learning_journal
-import learning_scoreboard
+if __package__:
+    from . import learning_journal, learning_scoreboard
+else:
+    import learning_journal  # type: ignore[no-redef]
+    import learning_scoreboard  # type: ignore[no-redef]
 
 # The trailing window `evaluate_proposal` uses to compare scoreboards before
 # and after a trial batch, re-exported from `learning_scoreboard` rather than

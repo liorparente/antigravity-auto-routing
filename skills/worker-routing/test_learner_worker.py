@@ -11,6 +11,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+import sys
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -20,19 +21,35 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import learned_state
-import learner_worker
-import risk_tiered_application
-from learning_journal import (
-    ComplianceRecord,
-    DialogueQualityRecord,
-    DialogueRound,
-    OutcomeRecord,
-    ReplayBenchmarkRecord,
-    TaskLabel,
-    WorkerExecutionRecord,
-    append_journal_record,
-)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __package__:
+    from . import learned_state, learner_worker, risk_tiered_application
+    from .learning_journal import (
+        ComplianceRecord,
+        DialogueQualityRecord,
+        DialogueRound,
+        OutcomeRecord,
+        ReplayBenchmarkRecord,
+        TaskLabel,
+        WorkerExecutionRecord,
+        append_journal_record,
+    )
+else:
+    import learned_state  # type: ignore[no-redef]
+    import learner_worker  # type: ignore[no-redef]
+    import risk_tiered_application  # type: ignore[no-redef]
+    from learning_journal import (  # type: ignore[no-redef]
+        ComplianceRecord,
+        DialogueQualityRecord,
+        DialogueRound,
+        OutcomeRecord,
+        ReplayBenchmarkRecord,
+        TaskLabel,
+        WorkerExecutionRecord,
+        append_journal_record,
+    )
 
 # A fixed, timezone-aware `now`. The default 7-day weekly window is
 # (2026-08-08T12:00:00Z, 2026-08-15T12:00:00Z].
@@ -130,6 +147,23 @@ def _seed_replay_benchmark(
     )
     error = append_journal_record(record, root_dir=root)
     assert error is None, error
+
+
+def _imported_module_names(source: str) -> set[str]:
+    """Every module name source imports, by any syntax. `from . import x`
+    puts x in alias.name with node.module None; `from .x import y` puts
+    it in node.module — so both must be collected or relative imports slip past.
+    """
+    tree = ast.parse(source)
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                names.add(node.module)
+            names.update(alias.name for alias in node.names)
+    return names
 
 
 def _json_reply(payload: dict) -> str:
@@ -1389,16 +1423,27 @@ class TestSeamAndSeparationTests(unittest.TestCase):
         `risk_tiered_application`'s tiering.
         """
         source = Path(learner_worker.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        imported_names: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported_names.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported_names.add(node.module)
+        imported_names = _imported_module_names(source)
 
         self.assertNotIn("learned_state", imported_names)
         self.assertNotIn("adopt(", source)
+
+    def test_the_learned_state_import_guard_catches_relative_and_absolute_imports(self) -> None:
+        """Regression for the AST walk above: it must flag `learned_state`
+        whether it arrives via a plain `import`, a relative `from . import`,
+        a relative `from .learned_state import`, or an absolute
+        `from learned_state import` — the walk collects both `node.module`
+        and each `alias.name` from every `ast.ImportFrom` node.
+        """
+
+        self.assertIn("learned_state", _imported_module_names("import learned_state"))
+        self.assertIn("learned_state", _imported_module_names("from . import learned_state"))
+        self.assertIn(
+            "learned_state", _imported_module_names("from .learned_state import adopt")
+        )
+        self.assertIn(
+            "learned_state", _imported_module_names("from learned_state import adopt")
+        )
 
     def test_all_mutations_flow_through_risk_tiered_application(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

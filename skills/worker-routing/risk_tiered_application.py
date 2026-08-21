@@ -45,19 +45,32 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-import acceptance_gate
-import learned_state
-import learning_scoreboard
-from acceptance_gate import (
-    DEFAULT_SCORE_THRESHOLD,
-    DEFAULT_TRIAL_COUNT,
-    GateDecision,
-)
-from learned_state import (
-    DocumentChange,
-    LearnedDocument,
-    VersionEntry,
-)
+if __package__:
+    from . import acceptance_gate, learned_state, learning_scoreboard
+    from .acceptance_gate import (
+        DEFAULT_SCORE_THRESHOLD,
+        DEFAULT_TRIAL_COUNT,
+        GateDecision,
+    )
+    from .learned_state import (
+        DocumentChange,
+        LearnedDocument,
+        VersionEntry,
+    )
+else:
+    import acceptance_gate  # type: ignore[no-redef]
+    import learned_state  # type: ignore[no-redef]
+    import learning_scoreboard  # type: ignore[no-redef]
+    from acceptance_gate import (  # type: ignore[no-redef]
+        DEFAULT_SCORE_THRESHOLD,
+        DEFAULT_TRIAL_COUNT,
+        GateDecision,
+    )
+    from learned_state import (  # type: ignore[no-redef]
+        DocumentChange,
+        LearnedDocument,
+        VersionEntry,
+    )
 
 ApplicationStatus = Literal["applied", "rejected", "pending", "no_op"]
 

@@ -96,7 +96,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import learning_journal
+if __package__:
+    from . import learning_journal
+else:
+    import learning_journal  # type: ignore[no-redef]
 
 if TYPE_CHECKING:
     # Annotation-only under `from __future__ import annotations`:
@@ -105,7 +108,10 @@ if TYPE_CHECKING:
     # report.options` and `chosen.id` are plain attribute access). Importing
     # it for real would make every caller of `record_test_result` pay for
     # `advisory_consultation` and the `production_invoker` chain behind it.
-    import advisory_consultation
+    if __package__:
+        from . import advisory_consultation
+    else:
+        import advisory_consultation  # type: ignore[no-redef]
 
 # Mirrors `advisory_consultation._build_stalemate_report`'s three options, in
 # order: (1) approve the Planner's architecture, (2) approve the Critic's,

@@ -1,26 +1,15 @@
 #!/usr/bin/env python3
 """Unit tests for `learning_report` (spec 0004 ticket 17).
 
-Modules are loaded by path with `importlib.util.spec_from_file_location`,
-the pattern `test_learning_scoreboard.py` and `test_production_invoker.py`
-already use: these files are not a package, and `learning_report.py`'s bare
-`import learning_journal` / `import learning_scoreboard` only resolve
-because those two names are registered in `sys.modules` first.
-
 `_find_forbidden_clock_reads` is imported by name from
 `test_learning_scoreboard` — and nothing else from that module — per
 implementation_plan.md Section 9 slice 1's round-2 correction: that one
 function is pure (`ast.AST` in, a plain list of tuples out) and touches
-neither `learning_journal` nor `learning_scoreboard`, so it is safe to import
-even though importing `test_learning_scoreboard` re-registers those two
-names in `sys.modules` as a side effect. This file's own module loads below
-re-register both names again afterward, so every fixture and assertion here
-still narrows against the module objects this file itself loaded.
+neither `learning_journal` nor `learning_scoreboard`.
 """
 from __future__ import annotations
 
 import ast
-import importlib.util
 import sys
 import tempfile
 import unittest
@@ -29,38 +18,18 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from test_learning_scoreboard import _find_forbidden_clock_reads
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-MODULE_PATH = Path(__file__).with_name("learning_journal.py")
-LEARNING_SCOREBOARD_PATH = Path(__file__).with_name("learning_scoreboard.py")
+if __package__:
+    from . import learning_journal, learning_report
+    from .test_learning_scoreboard import _find_forbidden_clock_reads
+else:
+    import learning_journal  # type: ignore[no-redef]
+    import learning_report  # type: ignore[no-redef]
+    from test_learning_scoreboard import _find_forbidden_clock_reads  # type: ignore[no-redef]
+
 LEARNING_REPORT_PATH = Path(__file__).with_name("learning_report.py")
-
-learning_journal_spec = importlib.util.spec_from_file_location("learning_journal", MODULE_PATH)
-assert learning_journal_spec is not None and learning_journal_spec.loader is not None
-learning_journal = importlib.util.module_from_spec(learning_journal_spec)
-sys.modules["learning_journal"] = learning_journal
-learning_journal_spec.loader.exec_module(learning_journal)
-
-# `learning_scoreboard` does a bare `import learning_journal` at module top
-# level, which only resolves because `learning_journal` is already
-# registered in `sys.modules` above.
-learning_scoreboard_spec = importlib.util.spec_from_file_location(
-    "learning_scoreboard", LEARNING_SCOREBOARD_PATH
-)
-assert learning_scoreboard_spec is not None and learning_scoreboard_spec.loader is not None
-learning_scoreboard = importlib.util.module_from_spec(learning_scoreboard_spec)
-sys.modules["learning_scoreboard"] = learning_scoreboard
-learning_scoreboard_spec.loader.exec_module(learning_scoreboard)
-
-# Same reasoning: `learning_report` does bare `import learning_journal` and
-# `import learning_scoreboard`, resolved via the two registrations above.
-learning_report_spec = importlib.util.spec_from_file_location(
-    "learning_report", LEARNING_REPORT_PATH
-)
-assert learning_report_spec is not None and learning_report_spec.loader is not None
-learning_report = importlib.util.module_from_spec(learning_report_spec)
-sys.modules["learning_report"] = learning_report
-learning_report_spec.loader.exec_module(learning_report)
 
 # A shared, timezone-aware `now` for every test below — never used to derive
 # a live clock reading, only as a fixed injected value. Window bounds for the
@@ -630,7 +599,9 @@ class AdoptedRevertedTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             learning_report.render_weekly_report(
-                journal, now=_NOW, adopted="adopted the routing-table update"
+                journal,
+                now=_NOW,
+                adopted="adopted the routing-table update",  # type: ignore[arg-type]
             )
 
 

@@ -60,7 +60,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, get_args
 
-import learning_journal
+if __package__:
+    from . import learning_journal
+else:
+    import learning_journal  # type: ignore[no-redef]
 
 # The default trailing window, matching ticket 17's weekly report cadence.
 # Configurable per call because a later consumer (ticket 18's acceptance

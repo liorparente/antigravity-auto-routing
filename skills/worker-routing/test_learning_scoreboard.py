@@ -7,16 +7,10 @@ and the reader tolerates a damaged or forward-shifted stream rather than
 raising. Slice 3's test 16 (`compute_scoreboard`/`read_scoreboard` does not
 raise over such a line) is stage 2's — `learning_scoreboard.py` does not
 exist yet — and is deliberately not written here.
-
-Modules are loaded by path with `importlib.util.spec_from_file_location`,
-the pattern `test_production_invoker.py` already uses: these files are not a
-package, and `learning_outcomes.py`'s bare `import learning_journal` only
-resolves because `learning_journal` is registered in `sys.modules` first.
 """
 from __future__ import annotations
 
 import ast
-import importlib.util
 import json
 import sys
 import tempfile
@@ -26,34 +20,17 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-MODULE_PATH = Path(__file__).with_name("learning_journal.py")
-LEARNING_OUTCOMES_PATH = Path(__file__).with_name("learning_outcomes.py")
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __package__:
+    from . import learning_journal, learning_outcomes, learning_scoreboard
+else:
+    import learning_journal  # type: ignore[no-redef]
+    import learning_outcomes  # type: ignore[no-redef]
+    import learning_scoreboard  # type: ignore[no-redef]
+
 LEARNING_SCOREBOARD_PATH = Path(__file__).with_name("learning_scoreboard.py")
-
-learning_journal_spec = importlib.util.spec_from_file_location("learning_journal", MODULE_PATH)
-assert learning_journal_spec is not None and learning_journal_spec.loader is not None
-learning_journal = importlib.util.module_from_spec(learning_journal_spec)
-sys.modules["learning_journal"] = learning_journal
-learning_journal_spec.loader.exec_module(learning_journal)
-
-learning_outcomes_spec = importlib.util.spec_from_file_location(
-    "learning_outcomes", LEARNING_OUTCOMES_PATH
-)
-assert learning_outcomes_spec is not None and learning_outcomes_spec.loader is not None
-learning_outcomes = importlib.util.module_from_spec(learning_outcomes_spec)
-learning_outcomes_spec.loader.exec_module(learning_outcomes)
-
-# `learning_scoreboard` does a bare `import learning_journal` at module top
-# level, which only resolves because `learning_journal` is already registered
-# in `sys.modules` above — the same reasoning `test_production_invoker.py`
-# documents for `production_invoker`'s own `import learning_journal`.
-learning_scoreboard_spec = importlib.util.spec_from_file_location(
-    "learning_scoreboard", LEARNING_SCOREBOARD_PATH
-)
-assert learning_scoreboard_spec is not None and learning_scoreboard_spec.loader is not None
-learning_scoreboard = importlib.util.module_from_spec(learning_scoreboard_spec)
-sys.modules["learning_scoreboard"] = learning_scoreboard
-learning_scoreboard_spec.loader.exec_module(learning_scoreboard)
 
 # A shared, timezone-aware `now` for every stage-2 test below — never used to
 # derive a live clock reading, only as a fixed injected value.
@@ -3288,7 +3265,7 @@ class ScoreboardComparisonTests(unittest.TestCase):
         no_data = learning_scoreboard.MetricNoData(
             name="violations_per_session", direction="lower_is_better"
         )
-        cases = {
+        cases: dict[str, tuple[learning_scoreboard.Metric, learning_scoreboard.Metric]] = {
             "baseline_only_no_data": (no_data, measured),
             "current_only_no_data": (measured, no_data),
             "neither_has_data": (no_data, no_data),
@@ -3738,7 +3715,9 @@ class ReplayBenchmarkMetricsTests(unittest.TestCase):
 
             # Read current on bench-v2
             current = learning_scoreboard.read_scoreboard(root, now=_NOW, task_set="bench-v2")
-            self.assertEqual(current.replay_benchmark.mean_benchmark_score.value, 0.85)
+            current_score = current.replay_benchmark.mean_benchmark_score
+            assert isinstance(current_score, learning_scoreboard.MetricValue)
+            self.assertEqual(current_score.value, 0.85)
 
             # Compare them: regression should not be detected since baseline was MetricNoData
             comp = learning_scoreboard.compare_scoreboards(baseline, current)

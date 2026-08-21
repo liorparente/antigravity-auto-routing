@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for `learned_state` (spec 0004 ticket 19).
 
-Modules are loaded by path with `importlib.util.spec_from_file_location`,
-the pattern every other test file in this skill directory uses: these files
-are not a package.
-
 Every test that mutates `root_dir` performs its disk-reading assertions
 *inside* the `tempfile.TemporaryDirectory()` block that owns it — reading
 after the block exits would read a directory that no longer exists.
@@ -12,7 +8,6 @@ after the block exits would read a directory that no longer exists.
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import os
 import shutil
@@ -22,15 +17,17 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
-MODULE_PATH = Path(__file__).with_name("learned_state.py")
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __package__:
+    from . import learned_state
+else:
+    import learned_state  # type: ignore[no-redef]
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-learned_state_spec = importlib.util.spec_from_file_location("learned_state", MODULE_PATH)
-assert learned_state_spec is not None and learned_state_spec.loader is not None
-learned_state = importlib.util.module_from_spec(learned_state_spec)
-sys.modules["learned_state"] = learned_state
-learned_state_spec.loader.exec_module(learned_state)
 
 # Three fixed, timezone-aware instants — never used to derive a live clock
 # reading, only as injected values. Spread out so successive calls in one
@@ -211,16 +208,15 @@ class RollBackTests(unittest.TestCase):
             self.assertNotIn("routing_table", current)
 
 
-# No return annotation: the module is loaded by path, so mypy cannot
-# resolve `learned_state.VersionEntry` as a type. Same reason `_change` at
-# the top of this file has none.
-def _entry(kind: str, version: int, replaces: int | None):
+def _entry(
+    kind: Literal["adopt", "rollback"], version: int, replaces: int | None
+) -> learned_state.VersionEntry:
     """A minimal, otherwise-valid `VersionEntry` naming only what
     `most_recent_live_adoption` actually inspects (`kind`), plus the two
     fields every entry must carry. Built directly rather than through
     `adopt`/`roll_back` so interleaved sequences can be constructed without
     a filesystem round trip."""
-    return learned_state.VersionEntry(  # type: ignore[arg-type]
+    return learned_state.VersionEntry(
         kind=kind,
         version=version,
         replaces=replaces,

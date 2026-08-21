@@ -1,15 +1,7 @@
 #!/usr/bin/env python3
-"""Unit tests for `acceptance_gate` (spec 0004 ticket 18).
-
-Modules are loaded by path with `importlib.util.spec_from_file_location`,
-the pattern `test_learning_report.py` already uses: these files are not a
-package, and `acceptance_gate.py`'s bare `import learning_journal` /
-`import learning_scoreboard` only resolve because those two names are
-registered in `sys.modules` first.
-"""
+"""Unit tests for `acceptance_gate` (spec 0004 ticket 18)."""
 from __future__ import annotations
 
-import importlib.util
 import sys
 import tempfile
 import unittest
@@ -18,31 +10,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-MODULE_PATH = Path(__file__).with_name("learning_journal.py")
-LEARNING_SCOREBOARD_PATH = Path(__file__).with_name("learning_scoreboard.py")
-ACCEPTANCE_GATE_PATH = Path(__file__).with_name("acceptance_gate.py")
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-learning_journal_spec = importlib.util.spec_from_file_location("learning_journal", MODULE_PATH)
-assert learning_journal_spec is not None and learning_journal_spec.loader is not None
-learning_journal = importlib.util.module_from_spec(learning_journal_spec)
-sys.modules["learning_journal"] = learning_journal
-learning_journal_spec.loader.exec_module(learning_journal)
-
-learning_scoreboard_spec = importlib.util.spec_from_file_location(
-    "learning_scoreboard", LEARNING_SCOREBOARD_PATH
-)
-assert learning_scoreboard_spec is not None and learning_scoreboard_spec.loader is not None
-learning_scoreboard = importlib.util.module_from_spec(learning_scoreboard_spec)
-sys.modules["learning_scoreboard"] = learning_scoreboard
-learning_scoreboard_spec.loader.exec_module(learning_scoreboard)
-
-acceptance_gate_spec = importlib.util.spec_from_file_location(
-    "acceptance_gate", ACCEPTANCE_GATE_PATH
-)
-assert acceptance_gate_spec is not None and acceptance_gate_spec.loader is not None
-acceptance_gate = importlib.util.module_from_spec(acceptance_gate_spec)
-sys.modules["acceptance_gate"] = acceptance_gate
-acceptance_gate_spec.loader.exec_module(acceptance_gate)
+if __package__:
+    from . import acceptance_gate, learning_journal, learning_scoreboard
+else:
+    import acceptance_gate  # type: ignore[no-redef]
+    import learning_journal  # type: ignore[no-redef]
+    import learning_scoreboard  # type: ignore[no-redef]
 
 # A shared, timezone-aware `now` for every test below — never used to derive
 # a live clock reading, only as a fixed injected value.
@@ -53,6 +29,23 @@ def _scripted_runner(scores: list[float]) -> Callable[[], float]:
     """A runner that returns each of `scores` in order, one per call."""
     remaining = iter(scores)
     return lambda: next(remaining)
+
+
+def _constant_runner(value: object) -> Callable[[], float]:
+    """A runner that always returns `value`, whatever its actual type.
+
+    `value` is bound as a real function argument at call time, not looked up
+    from an enclosing loop by closure — the loop-variable-capture trap a bare
+    `lambda: bad_score` defined inside a `for` loop would fall into. Typed to
+    return `float` structurally (matching `evaluate_proposal`'s `runner`
+    seam) while actually returning whatever `value` is, including a
+    deliberately wrong type — the fail-closed behaviour this helper exists
+    to exercise.
+    """
+    def _runner() -> Any:
+        return value
+
+    return _runner
 
 
 class AcceptanceTests(unittest.TestCase):
@@ -259,7 +252,7 @@ class RunnerFailureFailsClosedTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
                     decision = acceptance_gate.evaluate_proposal(
-                        lambda score=bad_score: score,
+                        _constant_runner(bad_score),
                         task_set="bench-v1",
                         root_dir=root,
                         now=_NOW,
@@ -414,7 +407,7 @@ class InputValidationTests(unittest.TestCase):
             raise AssertionError("read_scoreboard was reached despite a naive now")
 
         real_read_scoreboard = acceptance_gate.learning_scoreboard.read_scoreboard
-        acceptance_gate.learning_scoreboard.read_scoreboard = _unreachable
+        acceptance_gate.learning_scoreboard.read_scoreboard = _unreachable  # type: ignore[assignment]
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
