@@ -655,7 +655,7 @@ class AdoptValidationTests(unittest.TestCase):
             root = self._seeded_root(tmp)
             with self.assertRaises(ValueError):
                 learned_state.adopt(
-                    [_change("protocol", "x")], root_dir=root, now=_LATER
+                    [_change("protocol", "x")], root_dir=root, now=_LATER  # type: ignore[arg-type]
                 )
             self._assert_store_still_only_has_v0001(root)
 
@@ -1722,7 +1722,7 @@ class MissingSnapshotTests(unittest.TestCase):
 class DocumentChangeValidationTests(unittest.TestCase):
     def test_rejects_an_unknown_document(self) -> None:
         with self.assertRaises(ValueError):
-            _change("protocol", "x")
+            _change("protocol", "x")  # type: ignore[arg-type]
 
     def test_rejects_non_string_content(self) -> None:
         with self.assertRaises(ValueError):
