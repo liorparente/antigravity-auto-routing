@@ -11,13 +11,13 @@ adapter, not a test-file loader, and is not touched by this ticket.
 
 **Blocked by:** [06 — Transparent CLI Bootstrap & Multi-Harness Installer Sync (#15)](https://github.com/liorparente/antigravity-auto-routing/issues/15)
 
-**Status:** ready-for-agent
+**Status:** closed (implemented & verified)
 
-- [ ] Replace each `spec_from_file_location`/`module_from_spec`/`exec_module` triple in
+- [x] Replace each `spec_from_file_location`/`module_from_spec`/`exec_module` triple in
       `test_routing.py` with the file's standard `if __package__: from . import x else: import x`
       header, importing the target module once at file scope rather than by path per test.
-- [ ] Do the same for the two by-path loaders in `test_production_invoker.py`.
-- [ ] Confirm no test in either file relies on a *fresh* module object per test (a side effect of
+- [x] Do the same for the two by-path loaders in `test_production_invoker.py`.
+- [x] Confirm no test in either file relies on a *fresh* module object per test (a side effect of
       `spec_from_file_location` re-executing the module) before collapsing to a single shared import —
       if any do, note them explicitly rather than silently changing their isolation.
-- [ ] Run the full suite (`python3 -m unittest discover`) and confirm no regression.
+- [x] Run the full suite (`python3 -m unittest discover`) and confirm no regression.

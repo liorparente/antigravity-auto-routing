@@ -25,8 +25,34 @@ import unittest
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, get_args
+from typing import get_args
 from unittest import mock
+
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __package__:
+    from . import (
+        advisory_consultation,
+        agent_council,
+        learned_state,
+        learning_journal,
+        learning_outcomes,
+        production_invoker,
+        routing_check,
+    )
+    from .advisory_consultation import CanaryFixture, IsFamilyReachable
+    from .learning_journal import OutcomeRecord
+else:
+    import advisory_consultation  # type: ignore[no-redef]
+    import agent_council  # type: ignore[no-redef]
+    import learned_state  # type: ignore[no-redef]
+    import learning_journal  # type: ignore[no-redef]
+    import learning_outcomes  # type: ignore[no-redef]
+    import production_invoker  # type: ignore[no-redef]
+    import routing_check  # type: ignore[no-redef]
+    from advisory_consultation import CanaryFixture, IsFamilyReachable  # type: ignore[no-redef]
+    from learning_journal import OutcomeRecord  # type: ignore[no-redef]
 
 _COUNCIL_SECRET_PATCHER: object | None = None
 
@@ -46,14 +72,6 @@ def tearDownModule() -> None:
     if _COUNCIL_SECRET_PATCHER is not None:
         _COUNCIL_SECRET_PATCHER.stop()  # type: ignore[attr-defined]
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
-    # For type annotations only — at runtime `advisory_consultation` is the
-    # dynamically loaded module object below, whose attributes mypy cannot
-    # resolve inside annotations.
-    from advisory_consultation import CanaryFixture, IsFamilyReachable
-    from learning_journal import OutcomeRecord
 
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent
@@ -68,36 +86,6 @@ UNINSTALL_SH = REPO_ROOT / "uninstall.sh"
 # Same versionless sentinel markers install.sh/uninstall.sh write/look for.
 PROTOCOL_START = "# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END = "# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
-
-spec = importlib.util.spec_from_file_location("routing_check", ROUTING_CHECK)
-assert spec is not None and spec.loader is not None
-routing_check = importlib.util.module_from_spec(spec)
-sys.modules["routing_check"] = routing_check
-spec.loader.exec_module(routing_check)
-
-agent_council_spec = importlib.util.spec_from_file_location(
-    "agent_council", SKILL_DIR / "agent_council.py"
-)
-assert agent_council_spec is not None and agent_council_spec.loader is not None
-agent_council = importlib.util.module_from_spec(agent_council_spec)
-sys.modules["agent_council"] = agent_council
-agent_council_spec.loader.exec_module(agent_council)
-
-advisory_consultation_spec = importlib.util.spec_from_file_location(
-    "advisory_consultation", SKILL_DIR / "advisory_consultation.py"
-)
-assert advisory_consultation_spec is not None and advisory_consultation_spec.loader is not None
-advisory_consultation = importlib.util.module_from_spec(advisory_consultation_spec)
-sys.modules["advisory_consultation"] = advisory_consultation
-advisory_consultation_spec.loader.exec_module(advisory_consultation)
-
-learned_state_spec = importlib.util.spec_from_file_location(
-    "learned_state", SKILL_DIR / "learned_state.py"
-)
-assert learned_state_spec is not None and learned_state_spec.loader is not None
-learned_state = importlib.util.module_from_spec(learned_state_spec)
-sys.modules["learned_state"] = learned_state
-learned_state_spec.loader.exec_module(learned_state)
 
 
 def _bash_array(script: Path, name: str) -> list[str]:
@@ -1473,15 +1461,8 @@ class GoldStandardV6NegativeTests(unittest.TestCase):
         self.assertEqual(len(metrics["violations"]), 1)
 
     def test_agent_council_manifest_generation(self) -> None:
-        agent_council_path = SKILL_DIR / "agent_council.py"
-        spec = importlib.util.spec_from_file_location("agent_council", agent_council_path)
-        assert spec is not None and spec.loader is not None
-        agent_council_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(agent_council_mod)
-        AgentCouncil = agent_council_mod.AgentCouncil
-
         with tempfile.TemporaryDirectory() as tmp:
-            council = AgentCouncil(root_dir=Path(tmp))
+            council = agent_council.AgentCouncil(root_dir=Path(tmp))
             manifest = council.run(task="Refactor auth system", complexity="complex", effort="high", task_id="test-task-1")
             self.assertEqual(manifest["task_id"], "test-task-1")
             self.assertEqual(manifest["complexity"], "complex")
@@ -5638,18 +5619,7 @@ class Phase1CharacterizationTests(unittest.TestCase):
         self.assertEqual(result.returncode, self.golden["audit_output"]["returncode"])
 
 
-# Spec 0004 ticket 12 — the LearningJournal. Loaded here rather than beside
-# the loaders at the top of this file so the ticket's additions are one
-# contiguous, append-only block: this file is edited concurrently on other
-# branches, and an insertion at the top is a merge conflict for everyone.
-learning_journal_spec = importlib.util.spec_from_file_location(
-    "learning_journal", SKILL_DIR / "learning_journal.py"
-)
-assert learning_journal_spec is not None and learning_journal_spec.loader is not None
-learning_journal = importlib.util.module_from_spec(learning_journal_spec)
-sys.modules["learning_journal"] = learning_journal
-learning_journal_spec.loader.exec_module(learning_journal)
-
+# Spec 0004 ticket 12 — the LearningJournal.
 # Every test below reaches the journal through `learning_journal.journal_path`
 # (and `JOURNAL_RELATIVE_PATH` where only the file *name* is wanted), never
 # through a locally re-declared `Path(".ralph") / "learning_journal.jsonl"`.
@@ -7136,18 +7106,6 @@ class LearningJournalTests(unittest.TestCase):
         )
 
 
-if "production_invoker" in sys.modules:
-    production_invoker = sys.modules["production_invoker"]
-else:
-    production_invoker_spec = importlib.util.spec_from_file_location(
-        "production_invoker", SKILL_DIR / "production_invoker.py"
-    )
-    assert production_invoker_spec is not None and production_invoker_spec.loader is not None
-    production_invoker = importlib.util.module_from_spec(production_invoker_spec)
-    sys.modules["production_invoker"] = production_invoker
-    production_invoker_spec.loader.exec_module(production_invoker)
-
-
 class WorkerExecutionJournalingTests(unittest.TestCase):
     """Ticket 13: every worker invocation the production path makes leaves a
     `WorkerExecutionRecord` behind, correlated to its consultation by
@@ -7439,15 +7397,6 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         for record in worker_records:
             self.assertEqual(record["task_id"], "task-default-path-1")
             self.assertTrue(record["success"])
-
-
-learning_outcomes_spec = importlib.util.spec_from_file_location(
-    "learning_outcomes", SKILL_DIR / "learning_outcomes.py"
-)
-assert learning_outcomes_spec is not None and learning_outcomes_spec.loader is not None
-learning_outcomes = importlib.util.module_from_spec(learning_outcomes_spec)
-sys.modules["learning_outcomes"] = learning_outcomes
-learning_outcomes_spec.loader.exec_module(learning_outcomes)
 
 
 class OutcomeRecordingTests(unittest.TestCase):

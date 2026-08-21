@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib.util
 import inspect
 import io
 import json
@@ -12,7 +11,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from typing import Any
@@ -22,9 +20,10 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import learning_journal, production_invoker
+    from . import advisory_consultation, learning_journal, production_invoker
     from .test_routing import _approve
 else:
+    import advisory_consultation  # type: ignore[no-redef]
     import learning_journal  # type: ignore[no-redef]
     import production_invoker  # type: ignore[no-redef]
     from test_routing import _approve  # type: ignore[no-redef]
@@ -379,22 +378,6 @@ class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
         self.assertEqual([record["duration_ms"] for record in records], [100, 200])
 
     def test_defaults_to_production_invoke_worker(self) -> None:
-        advisory_path = Path(__file__).with_name("advisory_consultation.py")
-        advisory_spec = importlib.util.spec_from_file_location(
-            "advisory_consultation_for_production_invoker_test", advisory_path
-        )
-        assert advisory_spec is not None and advisory_spec.loader is not None
-        advisory_consultation = importlib.util.module_from_spec(advisory_spec)
-        previous_advisory = sys.modules.get(advisory_spec.name)
-        sys.modules[advisory_spec.name] = advisory_consultation
-        try:
-            advisory_spec.loader.exec_module(advisory_consultation)
-        finally:
-            if previous_advisory is None:
-                del sys.modules[advisory_spec.name]
-            else:
-                sys.modules[advisory_spec.name] = previous_advisory
-
         calls: list[tuple[str, str, str]] = []
 
         def fake_invoke_worker(model: str, effort: str, prompt: str) -> str:
@@ -418,52 +401,23 @@ class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
             # instrumentation.
             return fake_invoke_worker
 
-        previous_module = sys.modules.get("production_invoker")
-        production_module = types.ModuleType("production_invoker")
-        production_module.invoke_worker = fake_invoke_worker  # type: ignore[attr-defined]
-        production_module.make_journaled_invoke_worker = (  # type: ignore[attr-defined]
-            fake_make_journaled_invoke_worker
-        )
-        # `_critic_response_from_payload` resolves the *current*
-        # production_invoker (via `_current_production_invoker()`) to parse
-        # the critic's VerdictContract payload, so this stand-in module must
-        # delegate that one function to the real implementation even though
-        # this test only fakes worker invocation.
-        production_module.extract_review_payload = (  # type: ignore[attr-defined]
-            production_invoker.extract_review_payload
-        )
-        sys.modules["production_invoker"] = production_module
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                result = advisory_consultation.run_advisory_consultation_debate(
-                    "Plan the implementation", root_dir=Path(tmp)
-                )
-        finally:
-            if previous_module is None:
-                del sys.modules["production_invoker"]
-            else:
-                sys.modules["production_invoker"] = previous_module
+        with (
+            patch.object(production_invoker, "invoke_worker", fake_invoke_worker),
+            patch.object(
+                production_invoker,
+                "make_journaled_invoke_worker",
+                fake_make_journaled_invoke_worker,
+            ),
+            tempfile.TemporaryDirectory() as tmp,
+        ):
+            result = advisory_consultation.run_advisory_consultation_debate(
+                "Plan the implementation", root_dir=Path(tmp)
+            )
 
         self.assertTrue(result.consensus_reached)
         self.assertEqual(len(calls), 2)
 
     def test_debate_loop_accepts_a_journaled_sync_caller(self) -> None:
-        advisory_path = Path(__file__).with_name("advisory_consultation.py")
-        advisory_spec = importlib.util.spec_from_file_location(
-            "advisory_consultation_for_journaled_sync_caller_test", advisory_path
-        )
-        assert advisory_spec is not None and advisory_spec.loader is not None
-        advisory_consultation = importlib.util.module_from_spec(advisory_spec)
-        previous_advisory = sys.modules.get(advisory_spec.name)
-        sys.modules[advisory_spec.name] = advisory_consultation
-        try:
-            advisory_spec.loader.exec_module(advisory_consultation)
-        finally:
-            if previous_advisory is None:
-                del sys.modules[advisory_spec.name]
-            else:
-                sys.modules[advisory_spec.name] = previous_advisory
-
         runner = Mock(
             side_effect=[
                 subprocess.CompletedProcess([], 0, "Planner plan", ""),
