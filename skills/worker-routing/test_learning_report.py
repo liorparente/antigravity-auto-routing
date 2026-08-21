@@ -5,7 +5,10 @@
 `test_learning_scoreboard` — and nothing else from that module — per
 implementation_plan.md Section 9 slice 1's round-2 correction: that one
 function is pure (`ast.AST` in, a plain list of tuples out) and touches
-neither `learning_journal` nor `learning_scoreboard`.
+neither `learning_journal` nor `learning_scoreboard`. Sibling module
+imports in `test_learning_scoreboard` execute upon import and populate
+`sys.modules`, which is safe because both test modules share identical
+package/standalone singleton bindings.
 """
 from __future__ import annotations
 
