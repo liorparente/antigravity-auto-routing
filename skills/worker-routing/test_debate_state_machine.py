@@ -1,24 +1,19 @@
 """Offline tests for the pure debate-state reducer."""
 from __future__ import annotations
 
-import importlib.util
 import math
 import sys
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-def _load(name: str):
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-machine = _load("debate_state_machine")
+if __package__:
+    from . import debate_state_machine as machine
+else:
+    import debate_state_machine as machine  # type: ignore[no-redef]
 
 
 class DebateStateMachineTests(unittest.TestCase):
@@ -28,11 +23,13 @@ class DebateStateMachineTests(unittest.TestCase):
             "provider": "codex",
             "findings": [{"id": "SEC-1", "severity": "CRITICAL", "confidence": 0.9}],
         },))
+        assert dict_veto is not None
         response_veto = handler.check((machine.CriticResponse(
             "critic-a",
             "",
             findings=({"id": "SEC-2", "severity": "High", "confidence": 0.8},),
         ),))
+        assert response_veto is not None
 
         self.assertEqual((dict_veto.provider, dict_veto.finding["id"]), ("codex", "SEC-1"))
         self.assertEqual(
@@ -64,7 +61,7 @@ class DebateStateMachineTests(unittest.TestCase):
         ):
             with self.subTest(threshold=threshold):
                 handler = machine.SecurityVetoHandler(
-                    ["high"], security_threshold=threshold
+                    ["high"], security_threshold=threshold  # type: ignore[arg-type]
                 )
                 self.assertEqual(handler.security_threshold, 0.80)
                 self.assertIsNotNone(handler.check(({
@@ -75,7 +72,7 @@ class DebateStateMachineTests(unittest.TestCase):
     def test_invalid_veto_severities_use_fail_closed_defaults(self) -> None:
         for severities in (None, "high", [], [""], ["high", 1]):
             with self.subTest(severities=severities):
-                handler = machine.SecurityVetoHandler(veto_severities=severities)
+                handler = machine.SecurityVetoHandler(veto_severities=severities)  # type: ignore[arg-type]
                 self.assertEqual(handler.veto_severities, {"critical", "high"})
 
     def test_security_veto_can_be_disabled_and_uses_default_confidence(self) -> None:
@@ -113,22 +110,28 @@ class DebateStateMachineTests(unittest.TestCase):
     def test_session_transitions_and_terminal_preservation(self) -> None:
         initial = machine.DebateSessionState("ambiguity", "medium", 3, False)
         approved = machine.advance_debate_state(initial, machine.DebateRoundRecord(1, "plan one", "ok", critic_a_verdict="APPROVE"))
+        assert isinstance(approved, machine.DebateSessionState)
         self.assertTrue(approved.consensus_reached)
         self.assertEqual(approved.final_plan, "plan one")
         revised = machine.advance_debate_state(initial, machine.DebateRoundRecord(1, "plan one", "revise", critic_a_verdict="REVISE"))
+        assert isinstance(revised, machine.DebateSessionState)
         second = machine.advance_debate_state(revised, machine.DebateRoundRecord(2, "plan two", "ok", critic_a_verdict="APPROVED"))
+        assert isinstance(second, machine.DebateSessionState)
         self.assertTrue(second.consensus_reached)
         third = machine.advance_debate_state(machine.advance_debate_state(revised, machine.DebateRoundRecord(2, "plan two", "revise", critic_a_verdict="REVISE")), machine.DebateRoundRecord(3, "plan three", "revise", critic_a_verdict="REVISE"))
+        assert isinstance(third, machine.DebateSessionState)
         self.assertIsNotNone(third.stalemate_report)
         self.assertIs(machine.advance_debate_state(approved, machine.DebateRoundRecord(2, "ignored", "", critic_a_verdict="APPROVE")), approved)
         with self.assertRaises(FrozenInstanceError):
-            initial.rounds = ()
+            initial.rounds = ()  # type: ignore[misc]
 
     def test_general_reducer_uses_quorum_and_preserves_terminal_state(self) -> None:
         state = machine.DebateState("plan-review", "task", "task-1", 0, 3, (), (), "in_progress")
         revise = machine.RoundTurnResult(1, "plan one", (machine.CriticResponse("a", "revise", "REVISE"),))
         pending = machine.advance_debate_state(state, revise)
+        assert isinstance(pending, machine.DebateState)
         accepted = machine.advance_debate_state(pending, machine.RoundTurnResult(2, "plan two", (machine.CriticResponse("a", "ok", "approve"),)))
+        assert isinstance(accepted, machine.DebateState)
         self.assertEqual(pending.status, "in_progress")
         self.assertEqual(accepted.status, "consensus")
         self.assertEqual(accepted.final_plan, "plan two")
@@ -181,8 +184,20 @@ class DebateStateMachineTests(unittest.TestCase):
     def test_general_reducer_escalates_after_third_round(self) -> None:
         state = machine.DebateState("code-review", "task", "task-1", 0, 3, (), (), "in_progress")
         for index in range(1, 4):
-            state = machine.advance_debate_state(state, machine.RoundTurnResult(index, f"plan {index}", (machine.CriticResponse("a", "revise", "revise"), machine.CriticResponse("b", "revise", "revise"))))
+            state = machine.advance_debate_state(
+                state,
+                machine.RoundTurnResult(
+                    index,
+                    f"plan {index}",
+                    (
+                        machine.CriticResponse("a", "revise", "revise"),
+                        machine.CriticResponse("b", "revise", "revise"),
+                    ),
+                ),
+            )
+        assert isinstance(state, machine.DebateState)
         self.assertEqual(state.status, "stalemate")
+        assert state.stalemate_report is not None
         self.assertEqual(state.stalemate_report.critic_b_position, "revise")
 
     def test_consensus_table_scores_only_positive_approvals(self) -> None:
@@ -257,12 +272,12 @@ class DebateStateMachineTests(unittest.TestCase):
         finding["severity"] = "low"
         self.assertEqual(response.findings[0]["severity"], "high")
         with self.assertRaises(TypeError):
-            response.findings[0]["severity"] = "critical"
+            response.findings[0]["severity"] = "critical"  # type: ignore[index]
 
     def test_critic_response_findings_are_deeply_immutable(self) -> None:
         response = machine.CriticResponse("critic", "", findings=({"nested": {"key": "good"}},))
         with self.assertRaises(TypeError):
-            response.findings[0]["nested"]["key"] = "bad"
+            response.findings[0]["nested"]["key"] = "bad"  # type: ignore[index]
 
     def test_consensus_table_evaluates_dicts_and_responses(self) -> None:
         table = machine.ConsensusTable(policy=("UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"), quorum_threshold=0.50)
@@ -345,6 +360,7 @@ class DebateStateMachineTests(unittest.TestCase):
             )),
             "weighted", weights={"a": 3, "b": 1}, quorum_threshold=0.70,
         )
+        assert isinstance(consensus, machine.DebateState)
         self.assertEqual(consensus.status, "consensus")
         self.assertEqual(consensus.final_plan, "plan")
 
@@ -356,6 +372,7 @@ class DebateStateMachineTests(unittest.TestCase):
             )),
             "weighted",
         )
+        assert isinstance(error, machine.DebateState)
         self.assertEqual(error.status, "error")
         self.assertEqual(error.error, "material disagreement in candidate hashes")
 
@@ -364,11 +381,13 @@ class DebateStateMachineTests(unittest.TestCase):
             machine.RoundTurnResult(1, "plan one", (machine.CriticResponse("a", "abstain", "abstain", confidence=0.0),)),
             "weighted",
         )
+        assert isinstance(pending, machine.DebateState)
         stalemate = machine.advance_debate_state(
             pending,
             machine.RoundTurnResult(2, "plan two", (machine.CriticResponse("a", "abstain", "abstain", confidence=0.0),)),
             "weighted",
         )
+        assert isinstance(stalemate, machine.DebateState)
         self.assertEqual(stalemate.status, "stalemate")
         self.assertIsNotNone(stalemate.stalemate_report)
 
@@ -384,6 +403,7 @@ class DebateStateMachineTests(unittest.TestCase):
             "weighted",
             require_candidate_hashes=True,
         )
+        assert isinstance(error, machine.DebateState)
         self.assertEqual(error.status, "error")
         self.assertEqual(error.error, "material disagreement in candidate hashes")
 
@@ -400,6 +420,7 @@ class DebateStateMachineTests(unittest.TestCase):
             require_candidate_hashes=True,
             expected_hash="candidate",
         )
+        assert isinstance(consensus, machine.DebateState)
         self.assertEqual(consensus.status, "consensus")
 
 

@@ -29,7 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
-import learning_journal
+if __package__:
+    from . import learning_journal
+else:
+    import learning_journal  # type: ignore[no-redef]
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 DEFAULT_TIMEOUT_SECONDS = 300.0
@@ -463,7 +466,7 @@ async def invoke_worker_async(
             stderr=asyncio.subprocess.PIPE,
             env=environment,
         )
-    except Exception as error:  # noqa: BLE001 - a missing binary or spawn failure is a worker outcome, not a call-site bug.
+    except Exception as error:  # noqa: BLE001 - a missing binary or spawn failure is a worker outcome.
         duration_ms = max(0, round((clock() - start) * 1000))
         return WorkerExecutionResult(
             raw_output="",

@@ -18,24 +18,16 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from test_routing import _approve
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-MODULE_PATH = Path(__file__).with_name("production_invoker.py")
-LEARNING_JOURNAL_PATH = Path(__file__).with_name("learning_journal.py")
-
-learning_journal_spec = importlib.util.spec_from_file_location(
-    "learning_journal", LEARNING_JOURNAL_PATH
-)
-assert learning_journal_spec is not None and learning_journal_spec.loader is not None
-learning_journal = importlib.util.module_from_spec(learning_journal_spec)
-sys.modules["learning_journal"] = learning_journal
-learning_journal_spec.loader.exec_module(learning_journal)
-
-SPEC = importlib.util.spec_from_file_location("production_invoker", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-production_invoker = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(production_invoker)
+if __package__:
+    from . import learning_journal, production_invoker
+    from .test_routing import _approve
+else:
+    import learning_journal  # type: ignore[no-redef]
+    import production_invoker  # type: ignore[no-redef]
+    from test_routing import _approve  # type: ignore[no-redef]
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -1092,7 +1084,7 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
         reported: list[str] = []
         runner = Mock(return_value=subprocess.CompletedProcess([], 0, "worker output", ""))
         with tempfile.TemporaryDirectory() as tmp, patch.object(
-            learning_journal,
+            production_invoker.learning_journal,
             "WorkerExecutionRecord",
             side_effect=ValueError("boom: unbuildable record"),
         ):

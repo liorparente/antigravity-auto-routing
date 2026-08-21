@@ -55,6 +55,11 @@ if TYPE_CHECKING:
 
 
 def _load_sibling(name: str) -> Any:
+    if __package__:
+        pkg_mod = sys.modules.get(f"{__package__}.{name}")
+        if pkg_mod is not None:
+            return pkg_mod
+        return __import__(f"{__package__}.{name}", fromlist=[name])
     try:
         return __import__(name)
     except ModuleNotFoundError as exc:
@@ -80,6 +85,14 @@ _debate_state_machine = _load_sibling("debate_state_machine")
 _consultation_policy = _load_sibling("consultation_policy")
 _debate_transport = _load_sibling("debate_transport")
 _production_invoker = _load_sibling("production_invoker")
+
+
+def _current_production_invoker() -> Any:
+    if __package__:
+        package_invoker = sys.modules.get(f"{__package__}.production_invoker")
+        if package_invoker is not None:
+            return package_invoker
+    return sys.modules.get("production_invoker", _production_invoker)
 
 if not TYPE_CHECKING:
     AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
@@ -2665,10 +2678,6 @@ def run_advisory_consultation_debate(
         result_topology = "pair"
 
         if invoke_worker is None:
-            try:
-                import production_invoker
-            except Exception as exc:  # noqa: BLE001 - a production worker failure fails closed.
-                return _result("worker_error", error=str(exc))
             invoke_worker = DebateTransport(
                 root_dir=root_dir,
                 notifier=RecurringFailureNotifier(threshold=ESCALATION_FAILURE_THRESHOLD),
@@ -2716,21 +2725,6 @@ def run_advisory_consultation_debate(
         )
 
     if invoke_worker is None:
-        # Two failures with opposite handling, so two separate blocks. Without
-        # a worker callable there is no consultation to run at all, and this
-        # fails closed. Without journaling there is still a consultation — the
-        # instrumentation is what degrades, and a run that would otherwise
-        # have succeeded must not be reported as `worker_error` because the
-        # journal could not be set up. Folding these two together is how a
-        # caller-supplied `task_id` that `TaskLabel.for_task` rejects (a
-        # space in it, say) used to fail every production consultation before
-        # a worker was ever contacted.
-        try:
-            import production_invoker
-        except Exception as exc:  # noqa: BLE001 - no worker callable at all fails closed.
-            cleanup_error = _remove_stale_plan_artifact(plan_path)
-            return _result("worker_error", error=_fold_error(str(exc), cleanup_error))
-
         # `DebateTransport` (re-exported above but previously never
         # instantiated from this loop) is now the single source of truth for
         # isolated default-path process execution and for the failure
@@ -2740,7 +2734,7 @@ def run_advisory_consultation_debate(
         # rule this module's own `ESCALATION_FAILURE_THRESHOLD` constant
         # already documents. The base (unjournaled) path delegates straight
         # to `_transport.invoke_worker`; the journaled path below still runs
-        # process execution through `production_invoker`'s own journaling
+        # process execution through `_production_invoker`'s own journaling
         # wrapper (which needs to time the raw subprocess call itself) but
         # shares this exact `_transport.notifier` instance for alerting, so
         # there is never more than one notifier tracking this run's failures.
@@ -2758,7 +2752,7 @@ def run_advisory_consultation_debate(
             # this run's telemetry record stay correlated by TaskIdentity.
             journaled_task_id = _resolve_task_id(task_description, task_id, "consensus")
             journal_run_id = secrets.token_hex(8)
-            journaled_invoke_worker = production_invoker.make_journaled_invoke_worker(
+            journaled_invoke_worker = _current_production_invoker().make_journaled_invoke_worker(
                 journaled_task_id, root_dir=root_dir, run_id=journal_run_id
             )
             dialogue_run_id = journal_run_id

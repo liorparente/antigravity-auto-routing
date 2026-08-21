@@ -7,11 +7,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import advisory_consultation
-import dialogue_contracts
-import dialogue_transcript
+if __package__:
+    from . import advisory_consultation, dialogue_contracts, dialogue_transcript
+else:
+    import advisory_consultation  # type: ignore[no-redef]
+    import dialogue_contracts  # type: ignore[no-redef]
+    import dialogue_transcript  # type: ignore[no-redef]
 
 
 class DialogueTranscriptTests(unittest.TestCase):

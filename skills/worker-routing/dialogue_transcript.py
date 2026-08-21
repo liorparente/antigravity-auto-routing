@@ -11,7 +11,6 @@ from __future__ import annotations
 import dataclasses
 import fcntl
 import hashlib
-import importlib.util
 import json
 import os
 import secrets
@@ -24,57 +23,54 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
-    from debate_orchestrator import AdvisoryDebateResult, CanaryFixture
+    if __package__:
+        from .debate_orchestrator import AdvisoryDebateResult, CanaryFixture
+    else:
+        from debate_orchestrator import (  # type: ignore[no-redef]
+            AdvisoryDebateResult,
+            CanaryFixture,
+        )
 
-
-def _load_sibling(name: str) -> Any:
-    """Load a sibling module when this file was imported directly by path."""
-    try:
-        return __import__(name)
-    except ModuleNotFoundError as exc:
-        if exc.name != name:
-            raise
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-try:
-    from dialogue_contracts import (
+if __package__:
+    from . import learning_journal, learning_outcomes
+    from .dialogue_contracts import (
         AdvisoryOutcome,
         AdvisoryRoundVerdict,
         CriticVerdict,
         VerdictContractResult,
     )
-except ModuleNotFoundError as exc:
-    if exc.name != "dialogue_contracts":
-        raise
-    _load_sibling("dialogue_contracts")
-    from dialogue_contracts import (
+    from .dialogue_degradation import (
+        _DEGRADATION_RUNG_LABELS,
+        BUDGET_DEGRADATION_MARKER,
+        DegradationRung,
+    )
+else:
+    import learning_journal  # type: ignore[no-redef]
+    import learning_outcomes  # type: ignore[no-redef]
+    from dialogue_contracts import (  # type: ignore[no-redef]
         AdvisoryOutcome,
         AdvisoryRoundVerdict,
         CriticVerdict,
         VerdictContractResult,
     )
+    from dialogue_degradation import (  # type: ignore[no-redef]
+        _DEGRADATION_RUNG_LABELS,
+        BUDGET_DEGRADATION_MARKER,
+        DegradationRung,
+    )
 
-try:
-    from dialogue_degradation import (
-        _DEGRADATION_RUNG_LABELS,
-        BUDGET_DEGRADATION_MARKER,
-        DegradationRung,
-    )
-except ModuleNotFoundError as exc:
-    if exc.name != "dialogue_degradation":
-        raise
-    _load_sibling("dialogue_degradation")
-    from dialogue_degradation import (
-        _DEGRADATION_RUNG_LABELS,
-        BUDGET_DEGRADATION_MARKER,
-        DegradationRung,
-    )
+__all__ = [
+    "CANARY_MARKER",
+    "DEGRADED_INDEPENDENCE_MARKER",
+    "AdvisoryTelemetryRecord",
+    "CanaryResult",
+    "ConsultationTranscript",
+    "Occasion",
+    "RosterTopology",
+    "format_transcript_markdown",
+    "render_consultation_transcript",
+    "render_sensitivity_halt_transcript",
+]
 
 DEGRADED_INDEPENDENCE_MARKER = "DEGRADED INDEPENDENCE"
 CANARY_MARKER = "CANARY DIALOGUE"
@@ -322,17 +318,24 @@ def _write_dialogue_quality_record(
 ) -> str | None:
     """Best-effort append of the redacted LearningJournal dialogue-quality record."""
     try:
-        learning_journal = _load_sibling("learning_journal")
-        record = learning_journal.DialogueQualityRecord(
-            task=learning_journal.TaskLabel.for_task(task_id), occasion=result.occasion,
+        current_journal = (
+            sys.modules.get(f"{__package__}.learning_journal")
+            if __package__
+            else None
+        ) or sys.modules.get("learning_journal", learning_journal)
+        record = current_journal.DialogueQualityRecord(
+            task=current_journal.TaskLabel.for_task(task_id), occasion=result.occasion,
             topology=result.topology,
-            rounds=tuple(learning_journal.DialogueRound(*_reduce_dialogue_round(item)) for item in result.round_verdicts),
+            rounds=tuple(
+                current_journal.DialogueRound(*_reduce_dialogue_round(item))
+                for item in result.round_verdicts
+            ),
             canaries_planted=1 if result.canary_result is not None else 0,
             canaries_caught=1 if result.canary_result == "catch" else 0,
             degraded=result.degradation_rung != 0,
             independent=not result.degraded_independence, run_id=run_id,
         )
-        return learning_journal.append_journal_record(record, root_dir=root_dir)
+        return current_journal.append_journal_record(record, root_dir=root_dir)
     except (ImportError, ValueError) as exc:
         return f"failed to build dialogue-quality record: {exc}"
 
@@ -340,7 +343,11 @@ def _write_dialogue_quality_record(
 def _write_plan_outcome_record(*, task_id: str, accepted: bool, run_id: str | None, root_dir: Path) -> str | None:
     """Best-effort record of the plan verdict, without letting instrumentation abort a dialogue."""
     try:
-        learning_outcomes = _load_sibling("learning_outcomes")
-        return learning_outcomes.record_plan_outcome(task_id, accepted=accepted, run_id=run_id, root_dir=root_dir)
+        current_outcomes = (
+            sys.modules.get(f"{__package__}.learning_outcomes")
+            if __package__
+            else None
+        ) or sys.modules.get("learning_outcomes", learning_outcomes)
+        return current_outcomes.record_plan_outcome(task_id, accepted=accepted, run_id=run_id, root_dir=root_dir)
     except (ImportError, ValueError) as exc:
         return f"failed to record plan outcome: {exc}"

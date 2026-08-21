@@ -1,7 +1,6 @@
 """Hermetic unit tests for the isolated debate worker transport."""
 from __future__ import annotations
 
-import importlib.util
 import subprocess
 import sys
 import tempfile
@@ -9,12 +8,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-MODULE_PATH = Path(__file__).with_name("debate_transport.py")
-SPEC = importlib.util.spec_from_file_location("debate_transport", MODULE_PATH)
-assert SPEC is not None and SPEC.loader is not None
-transport = importlib.util.module_from_spec(SPEC)
-sys.modules["debate_transport"] = transport
-SPEC.loader.exec_module(transport)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+if __package__:
+    from . import debate_transport as transport
+else:
+    import debate_transport as transport  # type: ignore[no-redef]
 
 
 class DebateTransportTests(unittest.TestCase):
@@ -78,6 +78,36 @@ class DebateTransportTests(unittest.TestCase):
         self.assertEqual((result.verdict, result.confidence), ("revise", 0.75))
         self.assertEqual(result.candidate_hash, "candidate-1")
         self.assertEqual(result.findings[0]["severity"], "high")
+
+    def test_mock_patching_intercepts_production_invoker(self) -> None:
+        """A patch on ``production_invoker`` must be seen by the transport, always.
+
+        The retired ``_load_sibling`` by-path loader could leave the transport
+        holding a module identity a caller's patch never touched, so a
+        monkeypatched ``invoke_worker`` would silently miss every call and a
+        real subprocess would launch underneath the mock. A package-relative
+        import always resolves ``production_invoker`` through ``sys.modules``,
+        so ``patch.object`` on the exact module the transport calls reaches
+        it -- and never falls through to a real ``subprocess.run``.
+        """
+        def never_runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            raise AssertionError("a real subprocess must never run while production_invoker is mocked")
+
+        worker = transport.DebateTransport(runner=never_runner)
+        invoker_mod = transport._current_production_invoker()
+        with patch.object(invoker_mod, "invoke_worker", return_value="mocked output") as mock_invoke:
+            self.assertEqual(worker.invoke_worker("gpt-5.6-sol", "high", "Review"), "mocked output")
+        mock_invoke.assert_called_once_with(
+            "gpt-5.6-sol", "high", "Review", timeout=worker.timeout_seconds, runner=never_runner
+        )
+
+        with patch.object(
+            transport.production_invoker, "invoke_worker", return_value="direct mock output"
+        ) as direct_mock:
+            self.assertEqual(worker.invoke_worker("gpt-5.6-sol", "high", "Review"), "direct mock output")
+        direct_mock.assert_called_once_with(
+            "gpt-5.6-sol", "high", "Review", timeout=worker.timeout_seconds, runner=never_runner
+        )
 
 
 class RecurringFailureNotifierTests(unittest.TestCase):

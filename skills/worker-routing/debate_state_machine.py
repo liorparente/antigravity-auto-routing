@@ -5,43 +5,47 @@ only sibling dependency is the dialogue contract that owns shared wire types.
 """
 from __future__ import annotations
 
-import importlib.util
 import math
-import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, overload
+from typing import Any, overload
 
-if TYPE_CHECKING:
-    from dialogue_contracts import (
+if __package__:
+    from .dialogue_contracts import (
+        AdvisoryResolutionOption,
+        AdvisoryStalemateReport,
+        Occasion,
+    )
+else:
+    from dialogue_contracts import (  # type: ignore[no-redef]
         AdvisoryResolutionOption,
         AdvisoryStalemateReport,
         Occasion,
     )
 
-
-def _load_sibling(name: str) -> Any:
-    try:
-        return __import__(name)
-    except ModuleNotFoundError as exc:
-        if exc.name != name:
-            raise
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_dialogue_contracts = _load_sibling("dialogue_contracts")
-
-if not TYPE_CHECKING:
-    Occasion = _dialogue_contracts.Occasion
-    AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
-    AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
+__all__ = [
+    "DEFAULT_VOTE_CONFIDENCE",
+    "PANEL_TOPOLOGY_OCCASIONS",
+    "VALID_CONSENSUS_OUTCOMES",
+    "AdvisoryResolutionOption",
+    "AdvisoryStalemateReport",
+    "ConsensusTable",
+    "CriticResponse",
+    "DebateRoundRecord",
+    "DebateSessionState",
+    "DebateState",
+    "Occasion",
+    "RoundTurnResult",
+    "SecurityVeto",
+    "SecurityVetoHandler",
+    "advance_debate_state",
+    "build_stalemate_report",
+    "evaluate_quorum",
+    "evaluate_round_verdicts",
+    "evaluate_weighted_quorum",
+    "is_panel_topology",
+]
 
 PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
 
@@ -336,8 +340,12 @@ class ConsensusTable:
         score = self.weighted_score(votes)
         if score < self.quorum_threshold:
             return self._enforce_policy("UNRESOLVED")
-        vote_names = [str(_field(vote, "vote", _field(vote, "verdict", ""))).strip().casefold() for vote in votes]
-        return self._enforce_policy("UNANIMOUS" if all(_normalize_verdict(vote) == "APPROVE" for vote in vote_names) else "QUALIFIED")
+        vote_names = [
+            str(_field(vote, "vote", _field(vote, "verdict", ""))).strip().casefold()
+            for vote in votes
+        ]
+        is_unanimous = all(_normalize_verdict(vote) == "APPROVE" for vote in vote_names)
+        return self._enforce_policy("UNANIMOUS" if is_unanimous else "QUALIFIED")
 
 
 def evaluate_weighted_quorum(
@@ -465,7 +473,12 @@ class DebateState:
 
 
 def _advance_session_state(state: DebateSessionState, record: DebateRoundRecord) -> DebateSessionState:
-    if state.consensus_reached or state.error is not None or state.stalemate_report is not None or len(state.rounds) >= state.max_rounds:
+    if (
+        state.consensus_reached
+        or state.error is not None
+        or state.stalemate_report is not None
+        or len(state.rounds) >= state.max_rounds
+    ):
         return state
     consensus, error = evaluate_round_verdicts(
         record.critic_a_verdict, record.critic_b_verdict, is_panel=state.is_panel
@@ -473,11 +486,37 @@ def _advance_session_state(state: DebateSessionState, record: DebateRoundRecord)
     normalized_record = replace(record, is_consensus=consensus, error=error)
     rounds = (*state.rounds, normalized_record)
     if consensus:
-        return replace(state, rounds=rounds, consensus_reached=True, final_plan=record.planner_plan, stalemate_report=None, error=error)
+        return replace(
+            state,
+            rounds=rounds,
+            consensus_reached=True,
+            final_plan=record.planner_plan,
+            stalemate_report=None,
+            error=error,
+        )
     if error:
-        return replace(state, rounds=rounds, consensus_reached=False, final_plan=None, stalemate_report=None, error=error)
+        return replace(
+            state,
+            rounds=rounds,
+            consensus_reached=False,
+            final_plan=None,
+            stalemate_report=None,
+            error=error,
+        )
     if len(rounds) >= state.max_rounds:
-        return replace(state, rounds=rounds, consensus_reached=False, final_plan=None, stalemate_report=build_stalemate_report(record.planner_plan, record.critic_a_response, record.critic_b_response if state.is_panel else None), error=None)
+        report = build_stalemate_report(
+            record.planner_plan,
+            record.critic_a_response,
+            record.critic_b_response if state.is_panel else None,
+        )
+        return replace(
+            state,
+            rounds=rounds,
+            consensus_reached=False,
+            final_plan=None,
+            stalemate_report=report,
+            error=None,
+        )
     return replace(state, rounds=rounds)
 
 
@@ -507,22 +546,66 @@ def _advance_general_state(
     proposals = (*state.planner_proposals, turn.planner_proposal)
     responses = (*state.critic_responses, turn.critic_responses)
     if error:
-        return replace(state, round_number=turn.round_index, planner_proposals=proposals, critic_responses=responses, status="error", error=error)
+        return replace(
+            state,
+            round_number=turn.round_index,
+            planner_proposals=proposals,
+            critic_responses=responses,
+            status="error",
+            error=error,
+        )
     if consensus:
-        return replace(state, round_number=turn.round_index, planner_proposals=proposals, critic_responses=responses, status="consensus", final_plan=recorded_turn.planner_proposal, stalemate_report=None, error=None)
+        return replace(
+            state,
+            round_number=turn.round_index,
+            planner_proposals=proposals,
+            critic_responses=responses,
+            status="consensus",
+            final_plan=recorded_turn.planner_proposal,
+            stalemate_report=None,
+            error=None,
+        )
     if len(proposals) >= state.max_rounds:
         critic_a = turn.critic_responses[0].response if turn.critic_responses else ""
         critic_b = turn.critic_responses[1].response if len(turn.critic_responses) > 1 else None
-        return replace(state, round_number=turn.round_index, planner_proposals=proposals, critic_responses=responses, status="stalemate", final_plan=None, stalemate_report=build_stalemate_report(turn.planner_proposal, critic_a, critic_b), error=None)
+        report = build_stalemate_report(turn.planner_proposal, critic_a, critic_b)
+        return replace(
+            state,
+            round_number=turn.round_index,
+            planner_proposals=proposals,
+            critic_responses=responses,
+            status="stalemate",
+            final_plan=None,
+            stalemate_report=report,
+            error=None,
+        )
     return replace(state, round_number=turn.round_index, planner_proposals=proposals, critic_responses=responses)
 
 
 @overload
-def advance_debate_state(state: DebateSessionState, record: DebateRoundRecord, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60, require_candidate_hashes: bool = False, expected_hash: str | None = None) -> DebateSessionState: ...
+def advance_debate_state(
+    state: DebateSessionState,
+    record: DebateRoundRecord,
+    quorum_policy: str = "unanimous",
+    *,
+    weights: dict[str, float] | None = None,
+    quorum_threshold: float = 0.60,
+    require_candidate_hashes: bool = False,
+    expected_hash: str | None = None,
+) -> DebateSessionState: ...
 
 
 @overload
-def advance_debate_state(state: DebateState, record: RoundTurnResult, quorum_policy: str = "unanimous", *, weights: dict[str, float] | None = None, quorum_threshold: float = 0.60, require_candidate_hashes: bool = False, expected_hash: str | None = None) -> DebateState: ...
+def advance_debate_state(
+    state: DebateState,
+    record: RoundTurnResult,
+    quorum_policy: str = "unanimous",
+    *,
+    weights: dict[str, float] | None = None,
+    quorum_threshold: float = 0.60,
+    require_candidate_hashes: bool = False,
+    expected_hash: str | None = None,
+) -> DebateState: ...
 
 
 def advance_debate_state(

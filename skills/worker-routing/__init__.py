@@ -15,6 +15,8 @@ if _PKG_DIR not in _sys.path:
 from . import acceptance_gate as _gate
 from . import advisory_consultation as _advisory
 from . import agent_council as _council
+from . import dialogue_contracts as _dialogue_contracts
+from . import dialogue_degradation as _dialogue_degradation
 from . import learned_state as _learned_state
 from . import learning_journal as _journal
 from . import learning_outcomes as _outcomes
@@ -41,26 +43,26 @@ RecurringFailureNotifier = _advisory.RecurringFailureNotifier
 # Dialogue contracts.
 AdvisoryDebateResult = _advisory.AdvisoryDebateResult
 AdvisoryDebateRound = _advisory.AdvisoryDebateRound
-AdvisoryOutcome = _advisory.AdvisoryOutcome
-AdvisoryResolutionOption = _advisory.AdvisoryResolutionOption
-AdvisoryRoundVerdict = _advisory.AdvisoryRoundVerdict
-AdvisoryStalemateReport = _advisory.AdvisoryStalemateReport
+AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
+AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
+AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
+AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
 AdvisoryTelemetryRecord = _advisory.AdvisoryTelemetryRecord
 CanaryFixture = _advisory.CanaryFixture
 CanaryResult = _advisory.CanaryResult
 ConsultationTranscript = _advisory.ConsultationTranscript
 CriticResponse = _advisory.CriticResponse
-CriticVerdict = _advisory.CriticVerdict
+CriticVerdict = _dialogue_contracts.CriticVerdict
 DebateRoundRecord = _advisory.DebateRoundRecord
 DebateSessionState = _advisory.DebateSessionState
 DebateState = _advisory.DebateState
 DegradationLadderState = _advisory.DegradationLadderState
-DegradationRung = _advisory.DegradationRung
+DegradationRung = _dialogue_degradation.DegradationRung
 ExecutiveDialogueReport = _advisory.ExecutiveDialogueReport
 InvokeWorker = _advisory.InvokeWorker
 IsFamilyReachable = _advisory.IsFamilyReachable
 MissionCopy = _advisory.MissionCopy
-Occasion = _advisory.Occasion
+Occasion = _dialogue_contracts.Occasion
 RosterAssignment = _advisory.RosterAssignment
 RosterResolution = _advisory.RosterResolution
 RosterResolutionError = _advisory.RosterResolutionError
@@ -68,7 +70,7 @@ RosterRole = _advisory.RosterRole
 RosterTopology = _advisory.RosterTopology
 RoundTurnResult = _advisory.RoundTurnResult
 TaskIdentity = _advisory.TaskIdentity
-VerdictContractResult = _advisory.VerdictContractResult
+VerdictContractResult = _dialogue_contracts.VerdictContractResult
 
 
 LearningJournal = _journal

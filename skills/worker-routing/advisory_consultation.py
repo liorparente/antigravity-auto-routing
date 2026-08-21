@@ -13,6 +13,11 @@ if TYPE_CHECKING:
 
 
 def _load_sibling(name: str) -> Any:
+    if __package__:
+        pkg_mod = sys.modules.get(f"{__package__}.{name}")
+        if pkg_mod is not None:
+            return pkg_mod
+        return __import__(f"{__package__}.{name}", fromlist=[name])
     try:
         return __import__(name)
     except ModuleNotFoundError as exc:

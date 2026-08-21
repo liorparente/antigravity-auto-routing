@@ -9,7 +9,6 @@ an interactive terminal.
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
@@ -17,57 +16,32 @@ import threading
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from debate_state_machine import CriticResponse
-
-
-def _load_sibling(name: str) -> Any:
-    """Load a sibling whether this file is imported or loaded by path."""
-    try:
-        return __import__(name)
-    except ModuleNotFoundError as exc:
-        if exc.name != name:
-            raise
-    sibling_dir = str(Path(__file__).resolve().parent)
-    if sibling_dir not in sys.path:
-        # ``production_invoker`` has an ordinary sibling import
-        # (``learning_journal``), so path-loaded harnesses need this same
-        # directory on the standard importer path before it is executed.
-        sys.path.insert(0, sibling_dir)
-    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(f"{name}.py"))
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_dialogue_contracts = _load_sibling("dialogue_contracts")
-_debate_state_machine = _load_sibling("debate_state_machine")
-_production_invoker = _load_sibling("production_invoker")
+if __package__:
+    from . import production_invoker
+    from .debate_state_machine import CriticResponse
+else:
+    import production_invoker  # type: ignore[no-redef]
+    from debate_state_machine import CriticResponse  # type: ignore[no-redef]
 
 
 def _current_production_invoker() -> Any:
-    """Resolve ``production_invoker`` fresh from ``sys.modules`` on every call.
-
-    A harness that path-loads its own copy of ``production_invoker`` (a test
-    module doing the same by-path load this file's own ``_load_sibling``
-    does) and registers it under ``sys.modules["production_invoker"]`` after
-    this module was first imported would otherwise leave the module-level
-    ``_production_invoker`` pointing at a stale, unpatchable copy — a caller
-    monkeypatching ``production_invoker.invoke_worker`` for a hermetic test
-    would silently miss every call this transport makes. Re-resolving here
-    mirrors what a fresh ``import production_invoker`` statement does on
-    every execution: it always binds to whatever ``sys.modules`` currently
-    holds, never a snapshot from this module's own load time.
-    """
-    return sys.modules.get("production_invoker", _production_invoker)
+    if __package__:
+        package_invoker = sys.modules.get(f"{__package__}.production_invoker")
+        if package_invoker is not None:
+            return package_invoker
+    return sys.modules.get("production_invoker", production_invoker)
 
 
-if not TYPE_CHECKING:
-    CriticResponse = _debate_state_machine.CriticResponse
+__all__ = [
+    "ESCALATION_FAILURE_THRESHOLD",
+    "CriticResponse",
+    "DebateTransport",
+    "RecurringFailureNotifier",
+    "Runner",
+]
+
 ESCALATION_FAILURE_THRESHOLD = 2
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -193,11 +167,3 @@ class DebateTransport:
             candidate_hash=payload.get("candidate_hash"),
             findings=tuple(payload.get("findings", ())),
         )
-
-
-__all__ = [
-    "ESCALATION_FAILURE_THRESHOLD",
-    "CriticResponse",
-    "DebateTransport",
-    "RecurringFailureNotifier",
-]
