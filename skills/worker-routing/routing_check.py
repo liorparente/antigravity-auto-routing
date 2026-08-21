@@ -601,8 +601,11 @@ def _add_calibration_text(step: Step, text: str) -> None:
 
 def get_calibration_secret(root_dir: str | Path | None = None) -> bytes | None:
     """Read the verifier secret without creating or modifying project state."""
-    # Keep this import lazy: routing_check.py is loaded directly by path in
-    # standalone audit contexts, before its sibling module is on sys.path.
+    # Keep this import lazy: agent_council pulls in the heavier calibration
+    # dependency chain, and most callers of this module never verify a
+    # manifest or load a secret, so importing it eagerly at module load time
+    # would pay that cost unconditionally. Deferring it here means it's only
+    # paid when a secret is actually requested.
     if __package__:
         from .agent_council import AgentCouncil
     else:
@@ -634,8 +637,9 @@ class SecurityContext:
     def verify_manifest(self, manifest: dict[str, Any]) -> bool:
         if self.secret is None:
             return False
-        # See get_calibration_secret: direct-path execution needs this sibling
-        # import to remain lazy until the caller has installed it.
+        # See get_calibration_secret: defer the agent_council import until a
+        # manifest actually needs verifying, rather than paying its import
+        # cost for every SecurityContext regardless of whether it's used.
         if __package__:
             from .agent_council import AgentCouncil
         else:

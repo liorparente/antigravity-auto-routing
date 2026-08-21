@@ -77,12 +77,23 @@ Transform `skills/worker-routing/` into a standard, self-contained Python packag
 - For scripts intended for direct execution via CLI (such as `routing_check.py`), implement a non-intrusive package resolution fallback:
   ```python
   if __package__ is None or __package__ == "":
-      import sys
-      from pathlib import Path
-      sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-      __package__ = "worker-routing"
+      sys.path.insert(0, str(Path(__file__).resolve().parent))
   ```
-- This guarantees that both direct script execution (`python3 routing_check.py`) and module execution (`python3 -m skills.worker-routing.routing_check`) resolve internal package imports identically.
+- This anchors the skill directory itself (not its parent) on `sys.path`, so a
+  direct or path-based load (`python3 routing_check.py`, or
+  `importlib.util.spec_from_file_location` from an unrelated `cwd`) can resolve
+  its sibling imports (`import agent_council`, `from . import learning_journal`)
+  exactly as it would if that directory were already on the path. It
+  deliberately does not assign `__package__` — `worker-routing`'s hyphen is not
+  a valid Python identifier, so writing it there would not make relative
+  imports (`from .agent_council import ...`) work and would only mask the
+  module's true package status. `__package__` is left untouched: `None`/`""`
+  for a direct/path-based load, and `"worker_routing"` when actually invoked as
+  `python3 -m worker_routing.routing_check` through the installed package's own
+  `__init__.py`. Callers that need a sibling import to work in both modes
+  branch on `__package__` at the call site (see `get_calibration_secret` and
+  `SecurityContext.verify_manifest` in `routing_check.py`) rather than relying
+  on this bootstrap to unify the two.
 
 ### 4. Thin Facade Simplification
 - In `advisory_consultation.py`, eliminate dynamic `__getattr__` lookup loops over the `_modules` tuple. Replace with explicit static imports and re-exports, retaining complete backward compatibility for external callers while providing full static analysis clarity.

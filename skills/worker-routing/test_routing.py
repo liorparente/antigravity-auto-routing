@@ -452,15 +452,65 @@ class RoutingCheckFixtureTests(unittest.TestCase):
         result = run_check("--strict", str(FIXTURES_DIR / "clean_log.txt"))
         self.assertEqual(result.returncode, 0)
 
-    def test_routing_check_resolves_transparently_in_standalone_and_package_mode(self) -> None:
-        res_direct = subprocess.run(
-            [sys.executable, str(ROUTING_CHECK), str(FIXTURES_DIR / "clean_log.txt")],
-            capture_output=True,
-            text=True,
-            check=False,
+    def test_routing_check_bootstrap_enables_path_based_loading_from_foreign_cwd(self) -> None:
+        """The bootstrap's `sys.path.insert(0, ...)` in `routing_check.py` is
+        what keeps sibling imports (`agent_council`) resolving when the
+        module is loaded by path from a caller that has no reason to already
+        have `skills/worker-routing` on `sys.path` — e.g. an audit script
+        elsewhere using `importlib.util.spec_from_file_location`.
+
+        Running `routing_check.py` directly as a script (the previous form
+        of this test) proves nothing about that line: Python always
+        prepends a run script's own directory to `sys.path[0]`, so the
+        sibling import would resolve even with the bootstrap deleted. Only
+        `spec_from_file_location`, invoked from an unrelated `cwd` with
+        nothing pre-populating `sys.path`, actually exercises it.
+        """
+        child_script = (
+            "import importlib.util, sys\n"
+            f"spec = importlib.util.spec_from_file_location('routing_check', {str(ROUTING_CHECK)!r})\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "sys.modules['routing_check'] = module\n"
+            "spec.loader.exec_module(module)\n"
+            "module.get_calibration_secret()\n"
+            "print('sibling imports resolved')\n"
         )
-        self.assertEqual(res_direct.returncode, 0, res_direct.stdout + res_direct.stderr)
-        self.assertIn("No violations detected", res_direct.stdout)
+        with tempfile.TemporaryDirectory() as foreign_cwd:
+            result = subprocess.run(
+                [sys.executable, "-c", child_script],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=foreign_cwd,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("sibling imports resolved", result.stdout)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
+
+    def test_routing_check_resolves_in_package_execution_mode(self) -> None:
+        """`python3 -m worker_routing.routing_check` runs `routing_check.py`
+        with `__package__` already set to `worker_routing`, so its relative
+        sibling import (`from .agent_council import AgentCouncil`) must
+        resolve through the installed package's own `__init__.py`, not the
+        standalone bootstrap this class's sibling test covers.
+        """
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            package_root = Path(temporary_dir)
+            os.symlink(SKILL_DIR, package_root / "worker_routing")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "worker_routing.routing_check",
+                    str(FIXTURES_DIR / "clean_log.txt"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                cwd=package_root,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("No violations detected", result.stdout)
 
 
 class RoutingAuditIntegrationTests(unittest.TestCase):
@@ -8629,7 +8679,8 @@ class ManagedFileClosureTests(unittest.TestCase):
                 names = []
                 if node.module:
                     names.append(node.module)
-                names.extend(alias.name for alias in node.names)
+                elif node.level > 0:
+                    names.extend(alias.name for alias in node.names)
             else:
                 continue
             imported.update(
@@ -8638,6 +8689,30 @@ class ManagedFileClosureTests(unittest.TestCase):
                 if name.split(".")[0] in siblings
             )
         return imported
+
+    def test_sibling_imports_detects_relative_and_absolute_forms(self) -> None:
+        """`_sibling_imports` must catch a sibling however it's spelled —
+        plain `import`, `from . import`, and `from .module import name` —
+        while leaving unrelated stdlib imports alone.
+
+        The `from .module import name` case is the one a naive `ImportFrom`
+        walk gets wrong: `name` is an attribute of `.module`, not a module of
+        its own, so it must not be reported as a sibling in its own right
+        even when it happens to share a name with nothing in particular.
+        """
+        source = (
+            "import agent_council\n"
+            "from . import learning_journal\n"
+            "from .agent_council import AgentCouncil\n"
+            "from typing import Any\n"
+            "from unittest.mock import patch\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir) / "probe.py"
+            module_path.write_text(source, encoding="utf-8")
+            imported = self._sibling_imports(module_path)
+
+        self.assertEqual(imported, {"agent_council", "learning_journal"})
 
     def test_every_module_a_managed_file_imports_is_itself_managed(self) -> None:
         managed = self._managed()
