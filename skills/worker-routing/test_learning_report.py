@@ -5,12 +5,7 @@
 `test_learning_scoreboard` — and nothing else from that module — per
 implementation_plan.md Section 9 slice 1's round-2 correction: that one
 function is pure (`ast.AST` in, a plain list of tuples out) and touches
-neither `learning_journal` nor `learning_scoreboard`. That import is safe
-under both loading paths this file supports: as a package submodule
-(`from .test_learning_scoreboard import ...`) and as a standalone script
-run directly (`from test_learning_scoreboard import ...`), since either
-form only ever reaches this one pure function and `test_learning_scoreboard`'s
-module level contains only constants and test classes guarded by `unittest.main()`.
+neither `learning_journal` nor `learning_scoreboard`.
 """
 from __future__ import annotations
 
