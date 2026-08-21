@@ -1,5 +1,12 @@
 # Worker Routing Fallbacks
 
+## 2026-08-21 — Non-Interactive `agy` Background Task TTY / IPC Socket Lock
+
+- Mission: Dispatch worker task via `agy -p` (Antigravity CLI) as a background task from within the IDE.
+- Failure: Executing `agy` as a non-interactive background subagent / subprocess without a connected interactive TTY caused the process to hang indefinitely waiting for terminal IO / IPC socket attachment.
+- Resolution: Killed the stuck background task, avoided nested `agy` invocations in non-interactive subshells, and routed execution directly via specific worker CLIs (`codex exec`, `claude -p`) or local REST endpoints (`LM Studio`).
+- Lesson: In automated orchestration environments lacking an interactive TTY, never invoke tools expecting terminal attachment; use decoupled non-interactive headless CLI tools or HTTP APIs.
+
 ## 2026-08-20 — Word-Boundary False Positives in Prose Security Indicator Scanner
 
 - Mission: Implement prose security veto for unstructured critic responses in `production_invoker.py` (Spec 0009).
