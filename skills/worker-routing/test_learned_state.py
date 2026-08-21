@@ -38,8 +38,8 @@ _LATER = datetime(2026, 1, 9, tzinfo=timezone.utc)
 _LATEST = datetime(2026, 1, 10, tzinfo=timezone.utc)
 
 
-def _change(document: str, content: str):
-    return learned_state.DocumentChange(document=document, content=content)  # type: ignore[arg-type]
+def _change(document: learned_state.LearnedDocument, content: str) -> learned_state.DocumentChange:
+    return learned_state.DocumentChange(document=document, content=content)
 
 
 class AdoptTests(unittest.TestCase):

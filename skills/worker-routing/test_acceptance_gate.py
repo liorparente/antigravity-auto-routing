@@ -36,11 +36,12 @@ def _constant_runner(value: object) -> Callable[[], float]:
 
     `value` is bound as a real function argument at call time, not looked up
     from an enclosing loop by closure — the loop-variable-capture trap a bare
-    `lambda: bad_score` defined inside a `for` loop would fall into. Typed to
-    return `float` structurally (matching `evaluate_proposal`'s `runner`
-    seam) while actually returning whatever `value` is, including a
-    deliberately wrong type — the fail-closed behaviour this helper exists
-    to exercise.
+    `lambda: bad_score` defined inside a `for` loop would fall into. Declared
+    to return `float` only to match `evaluate_proposal`'s `runner` seam
+    structurally — the annotation is not enforced at runtime, and this
+    helper deliberately returns invalid or sentinel values it names (NaN,
+    `-inf`, a negative number, `"not a number"`) to exercise the fail-closed
+    behaviour those trigger.
     """
     def _runner() -> Any:
         return value

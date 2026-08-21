@@ -65,8 +65,8 @@ Transform `skills/worker-routing/` into a standard, self-contained Python packag
   - `sensitivity_redactor.py`
   - `executive_dialogue_report.py`
   - `consultation_policy.py`
-  - `learning_journal.py`
-  - `learned_state.py`
+  - `learning_journal.py` — a true leaf module with zero sibling dependencies
+  - `learned_state.py` — a true leaf module with zero sibling dependencies
   - `learning_outcomes.py`
   - `learning_scoreboard.py`
   - `risk_tiered_application.py`

@@ -149,10 +149,12 @@ def _seed_replay_benchmark(
     assert error is None, error
 
 
-def _imported_module_names(source: str) -> set[str]:
-    """Every module name source imports, by any syntax. `from . import x`
-    puts x in alias.name with node.module None; `from .x import y` puts
-    it in node.module — so both must be collected or relative imports slip past.
+def _imported_names(source: str) -> set[str]:
+    """Every module and symbol name `source` imports, collected from every
+    `ast.Import` and `ast.ImportFrom` node. `from . import x` puts `x` in
+    `alias.name` with `node.module` `None`; `from .x import y` puts `x` in
+    `node.module` and `y` in `alias.name` — so both must be collected or a
+    relative import slips past.
     """
     tree = ast.parse(source)
     names: set[str] = set()
@@ -1423,7 +1425,7 @@ class TestSeamAndSeparationTests(unittest.TestCase):
         `risk_tiered_application`'s tiering.
         """
         source = Path(learner_worker.__file__).read_text(encoding="utf-8")
-        imported_names = _imported_module_names(source)
+        imported_names = _imported_names(source)
 
         self.assertNotIn("learned_state", imported_names)
         self.assertNotIn("adopt(", source)
@@ -1436,13 +1438,13 @@ class TestSeamAndSeparationTests(unittest.TestCase):
         and each `alias.name` from every `ast.ImportFrom` node.
         """
 
-        self.assertIn("learned_state", _imported_module_names("import learned_state"))
-        self.assertIn("learned_state", _imported_module_names("from . import learned_state"))
+        self.assertIn("learned_state", _imported_names("import learned_state"))
+        self.assertIn("learned_state", _imported_names("from . import learned_state"))
         self.assertIn(
-            "learned_state", _imported_module_names("from .learned_state import adopt")
+            "learned_state", _imported_names("from .learned_state import adopt")
         )
         self.assertIn(
-            "learned_state", _imported_module_names("from learned_state import adopt")
+            "learned_state", _imported_names("from learned_state import adopt")
         )
 
     def test_all_mutations_flow_through_risk_tiered_application(self) -> None:
