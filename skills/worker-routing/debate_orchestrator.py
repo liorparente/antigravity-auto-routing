@@ -62,6 +62,7 @@ if __package__:
     from . import dialogue_degradation as _dialogue_degradation
     from . import dialogue_transcript as _dialogue_transcript
     from . import executive_dialogue_report as _executive_dialogue_report
+    from . import learned_state as _learned_state
     from . import learning_journal as _learning_journal
     from . import learning_outcomes as _learning_outcomes
     from . import production_invoker as _production_invoker
@@ -75,6 +76,7 @@ else:
     import dialogue_degradation as _dialogue_degradation  # type: ignore[no-redef]
     import dialogue_transcript as _dialogue_transcript  # type: ignore[no-redef]
     import executive_dialogue_report as _executive_dialogue_report  # type: ignore[no-redef]
+    import learned_state as _learned_state  # type: ignore[no-redef]
     import learning_journal as _learning_journal  # type: ignore[no-redef]
     import learning_outcomes as _learning_outcomes  # type: ignore[no-redef]
     import production_invoker as _production_invoker  # type: ignore[no-redef]
@@ -135,6 +137,8 @@ build_canary_prompt = _prompt_assembler.build_canary_prompt
 build_adjudicator_prompt = _prompt_assembler.build_adjudicator_prompt
 build_stalemate_prompt = _prompt_assembler.build_stalemate_prompt
 combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
+extract_scoped_memory = _prompt_assembler.extract_scoped_memory
+get_scoped_memory = _learned_state.get_scoped_memory
 _MISSION_COPY = _prompt_assembler._MISSION_COPY
 _MissionCopy = _prompt_assembler._MissionCopy
 
@@ -1559,17 +1563,31 @@ def _build_planner_prompt(
     occasion: Occasion = "ambiguity",
     previous_plan: str | None = None,
     critic_feedback: str | None = None,
+    scoped_memory: str | None = None,
+    root_dir: Path | None = None,
 ) -> str:
+    if scoped_memory is None:
+        scoped_memory = (
+            get_scoped_memory(root_dir, task_description)
+            if root_dir is not None
+            else extract_scoped_memory(task_description)
+        )
     return build_planner_prompt(
         task_description,
         occasion=occasion,
         previous_plan=previous_plan,
         critic_feedback=critic_feedback,
+        scoped_memory=scoped_memory,
     )
 
 
 def _build_critic_prompt(
-    task_description: str, planner_plan: str, *, occasion: Occasion = "ambiguity"
+    task_description: str,
+    planner_plan: str,
+    *,
+    occasion: Occasion = "ambiguity",
+    scoped_memory: str | None = None,
+    root_dir: Path | None = None,
 ) -> str:
     # spec 0003 ticket 02's VerdictContract, reversed from spec 0001: the
     # verdict line now comes LAST, after rationale and engagement units, not
@@ -1597,12 +1615,19 @@ def _build_critic_prompt(
     # encouraged and still counted, but — per `_parse_critic_verdict` — they
     # can never substitute for a quote in the approval decision, so the
     # prompt must not imply they can.
+    if scoped_memory is None:
+        scoped_memory = (
+            get_scoped_memory(root_dir, task_description)
+            if root_dir is not None
+            else extract_scoped_memory(task_description)
+        )
     return build_critic_prompt(
         task_description,
         planner_plan,
         occasion=occasion,
         approve_verdict=CRITIC_VERDICT_APPROVE,
         revise_verdict=CRITIC_VERDICT_REVISE,
+        scoped_memory=scoped_memory,
     )
 
 
@@ -2771,6 +2796,7 @@ def run_advisory_consultation_debate(
             occasion=occasion,
             previous_plan=previous_plan,
             critic_feedback=previous_critique,
+            root_dir=root_dir,
         )
         try:
             planner_plan = invoke_worker(planner_model, planner_effort, planner_prompt)
@@ -2786,7 +2812,7 @@ def run_advisory_consultation_debate(
         # with, not by different prompt text, so `_build_critic_prompt`
         # needs no panel-awareness of its own.
         critic_prompt = _build_critic_prompt(
-            task_description, planner_plan, occasion=occasion
+            task_description, planner_plan, occasion=occasion, root_dir=root_dir
         )
         candidate_hash = hashlib.sha256(planner_plan.encode("utf-8")).hexdigest()
 

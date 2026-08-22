@@ -494,24 +494,44 @@ def escape_delimiters(text: str) -> str:
     return _DELIMITER_RE.sub(lambda m: f"= = = {m.group(1).upper()}", text)
 
 
+def _format_scoped_memory(scoped_memory: str) -> str:
+    """Pass an `extract_scoped_memory` block through untouched; escape raw text.
+
+    A block already wrapped in `SCOPED_MEMORY_BEGIN`/`SCOPED_MEMORY_END` has
+    had every entry escaped by `extract_scoped_memory` already — re-escaping
+    would double-escape it. Raw caller-supplied text has not been through
+    that pass, so it still needs `escape_delimiters` to prevent it from
+    forging a section boundary.
+    """
+    if scoped_memory.startswith(SCOPED_MEMORY_BEGIN) and scoped_memory.endswith(
+        SCOPED_MEMORY_END
+    ):
+        return scoped_memory
+    return escape_delimiters(scoped_memory)
+
+
 def build_planner_prompt(
     task_description: str,
     *,
     occasion: Occasion = "ambiguity",
     previous_plan: str | None = None,
     critic_feedback: str | None = None,
+    scoped_memory: str | None = None,
 ) -> str:
     """Build a Planner's initial or revision prompt without interpreting input."""
     mission = MISSION_COPY[occasion]
+    memory_section = f"{_format_scoped_memory(scoped_memory)}\n\n" if scoped_memory else ""
     if previous_plan is None or critic_feedback is None:
         return (
             f"{WORKER_MODE_TOKEN}\n{mission.planner_intro}\n\n"
+            f"{memory_section}"
             "=== BEGIN TASK DESCRIPTION ===\n"
             f"{escape_delimiters(task_description)}\n"
             "=== END TASK DESCRIPTION ==="
         )
     return (
         f"{WORKER_MODE_TOKEN}\n{mission.planner_revision_intro}\n\n"
+        f"{memory_section}"
         "=== BEGIN TASK DESCRIPTION ===\n"
         f"{escape_delimiters(task_description)}\n"
         "=== END TASK DESCRIPTION ===\n\n"
@@ -531,11 +551,14 @@ def build_critic_prompt(
     occasion: Occasion = "ambiguity",
     approve_verdict: str = CRITIC_VERDICT_APPROVE,
     revise_verdict: str = CRITIC_VERDICT_REVISE,
+    scoped_memory: str | None = None,
 ) -> str:
     """Build the strict VerdictContract prompt used for a Critic review."""
     mission = MISSION_COPY[occasion]
+    memory_section = f"{_format_scoped_memory(scoped_memory)}\n\n" if scoped_memory else ""
     return (
         f"{WORKER_MODE_TOKEN}\n{mission.critic_intro}\n\n"
+        f"{memory_section}"
         "Write your rationale first. Before you verdict, show your engagement "
         "with it: quote the exact passages you are judging, one per line, as "
         "QUOTE: \"<verbatim text copied from what you were given>\", and list "

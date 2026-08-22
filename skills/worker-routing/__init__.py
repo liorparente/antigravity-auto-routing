@@ -21,6 +21,7 @@ from . import learned_state as _learned_state
 from . import learning_journal as _journal
 from . import learning_outcomes as _outcomes
 from . import production_invoker as _invoker
+from . import prompt_assembler as _prompt_assembler
 from . import routing_check as _routing_check
 
 # Advisory and critical dialogue.
@@ -96,6 +97,11 @@ roll_back = _learned_state.roll_back
 read_history = _learned_state.read_history
 read_current = _learned_state.read_current
 current_version_dir = _learned_state.current_version_dir
+get_scoped_memory = _learned_state.get_scoped_memory
+
+extract_scoped_memory = _prompt_assembler.extract_scoped_memory
+GoldenRule = _prompt_assembler.GoldenRule
+GOLDEN_RULES = _prompt_assembler.GOLDEN_RULES
 
 record_test_result = _outcomes.record_test_result
 record_review_verdict = _outcomes.record_review_verdict
@@ -135,13 +141,14 @@ run_audit = _routing_check.run_audit
 
 __version__ = "3.5.0"
 
-__all__ = (
+__all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tuple(sorted(__all__)) == __all__
     "AcceptanceGateResult", "AdvisoryDebateResult", "AdvisoryDebateRound", "AdvisoryOutcome",
     "AdvisoryResolutionOption", "AdvisoryRoundVerdict", "AdvisoryStalemateReport",
     "AdvisoryTelemetryRecord", "CanaryFixture", "CanaryResult", "ComplianceRecord", "ConsensusTable",
     "ConsultationTranscript", "CriticResponse", "CriticVerdict", "DebateRoundRecord", "DebateSessionState",
     "DebateState", "DebateTransport", "DegradationLadderState", "DegradationRung", "DialogueQualityRecord",
-    "DialogueRound", "DocumentChange", "DocumentDelta", "ExecutiveDialogueReport", "InvokeWorker",
+    "DialogueRound", "DocumentChange", "DocumentDelta", "ExecutiveDialogueReport", "GOLDEN_RULES",
+    "GoldenRule", "InvokeWorker",
     "IsFamilyReachable", "JournalRead", "LearnedState", "LearningJournal", "MissionCopy", "Occasion",
     "OutcomeRecord", "PrivacyMode", "RecurringFailureNotifier", "ReplayBenchmarkRecord", "ReviewCouncil",
     "ReviewOutcome", "ReviewRequest", "RosterAssignment", "RosterResolution", "RosterResolutionError",
@@ -149,7 +156,8 @@ __all__ = (
     "TaskLabel", "VerdictContractResult", "VersionEntry", "WorkerExecutionRecord", "__version__", "adopt",
     "append_journal_record", "classify_complexity", "classify_model_family", "current_version_dir",
     "dispatch_post_mortem_consultation", "escalate_routing_effort", "evaluate_proposal_gate",
-    "extract_issue_codes", "invoke_worker", "journal_path", "read_current", "read_history", "read_journal",
+    "extract_issue_codes", "extract_scoped_memory", "get_scoped_memory", "invoke_worker", "journal_path",
+    "read_current", "read_history", "read_journal",
     "record_plan_outcome", "record_review_verdict", "record_stalemate_resolution", "record_test_result",
     "resolve_cli_command", "resolve_model_name", "roll_back", "run_advisory_consultation_debate", "run_audit",
     "run_canary_dialogue", "run_critical_dialogue", "run_debate_loop", "run_post_mortem_loop",

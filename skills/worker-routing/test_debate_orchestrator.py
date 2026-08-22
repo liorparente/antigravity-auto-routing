@@ -12,6 +12,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from dataclasses import FrozenInstanceError
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -20,11 +21,12 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import advisory_consultation, debate_orchestrator, dialogue_contracts
+    from . import advisory_consultation, debate_orchestrator, dialogue_contracts, learned_state
 else:
     import advisory_consultation  # type: ignore[no-redef]
     import debate_orchestrator  # type: ignore[no-redef]
     import dialogue_contracts  # type: ignore[no-redef]
+    import learned_state  # type: ignore[no-redef]
 
 
 class PanelTopologyTests(unittest.TestCase):
@@ -127,6 +129,129 @@ class CriticResponsePayloadTests(unittest.TestCase):
         )
 
         self.assertIsNone(response.candidate_hash)
+
+
+class ScopedMemoryPromptWiringTests(unittest.TestCase):
+    def test_planner_prompt_embeds_scoped_institutional_memory_by_default(self) -> None:
+        task = "Fix a flaky test that leaks mocks across the CI suite"
+        expected_memory = debate_orchestrator.extract_scoped_memory(task)
+
+        prompt = debate_orchestrator._build_planner_prompt(task)
+
+        self.assertIn(expected_memory, prompt)
+        self.assertLess(
+            prompt.index(expected_memory), prompt.index("=== BEGIN TASK DESCRIPTION ===")
+        )
+
+    def test_critic_prompt_embeds_scoped_institutional_memory_by_default(self) -> None:
+        task = "Fix a flaky test that leaks mocks across the CI suite"
+        expected_memory = debate_orchestrator.extract_scoped_memory(task)
+
+        prompt = debate_orchestrator._build_critic_prompt(task, "Proposed plan")
+
+        self.assertIn(expected_memory, prompt)
+        self.assertLess(
+            prompt.index(expected_memory), prompt.index("=== BEGIN TASK DESCRIPTION ===")
+        )
+
+    def test_planner_prompt_scopes_against_adopted_memory_when_root_dir_given(self) -> None:
+        task = "Improve the router keyword scoring"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_content = (
+                "Entry about database migration ordering.\n\n"
+                "Entry about router keyword scoring and prompt injection.\n\n"
+                "Entry about unrelated wombats.\n\n"
+                "Entry about unrelated gadgets."
+            )
+            learned_state.adopt(
+                [learned_state.DocumentChange(document="memory", content=memory_content)],
+                root_dir=root,
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            expected_memory = debate_orchestrator.get_scoped_memory(root, task)
+            default_memory = debate_orchestrator.extract_scoped_memory(task)
+            self.assertNotEqual(expected_memory, default_memory)
+
+            prompt = debate_orchestrator._build_planner_prompt(task, root_dir=root)
+
+            self.assertIn(expected_memory, prompt)
+            self.assertNotIn(default_memory, prompt)
+
+    def test_critic_prompt_scopes_against_adopted_memory_when_root_dir_given(self) -> None:
+        task = "Improve the router keyword scoring"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_content = (
+                "Entry about database migration ordering.\n\n"
+                "Entry about router keyword scoring and prompt injection.\n\n"
+                "Entry about unrelated wombats.\n\n"
+                "Entry about unrelated gadgets."
+            )
+            learned_state.adopt(
+                [learned_state.DocumentChange(document="memory", content=memory_content)],
+                root_dir=root,
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            expected_memory = debate_orchestrator.get_scoped_memory(root, task)
+            default_memory = debate_orchestrator.extract_scoped_memory(task)
+            self.assertNotEqual(expected_memory, default_memory)
+
+            prompt = debate_orchestrator._build_critic_prompt(
+                task, "Proposed plan", root_dir=root
+            )
+
+            self.assertIn(expected_memory, prompt)
+            self.assertNotIn(default_memory, prompt)
+
+    def test_run_advisory_consultation_debate_scopes_worker_prompts_against_adopted_memory(
+        self,
+    ) -> None:
+        """End-to-end: `run_advisory_consultation_debate` must thread its
+        `root_dir` into both `_build_planner_prompt` and `_build_critic_prompt`
+        so the Planner and Critic worker prompts it actually dispatches carry
+        the adopted-memory-scoped rules, not the built-in `GOLDEN_RULES`
+        fallback `extract_scoped_memory` uses when no `root_dir` reaches it.
+        """
+        task = "Improve the router keyword scoring"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_content = (
+                "Entry about database migration ordering.\n\n"
+                "Entry about router keyword scoring and prompt injection.\n\n"
+                "Entry about unrelated wombats.\n\n"
+                "Entry about unrelated gadgets."
+            )
+            learned_state.adopt(
+                [learned_state.DocumentChange(document="memory", content=memory_content)],
+                root_dir=root,
+                now=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+            expected_memory = debate_orchestrator.get_scoped_memory(root, task)
+            default_memory = debate_orchestrator.extract_scoped_memory(task)
+            self.assertNotEqual(expected_memory, default_memory)
+
+            planner_prompts: list[str] = []
+            critic_prompts: list[str] = []
+
+            def invoker(_model: str, _effort: str, prompt: str) -> str:
+                if "You are the Planner" in prompt:
+                    planner_prompts.append(prompt)
+                    return "Proposed plan"
+                critic_prompts.append(prompt)
+                return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
+
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                task, invoker, root_dir=root
+            )
+
+            self.assertEqual(result.outcome, "consensus")
+            self.assertEqual(len(planner_prompts), 1)
+            self.assertEqual(len(critic_prompts), 1)
+            self.assertIn(expected_memory, planner_prompts[0])
+            self.assertNotIn(default_memory, planner_prompts[0])
+            self.assertIn(expected_memory, critic_prompts[0])
+            self.assertNotIn(default_memory, critic_prompts[0])
 
 
 class DebateStateTests(unittest.TestCase):
