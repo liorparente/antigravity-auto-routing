@@ -7729,6 +7729,195 @@ class OutcomeRecordingTests(unittest.TestCase):
         self.assertEqual(kinds_by_task["outcome"]["ground_truth"], "tests")
         self.assertEqual(kinds_by_task["outcome"]["verdict"], "pass")
 
+    def test_auto_record_test_execution_maps_zero_to_pass_and_nonzero_to_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for exit_code in (0, 1, 2, -1, 127):
+                with self.subTest(exit_code=exit_code):
+                    error = learning_outcomes.auto_record_test_execution(
+                        f"task-exit-{exit_code}", exit_code, root
+                    )
+                    self.assertIsNone(error)
+
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        verdict_by_task = {record["task_id"]: record["verdict"] for record in records}
+        self.assertEqual(verdict_by_task["task-exit-0"], "pass")
+        self.assertEqual(verdict_by_task["task-exit-1"], "fail")
+        self.assertEqual(verdict_by_task["task-exit-2"], "fail")
+        self.assertEqual(verdict_by_task["task-exit--1"], "fail")
+        self.assertEqual(verdict_by_task["task-exit-127"], "fail")
+        self.assertTrue(
+            all(record["ground_truth"] == "tests" for record in records),
+            "auto_record_test_execution always grades the 'tests' ground truth",
+        )
+
+    def test_auto_record_test_execution_validates_types_and_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaises(ValueError):
+                learning_outcomes.auto_record_test_execution(
+                    "task-bad-type", "0", root  # type: ignore[arg-type]
+                )
+            with self.assertRaises(ValueError):
+                # bool is an int subclass; must be refused like every other
+                # count-shaped field in this package.
+                learning_outcomes.auto_record_test_execution("task-bad-bool", True, root)
+            with self.assertRaises(ValueError):
+                learning_outcomes.auto_record_test_execution("", 0, root)
+
+            self.assertFalse(learning_journal.journal_path(root).exists())
+
+    def test_auto_record_test_execution_passes_run_id_and_reports_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            error = learning_outcomes.auto_record_test_execution(
+                "task-exit-run", 0, root, run_id="run-exit-1"
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertIsNone(error)
+        self.assertEqual(records[0]["run_id"], "run-exit-1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_journal.journal_path(root).parent.write_text("not a directory")
+
+            error = learning_outcomes.auto_record_test_execution(
+                "task-exit-write-failure", 0, root
+            )
+
+            self.assertIsNotNone(error)
+            assert error is not None
+            self.assertIn("learning journal", error.lower())
+
+    def test_auto_record_review_execution_maps_boolean_verdicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_outcomes.auto_record_review_execution("task-auto-approved", True, root)
+            learning_outcomes.auto_record_review_execution("task-auto-rejected", False, root)
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        verdict_by_task = {record["task_id"]: record["verdict"] for record in records}
+        self.assertEqual(verdict_by_task["task-auto-approved"], "approved")
+        self.assertEqual(verdict_by_task["task-auto-rejected"], "rejected")
+        self.assertTrue(
+            all(record["ground_truth"] == "review" for record in records),
+            "auto_record_review_execution always grades the 'review' ground truth",
+        )
+
+    def test_auto_record_review_execution_validates_types_and_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with self.assertRaises(ValueError):
+                learning_outcomes.auto_record_review_execution(
+                    "task-bad-type", "true", root  # type: ignore[arg-type]
+                )
+            with self.assertRaises(ValueError):
+                learning_outcomes.auto_record_review_execution(
+                    "task-bad-int", 1, root  # type: ignore[arg-type]
+                )
+            with self.assertRaises(ValueError):
+                learning_outcomes.auto_record_review_execution("", True, root)
+
+            self.assertFalse(learning_journal.journal_path(root).exists())
+
+    def test_auto_record_review_execution_passes_run_id_and_reports_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            error = learning_outcomes.auto_record_review_execution(
+                "task-review-run", True, root, run_id="run-review-1"
+            )
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertIsNone(error)
+        self.assertEqual(records[0]["run_id"], "run-review-1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_journal.journal_path(root).parent.write_text("not a directory")
+
+            error = learning_outcomes.auto_record_review_execution(
+                "task-review-write-failure", True, root
+            )
+
+            self.assertIsNotNone(error)
+            assert error is not None
+            self.assertIn("learning journal", error.lower())
+
+    def test_reduce_outcomes_positionally_resolves_to_latest_record(self) -> None:
+        """'Latest' means last in file order, not latest by timestamp — the
+        same rule `ComplianceRecord`'s own reduction contract uses, and for
+        the same reason: a second-resolution wire timestamp can tie or even
+        run behind a re-write. The record positioned second here carries the
+        *earlier* timestamp, and it must still win."""
+        earlier_position_later_timestamp = learning_journal.OutcomeRecord(
+            task=learning_journal.TaskLabel.for_task("task-positional"),
+            ground_truth="tests",
+            verdict="pass",
+            timestamp="2026-01-05T00:00:00Z",
+        )
+        later_position_earlier_timestamp = learning_journal.OutcomeRecord(
+            task=learning_journal.TaskLabel.for_task("task-positional"),
+            ground_truth="tests",
+            verdict="fail",
+            timestamp="2026-01-01T00:00:00Z",
+        )
+
+        reduced = learning_outcomes.reduce_outcomes_positionally(
+            (earlier_position_later_timestamp, later_position_earlier_timestamp)
+        )
+
+        self.assertEqual(reduced, (later_position_earlier_timestamp,))
+        self.assertEqual(
+            learning_outcomes.reduce_outcomes_by_key(
+                (earlier_position_later_timestamp, later_position_earlier_timestamp)
+            ),
+            {("task-positional", "tests"): later_position_earlier_timestamp},
+        )
+
+    def test_reduce_outcomes_positionally_preserves_distinct_ground_truths(self) -> None:
+        tests_outcome = learning_journal.OutcomeRecord(
+            task=learning_journal.TaskLabel.for_task("task-distinct"),
+            ground_truth="tests",
+            verdict="pass",
+            timestamp="2026-01-05T00:00:00Z",
+        )
+        review_outcome = learning_journal.OutcomeRecord(
+            task=learning_journal.TaskLabel.for_task("task-distinct"),
+            ground_truth="review",
+            verdict="approved",
+            timestamp="2026-01-05T00:00:00Z",
+        )
+        other_task_outcome = learning_journal.OutcomeRecord(
+            task=learning_journal.TaskLabel.for_task("task-other"),
+            ground_truth="tests",
+            verdict="fail",
+            timestamp="2026-01-05T00:00:00Z",
+        )
+
+        reduced = learning_outcomes.reduce_outcomes_positionally(
+            (tests_outcome, review_outcome, other_task_outcome)
+        )
+
+        self.assertEqual(reduced, (tests_outcome, review_outcome, other_task_outcome))
+        self.assertEqual(
+            learning_outcomes.reduce_outcomes_by_key(
+                (tests_outcome, review_outcome, other_task_outcome)
+            ),
+            {
+                ("task-distinct", "tests"): tests_outcome,
+                ("task-distinct", "review"): review_outcome,
+                ("task-other", "tests"): other_task_outcome,
+            },
+        )
+
+    def test_reduce_outcomes_positionally_handles_empty_sequence(self) -> None:
+        self.assertEqual(learning_outcomes.reduce_outcomes_positionally(()), ())
+        self.assertEqual(learning_outcomes.reduce_outcomes_by_key(()), {})
+
 
 # Ticket 15 — the post-session audit verdict, persisted instead of printed and
 # lost. Appended here, at the end of the file, per this ticket's instructions:

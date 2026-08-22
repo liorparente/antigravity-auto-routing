@@ -2791,6 +2791,47 @@ class CompletionAndCostMetricTests(unittest.TestCase):
         self.assertEqual(metric.value, 5.0)
         self.assertEqual(metric.sample_size, 1)
 
+    def test_completed_task_ids_respects_positional_reduction_over_multiple_outcomes(
+        self,
+    ) -> None:
+        """A task re-reviewed writes a second `OutcomeRecord` under the same
+        `(task_id, ground_truth)` pair. `_completed_task_ids` must judge
+        completion by the *authoritative* (last-in-file-order) record for
+        that pair, per `learning_outcomes.reduce_outcomes_positionally` —
+        never by whichever of the two records happens to carry an in-window
+        timestamp. Here the first-written record is windowed and the
+        second-written (authoritative) record is not: without the
+        reduction, the first record alone would mark the task complete;
+        with it, the superseded record cannot resurrect a completion the
+        authoritative record does not support.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            superseded_in_window = _outcome_record(
+                "task-superseded-review",
+                ground_truth="review",
+                verdict="approved",
+                timestamp="2026-01-05T00:00:00Z",
+            )
+            authoritative_out_of_window = _outcome_record(
+                "task-superseded-review",
+                ground_truth="review",
+                verdict="rejected",
+                timestamp="2025-12-01T00:00:00Z",
+            )
+            execution = _worker_execution_record(
+                "task-superseded-review", timestamp="2026-01-05T00:00:00Z", cost=5.0
+            )
+            for record in (superseded_in_window, authoritative_out_of_window, execution):
+                self.assertIsNone(learning_journal.append_journal_record(record, root_dir=root))
+
+            journal = learning_journal.read_journal(root)
+
+        board = learning_scoreboard.compute_scoreboard(journal, now=_NOW)
+        self.assertIsInstance(
+            board.efficiency.cost_per_completed_task_usd, learning_scoreboard.MetricNoData
+        )
+
 
 class DialogueNonConsensusRateTests(unittest.TestCase):
     """Slice 10 — efficiency: dialogue non-consensus rate and the escalation

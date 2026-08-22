@@ -61,9 +61,10 @@ from pathlib import Path
 from typing import Any, Literal, get_args
 
 if __package__:
-    from . import learning_journal
+    from . import learning_journal, learning_outcomes
 else:
     import learning_journal  # type: ignore[no-redef]
+    import learning_outcomes  # type: ignore[no-redef]
 
 # The default trailing window, matching ticket 17's weekly report cadence.
 # Configurable per call because a later consumer (ticket 18's acceptance
@@ -524,15 +525,18 @@ def _completed_task_ids(
     `review` — see `_COMPLETING_GROUND_TRUTHS` for why those two and not the
     other two.
 
-    No reduction runs over `outcomes` here — an outcome's `run_id` narrows
-    what it grades, and the `plan` family has two producers under one
-    `task_id`; any metric that reads *verdicts* rather than *membership*
-    must settle both before it reads one (`OutcomeRecord.run_id`'s
-    docstring, `learning_journal.py`). This function only asks membership,
-    which no ordering can change, so it settles nothing that question owns.
+    Reduced first through `learning_outcomes.reduce_outcomes_positionally`:
+    when more than one `OutcomeRecord` shares a `(task_id, ground_truth)`
+    pair — a task re-tested or re-reviewed — only the record that is last in
+    file order is the authoritative one for that pair, exactly as
+    `ComplianceRecord`'s own "last record wins" contract already governs
+    `_reduce_compliance`. A superseded record's timestamp must not decide
+    whether the pair's completion falls in the window once a later record
+    for the same pair has landed; only the surviving, authoritative record's
+    timestamp may.
     """
     completed: set[str] = set()
-    for outcome in outcomes:
+    for outcome in learning_outcomes.reduce_outcomes_positionally(outcomes):
         if outcome.ground_truth not in _COMPLETING_GROUND_TRUTHS:
             continue
         ts = learning_journal.parse_wire_timestamp(outcome.timestamp)

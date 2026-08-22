@@ -93,6 +93,7 @@ calls once the pick is made. It does not invent that caller.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -174,6 +175,44 @@ def record_review_verdict(
     )
 
 
+def auto_record_test_execution(
+    task_id: str, exit_code: int, root_dir: Path, run_id: str | None = None
+) -> str | None:
+    """Record a test run's ground truth straight from the exit code a runner
+    already has, without asking that caller to translate it to a `bool` by
+    hand. `0` is `passed`; anything else — a failure, a signal death, a
+    nonstandard code — is not.
+
+    `exit_code` must be a real `int`, not a `bool`: a caller passing
+    `subprocess.CompletedProcess.returncode` never holds a `bool`, so
+    accepting one here would only mask a call-site bug (`exit_code=True`
+    meaning... 1? True? neither is an exit code) — the same reasoning
+    `learning_journal._validate_count` applies to every count field in this
+    package.
+    """
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        raise ValueError(  # noqa: TRY004 - this module's rejection contract is ValueError throughout
+            f"exit_code must be an integer, got {type(exit_code).__name__}"
+        )
+    return record_test_result(task_id, passed=(exit_code == 0), root_dir=root_dir, run_id=run_id)
+
+
+def auto_record_review_execution(
+    task_id: str, approved: bool, root_dir: Path, run_id: str | None = None
+) -> str | None:
+    """Record a review's ground truth straight from an automated verdict —
+    the same mapping `record_review_verdict` performs, exposed under the
+    `auto_record_*` family's naming and argument order for a caller (a CI
+    hook, a review bot) reaching this module the way a test runner reaches
+    `auto_record_test_execution`.
+    """
+    if not isinstance(approved, bool):
+        raise ValueError(  # noqa: TRY004 - this module's rejection contract is ValueError throughout
+            f"approved must be True or False, got {type(approved).__name__}"
+        )
+    return record_review_verdict(task_id, approved=approved, root_dir=root_dir, run_id=run_id)
+
+
 def record_plan_outcome(
     task_id: str, *, accepted: bool, root_dir: Path, run_id: str | None = None
 ) -> str | None:
@@ -225,9 +264,54 @@ def record_stalemate_resolution(
     )
 
 
+def reduce_outcomes_by_key(
+    outcomes: Sequence[learning_journal.OutcomeRecord],
+) -> dict[tuple[str, str], learning_journal.OutcomeRecord]:
+    """Group `outcomes` by `(task_id, ground_truth)`, last-in-sequence wins.
+
+    Mirrors `learning_journal.ComplianceRecord`'s own reduction contract —
+    "file order is audit order... the last record wins" — applied to the
+    outcome family: a task re-tested or re-reviewed writes a second
+    `OutcomeRecord` under the same `task_id` and `ground_truth`, and the
+    later one is the authoritative verdict, not a duplicate to average
+    against the first. `timestamp` is deliberately not the tiebreaker —
+    second-resolution wire timestamps can tie, exactly as
+    `ComplianceRecord`'s docstring explains — so this reduces on `outcomes`'s
+    own sequence order (its position in the journal, for a caller passing
+    `JournalRead.outcomes` straight through) rather than resorting by a
+    field that can lie about which record came second.
+
+    Plain dict reassignment does the reduction: a key seen again simply
+    overwrites the value at its first-seen position, which is "last write
+    wins" for free from `dict`'s own semantics.
+    """
+    reduced: dict[tuple[str, str], learning_journal.OutcomeRecord] = {}
+    for outcome in outcomes:
+        reduced[(outcome.task.task_id, outcome.ground_truth)] = outcome
+    return reduced
+
+
+def reduce_outcomes_positionally(
+    outcomes: Sequence[learning_journal.OutcomeRecord],
+) -> tuple[learning_journal.OutcomeRecord, ...]:
+    """The one authoritative `OutcomeRecord` per `(task_id, ground_truth)`
+    pair in `outcomes`, in order of each pair's first appearance.
+
+    A thin restatement of `reduce_outcomes_by_key` as the tuple a caller
+    that only wants the reduced records — not the key each one reduced
+    under — actually iterates. See that function for the reduction rule
+    itself.
+    """
+    return tuple(reduce_outcomes_by_key(outcomes).values())
+
+
 __all__ = [
+    "auto_record_review_execution",
+    "auto_record_test_execution",
     "record_plan_outcome",
     "record_review_verdict",
     "record_stalemate_resolution",
     "record_test_result",
+    "reduce_outcomes_by_key",
+    "reduce_outcomes_positionally",
 ]

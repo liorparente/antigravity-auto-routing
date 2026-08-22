@@ -107,6 +107,10 @@ record_test_result = _outcomes.record_test_result
 record_review_verdict = _outcomes.record_review_verdict
 record_plan_outcome = _outcomes.record_plan_outcome
 record_stalemate_resolution = _outcomes.record_stalemate_resolution
+auto_record_test_execution = _outcomes.auto_record_test_execution
+auto_record_review_execution = _outcomes.auto_record_review_execution
+reduce_outcomes_positionally = _outcomes.reduce_outcomes_positionally
+reduce_outcomes_by_key = _outcomes.reduce_outcomes_by_key
 
 evaluate_proposal_gate = _gate.evaluate_proposal
 AcceptanceGateResult = _gate.GateDecision
@@ -154,11 +158,13 @@ __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tu
     "ReviewOutcome", "ReviewRequest", "RosterAssignment", "RosterResolution", "RosterResolutionError",
     "RosterRole", "RosterTopology", "RoundTurnResult", "SecurityVeto", "SecurityVetoHandler", "TaskIdentity",
     "TaskLabel", "VerdictContractResult", "VersionEntry", "WorkerExecutionRecord", "__version__", "adopt",
-    "append_journal_record", "classify_complexity", "classify_model_family", "current_version_dir",
+    "append_journal_record", "auto_record_review_execution", "auto_record_test_execution",
+    "classify_complexity", "classify_model_family", "current_version_dir",
     "dispatch_post_mortem_consultation", "escalate_routing_effort", "evaluate_proposal_gate",
     "extract_issue_codes", "extract_scoped_memory", "get_scoped_memory", "invoke_worker", "journal_path",
     "read_current", "read_history", "read_journal",
     "record_plan_outcome", "record_review_verdict", "record_stalemate_resolution", "record_test_result",
+    "reduce_outcomes_by_key", "reduce_outcomes_positionally",
     "resolve_cli_command", "resolve_model_name", "roll_back", "run_advisory_consultation_debate", "run_audit",
     "run_canary_dialogue", "run_critical_dialogue", "run_debate_loop", "run_post_mortem_loop",
 )
