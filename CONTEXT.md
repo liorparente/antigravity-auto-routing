@@ -168,3 +168,30 @@ The universal veto detection subsystem in `production_invoker.py` and `debate_or
 
 ### DynamicCandidateHash
 The SHA-256 digest calculated over the exact proposal content reviewed by a council panel, verified against critic candidate hashes during consensus reduction to detect and reject prompt tampering or stale candidate reviews. Spec 0009.
+
+### Harness
+The host runtime or CLI environment (such as Google Antigravity, Claude Code, or OpenAI Codex) executing the primary session and driving interaction with the user or automated workflows.
+
+### Orchestrator
+The root session agent operating within any [[Harness]], responsible for understanding task goals, planning, enforcing the routing gate, and coordinating execution across workers without performing unrouted state-modifying actions directly.
+
+### Worker
+A subordinate CLI process or subagent instance invoked by the [[Orchestrator]] with an explicit [[WorkerModeToken]], executing a scoped task within defined capability boundaries without being subject to top-level routing gates.
+
+### Role
+An abstract functional responsibility or job-to-be-done (such as `planner`, `builder_heavy`, `builder_light`, `reviewer_architecture`, `reviewer_risk`, `reviewer_maintainability`, `reviewer_security`, `adjudicator`, or `learner`) defined independently of any specific [[Provider]] or [[Model]].
+
+### CapabilityRequirements
+The declarative set of technical constraints and attributes (such as reasoning tier, tool access permissions, context window capacity, and local execution isolation) required to fulfill a specific [[Role]].
+
+### Provider
+A transport adapter or invocation interface (such as a vendor CLI wrapper, local model server, or HTTP API client) that connects an abstract [[Role]] and its [[CapabilityRequirements]] to an underlying [[Model]].
+
+### Model
+A concrete foundation model version and weights configuration (such as `claude-sonnet-5`, `gpt-5.6-sol`, `gemini-3.7-flash`, or `qwen3.8-27b`) invoked through a [[Provider]] to execute inference.
+
+### ContextLayer
+One of four strictly isolated tiers of prompt and memory state (Global memory, Project rules/glossary, Task specification, and Session history) assembled at invocation time to provide workers with relevant context without polluting the core context window.
+
+### PerspectiveReviewer
+A specialized reviewer within a [[CouncilPanel]] assigned to evaluate an architectural plan or code diff through one specific analytical domain lens (`reviewer_architecture`, `reviewer_risk`, `reviewer_maintainability`, or `reviewer_security`) rather than a model brand identity.

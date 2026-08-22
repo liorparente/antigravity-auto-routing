@@ -4,8 +4,8 @@
 
 **Blocked by:** None — can start immediately. (Frontier)
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] Create docs/adr/0012-workflow-v2-architecture-contracts.md establishing the 3-Condition Gate rationale and formal boundaries.
-- [ ] Update CONTEXT.md with definitions for Role, CapabilityRequirements, Provider, Model, Harness, Orchestrator, Worker, ContextLayer, and PerspectiveReviewer.
-- [ ] Ensure zero runtime code or configuration mutations occur in this ticket.
+- [x] Create docs/adr/0012-workflow-v2-architecture-contracts.md establishing the 3-Condition Gate rationale and formal boundaries.
+- [x] Update CONTEXT.md with definitions for Role, CapabilityRequirements, Provider, Model, Harness, Orchestrator, Worker, ContextLayer, and PerspectiveReviewer.
+- [x] Ensure zero runtime code or configuration mutations occur in this ticket.
