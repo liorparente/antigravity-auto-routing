@@ -856,6 +856,56 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertTrue(claude_rule.exists())
             self.assertEqual(claude_rule.read_text(), PROTOCOL_MD.read_text())
 
+    def test_install_sh_synchronizes_generalized_protocol_across_all_harnesses(self) -> None:
+        """Ticket 05: the generalized [WORKER-MODE: NESTED-EXEC] token (and its
+        legacy [WORKER-MODE: AGY-NESTED-EXEC] alias) must reach every target
+        harness file — AGENTS.md, CLAUDE.md, ~/.gemini/GEMINI.md, and
+        .claude/rules/worker-routing.md — survive a repeated install without
+        duplicating sentinel markers or sections, and never clobber
+        pre-existing custom content in those files."""
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            agents_md = Path(target_dir) / "AGENTS.md"
+            claude_md = Path(target_dir) / "CLAUDE.md"
+            agents_md.write_text("# Custom AGENTS notes\nKeep this line.\n")
+            claude_md.write_text("# Custom CLAUDE notes\nKeep this line too.\n")
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            gemini_md = Path(fake_home) / ".gemini" / "GEMINI.md"
+            claude_rule = Path(target_dir) / ".claude" / "rules" / "worker-routing.md"
+            protocol_text = PROTOCOL_MD.read_text()
+            expected_token_count = protocol_text.count("[WORKER-MODE: NESTED-EXEC]")
+            expected_legacy_count = protocol_text.count("[WORKER-MODE: AGY-NESTED-EXEC]")
+
+            for harness_file in (agents_md, claude_md, gemini_md, claude_rule):
+                with self.subTest(harness_file=harness_file):
+                    self.assertTrue(harness_file.exists(), str(harness_file))
+                    text = harness_file.read_text()
+                    self.assertEqual(text.count("[WORKER-MODE: NESTED-EXEC]"), expected_token_count)
+                    self.assertEqual(text.count("[WORKER-MODE: AGY-NESTED-EXEC]"), expected_legacy_count)
+
+            self.assertIn("Keep this line.", agents_md.read_text())
+            self.assertIn("Keep this line too.", claude_md.read_text())
+
+            # Repeating install.sh must not duplicate sentinel markers/sections
+            # or drop the preserved custom content.
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            for harness_file in (agents_md, claude_md, gemini_md):
+                with self.subTest(harness_file=harness_file):
+                    text = harness_file.read_text()
+                    self.assertEqual(text.count(PROTOCOL_START), 1)
+                    self.assertEqual(text.count(PROTOCOL_END), 1)
+                    self.assertEqual(text.count("[WORKER-MODE: NESTED-EXEC]"), expected_token_count)
+
+            self.assertEqual(
+                claude_rule.read_text().count("[WORKER-MODE: NESTED-EXEC]"), expected_token_count
+            )
+            self.assertIn("Keep this line.", agents_md.read_text())
+            self.assertIn("Keep this line too.", claude_md.read_text())
+
     def test_install_sh_aborts_on_unbalanced_markers_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             agents_md = Path(target_dir) / "AGENTS.md"

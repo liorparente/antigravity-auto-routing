@@ -4,9 +4,9 @@
 
 **Blocked by:** 04 — Generalize Worker Mode Token & Harness-Neutral Invocations
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Update install.sh to stage and synchronize the updated protocol.md across AGENTS.md and CLAUDE.md.
-- [ ] Update MANAGED_FILES in install.sh if any new modules are added.
-- [ ] Verify test_routing.py's ManagedFileClosureTests passes cleanly.
-- [ ] Run ./install.sh and verify clean atomic synchronization across all target directories.
+- [x] Update install.sh to stage and synchronize the updated protocol.md across AGENTS.md and CLAUDE.md.
+- [x] Update MANAGED_FILES in install.sh if any new modules are added.
+- [x] Verify test_routing.py's ManagedFileClosureTests passes cleanly.
+- [x] Run ./install.sh and verify clean atomic synchronization across all target directories.
