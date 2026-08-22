@@ -18,7 +18,7 @@ import math
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import Literal, cast
 
 __all__ = [
     "CRITIC_VERDICT_APPROVE",
@@ -477,7 +477,9 @@ def extract_perspective_tag(text: str) -> ReviewerPerspective | None:
 
 def _validate_perspective(candidate: str) -> ReviewerPerspective | None:
     """Return `candidate` if it is one of `REVIEWER_PERSPECTIVES`, else `None`."""
-    return candidate if candidate in REVIEWER_PERSPECTIVES else None  # type: ignore[return-value]
+    if candidate in REVIEWER_PERSPECTIVES:
+        return cast(ReviewerPerspective, candidate)
+    return None
 
 
 def _parse_finding_attrs(attrs_text: str) -> dict[str, str]:
@@ -493,7 +495,9 @@ def _parse_finding_attrs(attrs_text: str) -> dict[str, str]:
 
 def _normalize_severity(raw: str | None) -> FindingSeverity:
     normalized = (raw or "medium").strip().lower()
-    return normalized if normalized in FINDING_SEVERITIES else "medium"  # type: ignore[return-value]
+    if normalized in FINDING_SEVERITIES:
+        return cast(FindingSeverity, normalized)
+    return "medium"
 
 
 def _clamp_confidence(raw: object) -> float:

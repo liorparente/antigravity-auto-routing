@@ -19,6 +19,8 @@ try:
         REVIEWER_PERSPECTIVES,
         Occasion,
         ReviewerPerspective,
+        _normalize_perspective,
+        _validate_perspective,
     )
 except (ImportError, ValueError):
     from dialogue_contracts import (  # type: ignore[no-redef]
@@ -28,6 +30,8 @@ except (ImportError, ValueError):
         REVIEWER_PERSPECTIVES,
         Occasion,
         ReviewerPerspective,
+        _normalize_perspective,
+        _validate_perspective,
     )
 
 __all__ = [
@@ -725,13 +729,7 @@ def _resolve_perspective(
     framing."""
     if perspective is None:
         return None
-    candidate = perspective.strip().lower()
-    if candidate in PERSPECTIVE_HEURISTICS:
-        return candidate  # type: ignore[return-value]
-    aliased = f"reviewer_{candidate}"
-    if aliased in PERSPECTIVE_HEURISTICS:
-        return aliased  # type: ignore[return-value]
-    return None
+    return _validate_perspective(_normalize_perspective(perspective))
 
 
 def build_perspective_reviewer_prompt(
