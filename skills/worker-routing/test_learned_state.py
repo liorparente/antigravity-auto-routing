@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,9 +24,10 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import learned_state
+    from . import learned_state, prompt_assembler
 else:
     import learned_state  # type: ignore[no-redef]
+    import prompt_assembler  # type: ignore[no-redef]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -42,10 +44,6 @@ def _change(document: learned_state.LearnedDocument, content: str) -> learned_st
     return learned_state.DocumentChange(document=document, content=content)
 
 
-_SCOPED_MEMORY_BEGIN = "=== BEGIN SCOPED INSTITUTIONAL MEMORY ==="
-_SCOPED_MEMORY_END = "=== END SCOPED INSTITUTIONAL MEMORY ==="
-
-
 def _scoped_memory_blocks(scoped: str) -> list[str]:
     """The individual rule/entry blocks inside a `get_scoped_memory` result.
 
@@ -53,7 +51,9 @@ def _scoped_memory_blocks(scoped: str) -> list[str]:
     with a blank line, so this splits on that separator rather than on raw
     newlines, which would over-count multi-line entries.
     """
-    body = scoped[len(_SCOPED_MEMORY_BEGIN) + 1 : -(len(_SCOPED_MEMORY_END) + 1)]
+    begin = prompt_assembler.SCOPED_MEMORY_BEGIN
+    end = prompt_assembler.SCOPED_MEMORY_END
+    body = scoped[len(begin) + 1 : -(len(end) + 1)]
     return [block for block in body.split("\n\n") if block.strip()]
 
 
@@ -2026,6 +2026,51 @@ class GetScopedMemoryTests(unittest.TestCase):
 
             self.assertEqual(len(_scoped_memory_blocks(scoped)), 4)
             self.assertIn("[Multi-Harness Sync & Governance]", scoped)
+
+
+_MEMORY_RULE_LINE_RE = re.compile(r"^(\d+)\.\s")
+
+
+def _parse_institutional_memory_rules(text: str) -> list[tuple[int, str]]:
+    """Return each rule's `(id, category)` from `institutional-memory.md`.
+
+    A category is the text of the last `## `-prefixed heading seen so far
+    (skipping `## Metadata`, which precedes every rule); a rule is any line
+    starting with `N. ` at column 0 — wrapped continuation lines of a rule's
+    prose never start that way, so this only ever matches a rule's first
+    line, once each.
+    """
+    category: str | None = None
+    rules: list[tuple[int, str]] = []
+    for line in text.splitlines():
+        if line.startswith("## "):
+            heading = line[3:].strip()
+            category = None if heading == "Metadata" else heading
+            continue
+        match = _MEMORY_RULE_LINE_RE.match(line)
+        if match and category is not None:
+            rules.append((int(match.group(1)), category))
+    return rules
+
+
+class InstitutionalMemorySyncTests(unittest.TestCase):
+    def test_institutional_memory_matches_golden_rules(self) -> None:
+        """`knowledge/institutional-memory.md` is a human-readable rendering
+        of `prompt_assembler.GOLDEN_RULES` (spec 0011 ticket 03) — the two
+        must never silently drift apart: same 20 rules, same ids, same
+        categories.
+        """
+        memory_path = REPO_ROOT / "knowledge" / "institutional-memory.md"
+        parsed = _parse_institutional_memory_rules(
+            memory_path.read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(len(parsed), 20)
+        self.assertEqual(len(prompt_assembler.GOLDEN_RULES), 20)
+
+        parsed_categories_by_id = dict(parsed)
+        golden_rules_by_id = {rule.id: rule.category for rule in prompt_assembler.GOLDEN_RULES}
+        self.assertEqual(parsed_categories_by_id, golden_rules_by_id)
 
 
 if __name__ == "__main__":

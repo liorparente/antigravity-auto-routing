@@ -230,6 +230,11 @@ class ExtractScopedMemoryTests(unittest.TestCase):
 
         self.assertEqual(len(_scoped_rule_blocks(scoped)), 4)
 
+    def test_max_rules_above_the_ceiling_clamps_to_five(self) -> None:
+        scoped = prompt_assembler.extract_scoped_memory("Some task", max_rules=20)
+
+        self.assertEqual(len(_scoped_rule_blocks(scoped)), 5)
+
     def test_zero_matches_falls_back_to_baseline_general_rules(self) -> None:
         scoped = prompt_assembler.extract_scoped_memory(
             "xyzzy plugh unrelated gibberish query", max_rules=3

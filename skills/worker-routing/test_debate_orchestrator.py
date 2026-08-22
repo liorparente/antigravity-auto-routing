@@ -253,6 +253,70 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
             self.assertIn(expected_memory, critic_prompts[0])
             self.assertNotIn(default_memory, critic_prompts[0])
 
+    def test_planner_prompt_scopes_by_target_files_file_pattern(self) -> None:
+        # Keyword-neutral task (mirrors
+        # test_prompt_assembler.ExtractScopedMemoryTests
+        # .test_target_file_pattern_match_influences_ranking): any change in
+        # ranking has to come from the `target_files` file-pattern match
+        # alone, not from keyword overlap with the task text.
+        task = "Perform regular repository maintenance"
+        expected_memory = debate_orchestrator.extract_scoped_memory(
+            task, target_files=["NOTES.md"]
+        )
+        default_memory = debate_orchestrator.extract_scoped_memory(task)
+        self.assertNotEqual(expected_memory, default_memory)
+
+        prompt = debate_orchestrator._build_planner_prompt(task, target_files=["NOTES.md"])
+
+        self.assertIn(expected_memory, prompt)
+        self.assertNotIn(default_memory, prompt)
+
+    def test_critic_prompt_scopes_by_target_files_file_pattern(self) -> None:
+        task = "Perform regular repository maintenance"
+        expected_memory = debate_orchestrator.extract_scoped_memory(
+            task, target_files=["NOTES.md"]
+        )
+        default_memory = debate_orchestrator.extract_scoped_memory(task)
+        self.assertNotEqual(expected_memory, default_memory)
+
+        prompt = debate_orchestrator._build_critic_prompt(
+            task, "Proposed plan", target_files=["NOTES.md"]
+        )
+
+        self.assertIn(expected_memory, prompt)
+        self.assertNotIn(default_memory, prompt)
+
+    def test_run_advisory_consultation_debate_threads_target_files_into_worker_prompts(
+        self,
+    ) -> None:
+        task = "Perform regular repository maintenance"
+        expected_memory = debate_orchestrator.extract_scoped_memory(
+            task, target_files=["NOTES.md"]
+        )
+        default_memory = debate_orchestrator.extract_scoped_memory(task)
+        self.assertNotEqual(expected_memory, default_memory)
+
+        planner_prompts: list[str] = []
+        critic_prompts: list[str] = []
+
+        def invoker(_model: str, _effort: str, prompt: str) -> str:
+            if "You are the Planner" in prompt:
+                planner_prompts.append(prompt)
+                return "Proposed plan"
+            critic_prompts.append(prompt)
+            return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                task, invoker, root_dir=Path(tmp), target_files=["NOTES.md"]
+            )
+
+        self.assertEqual(result.outcome, "consensus")
+        self.assertIn(expected_memory, planner_prompts[0])
+        self.assertNotIn(default_memory, planner_prompts[0])
+        self.assertIn(expected_memory, critic_prompts[0])
+        self.assertNotIn(default_memory, critic_prompts[0])
+
 
 class DebateStateTests(unittest.TestCase):
     def test_round_and_session_state_construct_with_safe_defaults(self) -> None:

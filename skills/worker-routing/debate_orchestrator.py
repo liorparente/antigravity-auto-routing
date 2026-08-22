@@ -1557,6 +1557,31 @@ def needs_post_mortem_consultation(
     return stalemate_occurred
 
 
+def _resolve_scoped_memory(
+    task_description: str,
+    root_dir: Path | None = None,
+    target_files: Sequence[str] | None = None,
+    scoped_memory: str | None = None,
+) -> str:
+    """Resolve the scoped-memory block shared by `_build_planner_prompt` and
+    `_build_critic_prompt`.
+
+    An explicit `scoped_memory` always wins — a caller supplying one has
+    already decided what the Planner/Critic should see. Otherwise this
+    scopes against `root_dir`'s adopted `memory` document when a
+    `root_dir` is given, or `extract_scoped_memory`'s built-in
+    `GOLDEN_RULES` catalog when not — both scored against `target_files` so
+    a caller naming the files a task actually touches gets file-pattern
+    matches folded into the ranking, not just keyword overlap with
+    `task_description`.
+    """
+    if scoped_memory is not None:
+        return scoped_memory
+    if root_dir is not None:
+        return get_scoped_memory(root_dir, task_description, target_files=target_files)
+    return extract_scoped_memory(task_description, target_files=target_files)
+
+
 def _build_planner_prompt(
     task_description: str,
     *,
@@ -1565,13 +1590,9 @@ def _build_planner_prompt(
     critic_feedback: str | None = None,
     scoped_memory: str | None = None,
     root_dir: Path | None = None,
+    target_files: Sequence[str] | None = None,
 ) -> str:
-    if scoped_memory is None:
-        scoped_memory = (
-            get_scoped_memory(root_dir, task_description)
-            if root_dir is not None
-            else extract_scoped_memory(task_description)
-        )
+    scoped_memory = _resolve_scoped_memory(task_description, root_dir, target_files, scoped_memory)
     return build_planner_prompt(
         task_description,
         occasion=occasion,
@@ -1588,6 +1609,7 @@ def _build_critic_prompt(
     occasion: Occasion = "ambiguity",
     scoped_memory: str | None = None,
     root_dir: Path | None = None,
+    target_files: Sequence[str] | None = None,
 ) -> str:
     # spec 0003 ticket 02's VerdictContract, reversed from spec 0001: the
     # verdict line now comes LAST, after rationale and engagement units, not
@@ -1615,12 +1637,7 @@ def _build_critic_prompt(
     # encouraged and still counted, but — per `_parse_critic_verdict` — they
     # can never substitute for a quote in the approval decision, so the
     # prompt must not imply they can.
-    if scoped_memory is None:
-        scoped_memory = (
-            get_scoped_memory(root_dir, task_description)
-            if root_dir is not None
-            else extract_scoped_memory(task_description)
-        )
+    scoped_memory = _resolve_scoped_memory(task_description, root_dir, target_files, scoped_memory)
     return build_critic_prompt(
         task_description,
         planner_plan,
@@ -1702,6 +1719,7 @@ def run_advisory_consultation_debate(
     occasion: Occasion = "ambiguity",
     complexity: str = "medium",
     max_rounds: int = MAX_DEBATE_ROUNDS,
+    target_files: Sequence[str] | None = None,
     planner_model: str = "Claude Opus 5 (Thinking)",
     critic_model: str = "Codex 5.6 Sol",
     planner_effort: str = "high",
@@ -2797,6 +2815,7 @@ def run_advisory_consultation_debate(
             previous_plan=previous_plan,
             critic_feedback=previous_critique,
             root_dir=root_dir,
+            target_files=target_files,
         )
         try:
             planner_plan = invoke_worker(planner_model, planner_effort, planner_prompt)
@@ -2812,7 +2831,11 @@ def run_advisory_consultation_debate(
         # with, not by different prompt text, so `_build_critic_prompt`
         # needs no panel-awareness of its own.
         critic_prompt = _build_critic_prompt(
-            task_description, planner_plan, occasion=occasion, root_dir=root_dir
+            task_description,
+            planner_plan,
+            occasion=occasion,
+            root_dir=root_dir,
+            target_files=target_files,
         )
         candidate_hash = hashlib.sha256(planner_plan.encode("utf-8")).hexdigest()
 

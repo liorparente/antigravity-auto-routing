@@ -347,9 +347,13 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
 SCOPED_MEMORY_BEGIN = "=== BEGIN SCOPED INSTITUTIONAL MEMORY ==="
 SCOPED_MEMORY_END = "=== END SCOPED INSTITUTIONAL MEMORY ==="
 
-# `extract_scoped_memory`'s floor: never fewer than this many rules, even
-# when a caller passes a smaller `max_rules` or nothing scores above zero.
+# `extract_scoped_memory`'s floor and ceiling: a caller-supplied `max_rules`
+# is clamped to this range regardless of how small or how large it asks for
+# — never fewer than the floor, even when nothing scores above zero, and
+# never more than the ceiling, which is what keeps a worker's mission brief
+# bounded no matter what a caller passes.
 _MIN_SCOPED_RULES = 3
+_MAX_SCOPED_RULES = 5
 
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
 
@@ -457,12 +461,12 @@ def extract_scoped_memory(
     vocabulary for caller-supplied text, so this falls back to counting
     shared significant words.
 
-    **Bounds.** Returns at most `max(max_rules, 3)` rules — a caller asking
-    for fewer than 3 still gets the floor, matching the "at least 3, at
-    most `max_rules`" contract this exists to guarantee — and at most as
-    many rules as candidates exist. When fewer than 3 candidates score
-    above zero, the ranking's own tie-break (lowest id/index) naturally
-    fills the remaining slots with the lowest-numbered — i.e. most
+    **Bounds.** Returns between `_MIN_SCOPED_RULES` (3) and
+    `_MAX_SCOPED_RULES` (5) rules, inclusive — `max_rules` is clamped into
+    that range regardless of how small or how large a caller asks for — and
+    at most as many rules as candidates exist. When fewer than 3 candidates
+    score above zero, the ranking's own tie-break (lowest id/index)
+    naturally fills the remaining slots with the lowest-numbered — i.e. most
     foundational — rules, which is this function's fallback to "baseline
     general rules."
 
@@ -473,7 +477,7 @@ def extract_scoped_memory(
     """
     files = tuple(target_files) if target_files else ()
     task_lower = task_description.lower()
-    limit = max(max_rules, _MIN_SCOPED_RULES)
+    limit = max(_MIN_SCOPED_RULES, min(max_rules, _MAX_SCOPED_RULES))
 
     if memory_content is None:
         scored = _score_golden_rules(task_lower, files)
@@ -498,15 +502,23 @@ def _format_scoped_memory(scoped_memory: str) -> str:
     """Pass an `extract_scoped_memory` block through untouched; escape raw text.
 
     A block already wrapped in `SCOPED_MEMORY_BEGIN`/`SCOPED_MEMORY_END` has
-    had every entry escaped by `extract_scoped_memory` already — re-escaping
-    would double-escape it. Raw caller-supplied text has not been through
-    that pass, so it still needs `escape_delimiters` to prevent it from
-    forging a section boundary.
+    had every entry escaped by `extract_scoped_memory` already, so
+    re-escaping its body is a no-op — the escaped form (`= = = BEGIN`/`= = =
+    END`) no longer matches `_DELIMITER_RE`. Escaping the body again anyway,
+    rather than trusting the wrapper and returning it untouched, closes a
+    forgery: a caller-supplied string that merely starts with
+    `SCOPED_MEMORY_BEGIN` and ends with `SCOPED_MEMORY_END` — without ever
+    having been through `extract_scoped_memory` — could otherwise carry an
+    unescaped delimiter in its body and break out of the scoped-memory
+    block. Only the body between the two markers is escaped; the markers
+    themselves are left untouched; otherwise `escape_delimiters` would
+    mangle its own `=== BEGIN ...`/`=== END ...` wrapper text.
     """
     if scoped_memory.startswith(SCOPED_MEMORY_BEGIN) and scoped_memory.endswith(
         SCOPED_MEMORY_END
     ):
-        return scoped_memory
+        body = scoped_memory[len(SCOPED_MEMORY_BEGIN) : -len(SCOPED_MEMORY_END)]
+        return f"{SCOPED_MEMORY_BEGIN}{escape_delimiters(body)}{SCOPED_MEMORY_END}"
     return escape_delimiters(scoped_memory)
 
 
