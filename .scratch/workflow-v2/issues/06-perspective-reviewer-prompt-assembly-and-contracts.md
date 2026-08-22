@@ -4,9 +4,9 @@
 
 **Blocked by:** 04 — Generalize Worker Mode Token & Harness-Neutral Invocations
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] Define perspective role prompts in prompt_assembler.py for reviewer_architecture, reviewer_risk, reviewer_maintainability, and reviewer_security.
-- [ ] Update MISSION_COPY to include perspective-specific review heuristics (interface depth, race conditions, anti-bloat, credential isolation).
-- [ ] Update dialogue_contracts.py to parse structured findings and perspective tags.
-- [ ] Verify unit tests pass in test_prompt_assembler.py and test_dialogue_contracts.py.
+- [x] Define perspective role prompts in prompt_assembler.py for reviewer_architecture, reviewer_risk, reviewer_maintainability, and reviewer_security.
+- [x] Update MISSION_COPY to include perspective-specific review heuristics (interface depth, race conditions, anti-bloat, credential isolation).
+- [x] Update dialogue_contracts.py to parse structured findings and perspective tags.
+- [x] Verify unit tests pass in test_prompt_assembler.py and test_dialogue_contracts.py.

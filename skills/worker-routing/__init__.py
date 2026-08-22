@@ -103,6 +103,21 @@ extract_scoped_memory = _prompt_assembler.extract_scoped_memory
 GoldenRule = _prompt_assembler.GoldenRule
 GOLDEN_RULES = _prompt_assembler.GOLDEN_RULES
 
+# Perspective Reviewer prompts & contracts (spec 0012 / workflow-v2 ticket 06).
+StructuredFinding = _dialogue_contracts.StructuredFinding
+PerspectiveReviewResult = _dialogue_contracts.PerspectiveReviewResult
+FindingSeverity = _dialogue_contracts.FindingSeverity
+FINDING_SEVERITIES = _dialogue_contracts.FINDING_SEVERITIES
+PerspectiveVerdict = _dialogue_contracts.PerspectiveVerdict
+ReviewerPerspective = _dialogue_contracts.ReviewerPerspective
+REVIEWER_PERSPECTIVES = _dialogue_contracts.REVIEWER_PERSPECTIVES
+PERSPECTIVE_HEURISTICS = _prompt_assembler.PERSPECTIVE_HEURISTICS
+PERSPECTIVE_PROMPTS = _prompt_assembler.PERSPECTIVE_PROMPTS
+build_perspective_reviewer_prompt = _prompt_assembler.build_perspective_reviewer_prompt
+extract_perspective_tag = _dialogue_contracts.extract_perspective_tag
+extract_structured_findings = _dialogue_contracts.extract_structured_findings
+parse_perspective_review = _dialogue_contracts.parse_perspective_review
+
 record_test_result = _outcomes.record_test_result
 record_review_verdict = _outcomes.record_review_verdict
 record_plan_outcome = _outcomes.record_plan_outcome
@@ -151,25 +166,30 @@ __version__ = "3.6.0"
 __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tuple(sorted(__all__)) == __all__
     "AcceptanceGateResult", "AdvisoryDebateResult", "AdvisoryDebateRound", "AdvisoryOutcome",
     "AdvisoryResolutionOption", "AdvisoryRoundVerdict", "AdvisoryStalemateReport",
-    "AdvisoryTelemetryRecord", "CanaryFixture", "CanaryResult", "ComplianceRecord", "ConsensusTable",
-    "ConsultationTranscript", "CriticResponse", "CriticVerdict", "DebateRoundRecord", "DebateSessionState",
-    "DebateState", "DebateTransport", "DegradationLadderState", "DegradationRung", "DialogueQualityRecord",
-    "DialogueRound", "DocumentChange", "DocumentDelta", "ExecutiveDialogueReport", "GOLDEN_RULES",
-    "GoldenRule", "InvokeWorker",
-    "IsFamilyReachable", "JournalRead", "LearnedState", "LearningJournal", "LocalModelCapabilities",
-    "MissionCopy", "Occasion",
-    "OutcomeRecord", "PrivacyMode", "RecurringFailureNotifier", "ReplayBenchmarkRecord", "ReviewCouncil",
-    "ReviewOutcome", "ReviewRequest", "RosterAssignment", "RosterResolution", "RosterResolutionError",
-    "RosterRole", "RosterTopology", "RoundTurnResult", "SecurityVeto", "SecurityVetoHandler", "TaskIdentity",
-    "TaskLabel", "VerdictContractResult", "VersionEntry", "WorkerExecutionRecord", "__version__", "adopt",
+    "AdvisoryTelemetryRecord", "CanaryFixture", "CanaryResult", "ComplianceRecord",
+    "ConsensusTable", "ConsultationTranscript", "CriticResponse", "CriticVerdict",
+    "DebateRoundRecord", "DebateSessionState", "DebateState", "DebateTransport",
+    "DegradationLadderState", "DegradationRung", "DialogueQualityRecord", "DialogueRound",
+    "DocumentChange", "DocumentDelta", "ExecutiveDialogueReport", "FINDING_SEVERITIES",
+    "FindingSeverity", "GOLDEN_RULES", "GoldenRule", "InvokeWorker", "IsFamilyReachable",
+    "JournalRead", "LearnedState", "LearningJournal", "LocalModelCapabilities", "MissionCopy",
+    "Occasion", "OutcomeRecord", "PERSPECTIVE_HEURISTICS", "PERSPECTIVE_PROMPTS",
+    "PerspectiveReviewResult", "PerspectiveVerdict", "PrivacyMode", "REVIEWER_PERSPECTIVES",
+    "RecurringFailureNotifier", "ReplayBenchmarkRecord", "ReviewCouncil", "ReviewOutcome",
+    "ReviewRequest", "ReviewerPerspective", "RosterAssignment", "RosterResolution",
+    "RosterResolutionError", "RosterRole", "RosterTopology", "RoundTurnResult", "SecurityVeto",
+    "SecurityVetoHandler", "StructuredFinding", "TaskIdentity", "TaskLabel",
+    "VerdictContractResult", "VersionEntry", "WorkerExecutionRecord", "__version__", "adopt",
     "append_journal_record", "auto_record_review_execution", "auto_record_test_execution",
-    "classify_complexity", "classify_model_family", "current_version_dir",
-    "dispatch_post_mortem_consultation", "escalate_routing_effort", "evaluate_proposal_gate",
-    "extract_issue_codes", "extract_scoped_memory", "get_scoped_memory", "invoke_worker", "journal_path",
-    "probe_local_model_availability", "prompt_local_fallback_decision",
-    "read_current", "read_history", "read_journal",
-    "record_plan_outcome", "record_review_verdict", "record_stalemate_resolution", "record_test_result",
-    "reduce_outcomes_by_key", "reduce_outcomes_positionally",
-    "resolve_cli_command", "resolve_model_name", "roll_back", "run_advisory_consultation_debate", "run_audit",
-    "run_canary_dialogue", "run_critical_dialogue", "run_debate_loop", "run_post_mortem_loop",
+    "build_perspective_reviewer_prompt", "classify_complexity", "classify_model_family",
+    "current_version_dir", "dispatch_post_mortem_consultation", "escalate_routing_effort",
+    "evaluate_proposal_gate", "extract_issue_codes", "extract_perspective_tag",
+    "extract_scoped_memory", "extract_structured_findings", "get_scoped_memory",
+    "invoke_worker", "journal_path", "parse_perspective_review",
+    "probe_local_model_availability", "prompt_local_fallback_decision", "read_current",
+    "read_history", "read_journal", "record_plan_outcome", "record_review_verdict",
+    "record_stalemate_resolution", "record_test_result", "reduce_outcomes_by_key",
+    "reduce_outcomes_positionally", "resolve_cli_command", "resolve_model_name", "roll_back",
+    "run_advisory_consultation_debate", "run_audit", "run_canary_dialogue",
+    "run_critical_dialogue", "run_debate_loop", "run_post_mortem_loop",
 )

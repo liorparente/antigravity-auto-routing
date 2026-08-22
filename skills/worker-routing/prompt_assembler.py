@@ -14,22 +14,32 @@ from functools import lru_cache
 try:
     from .dialogue_contracts import (
         CRITIC_VERDICT_APPROVE,
+        CRITIC_VERDICT_BLOCK,
         CRITIC_VERDICT_REVISE,
+        REVIEWER_PERSPECTIVES,
         Occasion,
+        ReviewerPerspective,
     )
 except (ImportError, ValueError):
     from dialogue_contracts import (  # type: ignore[no-redef]
         CRITIC_VERDICT_APPROVE,
+        CRITIC_VERDICT_BLOCK,
         CRITIC_VERDICT_REVISE,
+        REVIEWER_PERSPECTIVES,
         Occasion,
+        ReviewerPerspective,
     )
 
 __all__ = [
     "CRITIC_VERDICT_APPROVE",
+    "CRITIC_VERDICT_BLOCK",
     "CRITIC_VERDICT_REVISE",
     "GOLDEN_RULES",
     "LEGACY_WORKER_MODE_TOKEN",
     "MISSION_COPY",
+    "PERSPECTIVE_HEURISTICS",
+    "PERSPECTIVE_PROMPTS",
+    "REVIEWER_PERSPECTIVES",
     "SCOPED_MEMORY_BEGIN",
     "SCOPED_MEMORY_END",
     "WORKER_MODE_TOKEN",
@@ -37,9 +47,11 @@ __all__ = [
     "GoldenRule",
     "MissionCopy",
     "Occasion",
+    "ReviewerPerspective",
     "build_adjudicator_prompt",
     "build_canary_prompt",
     "build_critic_prompt",
+    "build_perspective_reviewer_prompt",
     "build_planner_prompt",
     "build_stalemate_prompt",
     "combine_panel_critic_feedback",
@@ -112,6 +124,60 @@ MISSION_COPY: dict[Occasion, MissionCopy] = {
     ),
 }
 _MISSION_COPY = MISSION_COPY
+
+
+# --- Perspective Reviewer prompts (spec 0012 / workflow-v2 ticket 06) ---
+#
+# A Council reviewer is framed around one of four analytical perspectives —
+# never a vendor brand identity — per
+# `docs/adr/0012-workflow-v2-architecture-contracts.md`. `REVIEWER_PERSPECTIVES`
+# and `ReviewerPerspective` live in `dialogue_contracts` (the pure-parsing
+# leaf module) and are re-exported here so a prompt-assembly caller can reach
+# both the type and the text this module derives from it in one import.
+PERSPECTIVE_HEURISTICS: dict[ReviewerPerspective, str] = {
+    "reviewer_architecture": (
+        "Deep module design, simple public interfaces, interface depth, "
+        "dependency boundaries, module decomposition, boundary leaks, and "
+        "inversion of control."
+    ),
+    "reviewer_risk": (
+        "Concurrency, race conditions, edge cases, error handling, "
+        "fail-closed handling, error paths, deadlocks, timeouts, and state "
+        "machine degradation."
+    ),
+    "reviewer_maintainability": (
+        "Anti-bloat, DRY adherence, surgical edits, testability seams, "
+        "cognitive clarity, and preventing dead or speculative "
+        "abstractions."
+    ),
+    "reviewer_security": (
+        "CWE vulnerabilities, input validation, authentication boundaries, "
+        "credential isolation, delimiter containment, prompt injection "
+        "defenses, authorization checks, and sensitive data leakage."
+    ),
+}
+
+PERSPECTIVE_PROMPTS: dict[ReviewerPerspective, str] = {
+    "reviewer_architecture": (
+        "You are the Architecture reviewer on a CriticalDialogue Council "
+        "panel. Judge the artifact below strictly through an architectural "
+        "lens: {heuristics}"
+    ),
+    "reviewer_risk": (
+        "You are the Risk reviewer on a CriticalDialogue Council panel. "
+        "Judge the artifact below strictly through a risk lens: {heuristics}"
+    ),
+    "reviewer_maintainability": (
+        "You are the Maintainability reviewer on a CriticalDialogue Council "
+        "panel. Judge the artifact below strictly through a maintainability "
+        "lens: {heuristics}"
+    ),
+    "reviewer_security": (
+        "You are the Security reviewer on a CriticalDialogue Council panel. "
+        "Judge the artifact below strictly through a security lens: "
+        "{heuristics}"
+    ),
+}
 
 
 # --- Golden Rules (spec 0011 ticket 03) ---
@@ -598,6 +664,18 @@ def build_planner_prompt(
     )
 
 
+# Shared between `build_critic_prompt` and `build_perspective_reviewer_prompt`:
+# both prompts ask the same thing of the reviewer's engagement units (quotes
+# and numbered objections), so the sentence describing that shape lives in
+# one place rather than two near-identical copies drifting apart.
+_ENGAGEMENT_UNITS_INSTRUCTION = (
+    'quote the exact passages you are judging, one per line, as QUOTE: '
+    '"<verbatim text copied from what you were given>", and list any '
+    'concrete objections as a numbered list, one per line, like '
+    '"1. <objection>".'
+)
+
+
 def build_critic_prompt(
     task_description: str,
     planner_plan: str,
@@ -607,27 +685,122 @@ def build_critic_prompt(
     revise_verdict: str = CRITIC_VERDICT_REVISE,
     scoped_memory: str | None = None,
 ) -> str:
-    """Build the strict VerdictContract prompt used for a Critic review."""
+    """Build the strict VerdictContract prompt used for a Critic review.
+
+    This is the plain, occasion-framed Critic prompt only — a Council
+    perspective reviewer's prompt (role framing, `[PERSPECTIVE: ...]`
+    self-declaration, structured findings, the BLOCK verdict) is a distinct
+    contract with its own dedicated builder, `build_perspective_reviewer_prompt`.
+    """
     mission = MISSION_COPY[occasion]
     memory_section = f"{_format_scoped_memory(scoped_memory)}\n\n" if scoped_memory else ""
     return (
         f"{WORKER_MODE_TOKEN}\n{mission.critic_intro}\n\n"
         f"{memory_section}"
         "Write your rationale first. Before you verdict, show your engagement "
-        "with it: quote the exact passages you are judging, one per line, as "
-        "QUOTE: \"<verbatim text copied from what you were given>\", and list "
-        "any concrete objections as a numbered list, one per line, like "
-        "\"1. <objection>\". End your response with exactly one verdict line, "
-        "LAST: either "
+        f"with it: {_ENGAGEMENT_UNITS_INSTRUCTION} End your response with "
+        "exactly one verdict line, LAST: either "
         f"\"{approve_verdict}\" if it is sound as written, or "
         f"\"{revise_verdict}\" if it is not. An APPROVE backed by zero "
-        "verified quotes will be treated as invalid, even if it lists objections.\n\n"
+        "verified quotes will be treated as invalid, even if it lists "
+        "objections.\n\n"
         "=== BEGIN TASK DESCRIPTION ===\n"
         f"{escape_delimiters(task_description)}\n"
         "=== END TASK DESCRIPTION ===\n\n"
         "=== BEGIN PLANNER PLAN ===\n"
         f"{escape_delimiters(planner_plan)}\n"
         "=== END PLANNER PLAN ==="
+    )
+
+
+def _resolve_perspective(
+    perspective: ReviewerPerspective | str | None,
+) -> ReviewerPerspective | None:
+    """Normalize a caller-supplied perspective (its canonical
+    `ReviewerPerspective` name or a short alias, e.g. "security") to a
+    `ReviewerPerspective`, or `None` when absent or unrecognized. Resolving
+    to `None` rather than raising here keeps this helper a pure normalizer;
+    `build_perspective_reviewer_prompt` is what turns an unresolved
+    perspective into a `ValueError`, since it has no meaningful fallback
+    framing."""
+    if perspective is None:
+        return None
+    candidate = perspective.strip().lower()
+    if candidate in PERSPECTIVE_HEURISTICS:
+        return candidate  # type: ignore[return-value]
+    aliased = f"reviewer_{candidate}"
+    if aliased in PERSPECTIVE_HEURISTICS:
+        return aliased  # type: ignore[return-value]
+    return None
+
+
+def build_perspective_reviewer_prompt(
+    perspective: ReviewerPerspective | str,
+    task_description: str,
+    reviewed_artifact: str,
+    *,
+    occasion: Occasion = "plan-review",
+    approve_verdict: str = CRITIC_VERDICT_APPROVE,
+    revise_verdict: str = CRITIC_VERDICT_REVISE,
+    block_verdict: str = CRITIC_VERDICT_BLOCK,
+    scoped_memory: str | None = None,
+) -> str:
+    """Build a Council perspective reviewer's prompt (spec 0012 ticket 06).
+
+    Distinct from `build_critic_prompt` — the plain, occasion-framed Critic
+    contract — this is the full perspective-reviewer contract: it declares
+    the perspective's analytical domain and heuristic focus, requires a
+    `[PERSPECTIVE: <perspective>]` self-declaration, requires structured
+    findings tagged either as `FINDING: [id=... severity=... category=...]
+    <claim>` lines or a fenced ```json block with a `findings` array (see
+    `dialogue_contracts.extract_structured_findings`), and offers a third
+    verdict — `block_verdict` — reserved for a unilateral, fail-closed
+    security veto that a caller should treat as overriding any weighted
+    Council quorum (`dialogue_contracts.parse_perspective_review` is this
+    prompt's matching parser).
+
+    Raises `ValueError` if `perspective` is not one of `REVIEWER_PERSPECTIVES`
+    (or its alias) — a perspective reviewer prompt has no meaningful "no
+    perspective" framing to fall back to.
+    """
+    resolved_perspective = _resolve_perspective(perspective)
+    if resolved_perspective is None:
+        raise ValueError(f"Unsupported reviewer perspective: {perspective!r}")
+
+    mission = MISSION_COPY[occasion]
+    heuristics = PERSPECTIVE_HEURISTICS[resolved_perspective]
+    role_framing = PERSPECTIVE_PROMPTS[resolved_perspective].format(heuristics=heuristics)
+    memory_section = f"{_format_scoped_memory(scoped_memory)}\n\n" if scoped_memory else ""
+
+    return (
+        f"{WORKER_MODE_TOKEN}\n{role_framing}\n\n"
+        f"{memory_section}"
+        f"Begin your response with the line \"[PERSPECTIVE: {resolved_perspective}]\", "
+        "then write your rationale. Before you verdict, show your engagement "
+        f"with the artifact: {_ENGAGEMENT_UNITS_INSTRUCTION}\n\n"
+        "Report every concrete issue you find as a structured finding, "
+        "either as one line per finding, formatted exactly as "
+        "FINDING: [id=<short-id> severity=<critical|high|medium|low> "
+        "category=<category>] <one-sentence claim>, or as a single fenced "
+        "```json block containing "
+        '{"findings": [{"id": "...", "severity": "...", "category": "...", '
+        '"claim": "...", "evidence_references": ["..."], "recommendation": '
+        '"...", "rationale": "...", "confidence": 0.0-1.0}]}. '
+        "Zero findings means an empty list or no FINDING lines at all — "
+        "never fabricate a finding to have something to report.\n\n"
+        "End your response with exactly one verdict line, LAST: "
+        f"\"{approve_verdict}\" if the artifact is sound as written, "
+        f"\"{revise_verdict}\" if it needs changes, or "
+        f"\"{block_verdict}\" if you found a verified critical- or "
+        "high-severity security defect that must halt the pipeline "
+        "regardless of any other reviewer's vote. An APPROVE backed by zero "
+        f"verified quotes will be treated as invalid.\n\n"
+        "=== BEGIN TASK DESCRIPTION ===\n"
+        f"{escape_delimiters(task_description)}\n"
+        "=== END TASK DESCRIPTION ===\n\n"
+        f"=== BEGIN {mission.artifact_label.upper()} ===\n"
+        f"{escape_delimiters(reviewed_artifact)}\n"
+        f"=== END {mission.artifact_label.upper()} ==="
     )
 
 
