@@ -3,7 +3,7 @@ name: Auto Routing Protocol
 description: "Antigravity = pure orchestrator for Maximum Quality & Zero-Defect Execution ('Perfect Score Standard'). Every mission begins with deep research (agy) and deep thinking (Claude/Codex Sol), calibrating worker reasoning effort (low/medium/high/ultra) to guarantee top-tier performance. Use when orchestrating complex multi-agent tasks, performing worker routing calibration, running Agent Council reviews, or managing model effort tiers."
 ---
 
-# Auto Routing & Collaboration Protocol v3.5 (Quality-First Standard)
+# Auto Routing & Collaboration Protocol v3.6 (Quality-First Standard)
 
 This protocol defines the multi-model agent hierarchy and collaborative workflows. Antigravity acts as a **pure orchestrator**, delegating all context gathering, planning, execution, and verification steps to specialized models to optimize accuracy, structural soundness, and performance score.
 
@@ -88,4 +88,4 @@ drifting toward "every plan was accepted". See [`protocol.md`](protocol.md#-lear
 4. **Flow State Context Cleaning:** Run `/clear` when transitioning between major feature tasks.
 
 ---
-*Auto Routing & Collaboration Protocol v3.5 - Quality-First Standard*
+*Auto Routing & Collaboration Protocol v3.6 - Quality-First Standard*

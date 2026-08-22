@@ -347,7 +347,7 @@ class BuildWorkerCommandTests(unittest.TestCase):
 
         self.assertIn("--fail", command)
         self.assertIn("--max-time", command)
-        self.assertEqual(command[command.index("--max-time") + 1], "42")
+        self.assertEqual(command[command.index("--max-time") + 1], "42.9")
 
     def test_local_model_curl_max_time_defaults_to_the_module_default_timeout(self) -> None:
         command = production_invoker.build_worker_command("local-lmstudio", "low", "ping")
@@ -356,6 +356,16 @@ class BuildWorkerCommandTests(unittest.TestCase):
             command[command.index("--max-time") + 1],
             str(int(production_invoker.DEFAULT_TIMEOUT_SECONDS)),
         )
+
+    def test_local_model_curl_sub_second_timeout_is_not_truncated_to_zero(self) -> None:
+        """Round 2 fix: `int(0.2)` is `0`, and `curl --max-time 0` disables the
+        limit entirely — the opposite of what a caller asking for a fast
+        0.2s bound wants. `--max-time` must carry sub-second precision."""
+        command = production_invoker.build_worker_command(
+            "local-lmstudio", "low", "ping", timeout=0.2
+        )
+
+        self.assertEqual(command[command.index("--max-time") + 1], "0.2")
 
 
 class ProbeLocalModelAvailabilityTests(unittest.TestCase):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antigravity-auto-routing"
-version = "3.5.0"
+version = "3.6.0"
 description = "Deterministic quality-first multi-agent orchestration and calibrated worker routing protocol."
 requires-python = ">=3.10"
 authors = [{ name = "Lior Parente" }]

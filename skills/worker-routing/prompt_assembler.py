@@ -356,6 +356,7 @@ SCOPED_MEMORY_END = "=== END SCOPED INSTITUTIONAL MEMORY ==="
 # bounded no matter what a caller passes.
 _MIN_SCOPED_RULES = 3
 _MAX_SCOPED_RULES = 5
+_MEMORY_ENTRY_ID_OFFSET = 10_000
 
 _WORD_RE = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
 
@@ -495,10 +496,13 @@ def extract_scoped_memory(
     When `memory_content` is `None` (the default), candidates are
     `GOLDEN_RULES`. When a caller passes `memory_content` (e.g. a
     `learned_state`-adopted memory document), it is split into
-    paragraph-shaped entries and scored by keyword overlap with
-    `task_description` instead — there is no fixed keyword/file-pattern
-    vocabulary for caller-supplied text, so this falls back to counting
-    shared significant words.
+    paragraph-shaped entries, scored by keyword overlap with
+    `task_description` — there is no fixed keyword/file-pattern vocabulary
+    for caller-supplied text, so this falls back to counting shared
+    significant words — and combined with `GOLDEN_RULES` (scored the usual
+    keyword/file-pattern way) so both compete for the same ranked slots;
+    an adopted memory entry only displaces a golden rule when it actually
+    scores higher, rather than one source silently overriding the other.
 
     **Bounds.** Returns between `_MIN_SCOPED_RULES` (3) and
     `_MAX_SCOPED_RULES` (5) rules, inclusive — `max_rules` is clamped into
@@ -521,7 +525,12 @@ def extract_scoped_memory(
     if memory_content is None:
         scored = _score_golden_rules(task_lower, files)
     else:
-        scored = _score_memory_content(memory_content, task_lower, files)
+        golden_scored = _score_golden_rules(task_lower, files)
+        memory_scored = _score_memory_content(memory_content, task_lower, files)
+        scored = golden_scored + [
+            (score, _MEMORY_ENTRY_ID_OFFSET + index, text)
+            for score, index, text in memory_scored
+        ]
 
     ranked = sorted(scored, key=lambda item: (-item[0], item[1]))
     selected = [escape_delimiters(text) for _, _, text in ranked[:limit]]

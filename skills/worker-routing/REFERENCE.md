@@ -1,4 +1,4 @@
-# Reference Manual for Worker Routing & Learning Protocols (v3.5)
+# Reference Manual for Worker Routing & Learning Protocols (v3.6)
 
 This reference manual documents the complete CLI syntax, REST API commands, execution parameters, and learning-journal ground-truth recording mechanisms for the Auto Routing Protocol.
 

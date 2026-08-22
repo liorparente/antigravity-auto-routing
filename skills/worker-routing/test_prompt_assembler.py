@@ -296,7 +296,11 @@ class ExtractScopedMemoryTests(unittest.TestCase):
         self.assertEqual(scoped.count(prompt_assembler.SCOPED_MEMORY_END), 1)
         self.assertTrue(scoped.endswith(prompt_assembler.SCOPED_MEMORY_END))
 
-    def test_custom_memory_content_override_scores_its_own_entries(self) -> None:
+    def test_custom_memory_content_competes_with_golden_rules_for_ranked_slots(self) -> None:
+        """Round 2: an adopted memory document's entries are scored the same
+        word-overlap way as before, but now compete directly against
+        `GOLDEN_RULES` (scored via their own keyword/file-pattern weights)
+        for ranked slots, instead of replacing the catalog outright."""
         custom_memory = (
             "Entry about database migrations and schema changes.\n\n"
             "Entry about router keyword scoring and extraction logic.\n\n"
@@ -310,9 +314,9 @@ class ExtractScopedMemoryTests(unittest.TestCase):
             memory_content=custom_memory,
         )
 
-        self.assertIn("router keyword scoring", scoped)
-        self.assertNotIn("[Architecture & Deep Modules]", scoped)
-        self.assertEqual(len(_scoped_rule_blocks(scoped)), 3)
+        blocks = _scoped_rule_blocks(scoped)
+        self.assertEqual(len(blocks), 3)
+        self.assertIn("router keyword scoring", blocks[0])
 
     def test_scoped_memory_is_at_least_eighty_five_percent_smaller_than_full_legacy_memory(
         self,

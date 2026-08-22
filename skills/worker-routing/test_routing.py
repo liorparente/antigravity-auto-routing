@@ -8770,7 +8770,7 @@ class WorkerRoutingPackageContractTests(unittest.TestCase):
             sys.path.insert(0, str(package_root))
             try:
                 package = importlib.import_module("worker_routing")
-                self.assertEqual(package.__version__, "3.5.0")
+                self.assertEqual(package.__version__, "3.6.0")
                 self.assertEqual(tuple(sorted(package.__all__)), package.__all__)
 
                 self.assertIs(
@@ -12298,6 +12298,122 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
         self.assertEqual(result.final_plan, "Plan.")
         assert result.error is not None
         self.assertIn(refusal, result.error)
+
+
+class EndToEndIntegrationVerificationTests(unittest.TestCase):
+    """Round 2: exercises the full chain a real routing decision walks —
+    probe the local model, resolve to a worker (fallback or local),
+    invoke it, journal the ground-truth outcome automatically, and reduce
+    the journal to a scoreboard — through the real public functions of
+    `production_invoker`, `learning_outcomes`, and `learning_journal`
+    rather than a hand-built stand-in for any one of them.
+    """
+
+    @staticmethod
+    def _fake_local_response(payload: dict) -> object:
+        body = json.dumps(payload).encode("utf-8")
+
+        class _Response:
+            def __enter__(self) -> _Response:  # noqa: PYI034 - see ProbeLocalModelAvailabilityTests
+                return self
+
+            def __exit__(self, *exc_info: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return body
+
+        return _Response()
+
+    def test_offline_probe_falls_back_to_cloud_worker_then_journals_and_reduces_positionally(
+        self,
+    ) -> None:
+        """Offline probe -> human fallback choice -> cloud invocation ->
+        two `tests` outcomes for the same task -> positional reduction
+        keeps only the later (passing) verdict."""
+        probe_result = production_invoker.probe_local_model_availability(
+            urlopen_fn=mock.Mock(side_effect=OSError("connection refused"))
+        )
+        self.assertIsNone(probe_result)
+
+        fallback_model = production_invoker.prompt_local_fallback_decision(
+            prompt_fn=lambda _message: "2"
+        )
+        self.assertEqual(fallback_model, production_invoker.DEFAULT_FALLBACK_MODEL)
+
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess([], 0, "worker output", "")
+        )
+        output = production_invoker.invoke_worker(
+            fallback_model, "medium", "Run the test suite", runner=runner
+        )
+        self.assertEqual(output, "worker output")
+        self.assertEqual(runner.call_args.args[0][0], "agy")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_outcomes.auto_record_test_execution("task-e2e-1", 1, root_dir=root)
+            learning_outcomes.auto_record_test_execution("task-e2e-1", 0, root_dir=root)
+
+            journal = learning_journal.read_journal(root)
+            self.assertEqual(len(journal.outcomes), 2)
+
+            reduced = learning_outcomes.reduce_outcomes_positionally(journal.outcomes)
+
+        self.assertEqual(len(reduced), 1)
+        self.assertEqual(reduced[0].task.task_id, "task-e2e-1")
+        self.assertEqual(reduced[0].ground_truth, "tests")
+        self.assertEqual(reduced[0].verdict, "pass")
+
+    def test_online_probe_routes_to_local_worker_then_journals_and_reduces_by_key(
+        self,
+    ) -> None:
+        """Online probe discovers a loaded local model -> local invocation
+        through the curl/chat-completions branch -> two `review` outcomes
+        for the same task under different run ids -> keyed reduction keeps
+        only the later (rejected) verdict."""
+        probe_result = production_invoker.probe_local_model_availability(
+            urlopen_fn=mock.Mock(
+                return_value=self._fake_local_response(
+                    {"data": [{"id": "qwen3.8-27b-mlx"}]}
+                )
+            )
+        )
+        assert probe_result is not None
+        self.assertEqual(probe_result.family, "qwen")
+
+        runner = mock.Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                json.dumps(
+                    {"choices": [{"message": {"content": "review complete: approved"}}]}
+                ),
+                "",
+            )
+        )
+        output = production_invoker.invoke_worker(
+            "local-lmstudio", "low", "Review the diff", runner=runner
+        )
+        self.assertEqual(output, "review complete: approved")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            learning_outcomes.auto_record_review_execution(
+                "task-e2e-2", True, root_dir=root, run_id="run-1"
+            )
+            learning_outcomes.auto_record_review_execution(
+                "task-e2e-2", False, root_dir=root, run_id="run-2"
+            )
+
+            journal = learning_journal.read_journal(root)
+            self.assertEqual(len(journal.outcomes), 2)
+
+            reduced_by_key = learning_outcomes.reduce_outcomes_by_key(journal.outcomes)
+
+        reduced_record = reduced_by_key[("task-e2e-2", "review")]
+        self.assertEqual(reduced_record.verdict, "rejected")
+        self.assertEqual(reduced_record.run_id, "run-2")
 
 
 if __name__ == "__main__":

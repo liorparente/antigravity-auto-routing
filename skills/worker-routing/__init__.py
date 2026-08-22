@@ -146,7 +146,7 @@ def classify_complexity(complexity: str) -> str:
 escalate_routing_effort = _council.escalate_routing_effort
 run_audit = _routing_check.run_audit
 
-__version__ = "3.5.0"
+__version__ = "3.6.0"
 
 __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tuple(sorted(__all__)) == __all__
     "AcceptanceGateResult", "AdvisoryDebateResult", "AdvisoryDebateRound", "AdvisoryOutcome",

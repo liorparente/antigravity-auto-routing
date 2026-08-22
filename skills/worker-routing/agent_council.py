@@ -42,7 +42,7 @@ MAX_DEBATE_ROUNDS = 3
 # `test_escalation_failure_threshold_matches_agent_council_constant` in
 # `test_routing.py`, not by a shared import.
 ESCALATION_FAILURE_THRESHOLD = 2
-PROTOCOL_VERSION = "3.5"
+PROTOCOL_VERSION = "3.6"
 VALID_COMPLEXITIES = frozenset({"trivial", "simple", "medium", "complex"})
 VALID_EFFORTS = frozenset({"low", "medium", "high", "ultra"})
 DEFAULT_EFFORTS = {

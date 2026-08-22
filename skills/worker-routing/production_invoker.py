@@ -517,7 +517,7 @@ def build_worker_command(
             "-s",
             "--fail",
             "--max-time",
-            str(int(timeout)),
+            f"{max(0.001, timeout):g}",
             "-X",
             "POST",
             LOCAL_MODEL_CHAT_ENDPOINT,
@@ -584,7 +584,7 @@ def invoke_worker(
     an explicit EOF on stdin, and captured text diagnostics.
     """
     command = build_worker_command(model, effort, prompt, timeout=timeout)
-    normalized_model = MODEL_ALIASES.get(model)
+    model_id, _family = _resolve_model_id_and_family(model)
     environment = {**os.environ, "IN_WORKER_ROUTING": "true"}
 
     try:
@@ -616,7 +616,7 @@ def invoke_worker(
         )
 
     stdout_text = _diagnostic_text(result.stdout)
-    if normalized_model in LOCAL_MODELS:
+    if model_id in LOCAL_MODELS:
         return _extract_local_model_content(model, stdout_text)
     return stdout_text
 
