@@ -17,6 +17,7 @@ from council_review import (
     DEFAULT_CONSULTATION_POLICY,
     PrivacyMode,
     ReviewCouncil,
+    ReviewOutcome,
     ReviewRequest,
     SecurityVetoHandler,
     load_consultation_policy,
@@ -27,6 +28,7 @@ from provider_adapters import (
     CLIReviewerAdapter,
     CodexAdapter,
     FakeReviewerAdapter,
+    PerspectiveReviewerAdapter,
 )
 
 ROUTING_CONFIG_PATH = (
@@ -234,6 +236,192 @@ class CouncilReviewTDDTests(unittest.TestCase):
             "confidence": 0.0,
             "error": "Invalid adapter response payload",
         }])
+
+
+def _perspective_vote(perspective: str, vote: str, **extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"provider": perspective, "perspective": perspective, "vote": vote}
+    payload.update(extra)
+    return payload
+
+
+class CouncilPerspectiveFastPathTests(unittest.TestCase):
+    """Spec 0012 / workflow-v2 ticket 07: the 1-shot Council fast path,
+    unilateral security veto, 4-perspective concurrency, and stalemate
+    escalation, exercised through `ReviewCouncil.review(..., by_perspective=True)`.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.workspace_root = self.temp_dir.name
+        cal_dir = os.path.join(self.workspace_root, ".ralph", "cache")
+        os.makedirs(cal_dir, exist_ok=True)
+        with open(os.path.join(cal_dir, "calibration.key"), "w") as f:
+            f.write("test_secret_key_12345")
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _perspective_adapters(self, votes_by_perspective: dict[str, list[dict[str, Any]]]) -> list[Any]:
+        return [
+            FakeReviewerAdapter(perspective, responses)
+            for perspective, responses in votes_by_perspective.items()
+        ]
+
+    def test_fast_path_terminates_in_round_1_on_weighted_quorum(self) -> None:
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._perspective_adapters({
+            "reviewer_architecture": [_perspective_vote("reviewer_architecture", "approved")],
+            "reviewer_risk": [_perspective_vote("reviewer_risk", "approved")],
+            "reviewer_maintainability": [_perspective_vote("reviewer_maintainability", "approved")],
+            "reviewer_security": [_perspective_vote("reviewer_security", "approved")],
+        })
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertIsInstance(outcome, ReviewOutcome)
+        self.assertEqual(outcome.status, "UNANIMOUS")
+        # 1-shot: every one of the 4 perspective reviewers ran exactly once,
+        # in round 1, never reaching round 2 or 3.
+        self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
+
+    def test_four_perspectives_are_all_consulted_concurrently(self) -> None:
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._perspective_adapters({
+            perspective: [_perspective_vote(perspective, "approved")]
+            for perspective in (
+                "reviewer_architecture",
+                "reviewer_risk",
+                "reviewer_maintainability",
+                "reviewer_security",
+            )
+        })
+        votes = asyncio.run(council._execute_round(adapters, req.objective, 1, 45))
+
+        self.assertEqual(len(votes), 4)
+        self.assertEqual(
+            {vote["perspective"] for vote in votes},
+            {"reviewer_architecture", "reviewer_risk", "reviewer_maintainability", "reviewer_security"},
+        )
+        self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
+
+    def test_unilateral_security_veto_overrides_a_passing_quorum(self) -> None:
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._perspective_adapters({
+            "reviewer_architecture": [_perspective_vote("reviewer_architecture", "approved")],
+            "reviewer_risk": [_perspective_vote("reviewer_risk", "approved")],
+            "reviewer_maintainability": [_perspective_vote("reviewer_maintainability", "approved")],
+            "reviewer_security": [_perspective_vote(
+                "reviewer_security",
+                "blocked",
+                findings=[{"id": "SEC-1", "severity": "critical", "claim": "SQLi", "confidence": 0.95}],
+            )],
+        })
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "SECURITY_HALT")
+        self.assertEqual(outcome.unresolved_blockers, 1)
+
+    def test_round_1_below_quorum_recovers_in_round_2(self) -> None:
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._perspective_adapters({
+            "reviewer_architecture": [
+                _perspective_vote("reviewer_architecture", "revise"),
+                _perspective_vote("reviewer_architecture", "approved"),
+            ],
+            "reviewer_risk": [
+                _perspective_vote("reviewer_risk", "revise"),
+                _perspective_vote("reviewer_risk", "approved"),
+            ],
+            "reviewer_maintainability": [
+                _perspective_vote("reviewer_maintainability", "approved"),
+                _perspective_vote("reviewer_maintainability", "approved"),
+            ],
+            "reviewer_security": [
+                _perspective_vote("reviewer_security", "approved"),
+                _perspective_vote("reviewer_security", "approved"),
+            ],
+        })
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "UNANIMOUS")
+        self.assertEqual([a.call_count for a in adapters], [2, 2, 2, 2])
+
+    def test_stalemate_after_round_3_escalates_with_advisory_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            base = json.loads(ROUTING_CONFIG_PATH.read_text())
+            base.setdefault("consultation_policy", {})["adjudicators"] = []
+            config_path.write_text(json.dumps(base), encoding="utf-8")
+
+            council = ReviewCouncil(config_path)
+            req = ReviewRequest(
+                objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+            )
+            adapters = self._perspective_adapters({
+                perspective: [_perspective_vote(perspective, "revise")] * 3
+                for perspective in (
+                    "reviewer_architecture",
+                    "reviewer_risk",
+                    "reviewer_maintainability",
+                    "reviewer_security",
+                )
+            })
+            outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "UNRESOLVED")
+        self.assertEqual(outcome.unresolved_blockers, 1)
+        assert outcome.stalemate_report is not None
+        self.assertEqual(outcome.stalemate_report.planner_position, "Add a caching layer")
+        self.assertIn("reviewer_security", outcome.stalemate_report.critic_position)
+        self.assertEqual([a.call_count for a in adapters], [3, 3, 3, 3])
+
+    def test_stalemate_resolved_by_configured_adjudicator(self) -> None:
+        # The default policy's stub `lm-studio` adjudicator always approves,
+        # so an irreconcilable Council stalemate resolves to QUALIFIED
+        # instead of surfacing to a human — the "route to Adjudicator" half
+        # of ticket 07's "Adjudicator or HITL" requirement.
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._perspective_adapters({
+            perspective: [_perspective_vote(perspective, "revise")] * 3
+            for perspective in (
+                "reviewer_architecture",
+                "reviewer_risk",
+                "reviewer_maintainability",
+                "reviewer_security",
+            )
+        })
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "QUALIFIED")
+        assert outcome.stalemate_report is not None
+
+    def test_resolve_adapters_builds_perspective_reviewers_when_requested(self) -> None:
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = council._resolve_adapters(req)
+
+        self.assertEqual(len(adapters), 4)
+        self.assertTrue(all(isinstance(adapter, PerspectiveReviewerAdapter) for adapter in adapters))
+        self.assertEqual(
+            {adapter.provider_id for adapter in adapters},
+            {"reviewer_architecture", "reviewer_risk", "reviewer_maintainability", "reviewer_security"},
+        )
 
 
 class ConsultationPolicyConfigTests(unittest.TestCase):
@@ -457,6 +645,62 @@ class CLIReviewerAdapterReviewTests(unittest.TestCase):
         self.assertEqual(payload["provider"], "gemini")
         self.assertEqual(payload["vote"], "approve")
         self.assertEqual(payload["confidence"], 1.0)
+
+
+class PerspectiveReviewerAdapterReviewTests(unittest.TestCase):
+    def test_review_success_parses_perspective_contract(self) -> None:
+        process = _FakeAsyncProcess(
+            stdout=(
+                b"[PERSPECTIVE: reviewer_security]\n"
+                b"rationale here\n"
+                b'QUOTE: "reviewed artifact"\n'
+                b"VERDICT: APPROVE"
+            )
+        )
+        adapter = PerspectiveReviewerAdapter(
+            "reviewer_security", model="claude-opus-5", effort="high", runner=_runner_returning(process)
+        )
+
+        outcome = asyncio.run(adapter.review("reviewed artifact", 1, 30))
+
+        self.assertEqual(outcome["provider"], "reviewer_security")
+        self.assertEqual(outcome["perspective"], "reviewer_security")
+        self.assertEqual(outcome["vote"], "approved")
+        self.assertEqual(outcome["verified_quote_count"], 1)
+
+    def test_review_block_verdict_carries_structured_findings(self) -> None:
+        process = _FakeAsyncProcess(
+            stdout=(
+                b"[PERSPECTIVE: reviewer_security]\n"
+                b"rationale\n"
+                b"FINDING: [id=SEC-1 severity=critical category=injection] SQL injection\n"
+                b"VERDICT: BLOCK"
+            )
+        )
+        adapter = PerspectiveReviewerAdapter(
+            "reviewer_security", model="claude-opus-5", effort="high", runner=_runner_returning(process)
+        )
+
+        outcome = asyncio.run(adapter.review("reviewed artifact", 1, 30))
+
+        self.assertEqual(outcome["vote"], "blocked")
+        self.assertEqual(len(outcome["findings"]), 1)
+        self.assertEqual(outcome["findings"][0]["id"], "SEC-1")
+        self.assertEqual(outcome["findings"][0]["severity"], "critical")
+
+    def test_review_spawn_failure_returns_abstain_with_error(self) -> None:
+        adapter = PerspectiveReviewerAdapter(
+            "reviewer_architecture",
+            model="claude-opus-5",
+            effort="high",
+            runner=_runner_raising(RuntimeError("no such binary")),
+        )
+
+        outcome = asyncio.run(adapter.review("reviewed artifact", 1, 30))
+
+        self.assertEqual(outcome["provider"], "reviewer_architecture")
+        self.assertEqual(outcome["vote"], "abstain")
+        self.assertIn("error", outcome)
 
 
 if __name__ == "__main__":

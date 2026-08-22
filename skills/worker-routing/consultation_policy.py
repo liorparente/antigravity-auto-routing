@@ -58,6 +58,22 @@ DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
         "veto_severities": ["critical", "high"],
         "security_threshold": 0.80,
     },
+    "council_policy": {
+        "fast_path_enabled": True,
+        "quorum_threshold": 0.60,
+        "perspective_weights": {
+            "reviewer_architecture": 0.30,
+            "reviewer_risk": 0.25,
+            "reviewer_maintainability": 0.20,
+            "reviewer_security": 0.25,
+        },
+        "security_veto": {
+            "enabled": True,
+            "veto_severities": ["critical", "high"],
+            "security_threshold": 0.80,
+        },
+        "deadlines_seconds": {"round_1": 45, "round_2": 60, "round_3": 60},
+    },
 }
 
 
@@ -95,6 +111,77 @@ def _is_unit_interval(value: object) -> bool:
 
 def _is_nonnegative_int(value: object) -> bool:
     return not isinstance(value, bool) and isinstance(value, int) and value >= 0
+
+
+def _clean_deadlines_seconds(deadlines: object) -> dict[str, Any] | None:
+    """Discard non-dict deadlines wholesale, else drop each malformed entry."""
+    if not isinstance(deadlines, dict):
+        return None
+    return {key: value for key, value in deadlines.items() if _is_nonnegative_int(value)}
+
+
+def _clean_security_veto_section(security: object) -> dict[str, Any] | None:
+    """Validate one `security_veto`-shaped section, dropping each malformed field."""
+    if not isinstance(security, dict):
+        return None
+    clean_security = dict(security)
+    if "security_threshold" in clean_security and not _is_unit_interval(
+        clean_security["security_threshold"]
+    ):
+        clean_security.pop("security_threshold")
+    severities = clean_security.get("veto_severities")
+    if "veto_severities" in clean_security and (
+        not isinstance(severities, list)
+        or not severities
+        or not all(isinstance(severity, str) and bool(severity.strip()) for severity in severities)
+    ):
+        clean_security.pop("veto_severities")
+    return clean_security
+
+
+def _clean_perspective_weights(weights: object) -> dict[str, Any] | None:
+    if not isinstance(weights, dict):
+        return None
+    if not all(
+        _is_number(value) and math.isfinite(float(value)) and float(value) >= 0.0
+        for value in weights.values()
+    ):
+        return None
+    return dict(weights)
+
+
+def _clean_council_policy_section(council: object) -> dict[str, Any] | None:
+    """Validate the `council_policy` section (spec 0012 / workflow-v2 ticket 07)."""
+    if not isinstance(council, dict):
+        return None
+    clean_council = dict(council)
+    if "fast_path_enabled" in clean_council and not isinstance(
+        clean_council["fast_path_enabled"], bool
+    ):
+        clean_council.pop("fast_path_enabled")
+    if "quorum_threshold" in clean_council and not _is_unit_interval(
+        clean_council["quorum_threshold"]
+    ):
+        clean_council.pop("quorum_threshold")
+    if "perspective_weights" in clean_council:
+        cleaned_weights = _clean_perspective_weights(clean_council["perspective_weights"])
+        if cleaned_weights is None:
+            clean_council.pop("perspective_weights")
+        else:
+            clean_council["perspective_weights"] = cleaned_weights
+    if "deadlines_seconds" in clean_council:
+        cleaned_deadlines = _clean_deadlines_seconds(clean_council["deadlines_seconds"])
+        if cleaned_deadlines is None:
+            clean_council.pop("deadlines_seconds")
+        else:
+            clean_council["deadlines_seconds"] = cleaned_deadlines
+    if "security_veto" in clean_council:
+        cleaned_security = _clean_security_veto_section(clean_council["security_veto"])
+        if cleaned_security is None:
+            clean_council.pop("security_veto")
+        else:
+            clean_council["security_veto"] = cleaned_security
+    return clean_council
 
 
 def _validated_policy(configured: object) -> dict[str, Any]:
@@ -144,16 +231,12 @@ def _validated_policy(configured: object) -> dict[str, Any]:
     ):
         valid.pop("consensus_policy")
 
-    deadlines = valid.get("deadlines_seconds")
-    if deadlines is not None:
-        if not isinstance(deadlines, dict):
+    if "deadlines_seconds" in valid:
+        cleaned_deadlines = _clean_deadlines_seconds(valid["deadlines_seconds"])
+        if cleaned_deadlines is None:
             valid.pop("deadlines_seconds")
         else:
-            valid["deadlines_seconds"] = {
-                key: value
-                for key, value in deadlines.items()
-                if _is_nonnegative_int(value)
-            }
+            valid["deadlines_seconds"] = cleaned_deadlines
 
     weighting = valid.get("weighting")
     if weighting is not None:
@@ -190,27 +273,19 @@ def _validated_policy(configured: object) -> dict[str, Any]:
                 clean_weighting.pop("max_weight", None)
             valid["weighting"] = clean_weighting
 
-    security = valid.get("security_veto")
-    if security is not None:
-        if not isinstance(security, dict):
+    if "security_veto" in valid:
+        cleaned_security = _clean_security_veto_section(valid["security_veto"])
+        if cleaned_security is None:
             valid.pop("security_veto")
         else:
-            clean_security = dict(security)
-            if "security_threshold" in clean_security and not _is_unit_interval(
-                clean_security["security_threshold"]
-            ):
-                clean_security.pop("security_threshold")
-            severities = clean_security.get("veto_severities")
-            if "veto_severities" in clean_security and (
-                not isinstance(severities, list)
-                or not severities
-                or not all(
-                    isinstance(severity, str) and bool(severity.strip())
-                    for severity in severities
-                )
-            ):
-                clean_security.pop("veto_severities")
-            valid["security_veto"] = clean_security
+            valid["security_veto"] = cleaned_security
+
+    if "council_policy" in valid:
+        cleaned_council = _clean_council_policy_section(valid["council_policy"])
+        if cleaned_council is None:
+            valid.pop("council_policy")
+        else:
+            valid["council_policy"] = cleaned_council
     return valid
 
 
@@ -228,6 +303,20 @@ def load_consultation_policy(
         configured = config
     else:
         configured = {}
+
+    # `council_policy` (spec 0012 / workflow-v2 ticket 07) is its own
+    # top-level sibling of `consultation_policy` in routing-config.json, not
+    # nested inside it — fold it in here so `_validated_policy` sees and
+    # validates it uniformly with every other section, unless the caller's
+    # `configured` dict already declares its own (e.g. a legacy flat policy
+    # file that inlines `council_policy` directly).
+    if (
+        isinstance(configured, dict)
+        and "council_policy" not in configured
+        and isinstance(config.get("council_policy"), dict)
+    ):
+        configured = {**configured, "council_policy": config["council_policy"]}
+
     return _merge_policy_defaults(
         DEFAULT_CONSULTATION_POLICY, _validated_policy(configured)
     )

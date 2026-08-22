@@ -398,6 +398,12 @@ class ReviewRequest:
     workspace_root: str
     subject: str = ""
     privacy_mode: str = PrivacyMode.AUTO
+    # Spec 0012 / workflow-v2 ticket 07: opt into the 4-perspective Council
+    # panel (`ReviewCouncil._resolve_perspective_adapters`) and its 1-shot
+    # fast-path/security-veto/stalemate-escalation flow, instead of the
+    # legacy 3-provider, hash-ratified round protocol. Defaults to `False`
+    # so every existing caller keeps its current behavior unchanged.
+    by_perspective: bool = False
 
     def __post_init__(self) -> None:
         if not self.workspace_root:
@@ -414,6 +420,12 @@ class ReviewOutcome:
     manifest_path: str | None = None
     unresolved_blockers: int = 0
     source_changed: bool = False
+    # Populated only when a Council perspective review reaches an
+    # irreconcilable stalemate after round 3 (ticket 07) — the same
+    # `AdvisoryStalemateReport` shape spec 0003's Planner/Critic debates
+    # already use, adapted for an N-way perspective panel via
+    # `build_stalemate_report`'s `perspective_positions` parameter.
+    stalemate_report: AdvisoryStalemateReport | None = None
 
 
 def _load_provider_adapters() -> Any:
@@ -447,6 +459,12 @@ class ReviewCouncil:
     def _load_weights(self, workspace_root: str) -> dict[str, float]:
         weighting = self.policy.get("weighting", {})
         weights = dict(weighting.get("initial_weights", {}))
+        # Ticket 07: perspective weights live alongside provider weights in
+        # the same dict — `ConsensusTable._identity` reads a vote's
+        # `perspective` field ahead of its `provider`/`critic_id`, so the two
+        # key spaces (`"claude"`/`"codex"`/`"gemini"` vs.
+        # `"reviewer_architecture"`/etc.) never collide.
+        weights.update(self.policy.get("council_policy", {}).get("perspective_weights", {}))
         lo = weighting.get("min_weight", 0.05)
         hi = weighting.get("max_weight", 0.65)
         dynamic_path = weighting.get("dynamic_weights_path")
@@ -485,7 +503,26 @@ class ReviewCouncil:
                     "— failing closed rather than egressing data to cloud."
                 )
             return adapters
-        return [build_adapter(config) for config in self.policy.get("providers", [])]
+        providers = self.policy.get("providers", [])
+        if request.by_perspective or not providers:
+            return self._resolve_perspective_adapters()
+        return [build_adapter(config) for config in providers]
+
+    def _resolve_perspective_adapters(self) -> list[ReviewerAdapterProtocol]:
+        """Resolve the 4 Council perspective reviewers (ticket 07) via
+        `RoleResolver`, one `PerspectiveReviewerAdapter` per
+        `ReviewerPerspective` in `dialogue_contracts.REVIEWER_PERSPECTIVES`."""
+        module = _load_provider_adapters()
+        resolver = _production_invoker.get_default_role_resolver()
+        adapters: list[ReviewerAdapterProtocol] = []
+        for perspective in _dialogue_contracts.REVIEWER_PERSPECTIVES:
+            resolved = resolver.resolve_role(perspective)
+            adapters.append(
+                module.PerspectiveReviewerAdapter(
+                    perspective, model=resolved.model, effort=resolved.reasoning_effort
+                )
+            )
+        return adapters
 
     def _hash_source(self, path: str) -> str:
         if not path or not os.path.exists(path):
@@ -565,6 +602,9 @@ class ReviewCouncil:
         request: ReviewRequest,
         custom_adapters: Sequence[ReviewerAdapterProtocol] | None = None,
     ) -> ReviewOutcome:
+        if request.by_perspective:
+            return await self._review_by_perspective(request, custom_adapters)
+
         initial_hash = self._hash_source(request.subject)
         weights = self._load_weights(request.workspace_root)
         run_id = f"run-{uuid.uuid4().hex[:8]}"
@@ -625,6 +665,157 @@ class ReviewCouncil:
             run_id=run_id,
             source_changed=source_changed,
             manifest_path=manifest_path,
+        )
+
+    async def _review_by_perspective(
+        self,
+        request: ReviewRequest,
+        custom_adapters: Sequence[ReviewerAdapterProtocol] | None,
+    ) -> ReviewOutcome:
+        """The 4-perspective Council review flow (spec 0012 / workflow-v2
+        ticket 07): round 1 runs all 4 perspective reviewers concurrently
+        (`_execute_round` already gathers every adapter's `review()` call via
+        `asyncio.gather`); a unilateral security veto halts immediately
+        regardless of round; and a 1-shot fast path terminates in round 1 the
+        moment weighted quorum is met, skipping rounds 2/3 entirely. Only a
+        round that fails to reach quorum falls through to the next round;
+        round 3's own failure to reach quorum escalates to
+        `_route_perspective_stalemate` rather than degrading to a bare
+        "UNRESOLVED" status.
+        """
+        initial_hash = self._hash_source(request.subject)
+        run_id = f"run-{uuid.uuid4().hex[:8]}"
+        council_policy = self.policy.get("council_policy", {})
+
+        security_policy = council_policy.get("security_veto", self.policy.get("security_veto", {}))
+        veto_handler = SecurityVetoHandler(
+            veto_severities=security_policy.get("veto_severities", ["critical", "high"]),
+            security_threshold=security_policy.get("security_threshold", 0.80),
+            enabled=security_policy.get("enabled", True),
+        )
+        quorum_threshold = council_policy.get(
+            "quorum_threshold", self.policy.get("weighting", {}).get("quorum_threshold", 0.60)
+        )
+        table = ConsensusTable(
+            self.policy.get("consensus_policy", []),
+            weights=council_policy.get("perspective_weights", {}),
+            quorum_threshold=quorum_threshold,
+        )
+        fast_path_enabled = bool(council_policy.get("fast_path_enabled", True))
+        deadlines = council_policy.get("deadlines_seconds", {})
+
+        adapters = custom_adapters if custom_adapters is not None else self._resolve_adapters(request)
+
+        votes: list[dict[str, Any]] = []
+        for round_num, default_deadline in ((1, 45), (2, 60), (3, 60)):
+            deadline = deadlines.get(f"round_{round_num}", default_deadline)
+            votes = await self._execute_round(adapters, request.objective, round_num, deadline)
+            veto_outcome = self._check_veto_and_halt(
+                votes, veto_handler, run_id, request.workspace_root
+            )
+            if veto_outcome is not None:
+                return veto_outcome
+
+            if round_num == 1 and not fast_path_enabled:
+                continue
+            outcome = table.evaluate(votes)
+            if outcome in ("UNANIMOUS", "QUALIFIED"):
+                return self._finalize_perspective_outcome(outcome, run_id, request, initial_hash)
+
+        return await self._route_perspective_stalemate(votes, run_id, request)
+
+    def _finalize_perspective_outcome(
+        self, status: str, run_id: str, request: ReviewRequest, initial_hash: str
+    ) -> ReviewOutcome:
+        final_hash = self._hash_source(request.subject)
+        source_changed = bool(request.subject) and initial_hash != final_hash
+        final_status = "UNRESOLVED" if source_changed else status
+        manifest_path = self._write_manifest(final_status, run_id, request.workspace_root)
+        return ReviewOutcome(
+            status=final_status,
+            run_id=run_id,
+            source_changed=source_changed,
+            manifest_path=manifest_path,
+        )
+
+    @staticmethod
+    def _build_perspective_stalemate_report(
+        request: ReviewRequest, votes: Sequence[dict[str, Any]]
+    ) -> AdvisoryStalemateReport:
+        """Summarize a final round's per-perspective votes into the
+        `AdvisoryStalemateReport` shape via `build_stalemate_report`'s
+        `perspective_positions` parameter (ticket 07's addition)."""
+        positions: dict[str, str] = {}
+        for vote in votes:
+            perspective = str(vote.get("perspective") or vote.get("provider") or "unknown")
+            verdict = str(vote.get("vote") or vote.get("verdict") or "unparseable")
+            findings = vote.get("findings") or []
+            first_claim = ""
+            if findings:
+                first_finding = findings[0]
+                first_claim = (
+                    first_finding.get("claim", "")
+                    if isinstance(first_finding, dict)
+                    else str(getattr(first_finding, "claim", ""))
+                )
+            summary = f"verdict: {verdict}" + (f"\nfinding: {first_claim}" if first_claim else "")
+            positions[perspective] = summary
+        return build_stalemate_report(request.objective, perspective_positions=positions)
+
+    async def _route_perspective_stalemate(
+        self, votes: Sequence[dict[str, Any]], run_id: str, request: ReviewRequest
+    ) -> ReviewOutcome:
+        """Round 3 failed to reach weighted quorum: escalate to the
+        configured Adjudicator, or fail closed to HITL when none is
+        configured, carrying the summarized `AdvisoryStalemateReport` either
+        way (ticket 07's acceptance criterion)."""
+        stalemate_report = self._build_perspective_stalemate_report(request, votes)
+        adjudicators = self.policy.get("adjudicators", [])
+
+        if adjudicators:
+            build_adapter = _load_provider_adapters().build_adapter
+            adjudicator_adapter = build_adapter(adjudicators[0])
+            adjudicator_prompt = build_adjudicator_prompt(
+                request.objective,
+                stalemate_report.planner_position,
+                stalemate_report.critic_position,
+            )
+            deadline = self.policy.get("council_policy", {}).get("deadlines_seconds", {}).get(
+                "round_3", 60
+            )
+            result = await adjudicator_adapter.review(adjudicator_prompt, 4, deadline)
+            resolved_vote = str(result.get("vote", "")).strip().casefold()
+            if resolved_vote in ("approve", "approved", "unanimous"):
+                manifest_path = self._write_manifest(
+                    "QUALIFIED",
+                    run_id,
+                    request.workspace_root,
+                    events=[
+                        {
+                            "type": "adjudicator_resolved",
+                            "adjudicator": getattr(adjudicator_adapter, "provider_id", "unknown"),
+                        }
+                    ],
+                )
+                return ReviewOutcome(
+                    status="QUALIFIED",
+                    run_id=run_id,
+                    manifest_path=manifest_path,
+                    stalemate_report=stalemate_report,
+                )
+
+        manifest_path = self._write_manifest(
+            "UNRESOLVED",
+            run_id,
+            request.workspace_root,
+            events=[{"type": "stalemate_report", **dataclasses.asdict(stalemate_report)}],
+        )
+        return ReviewOutcome(
+            status="UNRESOLVED",
+            run_id=run_id,
+            manifest_path=manifest_path,
+            unresolved_blockers=1,
+            stalemate_report=stalemate_report,
         )
 
 

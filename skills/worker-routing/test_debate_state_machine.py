@@ -12,8 +12,10 @@ if __package__ is None or __package__ == "":
 
 if __package__:
     from . import debate_state_machine as machine
+    from . import dialogue_contracts
 else:
     import debate_state_machine as machine  # type: ignore[no-redef]
+    import dialogue_contracts  # type: ignore[no-redef]
 
 
 class DebateStateMachineTests(unittest.TestCase):
@@ -422,6 +424,120 @@ class DebateStateMachineTests(unittest.TestCase):
         )
         assert isinstance(consensus, machine.DebateState)
         self.assertEqual(consensus.status, "consensus")
+
+    # --- Spec 0012 / workflow-v2 ticket 07: Council fast path & security veto ---
+
+    def test_normalize_verdict_maps_blocked_to_block(self) -> None:
+        self.assertEqual(machine._normalize_verdict("blocked"), "BLOCK")
+        self.assertEqual(machine._normalize_verdict("Blocked"), "BLOCK")
+        self.assertEqual(machine.DEFAULT_VOTE_CONFIDENCE["blocked"], -1.0)
+
+    def test_security_veto_detects_structured_finding_instances(self) -> None:
+        handler = machine.SecurityVetoHandler()
+        finding = dialogue_contracts.StructuredFinding(
+            id="SEC-9", severity="critical", claim="hardcoded credential", confidence=0.95
+        )
+        veto = handler.check(({"provider": "reviewer_security", "findings": (finding,)},))
+        assert veto is not None
+        self.assertEqual((veto.provider, veto.finding["id"]), ("reviewer_security", "SEC-9"))
+        self.assertEqual(veto.finding["claim"], "hardcoded credential")
+
+    def test_security_veto_detects_unilateral_block_verdict_without_findings(self) -> None:
+        handler = machine.SecurityVetoHandler()
+        veto = handler.check(({"perspective": "reviewer_security", "vote": "blocked"},))
+        assert veto is not None
+        self.assertEqual(veto.provider, "reviewer_security")
+        self.assertEqual(veto.finding["severity"], "critical")
+
+    def test_security_veto_block_verdict_uses_first_structured_finding(self) -> None:
+        handler = machine.SecurityVetoHandler()
+        finding = dialogue_contracts.StructuredFinding(
+            id="SEC-2", severity="low", claim="unsafe temp file", confidence=1.0
+        )
+        # A BLOCK verdict is a unilateral veto regardless of the attached
+        # finding's own severity/confidence — those gate the *other*,
+        # severity-threshold trigger, not this one.
+        veto = handler.check((
+            {"perspective": "reviewer_security", "vote": "blocked", "findings": (finding,)},
+        ))
+        assert veto is not None
+        self.assertEqual(veto.finding["id"], "SEC-2")
+
+    def test_security_veto_ignores_block_verdict_when_disabled(self) -> None:
+        handler = machine.SecurityVetoHandler(enabled=False)
+        self.assertIsNone(handler.check(({"perspective": "reviewer_security", "vote": "blocked"},)))
+
+    def test_consensus_table_identity_prefers_perspective_over_provider(self) -> None:
+        table = machine.ConsensusTable(
+            weights={"reviewer_security": 0.25, "codex": 0.40},
+        )
+        self.assertEqual(
+            table._identity({"perspective": "reviewer_security", "provider": "codex"}),
+            "reviewer_security",
+        )
+        self.assertEqual(table._identity({"provider": "codex"}), "codex")
+
+    def test_consensus_table_evaluates_perspective_review_results(self) -> None:
+        table = machine.ConsensusTable(
+            weights={
+                "reviewer_architecture": 0.30,
+                "reviewer_risk": 0.25,
+                "reviewer_maintainability": 0.20,
+                "reviewer_security": 0.25,
+            },
+            quorum_threshold=0.60,
+        )
+        votes = (
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_architecture"
+            ),
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_risk"
+            ),
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_maintainability"
+            ),
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_security"
+            ),
+        )
+        self.assertEqual(table.evaluate(votes), "UNANIMOUS")
+        self.assertAlmostEqual(table.weighted_score(votes), 1.0)
+
+    def test_consensus_table_evaluates_perspective_vote_dicts_below_quorum(self) -> None:
+        table = machine.ConsensusTable(
+            weights={
+                "reviewer_architecture": 0.30,
+                "reviewer_risk": 0.25,
+                "reviewer_maintainability": 0.20,
+                "reviewer_security": 0.25,
+            },
+            quorum_threshold=0.60,
+        )
+        votes = (
+            {"perspective": "reviewer_architecture", "vote": "approved", "confidence": 1.0},
+            {"perspective": "reviewer_risk", "vote": "revise", "confidence": 0.0},
+            {"perspective": "reviewer_maintainability", "vote": "approved", "confidence": 1.0},
+            {"perspective": "reviewer_security", "vote": "revise", "confidence": 0.0},
+        )
+        self.assertEqual(table.evaluate(votes), "UNRESOLVED")
+
+    def test_build_stalemate_report_formats_perspective_positions(self) -> None:
+        report = machine.build_stalemate_report(
+            "Add a caching layer",
+            perspective_positions={
+                "reviewer_architecture": "verdict: approved",
+                "reviewer_security": "verdict: revise\nfinding: missing rate limiting",
+            },
+        )
+        self.assertEqual(report.planner_position, "Add a caching layer")
+        self.assertIn("reviewer_architecture:\nverdict: approved", report.critic_position)
+        self.assertIn("reviewer_security:\nverdict: revise", report.critic_position)
+        self.assertEqual(report.options[1].label, "Approve Council Perspectives")
+
+    def test_build_stalemate_report_requires_critic_position_without_perspectives(self) -> None:
+        with self.assertRaises(ValueError):
+            machine.build_stalemate_report("planner")
 
 
 if __name__ == "__main__":

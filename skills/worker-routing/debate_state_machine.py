@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 from typing import Any, overload
 
@@ -16,12 +16,14 @@ if __package__:
         AdvisoryResolutionOption,
         AdvisoryStalemateReport,
         Occasion,
+        StructuredFinding,
     )
 else:
     from dialogue_contracts import (  # type: ignore[no-redef]
         AdvisoryResolutionOption,
         AdvisoryStalemateReport,
         Occasion,
+        StructuredFinding,
     )
 
 __all__ = [
@@ -55,6 +57,7 @@ DEFAULT_VOTE_CONFIDENCE: dict[str, float] = {
     "unanimous": 1.0,
     "revise": -0.3,
     "block": -1.0,
+    "blocked": -1.0,
     "abstain": 0.0,
 }
 VALID_CONSENSUS_OUTCOMES = frozenset({
@@ -69,10 +72,37 @@ def is_panel_topology(occasion: Occasion, complexity: str) -> bool:
 
 def build_stalemate_report(
     planner_position: str,
-    critic_position: str,
+    critic_position: str | None = None,
     critic_b_position: str | None = None,
+    *,
+    perspective_positions: Mapping[str, str] | None = None,
 ) -> AdvisoryStalemateReport:
-    """Build the stable pair- or panel-topology human-resolution report."""
+    """Build the stable pair-, panel-, or Council-perspective human-resolution report.
+
+    Pair and panel topology (`critic_position`/`critic_b_position`) are
+    unchanged from spec 0003. `perspective_positions` is spec 0012 ticket
+    07's addition for a Council review's N-way perspective panel: a mapping
+    of each `ReviewerPerspective` to its formatted verdict/finding summary,
+    joined into one `critic_position` block (`"<perspective>:\\n<text>"` per
+    entry) rather than forcing an N-way panel into the two-critic pair/panel
+    shape. When supplied, it takes precedence over `critic_position`/
+    `critic_b_position`, which are ignored.
+    """
+    if perspective_positions:
+        formatted_critic_position = "\n\n".join(
+            f"{perspective}:\n{position}" for perspective, position in perspective_positions.items()
+        )
+        return AdvisoryStalemateReport(
+            planner_position=planner_position,
+            critic_position=formatted_critic_position,
+            options=(
+                AdvisoryResolutionOption(1, "Approve Planner Architecture", planner_position),
+                AdvisoryResolutionOption(2, "Approve Council Perspectives", formatted_critic_position),
+                AdvisoryResolutionOption(3, "Escalate to Human Decision", "Halt execution and request user review"),
+            ),
+        )
+    if critic_position is None:
+        raise ValueError("critic_position is required unless perspective_positions is supplied")
     if critic_b_position is None:
         return AdvisoryStalemateReport(
             planner_position=planner_position,
@@ -104,7 +134,7 @@ def _normalize_verdict(verdict: str | None) -> str | None:
         return "APPROVE"
     if normalized == "revise":
         return "REVISE"
-    if normalized == "block":
+    if normalized in ("block", "blocked"):
         return "BLOCK"
     if normalized == "abstain":
         return "ABSTAIN"
@@ -190,8 +220,26 @@ class SecurityVetoHandler:
         self.enabled = enabled
 
     @staticmethod
-    def _confidence(finding: Mapping[str, Any]) -> float:
-        raw_confidence = finding.get("confidence", 1.0)
+    def _is_finding(value: Any) -> bool:
+        return isinstance(value, (dict, MappingProxyType, StructuredFinding))
+
+    @staticmethod
+    def _finding_field(finding: Mapping[str, Any] | StructuredFinding, name: str, default: Any = None) -> Any:
+        """Read one field from either supported finding representation — a
+        dict/MappingProxyType (the wire shape) or a `StructuredFinding`
+        dataclass instance (spec 0012's parsed perspective-reviewer shape)."""
+        if isinstance(finding, (dict, MappingProxyType)):
+            return finding.get(name, default)
+        return getattr(finding, name, default)
+
+    @staticmethod
+    def _finding_to_dict(finding: Mapping[str, Any] | StructuredFinding) -> dict[str, Any]:
+        if isinstance(finding, (dict, MappingProxyType)):
+            return dict(finding)
+        return asdict(finding)
+
+    def _confidence(self, finding: Mapping[str, Any] | StructuredFinding) -> float:
+        raw_confidence = self._finding_field(finding, "confidence", 1.0)
         if isinstance(raw_confidence, bool):
             return 1.0
         try:
@@ -202,32 +250,57 @@ class SecurityVetoHandler:
             return 1.0
         return confidence
 
+    @staticmethod
+    def _default_block_finding() -> dict[str, Any]:
+        return {"claim": "unilateral security block verdict", "severity": "critical"}
+
     def check(
         self, votes: Sequence[dict[str, Any] | CriticResponse]
     ) -> SecurityVeto | None:
-        """Return the first configured veto, treating malformed confidence as certain."""
+        """Return the first configured veto, treating malformed confidence as certain.
+
+        Two independent triggers, checked per vote in this order: (1) the
+        vote's own verdict/vote field normalizes to `"BLOCK"` — spec 0012's
+        unilateral security veto, self-declared by a perspective reviewer's
+        `VERDICT: BLOCK` line (see `_normalize_verdict`) — which halts the
+        pipeline regardless of any finding's severity or confidence; (2) a
+        configured high-confidence, high-severity finding, exactly as
+        before. A finding may be a dict/MappingProxyType or a
+        `StructuredFinding` dataclass instance.
+        """
         if not self.enabled:
             return None
         for vote in votes:
             findings = _field(vote, "findings", ())
             if not isinstance(findings, (list, tuple)):
-                continue
+                findings = ()
+            provider = str(
+                _field(
+                    vote,
+                    "perspective",
+                    _field(vote, "provider", _field(vote, "critic_id", "unknown")),
+                )
+                or "unknown"
+            )
+
+            verdict_value = _field(vote, "vote", _field(vote, "verdict", None))
+            if _normalize_verdict(verdict_value) == "BLOCK":
+                block_finding = next((f for f in findings if self._is_finding(f)), None)
+                finding_dict = (
+                    self._finding_to_dict(block_finding)
+                    if block_finding is not None
+                    else self._default_block_finding()
+                )
+                return SecurityVeto(provider, finding_dict)
+
             for finding in findings:
-                if not isinstance(finding, dict) and not isinstance(finding, MappingProxyType):
+                if not self._is_finding(finding):
                     continue
-                severity = str(finding.get("severity", "")).strip().casefold()
+                severity = str(self._finding_field(finding, "severity", "")).strip().casefold()
                 if severity not in self.veto_severities:
                     continue
                 if self._confidence(finding) >= self.security_threshold:
-                    provider = str(
-                        _field(
-                            vote,
-                            "provider",
-                            _field(vote, "critic_id", "unknown"),
-                        )
-                        or "unknown"
-                    )
-                    return SecurityVeto(provider, dict(finding))
+                    return SecurityVeto(provider, self._finding_to_dict(finding))
         return None
 
 
@@ -282,7 +355,12 @@ class ConsensusTable:
         return max(-1.0, min(1.0, value))
 
     def _identity(self, vote: dict[str, Any] | CriticResponse) -> str:
-        return str(_field(vote, "provider", _field(vote, "critic_id", "")) or "")
+        """A vote's weight-lookup key: its Council `perspective` (spec 0012
+        ticket 07) when present, else its legacy `provider`/`critic_id`."""
+        return str(
+            _field(vote, "perspective", _field(vote, "provider", _field(vote, "critic_id", "")))
+            or ""
+        )
 
     def invalid_voters(
         self, votes: Sequence[dict[str, Any] | CriticResponse]

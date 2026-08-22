@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import sys
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ WORKER_ROUTING_DIR = str(Path(__file__).resolve().parent.parent.parent / "worker
 if WORKER_ROUTING_DIR not in sys.path:
     sys.path.insert(0, WORKER_ROUTING_DIR)
 
+from dialogue_contracts import parse_perspective_review  # type: ignore[import-not-found]
 from production_invoker import (  # type: ignore[import-not-found]
     WORKER_MODE_TOKEN,
     AsyncRunner,
@@ -17,6 +19,7 @@ from production_invoker import (  # type: ignore[import-not-found]
     extract_review_payload,
     invoke_worker_async,
 )
+from prompt_assembler import build_perspective_reviewer_prompt  # type: ignore[import-not-found]
 
 
 class ReviewerAdapter:
@@ -98,6 +101,90 @@ class AgyAdapter(CLIReviewerAdapter):
         super().__init__("gemini", model, effort, "agy", runner=runner)
 
 
+class PerspectiveReviewerAdapter(ReviewerAdapter):
+    """Reviews an artifact through one of the four Council perspectives
+    (spec 0012 / workflow-v2 ticket 07), rather than a vendor-branded
+    identity. `provider_id` is the perspective itself (e.g.
+    `"reviewer_security"`) — the same value `ConsensusTable._identity` and
+    `SecurityVetoHandler.check` read from a vote's `"perspective"` field, so
+    weighting and the unilateral security veto both key off this adapter's
+    output correctly.
+
+    Uses `build_perspective_reviewer_prompt`/`parse_perspective_review`
+    instead of `CLIReviewerAdapter`'s plain vote/confidence contract, since a
+    perspective reviewer's response carries structured findings and a
+    reserved `VERDICT: BLOCK` line neither of those understand.
+    """
+
+    def __init__(
+        self,
+        perspective: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        occasion: str = "plan-review",
+        task_description: str = "",
+        runner: AsyncRunner | None = None,
+    ) -> None:
+        super().__init__(perspective)
+        self.perspective = perspective
+        # `model` defaults to the perspective's own role id: `build_worker_command`
+        # resolves an abstract role (e.g. "reviewer_security") through the
+        # default `RoleResolver` when no concrete model is supplied.
+        self.model = model or perspective
+        self.effort = effort or ""
+        self.occasion = occasion
+        self.task_description = task_description
+        self._runner = runner
+
+    async def review(self, envelope: str, round_spec: int, deadline: int) -> dict[str, Any]:
+        prompt = build_perspective_reviewer_prompt(
+            self.perspective,
+            self.task_description or envelope,
+            envelope,
+            occasion=self.occasion,
+        )
+        try:
+            kwargs: dict[str, Any] = {}
+            if self._runner is not None:
+                kwargs["runner"] = self._runner
+            result: WorkerExecutionResult = await invoke_worker_async(
+                self.model,
+                self.effort,
+                prompt,
+                timeout=float(deadline),
+                **kwargs,
+            )
+            if not result.success:
+                return {
+                    "provider": self.perspective,
+                    "perspective": self.perspective,
+                    "vote": "abstain",
+                    "confidence": 0.0,
+                    "error": result.error or "Execution failed",
+                }
+            review_result = parse_perspective_review(
+                result.raw_output, envelope, default_perspective=self.perspective
+            )
+            return {
+                "provider": self.perspective,
+                "perspective": review_result.perspective or self.perspective,
+                "vote": review_result.verdict,
+                "verified_quote_count": review_result.verified_quote_count,
+                "objection_count": review_result.objection_count,
+                "findings": [dataclasses.asdict(finding) for finding in review_result.findings],
+                "raw_vote": review_result.raw_vote,
+            }
+        except Exception as error:  # noqa: BLE001
+            return {
+                "provider": self.perspective,
+                "perspective": self.perspective,
+                "vote": "abstain",
+                "confidence": 0.0,
+                "error": str(error),
+            }
+
+
 class LMStudioAdapter(ReviewerAdapter):
     def __init__(self, model: str, effort: str) -> None:
         super().__init__("lm-studio")
@@ -154,6 +241,7 @@ __all__ = [
     "CodexAdapter",
     "FakeReviewerAdapter",
     "LMStudioAdapter",
+    "PerspectiveReviewerAdapter",
     "ReviewerAdapter",
     "build_adapter",
 ]
