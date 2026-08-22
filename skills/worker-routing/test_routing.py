@@ -628,6 +628,20 @@ class ProtocolDocumentationTests(unittest.TestCase):
                 self.assertNotIn("BypassSandbox", command)
                 self.assertNotRegex(command, r"(?i)--\S*bypass\S*sandbox")
 
+    def test_protocol_md_size_is_under_5kb(self) -> None:
+        protocol_bytes = PROTOCOL_MD.read_bytes()
+        self.assertLess(
+            len(protocol_bytes),
+            5120,
+            f"protocol.md is {len(protocol_bytes)} bytes, exceeding the 5KB (5120 bytes) budget",
+        )
+        self.assertGreater(
+            len(protocol_bytes),
+            2000,
+            "protocol.md is unexpectedly truncated",
+        )
+
+
 
 class ProtocolSyncTests(unittest.TestCase):
     """Ensures install.sh/uninstall.sh single-source AGENTS.md, CLAUDE.md,

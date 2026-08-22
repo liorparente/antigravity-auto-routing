@@ -206,10 +206,15 @@ strip_protocol_block() {
     fi
 
     # Trim trailing blank lines left behind after stripping.
-    while [ -s "$target_file" ] && [ -z "$(tail -n 1 "$target_file")" ]; do
-        sed -i.tmp '$d' "$target_file"
-        rm -f "$target_file.tmp"
-    done
+    if [ -s "$target_file" ]; then
+        awk '
+            { lines[NR] = $0 }
+            END {
+                while (NR > 0 && lines[NR] ~ /^[[:space:]]*$/) { NR-- }
+                for (i = 1; i <= NR; i++) { print lines[i] }
+            }
+        ' "$target_file" > "$target_file.tmp" && mv -f "$target_file.tmp" "$target_file"
+    fi
 }
 
 # 2. Strip the protocol block out of AGENTS.md / CLAUDE.md in place,

@@ -94,20 +94,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+SNAPSHOT_COUNT=0
+SNAPSHOT_SEEN=""
+
 snapshot_file() {
     local target="$1" number
-    if grep -Fqx "$target" "$TRANSACTION_DIR/paths" 2>/dev/null; then
-        return
-    fi
-    touch "$TRANSACTION_DIR/paths"
-    number="$(wc -l < "$TRANSACTION_DIR/entries" | tr -d ' ')"
+    case "$SNAPSHOT_SEEN" in
+        *"|$target|"*) return ;;
+    esac
+    SNAPSHOT_SEEN="${SNAPSHOT_SEEN:-|}$target|"
+    number=$SNAPSHOT_COUNT
+    SNAPSHOT_COUNT=$((SNAPSHOT_COUNT + 1))
     if [ -e "$target" ]; then
         cp -p "$target" "$TRANSACTION_DIR/$number"
         echo "$number|present|$target" >> "$TRANSACTION_DIR/entries"
     else
         echo "$number|absent|$target" >> "$TRANSACTION_DIR/entries"
     fi
-    echo "$target" >> "$TRANSACTION_DIR/paths"
 }
 
 atomic_copy() {
@@ -121,6 +124,13 @@ atomic_copy() {
 
 merge_consultation_policy() {
     local source="$1" target="$2" merged
+    if [ ! -f "$target" ]; then
+        atomic_copy "$source" "$target"
+        return 0
+    fi
+    if grep -q '"consultation_policy"' "$target" 2>/dev/null; then
+        return 0
+    fi
     merged="$STAGING_DIR/routing-config-merged-$routing_config_index.json"
     routing_config_index=$((routing_config_index + 1))
     python3 - "$source" "$target" "$merged" <<'PYEOF'
@@ -192,10 +202,15 @@ stage_protocol_doc() {
         : > "$output"
     fi
     # Do not accumulate blank separators on repeated installs.
-    while [ -s "$output" ] && [ -z "$(tail -n 1 "$output")" ]; do
-        sed -i.tmp '$d' "$output"
-        rm -f "$output.tmp"
-    done
+    if [ -s "$output" ]; then
+        awk '
+            { lines[NR] = $0 }
+            END {
+                while (NR > 0 && lines[NR] ~ /^[[:space:]]*$/) { NR-- }
+                for (i = 1; i <= NR; i++) { print lines[i] }
+            }
+        ' "$output" > "$output.trimmed" && mv -f "$output.trimmed" "$output"
+    fi
     {
         echo ""
         echo "$PROTOCOL_START"
