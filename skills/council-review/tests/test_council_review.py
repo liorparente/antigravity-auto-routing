@@ -106,9 +106,9 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertIn("--no-session-persistence", claude_args)
         self.assertIn("-s", codex_args)
         self.assertIn("workspace-write", codex_args)
-        self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", " ".join(claude_args))
-        self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", " ".join(codex_args))
-        self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", " ".join(agy_args))
+        self.assertIn("[WORKER-MODE: NESTED-EXEC]", " ".join(claude_args))
+        self.assertIn("[WORKER-MODE: NESTED-EXEC]", " ".join(codex_args))
+        self.assertIn("[WORKER-MODE: NESTED-EXEC]", " ".join(agy_args))
 
     # Slice 4: Privacy Mode Local-Only Enforcement
     def test_local_only_privacy_mode_enforcement(self) -> None:

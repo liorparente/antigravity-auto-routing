@@ -273,12 +273,12 @@ class BuildWorkerCommandTests(unittest.TestCase):
                 'model_reasoning_effort="high"',
                 "-s",
                 "workspace-write",
-                "[WORKER-MODE: AGY-NESTED-EXEC] Review this plan",
+                "[WORKER-MODE: NESTED-EXEC] Review this plan",
             ],
         )
 
     def test_claude_command_preserves_existing_worker_token(self) -> None:
-        prompt = "[WORKER-MODE: AGY-NESTED-EXEC] Draft the plan"
+        prompt = "[WORKER-MODE: NESTED-EXEC] Draft the plan"
 
         command = production_invoker.build_worker_command("claude-sonnet-5", "high", prompt)
 
@@ -297,6 +297,25 @@ class BuildWorkerCommandTests(unittest.TestCase):
                 "bypassPermissions",
                 prompt,
             ],
+        )
+
+    def test_claude_command_preserves_existing_legacy_worker_token(self) -> None:
+        prompt = "[WORKER-MODE: AGY-NESTED-EXEC] Draft the plan"
+
+        command = production_invoker.build_worker_command("claude-sonnet-5", "high", prompt)
+
+        self.assertEqual(command[-1], prompt)
+
+    def test_with_worker_mode_token_recognizes_both_current_and_legacy_tokens(self) -> None:
+        current = f"{production_invoker.WORKER_MODE_TOKEN} Draft the plan"
+        legacy = f"{production_invoker.LEGACY_WORKER_MODE_TOKEN} Draft the plan"
+        bare = "Draft the plan"
+
+        self.assertEqual(production_invoker._with_worker_mode_token(current), current)
+        self.assertEqual(production_invoker._with_worker_mode_token(legacy), legacy)
+        self.assertEqual(
+            production_invoker._with_worker_mode_token(bare),
+            f"{production_invoker.WORKER_MODE_TOKEN} {bare}",
         )
 
     def test_prepends_token_when_token_is_only_mentioned_mid_prompt(self) -> None:
@@ -683,7 +702,7 @@ class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
 
         self.assertEqual(
             command,
-            ["agy", "-p", "[WORKER-MODE: AGY-NESTED-EXEC] Research"],
+            ["agy", "-p", "[WORKER-MODE: NESTED-EXEC] Research"],
         )
 
     def test_unknown_model_fails_closed(self) -> None:
@@ -703,7 +722,7 @@ class InvokeWorkerTests(unittest.TestCase):
         command = runner.call_args.args[0]
         kwargs = runner.call_args.kwargs
         self.assertEqual(command[0:2], ["codex", "exec"])
-        self.assertEqual(command[-1], "[WORKER-MODE: AGY-NESTED-EXEC] Implement it")
+        self.assertEqual(command[-1], "[WORKER-MODE: NESTED-EXEC] Implement it")
         self.assertEqual(kwargs["timeout"], 12.5)
         self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
         self.assertTrue(kwargs["text"])
@@ -897,7 +916,7 @@ class InvokeWorkerAsyncTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(runner.calls), 1)
         args, kwargs = runner.calls[0]
         self.assertEqual(args[0:2], ("codex", "exec"))
-        self.assertEqual(args[-1], "[WORKER-MODE: AGY-NESTED-EXEC] Implement it")
+        self.assertEqual(args[-1], "[WORKER-MODE: NESTED-EXEC] Implement it")
         self.assertIs(kwargs["stdin"], asyncio.subprocess.DEVNULL)
         self.assertIs(kwargs["stdout"], asyncio.subprocess.PIPE)
         self.assertIs(kwargs["stderr"], asyncio.subprocess.PIPE)
@@ -1832,7 +1851,7 @@ class BuildWorkerCommandRoleResolutionTests(unittest.TestCase):
         self.assertIn("--model", command)
         self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-5")
         self.assertEqual(command[command.index("--effort") + 1], "high")
-        self.assertEqual(command[-1], "[WORKER-MODE: AGY-NESTED-EXEC] Write code")
+        self.assertEqual(command[-1], "[WORKER-MODE: NESTED-EXEC] Write code")
 
     def test_builder_light_resolves_to_codex_command(self) -> None:
         command = production_invoker.build_worker_command(
@@ -1848,7 +1867,7 @@ class BuildWorkerCommandRoleResolutionTests(unittest.TestCase):
         )
         self.assertEqual(command[0], "agy")
         self.assertEqual(command[1], "-p")
-        self.assertEqual(command[-1], "[WORKER-MODE: AGY-NESTED-EXEC] Audit DRY")
+        self.assertEqual(command[-1], "[WORKER-MODE: NESTED-EXEC] Audit DRY")
 
     def test_adjudicator_resolves_to_local_curl_command(self) -> None:
         command = production_invoker.build_worker_command(

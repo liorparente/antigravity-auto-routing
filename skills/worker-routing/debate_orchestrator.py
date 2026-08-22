@@ -215,7 +215,8 @@ MAX_DEBATE_ROUNDS = 3
 # in `test_routing.py` keeps the two values from silently drifting apart.
 ESCALATION_FAILURE_THRESHOLD = 2
 
-WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
+WORKER_MODE_TOKEN = "[WORKER-MODE: NESTED-EXEC]"
+LEGACY_WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 
 InvokeWorker = Callable[[str, str, str], str]
 

@@ -55,6 +55,7 @@ RosterResolutionError = _debate_orchestrator.RosterResolutionError
 RosterRole = _debate_orchestrator.RosterRole
 RosterTopology = _debate_orchestrator.RosterTopology
 WORKER_MODE_TOKEN = _debate_orchestrator.WORKER_MODE_TOKEN
+LEGACY_WORKER_MODE_TOKEN = _debate_orchestrator.LEGACY_WORKER_MODE_TOKEN
 _CLOUD_FAMILY_SUBSTRINGS = _debate_orchestrator._CLOUD_FAMILY_SUBSTRINGS
 _build_stalemate_report = _debate_orchestrator._build_stalemate_report
 _resolve_task_id = _debate_orchestrator._resolve_task_id
@@ -208,6 +209,7 @@ __all__ = [
     "DEFAULT_SESSION_DIALOGUE_CAP",
     "DEGRADED_INDEPENDENCE_MARKER",
     "ESCALATION_FAILURE_THRESHOLD",
+    "LEGACY_WORKER_MODE_TOKEN",
     "MAX_DEBATE_ROUNDS",
     "MISSION_COPY",
     "PANEL_TOPOLOGY_OCCASIONS",

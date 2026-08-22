@@ -8,30 +8,30 @@ This reference manual documents the complete CLI syntax, REST API commands, exec
 
 ### 1. Antigravity CLI (`agy`) — Gemini 3.6 Flash / 3.5 Flash / 3.1 Pro
 - Always append `< /dev/null` or pipe input to prevent non-interactive TTY hangs.
-- Prefix with `IN_WORKER_ROUTING=true` and lead prompt with `[WORKER-MODE: AGY-NESTED-EXEC]`.
+- Prefix with `IN_WORKER_ROUTING=true` and lead prompt with `[WORKER-MODE: NESTED-EXEC]`.
 - Tool calls invoking external workers via `run_command` MUST specify `BypassSandbox: true`.
 
 ```bash
 # Deep Research & codebase scanning (Flash/Pro)
-IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: AGY-NESTED-EXEC] Perform deep research on authentication and token validation across the repository. List affected files, schemas, and dependencies." < /dev/null
+IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: NESTED-EXEC] Perform deep research on authentication and token validation across the repository. List affected files, schemas, and dependencies." < /dev/null
 
 # Large file / specification parsing
-IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: AGY-NESTED-EXEC] Extract API schemas and data contracts from this spec document" -i /path/to/spec.pdf < /dev/null
+IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: NESTED-EXEC] Extract API schemas and data contracts from this spec document" -i /path/to/spec.pdf < /dev/null
 ```
 
 ---
 
 ### 2. Claude Code CLI
-- Prefix with `IN_WORKER_ROUTING=true` and lead prompt with `[WORKER-MODE: AGY-NESTED-EXEC]`.
+- Prefix with `IN_WORKER_ROUTING=true` and lead prompt with `[WORKER-MODE: NESTED-EXEC]`.
 - Always append `< /dev/null`.
 - Tool calls invoking external workers via `run_command` MUST specify `BypassSandbox: true`.
 
 ```bash
 # Complex implementation (Sonnet 5 / Fable 5)
-IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-sonnet-5 --effort high --allow-dangerously-skip-permissions --permission-mode bypassPermissions "[WORKER-MODE: AGY-NESTED-EXEC] Implement the user profile component with full type safety and test coverage" < /dev/null
+IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-sonnet-5 --effort high --allow-dangerously-skip-permissions --permission-mode bypassPermissions "[WORKER-MODE: NESTED-EXEC] Implement the user profile component with full type safety and test coverage" < /dev/null
 
 # High-precision architectural planning (Opus 5 / Fable 5)
-IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-opus-5 --effort high --allow-dangerously-skip-permissions --permission-mode bypassPermissions "[WORKER-MODE: AGY-NESTED-EXEC] Draft a comprehensive migration plan for the database schema with zero downtime" < /dev/null
+IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-opus-5 --effort high --allow-dangerously-skip-permissions --permission-mode bypassPermissions "[WORKER-MODE: NESTED-EXEC] Draft a comprehensive migration plan for the database schema with zero downtime" < /dev/null
 ```
 
 ---
@@ -39,22 +39,22 @@ IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-opus-5 
 ### 3. Codex CLI (v0.125+)
 - Always specify both `--model <model>` (for `exec`) or `-c model="<model>"` (for `review`), and `-c model_reasoning_effort="low"|"medium"|"high"|"ultra"`.
 - `codex exec` selects sandbox mode via `-s`/`--sandbox`; `codex review` uses `-c sandbox_mode="<mode>"`.
-- Prefix with `IN_WORKER_ROUTING=true` and lead prompt with `[WORKER-MODE: AGY-NESTED-EXEC]`.
+- Prefix with `IN_WORKER_ROUTING=true` and lead prompt with `[WORKER-MODE: NESTED-EXEC]`.
 - Always append `< /dev/null`.
 - Tool calls invoking external workers via `run_command` MUST specify `BypassSandbox: true`.
 
 ```bash
 # Plan critique (Consensus step — High Effort for Deep Thinking)
-IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] Perform deep reasoning review on this implementation plan: $(cat .claude/plan_draft.md)" < /dev/null
+IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "[WORKER-MODE: NESTED-EXEC] Perform deep reasoning review on this implementation plan: $(cat .claude/plan_draft.md)" < /dev/null
 
 # Code review (QA step — High Effort for Zero-Defect Audit)
-IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode="workspace-write" -c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null
+IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode="workspace-write" -c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: NESTED-EXEC] ..." < /dev/null
 
 # Trivial task (Luna - gpt-5.6-luna)
-IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] Rename variables in file.js" < /dev/null
+IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "[WORKER-MODE: NESTED-EXEC] Rename variables in file.js" < /dev/null
 
 # Simple task (Terra - gpt-5.6-terra)
-IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] Add input validation and error handling to helper.js" < /dev/null
+IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "[WORKER-MODE: NESTED-EXEC] Add input validation and error handling to helper.js" < /dev/null
 ```
 
 ---

@@ -4,9 +4,9 @@
 
 **Blocked by:** 03 — Dynamic Role Resolution & Preference Fallback in production_invoker.py
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Update WORKER_MODE_TOKEN in skills/worker-routing/prompt_assembler.py to [WORKER-MODE: NESTED-EXEC].
-- [ ] Add backward-compatibility check in production_invoker.py and routing_check.py recognizing both NESTED-EXEC and AGY-NESTED-EXEC.
-- [ ] Update skills/worker-routing/protocol.md to use harness-neutral language and examples.
-- [ ] Verify all prompt assembly unit tests pass in skills/worker-routing/test_prompt_assembler.py.
+- [x] Update WORKER_MODE_TOKEN in skills/worker-routing/prompt_assembler.py to [WORKER-MODE: NESTED-EXEC].
+- [x] Add backward-compatibility check in production_invoker.py and routing_check.py recognizing both NESTED-EXEC and AGY-NESTED-EXEC.
+- [x] Update skills/worker-routing/protocol.md to use harness-neutral language and examples.
+- [x] Verify all prompt assembly unit tests pass in skills/worker-routing/test_prompt_assembler.py.

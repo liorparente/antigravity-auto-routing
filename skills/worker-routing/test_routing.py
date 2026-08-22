@@ -600,15 +600,15 @@ class ProtocolDocumentationTests(unittest.TestCase):
         ]
         expected_commands = [
             ('IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna '
-             '-c model_reasoning_effort="low" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
+             '-c model_reasoning_effort="low" -s workspace-write "[WORKER-MODE: NESTED-EXEC] ..." < /dev/null'),
             ('IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra '
-             '-c model_reasoning_effort="medium" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
+             '-c model_reasoning_effort="medium" -s workspace-write "[WORKER-MODE: NESTED-EXEC] ..." < /dev/null'),
             ('IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-sonnet-5 '
              '--effort high --allow-dangerously-skip-permissions --permission-mode bypassPermissions '
-             '"[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
+             '"[WORKER-MODE: NESTED-EXEC] ..." < /dev/null'),
             ("IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode=\"workspace-write\" "
-             '-c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null'),
-            'IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null',
+             '-c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: NESTED-EXEC] ..." < /dev/null'),
+            'IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: NESTED-EXEC] ..." < /dev/null',
         ]
 
         self.assertIn("**Execution requirement", matrix_intro)
@@ -627,6 +627,16 @@ class ProtocolDocumentationTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertNotIn("BypassSandbox", command)
                 self.assertNotRegex(command, r"(?i)--\S*bypass\S*sandbox")
+
+    def test_worker_mode_override_names_both_current_and_legacy_tokens(self) -> None:
+        protocol_text = PROTOCOL_MD.read_text()
+        override_section = protocol_text.split(
+            "## 🚦 Worker Mode Override", 1
+        )[1].split("## Orchestrator Role", 1)[0]
+
+        self.assertIn("[WORKER-MODE: NESTED-EXEC]", override_section)
+        self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", override_section)
+        self.assertIn("legacy", override_section.lower())
 
     def test_protocol_md_size_is_under_5kb(self) -> None:
         protocol_bytes = PROTOCOL_MD.read_bytes()
@@ -2481,7 +2491,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
 
         self.assertEqual(len(invoker.calls), 2)
         for _model, _effort, prompt in invoker.calls:
-            self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
+            self.assertIn("[WORKER-MODE: NESTED-EXEC]", prompt)
 
     def test_rejection_sends_the_critics_objection_back_to_the_planner(self) -> None:
         """A rejection must drive a second Planner call that actually holds the critique."""
@@ -2613,7 +2623,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
 
         self.assertEqual(len(invoker.calls), 6)
         for _model, _effort, prompt in invoker.calls:
-            self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
+            self.assertIn("[WORKER-MODE: NESTED-EXEC]", prompt)
 
     def test_stalemate_after_round_cap_reports_no_consensus_and_no_winner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -3373,7 +3383,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
 
         self.assertEqual(len(invoker.calls), 3)
         for _model, _effort, prompt in invoker.calls:
-            self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", prompt)
+            self.assertIn("[WORKER-MODE: NESTED-EXEC]", prompt)
 
     def test_transcript_renders_both_critics_for_a_panel_round(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -6375,7 +6385,7 @@ class LearningJournalTests(unittest.TestCase):
         is involved, because there is no free-text field."""
         unjournalable = (
             "Plan the auth rewrite for the ACME account",
-            "[WORKER-MODE: AGY-NESTED-EXEC]\nYou are the Planner",
+            "[WORKER-MODE: NESTED-EXEC]\nYou are the Planner",
             "src/routing/handler.py",
             "fix the login 500",
             "",

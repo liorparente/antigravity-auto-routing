@@ -34,7 +34,7 @@ class DebateTransportTests(unittest.TestCase):
         self.assertEqual(call["timeout"], 12.5)
         self.assertIs(call["stdin"], subprocess.DEVNULL)
         self.assertEqual(call["env"]["IN_WORKER_ROUTING"], "true")  # type: ignore[index]
-        self.assertIn("[WORKER-MODE: AGY-NESTED-EXEC]", call["command"][-1])  # type: ignore[index]
+        self.assertIn("[WORKER-MODE: NESTED-EXEC]", call["command"][-1])  # type: ignore[index]
 
     def test_timeout_becomes_safe_abstention(self) -> None:
         def timeout_runner(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:

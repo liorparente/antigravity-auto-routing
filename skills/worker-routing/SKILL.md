@@ -39,13 +39,13 @@ All Phase 0–3 external CLI worker invocations must follow [Rule 4.7 in `protoc
 ### Phase 0: Deep Research & Context Distillation
 Before any code or plan is written, the Orchestrator invokes `agy` (Gemini 3.6 Flash / 3.1 Pro) to perform a comprehensive codebase research pass.
 * **Goal:** Understand existing contracts, edge cases, dependencies, and side effects.
-* **Command:** `IN_WORKER_ROUTING=true script -q /dev/null agy -p "[WORKER-MODE: AGY-NESTED-EXEC] Perform deep research on {TOPIC}. Map out all affected files, imports, exported interfaces, and potential breaking changes."`
+* **Command:** `IN_WORKER_ROUTING=true script -q /dev/null agy -p "[WORKER-MODE: NESTED-EXEC] Perform deep research on {TOPIC}. Map out all affected files, imports, exported interfaces, and potential breaking changes."`
 
 ### Phase 1: Deep Thinking & Planner-Critic Consensus Loop (System 2 Planning)
 For all Medium and Complex tasks, planning undergoes deep reasoning and peer review:
 1. **Drafting:** The **Planner** (Claude Opus 5 Thinking / Fable 5) designs an interface-first implementation plan.
 2. **Autonomous Debate Loop:** The **Critic** (Codex 5.6 Sol / GPT-OSS 120B) reviews the draft plan using `medium`/`high` reasoning effort, flagging missing edge cases or performance flaws. Up to 3 rounds until consensus.
-   * **Command:** `cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] Perform deep review of this plan. Check for race conditions, type safety, edge cases, and performance." < /dev/null`
+   * **Command:** `cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "[WORKER-MODE: NESTED-EXEC] Perform deep review of this plan. Check for race conditions, type safety, edge cases, and performance." < /dev/null`
 3. **Consensus Delivery:** Save final approved plan to `implementation_plan.md` for user approval.
 
 ### Phase 2: Task Decomposition & Execution
@@ -56,7 +56,7 @@ Upon user approval, the Orchestrator initializes `task.md` with structured sub-t
 ### Phase 3: Zero-Defect Verification & QA
 * The **Doer** runs local unit/integration tests to verify behavior.
 * The Orchestrator invokes **Codex 5.6 Sol** with `high` effort for a final audit of the diff:
-  * **Command:** `IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode="workspace-write" -c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null`
+  * **Command:** `IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode="workspace-write" -c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: NESTED-EXEC] ..." < /dev/null`
 
 ---
 

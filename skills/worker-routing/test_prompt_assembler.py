@@ -15,10 +15,21 @@ else:
 
 
 class PromptAssemblerTests(unittest.TestCase):
+    def test_worker_mode_token_is_harness_neutral_with_legacy_preserved(self) -> None:
+        self.assertEqual(prompt_assembler.WORKER_MODE_TOKEN, "[WORKER-MODE: NESTED-EXEC]")
+        self.assertEqual(
+            prompt_assembler.LEGACY_WORKER_MODE_TOKEN, "[WORKER-MODE: AGY-NESTED-EXEC]"
+        )
+        self.assertEqual(
+            prompt_assembler.WORKER_MODE_TOKENS,
+            (prompt_assembler.WORKER_MODE_TOKEN, prompt_assembler.LEGACY_WORKER_MODE_TOKEN),
+        )
+
     def test_initial_planner_prompt_has_worker_marker_and_task_verbatim(self) -> None:
         prompt = prompt_assembler.build_planner_prompt("Preserve <untrusted> text.")
 
         self.assertTrue(prompt.startswith(prompt_assembler.WORKER_MODE_TOKEN + "\n"))
+        self.assertTrue(prompt.startswith("[WORKER-MODE: NESTED-EXEC]\n"))
         self.assertIn("AdvisoryConsultation", prompt)
         self.assertIn("=== BEGIN TASK DESCRIPTION ===", prompt)
         self.assertTrue(prompt.endswith("=== END TASK DESCRIPTION ==="))

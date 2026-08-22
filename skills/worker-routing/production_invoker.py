@@ -37,7 +37,9 @@ if __package__:
 else:
     import learning_journal  # type: ignore[no-redef]
 
-WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
+WORKER_MODE_TOKEN = "[WORKER-MODE: NESTED-EXEC]"
+LEGACY_WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
+WORKER_MODE_TOKENS = (WORKER_MODE_TOKEN, LEGACY_WORKER_MODE_TOKEN)
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_FALLBACK_MODEL = "gemini-3.7-flash"
 
@@ -611,7 +613,7 @@ def extract_review_payload(
 
 def _with_worker_mode_token(prompt: str) -> str:
     """Return ``prompt`` with the nested-worker marker present exactly once."""
-    if prompt.startswith(WORKER_MODE_TOKEN):
+    if prompt.startswith(WORKER_MODE_TOKEN) or prompt.startswith(LEGACY_WORKER_MODE_TOKEN):
         return prompt
     return f"{WORKER_MODE_TOKEN} {prompt}"
 
@@ -1371,12 +1373,14 @@ def make_journaled_invoke_worker(
 __all__ = [
     "DEFAULT_FALLBACK_MODEL",
     "DEFAULT_TIMEOUT_SECONDS",
+    "LEGACY_WORKER_MODE_TOKEN",
     "LOCAL_MODELS",
     "LOCAL_MODEL_CHAT_ENDPOINT",
     "MODEL_ALIASES",
     "UNPRICED_MODEL_ID",
     "USD_PER_SECOND",
     "WORKER_MODE_TOKEN",
+    "WORKER_MODE_TOKENS",
     "AsyncRunner",
     "AsyncWorkerProcess",
     "CapabilityRequirements",
