@@ -258,6 +258,13 @@ TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 # "safe_commands" do. "roster_topology" (spec 0003 ticket 07) is the same
 # kind of namespace, consumed by `advisory_consultation.resolve_roster`'s
 # `_load_roster_fallback_chains`, not a worker role either.
+# "roles", "providers", and "council_policy" (ADR 0012 / spec 0012 ticket 02)
+# are the declarative Role-Capability-Provider schema — nested role/provider
+# dicts have no "patterns" key of their own, but excluding the container
+# keys keeps `load_patterns` from ever descending into them. "supported_models"
+# (a list, not a dict) and "canary_cadence"/"dialogue_budget"/"acceptance_gate"
+# (dicts with no "patterns" key) were already inert under the old dict-shape
+# check; they're listed explicitly now for the same documented-intent reason.
 NON_ROLE_CONFIG_KEYS = {
     "code_extensions",
     "safe_commands",
@@ -265,6 +272,13 @@ NON_ROLE_CONFIG_KEYS = {
     "critical_dialogue",
     "roster_topology",
     "consultation_policy",
+    "council_policy",
+    "roles",
+    "providers",
+    "supported_models",
+    "canary_cadence",
+    "dialogue_budget",
+    "acceptance_gate",
 }
 
 ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S+\s+")

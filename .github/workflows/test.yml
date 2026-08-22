@@ -56,6 +56,7 @@ jobs:
         skills/worker-routing/test_risk_tiered_application.py
         skills/worker-routing/learner_worker.py
         skills/worker-routing/test_learner_worker.py
+        skills/worker-routing/test_declarative_schema.py
         skills/council-review/scripts/provider_adapters.py
         skills/council-review/scripts/council_review.py
         skills/council-review/tests/test_council_review.py
@@ -85,6 +86,7 @@ jobs:
         skills/worker-routing/test_learned_state.py
         skills/worker-routing/test_risk_tiered_application.py
         skills/worker-routing/test_learner_worker.py
+        skills/worker-routing/test_declarative_schema.py
         skills/council-review/tests/test_council_review.py
     steps:
       - uses: actions/checkout@v4

@@ -4,9 +4,9 @@
 
 **Blocked by:** 01 — Architecture Contracts ADR & Domain Glossary Alignment
 
-**Status:** ready-for-agent
+**Status:** complete
 
-- [ ] Add roles dictionary declaring planner, builder_heavy, builder_light, reviewer_architecture, reviewer_risk, reviewer_maintainability, reviewer_security, and adjudicator.
-- [ ] Add providers dictionary mapping logical provider IDs to adapters, model IDs, and default reasoning efforts.
-- [ ] Add council_policy section with fast_path_enabled, quorum_threshold: 0.60, and perspective weights.
-- [ ] Validate JSON syntax and retain existing legacy keys needed during transition.
+- [x] Add roles dictionary declaring planner, builder_heavy, builder_light, reviewer_architecture, reviewer_risk, reviewer_maintainability, reviewer_security, and adjudicator.
+- [x] Add providers dictionary mapping logical provider IDs to adapters, model IDs, and default reasoning efforts.
+- [x] Add council_policy section with fast_path_enabled, quorum_threshold: 0.60, and perspective weights.
+- [x] Validate JSON syntax and retain existing legacy keys needed during transition.
