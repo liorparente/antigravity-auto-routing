@@ -10,11 +10,11 @@ Update `routing-config.json` and `protocol.md` to establish a **Universal Calibr
 - **Tier 3 (Cloud System 2 / Deep Planning):** Claude Opus 5 (Thinking) & Codex 5.6 Sol (Ultra) for 5+ files, DB/architecture migrations, initial planning (`/plan`), and stubborn bugs (2+ failures).
 
 ## Acceptance criteria
-- [ ] Non-blocking HTTP probe checks `http://127.0.0.1:1234/v1/models` with a 200ms timeout and parses model capabilities.
-- [ ] If LM Studio is offline, system surfaces an interactive prompt allowing user to start LM Studio or fallback to Gemini Flash.
-- [ ] Provider routing correctly configures model and effort flags across Claude (`--effort`), Codex (`-c model_reasoning_effort`), `agy`, and LM Studio.
-- [ ] Trivial/Simple tasks route strictly to Tier 0 / Tier 1 by default, preventing unnecessary cloud credit burn.
-- [ ] System 2 escalation triggers (5+ files, DB/architecture, `/plan`, 2+ failures) reliably engage Tier 2 / Tier 3.
+- [x] Non-blocking HTTP probe checks `http://127.0.0.1:1234/v1/models` with a 200ms timeout and parses model capabilities.
+- [x] If LM Studio is offline, system surfaces an interactive prompt allowing user to start LM Studio or fallback to Gemini Flash.
+- [x] Provider routing correctly configures model and effort flags across Claude (`--effort`), Codex (`-c model_reasoning_effort`), `agy`, and LM Studio.
+- [x] Trivial/Simple tasks route strictly to Tier 0 / Tier 1 by default, preventing unnecessary cloud credit burn.
+- [x] System 2 escalation triggers (5+ files, DB/architecture, `/plan`, 2+ failures) reliably engage Tier 2 / Tier 3.
 
 ## Blocked by
 - 01 — Lean Protocol & Non-Blocking Zero-Latency Boot Infrastructure

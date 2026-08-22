@@ -28,6 +28,8 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
+from urllib.error import URLError
+from urllib.request import urlopen
 
 if __package__:
     from . import learning_journal
@@ -67,11 +69,31 @@ MODEL_ALIASES = {
     "gemini-3.5-flash": "gemini-3.5-flash",
     "gemini-3.1-pro": "gemini-3.1-pro",
     "agy": "agy",
+    "Gemini 3.7 Flash": "gemini-3.7-flash",
+    "gemini-3.7-flash": "gemini-3.7-flash",
+    "Claude 3.7 Sonnet": "claude-3-7-sonnet",
+    "claude-3-7-sonnet": "claude-3-7-sonnet",
+    "LM Studio (Local Model)": "local-lmstudio",
+    "local-lmstudio": "local-lmstudio",
+    "qwen3.8-27b-mlx": "qwen3.8-27b-mlx",
+    "gemma-4-e4b": "gemma-4-e4b",
+    "deepseek-r1": "deepseek-r1",
 }
 
 CODEX_MODELS = frozenset({"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-oss-120b"})
-CLAUDE_MODELS = frozenset({"claude-opus-5", "claude-sonnet-5", "claude-fable-5"})
-AGY_MODELS = frozenset({"agy", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro"})
+CLAUDE_MODELS = frozenset({"claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-3-7-sonnet"})
+AGY_MODELS = frozenset(
+    {"agy", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro", "gemini-3.7-flash"}
+)
+# Local, zero-cost models served by an OpenAI-compatible LM Studio endpoint
+# rather than a CLI provider — routed through `build_worker_command`'s HTTP
+# branch instead of `codex`/`claude`/`agy` argv templates.
+LOCAL_MODELS = frozenset({"local-lmstudio", "qwen3.8-27b-mlx", "gemma-4-e4b", "deepseek-r1"})
+
+# The OpenAI-compatible chat endpoint `build_worker_command` targets when a
+# `LOCAL_MODELS` member is routed directly, without a CLI provider in front
+# of it.
+LOCAL_MODEL_CHAT_ENDPOINT = "http://127.0.0.1:1234/v1/chat/completions"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -103,6 +125,110 @@ AsyncRunner = Callable[..., Awaitable[AsyncWorkerProcess]]
 
 # One routed invocation request, the unit ``invoke_workers_parallel`` batches.
 WorkerRequest = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class LocalModelCapabilities:
+    """What an active probe of a local LM Studio server discovered.
+
+    Deliberately thin: a probe result, not a routing decision. Callers decide
+    whether `family`/`parameter_class` are good enough for the task at hand;
+    this dataclass just carries what the server actually reported.
+    """
+
+    model_id: str
+    family: str
+    parameter_class: str
+    loaded: bool = True
+    endpoint: str = "http://127.0.0.1:1234/v1"
+
+
+_LOCAL_FAMILY_KEYWORDS = ("qwen", "gemma", "deepseek", "llama", "mistral", "phi")
+
+# Matches a leading parameter count like "27b" or "4B" in a model id
+# (including one embedded in an "e4b"-style suffix, e.g. "gemma-4-e4b" ->
+# "4b"). No match means the id does not advertise a parameter size at all.
+_LOCAL_PARAMETER_CLASS_RE = re.compile(r"(\d+(?:\.\d+)?)[bB]")
+
+
+def _infer_local_model_family(model_id: str) -> str:
+    """Classify a local model id by the family keyword it contains, if any."""
+    lowered = model_id.lower()
+    for keyword in _LOCAL_FAMILY_KEYWORDS:
+        if keyword in lowered:
+            return keyword
+    return "custom"
+
+
+def _infer_local_parameter_class(model_id: str) -> str:
+    """Extract a parameter size like "27B" from a local model id, or "unknown"."""
+    match = _LOCAL_PARAMETER_CLASS_RE.search(model_id)
+    if match is None:
+        return "unknown"
+    return f"{match.group(1)}B"
+
+
+def probe_local_model_availability(
+    endpoint: str = "http://127.0.0.1:1234/v1",
+    *,
+    timeout: float = 0.2,
+    urlopen_fn: Callable[..., Any] = urlopen,
+) -> LocalModelCapabilities | None:
+    """Actively probe an LM Studio-style local server for a loaded model.
+
+    A non-blocking (200ms default) HTTP GET against ``{endpoint}/models``,
+    the OpenAI-compatible discovery route. Any failure — offline server,
+    connection refused, timeout, or a response that is not the expected
+    ``{"data": [{"id": ...}, ...]}`` shape — fails closed to `None` rather
+    than raising, because "no local model is available" is a routine routing
+    outcome for a caller deciding between Tier 0 (local) and a cloud
+    fallback, not an exceptional one.
+
+    ``urlopen_fn`` is the injectable seam offline tests use in place of a
+    real socket.
+    """
+    try:
+        with urlopen_fn(f"{endpoint}/models", timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, ValueError):
+        return None
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not data:
+        return None
+
+    model_id = data[0].get("id") if isinstance(data[0], dict) else None
+    if not isinstance(model_id, str) or not model_id:
+        return None
+
+    return LocalModelCapabilities(
+        model_id=model_id,
+        family=_infer_local_model_family(model_id),
+        parameter_class=_infer_local_parameter_class(model_id),
+        loaded=True,
+        endpoint=endpoint,
+    )
+
+
+def prompt_local_fallback_decision(
+    prompt_fn: Callable[[str], str] = input,
+    stream: Any = None,
+) -> str:
+    """Ask the user how to proceed when `probe_local_model_availability` fails.
+
+    Returns ``"launch-lmstudio"`` for an explicit "1", and
+    ``"gemini-3.7-flash"`` for "2" or anything else (including empty input) —
+    an unrecognized answer degrades to the cloud fallback rather than
+    blocking, since a local-only tier can't be relied on to stay reachable.
+    """
+    message = (
+        "LM Studio is offline. [1] Launch local model "
+        "[2] Fallback to Gemini Flash (Cloud)"
+    )
+    if stream is not None:
+        print(message, file=stream)
+    response = prompt_fn(message)
+    return "launch-lmstudio" if response.strip() == "1" else "gemini-3.7-flash"
 
 
 async def _kill_and_reap_process(proc: AsyncWorkerProcess) -> None:
@@ -352,6 +478,28 @@ def build_worker_command(model: str, effort: str, prompt: str) -> list[str]:
         ]
     if normalized_model in AGY_MODELS:
         return ["agy", "-p", routed_prompt]
+    if normalized_model in LOCAL_MODELS:
+        # LM Studio has no CLI provider in front of it: route directly as an
+        # OpenAI-compatible chat-completions HTTP call via curl, the same
+        # payload shape `test_lmstudio.py` posts against a live server.
+        payload = json.dumps(
+            {
+                "model": normalized_model,
+                "messages": [{"role": "user", "content": routed_prompt}],
+                "temperature": 0,
+            }
+        )
+        return [
+            "curl",
+            "-s",
+            "-X",
+            "POST",
+            LOCAL_MODEL_CHAT_ENDPOINT,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            payload,
+        ]
 
     # Kept for defensive exhaustiveness if a future alias is added without a
     # corresponding CLI provider template.
@@ -595,6 +743,15 @@ USD_PER_SECOND: dict[str, float] = {
     "gemini-3.6-flash": 0.0010,
     "gemini-3.5-flash": 0.0010,
     "gemini-3.1-pro": 0.0060,
+    "gemini-3.7-flash": 0.0010,
+    "claude-3-7-sonnet": 0.0060,
+    # Tier 0: local models cost nothing to invoke — the rate is a real
+    # measurement, not a missing one. See `LOCAL_MODELS` and
+    # `estimate_cost_usd`'s docstring for how a reader tells the two apart.
+    "local-lmstudio": 0.0,
+    "qwen3.8-27b-mlx": 0.0,
+    "gemma-4-e4b": 0.0,
+    "deepseek-r1": 0.0,
 }
 
 # The `model_id` a record carries when `MODEL_ALIASES` did not recognize the
@@ -669,6 +826,8 @@ def _resolve_model_id_and_family(model: str) -> tuple[str, str]:
         return normalized, "codex"
     if normalized in AGY_MODELS:
         return normalized, "agy"
+    if normalized in LOCAL_MODELS:
+        return normalized, "lm-studio"
     return normalized, "unknown"
 
 
@@ -840,12 +999,15 @@ def make_journaled_invoke_worker(
 
 __all__ = [
     "DEFAULT_TIMEOUT_SECONDS",
+    "LOCAL_MODELS",
+    "LOCAL_MODEL_CHAT_ENDPOINT",
     "MODEL_ALIASES",
     "UNPRICED_MODEL_ID",
     "USD_PER_SECOND",
     "WORKER_MODE_TOKEN",
     "AsyncRunner",
     "AsyncWorkerProcess",
+    "LocalModelCapabilities",
     "WorkerExecutionResult",
     "WorkerRequest",
     "build_worker_command",
@@ -855,5 +1017,7 @@ __all__ = [
     "invoke_worker_async",
     "invoke_workers_parallel",
     "make_journaled_invoke_worker",
+    "probe_local_model_availability",
+    "prompt_local_fallback_decision",
     "report_journal_error_to_stderr",
 ]

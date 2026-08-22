@@ -321,6 +321,210 @@ class BuildWorkerCommandTests(unittest.TestCase):
                 if cli_model is not None:
                     self.assertEqual(command[command.index("--model") + 1], cli_model)
 
+    def test_local_model_routes_as_a_direct_http_call(self) -> None:
+        for model in sorted(production_invoker.LOCAL_MODELS):
+            with self.subTest(model=model):
+                command = production_invoker.build_worker_command(model, "low", "ping")
+
+                self.assertEqual(command[0], "curl")
+                self.assertIn(production_invoker.LOCAL_MODEL_CHAT_ENDPOINT, command)
+                payload = json.loads(command[-1])
+                self.assertEqual(payload["model"], model)
+                self.assertEqual(
+                    payload["messages"],
+                    [{"role": "user", "content": f"{production_invoker.WORKER_MODE_TOKEN} ping"}],
+                )
+
+
+class ProbeLocalModelAvailabilityTests(unittest.TestCase):
+    """`probe_local_model_availability` is the active, sub-second discovery
+    probe against an LM Studio-style `/v1/models` endpoint (spec 0011 ticket
+    02): it fails closed to `None` on anything short of a genuine loaded
+    model, since callers use the result to decide between Tier 0 (local) and
+    a cloud fallback.
+    """
+
+    @staticmethod
+    def _fake_response(payload: dict[str, Any] | bytes) -> Any:
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+
+        class _Response:
+            def __enter__(self) -> _Response:  # noqa: PYI034 - see test_routing.py's _InstalledHarness.__enter__ for the same local-class rationale
+                return self
+
+            def __exit__(self, *exc_info: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return body
+
+        return _Response()
+
+    def test_discovers_a_qwen_model(self) -> None:
+        urlopen_fn = Mock(
+            return_value=self._fake_response({"data": [{"id": "qwen3.8-27b-mlx"}]})
+        )
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        assert result is not None
+        self.assertEqual(result.model_id, "qwen3.8-27b-mlx")
+        self.assertEqual(result.family, "qwen")
+        self.assertEqual(result.parameter_class, "27B")
+        self.assertTrue(result.loaded)
+        self.assertEqual(result.endpoint, "http://127.0.0.1:1234/v1")
+        url = urlopen_fn.call_args.args[0]
+        self.assertEqual(url, "http://127.0.0.1:1234/v1/models")
+        self.assertEqual(urlopen_fn.call_args.kwargs["timeout"], 0.2)
+
+    def test_discovers_a_gemma_model(self) -> None:
+        urlopen_fn = Mock(
+            return_value=self._fake_response({"data": [{"id": "gemma-4-e4b"}]})
+        )
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        assert result is not None
+        self.assertEqual(result.family, "gemma")
+        self.assertEqual(result.parameter_class, "4B")
+
+    def test_discovers_a_deepseek_model(self) -> None:
+        urlopen_fn = Mock(
+            return_value=self._fake_response({"data": [{"id": "deepseek-r1"}]})
+        )
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        assert result is not None
+        self.assertEqual(result.family, "deepseek")
+        self.assertEqual(result.parameter_class, "unknown")
+
+    def test_empty_model_list_returns_none(self) -> None:
+        urlopen_fn = Mock(return_value=self._fake_response({"data": []}))
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        self.assertIsNone(result)
+
+    def test_missing_data_key_returns_none(self) -> None:
+        urlopen_fn = Mock(return_value=self._fake_response({}))
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        self.assertIsNone(result)
+
+    def test_connection_refused_returns_none(self) -> None:
+        urlopen_fn = Mock(side_effect=ConnectionRefusedError("connection refused"))
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        self.assertIsNone(result)
+
+    def test_url_error_returns_none(self) -> None:
+        from urllib.error import URLError
+
+        urlopen_fn = Mock(side_effect=URLError("offline"))
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        self.assertIsNone(result)
+
+    def test_timeout_returns_none(self) -> None:
+        urlopen_fn = Mock(side_effect=TimeoutError("timed out"))
+
+        result = production_invoker.probe_local_model_availability(
+            urlopen_fn=urlopen_fn, timeout=0.2
+        )
+
+        self.assertIsNone(result)
+
+    def test_json_decode_error_returns_none(self) -> None:
+        urlopen_fn = Mock(return_value=self._fake_response(b"not json"))
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        self.assertIsNone(result)
+
+    def test_custom_endpoint_is_probed_and_carried_on_the_result(self) -> None:
+        urlopen_fn = Mock(
+            return_value=self._fake_response({"data": [{"id": "llama-70b"}]})
+        )
+
+        result = production_invoker.probe_local_model_availability(
+            "http://127.0.0.1:9999/v1", urlopen_fn=urlopen_fn
+        )
+
+        assert result is not None
+        self.assertEqual(result.endpoint, "http://127.0.0.1:9999/v1")
+        self.assertEqual(result.family, "llama")
+        self.assertEqual(result.parameter_class, "70B")
+        self.assertEqual(
+            urlopen_fn.call_args.args[0], "http://127.0.0.1:9999/v1/models"
+        )
+
+    def test_unrecognized_family_falls_back_to_custom(self) -> None:
+        urlopen_fn = Mock(
+            return_value=self._fake_response({"data": [{"id": "acme-widget-9b"}]})
+        )
+
+        result = production_invoker.probe_local_model_availability(urlopen_fn=urlopen_fn)
+
+        assert result is not None
+        self.assertEqual(result.family, "custom")
+        self.assertEqual(result.parameter_class, "9B")
+
+
+class PromptLocalFallbackDecisionTests(unittest.TestCase):
+    """`prompt_local_fallback_decision` is the interactive gate a caller hits
+    when `probe_local_model_availability` returns `None` (spec 0011 ticket
+    02's "explicit, interactive user decision" requirement).
+    """
+
+    def test_choosing_1_launches_lmstudio(self) -> None:
+        result = production_invoker.prompt_local_fallback_decision(prompt_fn=lambda _: "1")
+
+        self.assertEqual(result, "launch-lmstudio")
+
+    def test_choosing_2_falls_back_to_gemini_flash(self) -> None:
+        result = production_invoker.prompt_local_fallback_decision(prompt_fn=lambda _: "2")
+
+        self.assertEqual(result, "gemini-3.7-flash")
+
+    def test_empty_input_falls_back_to_gemini_flash(self) -> None:
+        result = production_invoker.prompt_local_fallback_decision(prompt_fn=lambda _: "")
+
+        self.assertEqual(result, "gemini-3.7-flash")
+
+    def test_unrecognized_input_falls_back_to_gemini_flash(self) -> None:
+        result = production_invoker.prompt_local_fallback_decision(
+            prompt_fn=lambda _: "banana"
+        )
+
+        self.assertEqual(result, "gemini-3.7-flash")
+
+    def test_prompt_message_lists_both_options(self) -> None:
+        captured: list[str] = []
+
+        def fake_prompt(message: str) -> str:
+            captured.append(message)
+            return "1"
+
+        production_invoker.prompt_local_fallback_decision(prompt_fn=fake_prompt)
+
+        self.assertEqual(len(captured), 1)
+        self.assertIn("LM Studio is offline", captured[0])
+        self.assertIn("[1] Launch local model", captured[0])
+        self.assertIn("[2] Fallback to Gemini Flash (Cloud)", captured[0])
+
+    def test_writes_message_to_an_injected_stream_when_provided(self) -> None:
+        stream = io.StringIO()
+
+        production_invoker.prompt_local_fallback_decision(
+            prompt_fn=lambda _: "1", stream=stream
+        )
+
+        self.assertIn("LM Studio is offline", stream.getvalue())
+
 
 class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
     """Ticket 04's compatibility contract for synchronous worker callers.
@@ -1267,15 +1471,30 @@ class CostEstimateTests(unittest.TestCase):
         self.assertFalse(record["success"])
         self.assertEqual(record["cost_estimate_usd"], 0.0)
 
-    def test_every_routable_model_has_a_positive_rate(self) -> None:
-        """A priced model with a measurable duration always produces a
-        non-zero estimate, so a 0.0 on a real model means only "this call
-        took no measurable time" — never "we could not price it", which is
-        what `model_id` says."""
-        for model_id in sorted(set(production_invoker.MODEL_ALIASES.values())):
+    def test_every_routable_cloud_model_has_a_positive_rate(self) -> None:
+        """A priced cloud model with a measurable duration always produces a
+        non-zero estimate, so a 0.0 on a real cloud model means only "this
+        call took no measurable time" — never "we could not price it", which
+        is what `model_id` says."""
+        cloud_models = (
+            set(production_invoker.MODEL_ALIASES.values())
+            - production_invoker.LOCAL_MODELS
+        )
+        for model_id in sorted(cloud_models):
             with self.subTest(model_id=model_id):
                 self.assertGreater(production_invoker.USD_PER_SECOND[model_id], 0.0)
                 self.assertGreater(
+                    production_invoker.estimate_cost_usd(model_id, 60_000), 0.0
+                )
+
+    def test_every_local_model_is_priced_at_zero(self) -> None:
+        """Tier 0 (local) models cost nothing to invoke — `0.0` here is a real
+        measurement, not a missing rate: `test_rate_table_prices_every_invocable_model`
+        already pins that every invocable model, local included, has an entry."""
+        for model_id in sorted(production_invoker.LOCAL_MODELS):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(production_invoker.USD_PER_SECOND[model_id], 0.0)
+                self.assertEqual(
                     production_invoker.estimate_cost_usd(model_id, 60_000), 0.0
                 )
 

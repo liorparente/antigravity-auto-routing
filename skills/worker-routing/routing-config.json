@@ -28,6 +28,7 @@
     "patterns": ["codex review", "claude-opus-5"]
   },
   "supported_models": [
+    "Gemini 3.7 Flash",
     "Gemini 3.6 Flash (High)",
     "Gemini 3.6 Flash (Medium)",
     "Gemini 3.6 Flash (Low)",
@@ -36,9 +37,14 @@
     "Gemini 3.5 Flash (Low)",
     "Gemini 3.1 Pro (High)",
     "Gemini 3.1 Pro (Low)",
+    "Claude 3.7 Sonnet",
     "Claude Sonnet 5 (Thinking)",
     "Claude Opus 5 (Thinking)",
-    "GPT-OSS 120B (Medium)"
+    "Codex 5.6 Sol",
+    "Codex 5.6 Terra",
+    "Codex 5.6 Luna",
+    "GPT-OSS 120B (Medium)",
+    "LM Studio (Local Model)"
   ],
   "critical_dialogue": {
     "code_review_diff_line_threshold": 300,
