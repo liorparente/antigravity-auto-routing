@@ -295,9 +295,7 @@ class RoleResolver:
         def is_available(provider_id: str) -> bool:
             if provider_id in unavailable:
                 return False
-            if checker is not None and not checker(provider_id):
-                return False
-            return True
+            return checker is None or checker(provider_id)
 
         if role_config.capability_requirements.local_only:
             if not role_config.preferred_providers:
@@ -1124,7 +1122,7 @@ def _resolve_model_id_and_family(
         try:
             resolved = active_resolver.resolve_role(model)
             effective_model = resolved.model
-        except Exception:
+        except Exception:  # noqa: BLE001 - an unresolvable role degrades to the unpriced marker below, not a raise.
             effective_model = model
 
     normalized = MODEL_ALIASES.get(effective_model)
@@ -1318,19 +1316,18 @@ __all__ = [
     "WORKER_MODE_TOKEN",
     "AsyncRunner",
     "AsyncWorkerProcess",
-    "LocalModelCapabilities",
     "CapabilityRequirements",
+    "LocalModelCapabilities",
     "ProviderConfig",
-    "RoleConfig",
     "ResolvedRole",
+    "RoleConfig",
     "RoleResolver",
-    "get_default_role_resolver",
-    "reset_default_role_resolver",
     "WorkerExecutionResult",
     "WorkerRequest",
     "build_worker_command",
     "estimate_cost_usd",
     "extract_review_payload",
+    "get_default_role_resolver",
     "invoke_worker",
     "invoke_worker_async",
     "invoke_workers_parallel",
@@ -1338,4 +1335,5 @@ __all__ = [
     "probe_local_model_availability",
     "prompt_local_fallback_decision",
     "report_journal_error_to_stderr",
+    "reset_default_role_resolver",
 ]
