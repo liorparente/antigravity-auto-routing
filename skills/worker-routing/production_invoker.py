@@ -41,6 +41,12 @@ WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_FALLBACK_MODEL = "gemini-3.7-flash"
 
+# The declarative Role/Provider schema (ADR 0012 / spec 0012 ticket 02) this
+# module's `RoleResolver` reads `roles`/`providers` from. Same file
+# `routing_check.CONFIG_PATH` audits, kept as a second constant rather than
+# imported from there so this module never depends on `routing_check`.
+ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
+
 # The routing protocol uses human-readable names, while the worker CLIs need
 # stable model identifiers. Keep both the documented labels and already
 # normalized IDs explicit so arbitrary strings never select a provider.
@@ -78,6 +84,7 @@ MODEL_ALIASES = {
     "LM Studio (Local Model)": "local-lmstudio",
     "local-lmstudio": "local-lmstudio",
     "qwen3.8-27b-mlx": "qwen3.8-27b-mlx",
+    "qwen3-coder-30b": "qwen3-coder-30b",
     "gemma-4-e4b": "gemma-4-e4b",
     "deepseek-r1": "deepseek-r1",
 }
@@ -90,7 +97,7 @@ AGY_MODELS = frozenset(
 # Local, zero-cost models served by an OpenAI-compatible LM Studio endpoint
 # rather than a CLI provider — routed through `build_worker_command`'s HTTP
 # branch instead of `codex`/`claude`/`agy` argv templates.
-LOCAL_MODELS = frozenset({"local-lmstudio", "qwen3.8-27b-mlx", "gemma-4-e4b", "deepseek-r1"})
+LOCAL_MODELS = frozenset({"local-lmstudio", "qwen3.8-27b-mlx", "qwen3-coder-30b", "gemma-4-e4b", "deepseek-r1"})
 
 # The OpenAI-compatible chat endpoint `build_worker_command` targets when a
 # `LOCAL_MODELS` member is routed directly, without a CLI provider in front
@@ -143,6 +150,209 @@ class LocalModelCapabilities:
     parameter_class: str
     loaded: bool = True
     endpoint: str = "http://127.0.0.1:1234/v1"
+
+
+@dataclass(frozen=True)
+class CapabilityRequirements:
+    """One role's declared requirements, mirroring routing-config.json's
+    ``roles.<role>.capability_requirements`` shape (ADR 0012)."""
+
+    reasoning_tier: str
+    tool_access: str
+    min_context: int
+    local_only: bool = False
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    """One entry from routing-config.json's ``providers`` map."""
+
+    provider_id: str
+    adapter: str
+    model: str
+    default_reasoning_effort: str
+
+
+@dataclass(frozen=True)
+class RoleConfig:
+    """One entry from routing-config.json's ``roles`` map: what a role
+    requires and which providers, in order, can satisfy it."""
+
+    role_id: str
+    capability_requirements: CapabilityRequirements
+    preferred_providers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResolvedRole:
+    """A `RoleConfig` bound to one concrete, available `ProviderConfig` —
+    what `RoleResolver.resolve_role` hands back for a caller to actually
+    invoke."""
+
+    role_id: str
+    provider_id: str
+    adapter: str
+    model: str
+    reasoning_effort: str
+    capability_requirements: CapabilityRequirements
+
+
+class RoleResolver:
+    """Resolves an abstract role (e.g. ``"builder_light"``) to a concrete,
+    available provider using routing-config.json's declarative Role/Provider
+    schema (ADR 0012).
+
+    Resolution walks a role's ``preferred_providers`` in order and returns
+    the first one ``availability_checker`` accepts and that is not listed in
+    ``unavailable_providers`` — ordinary preference fallback. A role whose
+    ``capability_requirements.local_only`` is ``True`` (e.g. ``adjudicator``,
+    ``sensitive_executor``) is the one exception: only its first preferred
+    (local) provider is ever considered, and an unavailable local provider
+    raises rather than falling through to the rest of the chain — a
+    local-only role must never silently execute in the cloud.
+    """
+
+    def __init__(
+        self,
+        config_path: Path | str | None = None,
+        *,
+        config: dict[str, Any] | None = None,
+        availability_checker: Callable[[str], bool] | None = None,
+    ) -> None:
+        if config is None:
+            path = Path(config_path) if config_path is not None else ROUTING_CONFIG_PATH
+            with open(path, "r", encoding="utf-8") as handle:
+                config = json.load(handle)
+        elif config_path is not None:
+            raise TypeError("config_path and config are mutually exclusive")
+
+        self._availability_checker = availability_checker
+        self._providers: dict[str, ProviderConfig] = {
+            provider_id: ProviderConfig(
+                provider_id=provider_id,
+                adapter=provider["adapter"],
+                model=provider["model"],
+                default_reasoning_effort=provider["default_reasoning_effort"],
+            )
+            for provider_id, provider in config.get("providers", {}).items()
+        }
+        self._roles: dict[str, RoleConfig] = {
+            role_id: RoleConfig(
+                role_id=role_id,
+                capability_requirements=CapabilityRequirements(
+                    reasoning_tier=role["capability_requirements"]["reasoning_tier"],
+                    tool_access=role["capability_requirements"]["tool_access"],
+                    min_context=role["capability_requirements"]["min_context"],
+                    local_only=role["capability_requirements"].get("local_only", False),
+                ),
+                preferred_providers=tuple(role.get("preferred_providers", [])),
+            )
+            for role_id, role in config.get("roles", {}).items()
+        }
+
+    def is_role(self, identifier: str) -> bool:
+        """True if ``identifier`` names a role this resolver knows, as
+        opposed to a concrete model name/alias."""
+        return identifier in self._roles
+
+    def get_role_config(self, role: str) -> RoleConfig:
+        try:
+            return self._roles[role]
+        except KeyError:
+            raise ValueError(f"Unknown role: {role!r}") from None
+
+    def get_provider_config(self, provider_id: str) -> ProviderConfig:
+        try:
+            return self._providers[provider_id]
+        except KeyError:
+            raise ValueError(f"Unknown provider: {provider_id!r}") from None
+
+    def list_roles(self) -> list[str]:
+        return list(self._roles)
+
+    def list_providers(self) -> list[str]:
+        return list(self._providers)
+
+    def resolve_role(
+        self,
+        role: str,
+        *,
+        effort: str | None = None,
+        availability_checker: Callable[[str], bool] | None = None,
+        unavailable_providers: Sequence[str] | set[str] | None = None,
+    ) -> ResolvedRole:
+        """Resolve ``role`` to its first available provider.
+
+        Raises ``ValueError`` for an unknown role. Raises ``RuntimeError``
+        when no preferred provider is available — for a ``local_only`` role
+        this means its local provider specifically, and that failure is
+        never a cue to fall back to a cloud provider elsewhere in the chain.
+        """
+        role_config = self.get_role_config(role)
+        checker = availability_checker if availability_checker is not None else self._availability_checker
+        unavailable = set(unavailable_providers) if unavailable_providers is not None else set()
+
+        def is_available(provider_id: str) -> bool:
+            if provider_id in unavailable:
+                return False
+            if checker is not None and not checker(provider_id):
+                return False
+            return True
+
+        if role_config.capability_requirements.local_only:
+            if not role_config.preferred_providers:
+                raise RuntimeError(
+                    f"Role {role!r} is local_only but declares no preferred_providers"
+                )
+            local_provider_id = role_config.preferred_providers[0]
+            if not is_available(local_provider_id):
+                raise RuntimeError(
+                    f"Local provider {local_provider_id!r} for role {role!r} is "
+                    "unavailable; cloud fallback is rejected for local_only roles"
+                )
+            return self._resolved(role_config, local_provider_id, effort)
+
+        for provider_id in role_config.preferred_providers:
+            if is_available(provider_id):
+                return self._resolved(role_config, provider_id, effort)
+
+        raise RuntimeError(f"No available provider found for role {role!r}")
+
+    def _resolved(
+        self, role_config: RoleConfig, provider_id: str, effort: str | None
+    ) -> ResolvedRole:
+        provider = self.get_provider_config(provider_id)
+        reasoning_effort = (
+            _validated_effort(effort) if effort else provider.default_reasoning_effort
+        )
+        return ResolvedRole(
+            role_id=role_config.role_id,
+            provider_id=provider.provider_id,
+            adapter=provider.adapter,
+            model=provider.model,
+            reasoning_effort=reasoning_effort,
+            capability_requirements=role_config.capability_requirements,
+        )
+
+
+_DEFAULT_ROLE_RESOLVER: RoleResolver | None = None
+
+
+def get_default_role_resolver() -> RoleResolver:
+    """The process-wide `RoleResolver` built from routing-config.json, built
+    once and cached — the resolver `build_worker_command` and
+    `_resolve_model_id_and_family` fall back to when no resolver is
+    injected."""
+    global _DEFAULT_ROLE_RESOLVER
+    if _DEFAULT_ROLE_RESOLVER is None:
+        _DEFAULT_ROLE_RESOLVER = RoleResolver(ROUTING_CONFIG_PATH)
+    return _DEFAULT_ROLE_RESOLVER
+
+
+def reset_default_role_resolver() -> None:
+    """Reset the process-wide `RoleResolver` cache (for unit tests)."""
+    global _DEFAULT_ROLE_RESOLVER
+    _DEFAULT_ROLE_RESOLVER = None
 
 
 _LOCAL_FAMILY_KEYWORDS = ("qwen", "gemma", "deepseek", "llama", "mistral", "phi")
@@ -454,8 +664,14 @@ def build_worker_command(
     prompt: str,
     *,
     timeout: float = DEFAULT_TIMEOUT_SECONDS,
+    resolver: RoleResolver | None = None,
+    unavailable_providers: Sequence[str] | set[str] | None = None,
 ) -> list[str]:
     """Build the documented CLI argv for a routed worker.
+
+    Accepts either an explicit model name/alias (e.g. 'claude-sonnet-5', 'gpt-5.6-sol')
+    or an abstract role identifier (e.g. 'builder_heavy', 'planner', 'adjudicator').
+    Abstract roles are resolved dynamically via RoleResolver to concrete providers and models.
 
     Unknown models and unknown effort levels are rejected rather than
     guessed: launching an arbitrary executable, or handing a provider a
@@ -471,8 +687,22 @@ def build_worker_command(
     if timeout <= 0 or not math.isfinite(timeout):
         raise ValueError("timeout must be a positive finite number")
     routed_prompt = _with_worker_mode_token(prompt)
-    _validated_effort(effort)
-    normalized_model = MODEL_ALIASES.get(model)
+
+    active_resolver = resolver if resolver is not None else get_default_role_resolver()
+    effective_model = model
+    effective_effort = effort
+
+    if active_resolver.is_role(model):
+        resolved_role = active_resolver.resolve_role(
+            model,
+            effort=effort if effort else None,
+            unavailable_providers=unavailable_providers,
+        )
+        effective_model = resolved_role.model
+        effective_effort = resolved_role.reasoning_effort
+
+    _validated_effort(effective_effort)
+    normalized_model = MODEL_ALIASES.get(effective_model)
     if normalized_model is None:
         raise ValueError(f"Unsupported worker model: {model!r}")
 
@@ -483,7 +713,7 @@ def build_worker_command(
             "--model",
             normalized_model,
             "-c",
-            f'model_reasoning_effort="{effort}"',
+            f'model_reasoning_effort="{effective_effort}"',
             "-s",
             "workspace-write",
             routed_prompt,
@@ -496,7 +726,7 @@ def build_worker_command(
             "--model",
             normalized_model,
             "--effort",
-            effort,
+            effective_effort,
             "--allow-dangerously-skip-permissions",
             "--permission-mode",
             "bypassPermissions",
@@ -817,6 +1047,7 @@ USD_PER_SECOND: dict[str, float] = {
     # `estimate_cost_usd`'s docstring for how a reader tells the two apart.
     "local-lmstudio": 0.0,
     "qwen3.8-27b-mlx": 0.0,
+    "qwen3-coder-30b": 0.0,
     "gemma-4-e4b": 0.0,
     "deepseek-r1": 0.0,
 }
@@ -872,9 +1103,12 @@ def estimate_cost_usd(model_id: str, duration_ms: int) -> float:
     return round(rate * (duration_ms / 1000.0), 6)
 
 
-def _resolve_model_id_and_family(model: str) -> tuple[str, str]:
+def _resolve_model_id_and_family(
+    model: str, *, resolver: RoleResolver | None = None
+) -> tuple[str, str]:
     """Normalize ``model`` and classify it by the partitions ``invoke_worker`` uses.
 
+    Supports both explicit model names and abstract role identifiers.
     Reuses `MODEL_ALIASES` / `CODEX_MODELS` / `CLAUDE_MODELS` / `AGY_MODELS`
     rather than inventing a second mapping, per this module's own contract.
     A model `MODEL_ALIASES` would itself reject returns
@@ -884,7 +1118,16 @@ def _resolve_model_id_and_family(model: str) -> tuple[str, str]:
     That pair is also what tells a reader the record's cost is unknown; see
     `estimate_cost_usd`.
     """
-    normalized = MODEL_ALIASES.get(model)
+    active_resolver = resolver if resolver is not None else get_default_role_resolver()
+    effective_model = model
+    if active_resolver.is_role(model):
+        try:
+            resolved = active_resolver.resolve_role(model)
+            effective_model = resolved.model
+        except Exception:
+            effective_model = model
+
+    normalized = MODEL_ALIASES.get(effective_model)
     if normalized is None:
         return UNPRICED_MODEL_ID, "unknown"
     if normalized in CLAUDE_MODELS:
@@ -1076,6 +1319,13 @@ __all__ = [
     "AsyncRunner",
     "AsyncWorkerProcess",
     "LocalModelCapabilities",
+    "CapabilityRequirements",
+    "ProviderConfig",
+    "RoleConfig",
+    "ResolvedRole",
+    "RoleResolver",
+    "get_default_role_resolver",
+    "reset_default_role_resolver",
     "WorkerExecutionResult",
     "WorkerRequest",
     "build_worker_command",

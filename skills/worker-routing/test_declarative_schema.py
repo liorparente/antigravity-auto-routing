@@ -34,6 +34,7 @@ REQUIRED_ROLES = {
     "reviewer_maintainability",
     "reviewer_security",
     "adjudicator",
+    "sensitive_executor",
 }
 
 REQUIRED_CAPABILITY_KEYS = {
@@ -337,6 +338,7 @@ class TestLoadPatternsDoesNotLeakSchemaEntries(ConfigLoadMixin, unittest.TestCas
             "reviewer_maintainability",
             "reviewer_security",
             "adjudicator",
+            "sensitive_executor",
             "claude_opus_5",
             "claude_fable_5",
             "claude_sonnet_5",

@@ -1631,5 +1631,321 @@ class CostEstimateTests(unittest.TestCase):
                 )
 
 
+class RoleResolverTests(unittest.TestCase):
+    """Unit tests for RoleResolver parsing, lookup, and metadata."""
+
+    def setUp(self) -> None:
+        production_invoker.reset_default_role_resolver()
+        self.resolver = production_invoker.get_default_role_resolver()
+
+    def test_parses_all_declared_roles(self) -> None:
+        expected_roles = {
+            "planner",
+            "builder_heavy",
+            "builder_light",
+            "reviewer_architecture",
+            "reviewer_risk",
+            "reviewer_maintainability",
+            "reviewer_security",
+            "adjudicator",
+            "sensitive_executor",
+        }
+        roles = set(self.resolver.list_roles())
+        self.assertTrue(expected_roles.issubset(roles))
+        for role in expected_roles:
+            self.assertTrue(self.resolver.is_role(role))
+
+    def test_parses_all_declared_providers(self) -> None:
+        expected_providers = {
+            "claude_opus_5",
+            "claude_fable_5",
+            "claude_sonnet_5",
+            "codex_sol",
+            "codex_terra",
+            "codex_luna",
+            "gemini_flash_high",
+            "gemini_pro",
+            "lm_studio_local",
+        }
+        providers = set(self.resolver.list_providers())
+        self.assertTrue(expected_providers.issubset(providers))
+
+    def test_get_role_config_returns_typed_dataclass(self) -> None:
+        cfg = self.resolver.get_role_config("builder_heavy")
+        self.assertEqual(cfg.role_id, "builder_heavy")
+        self.assertEqual(cfg.capability_requirements.reasoning_tier, "high")
+        self.assertEqual(cfg.capability_requirements.tool_access, "workspace-write")
+        self.assertEqual(cfg.capability_requirements.min_context, 128000)
+        self.assertFalse(cfg.capability_requirements.local_only)
+        self.assertEqual(cfg.preferred_providers, ("claude_sonnet_5", "gemini_flash_high"))
+
+    def test_get_provider_config_returns_typed_dataclass(self) -> None:
+        pcfg = self.resolver.get_provider_config("claude_sonnet_5")
+        self.assertEqual(pcfg.provider_id, "claude_sonnet_5")
+        self.assertEqual(pcfg.adapter, "claude_code_cli")
+        self.assertEqual(pcfg.model, "claude-sonnet-5")
+        self.assertEqual(pcfg.default_reasoning_effort, "high")
+
+    def test_unknown_role_raises_value_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown role: 'unknown_role'"):
+            self.resolver.get_role_config("unknown_role")
+        with self.assertRaisesRegex(ValueError, "Unknown role: 'unknown_role'"):
+            self.resolver.resolve_role("unknown_role")
+        self.assertFalse(self.resolver.is_role("unknown_role"))
+
+    def test_unknown_provider_raises_value_error(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown provider: 'unknown_provider'"):
+            self.resolver.get_provider_config("unknown_provider")
+
+    def test_custom_config_injection(self) -> None:
+        custom_cfg = {
+            "roles": {
+                "custom_worker": {
+                    "capability_requirements": {
+                        "reasoning_tier": "medium",
+                        "tool_access": "read",
+                        "min_context": 16000,
+                        "local_only": False,
+                    },
+                    "preferred_providers": ["test_prov"],
+                }
+            },
+            "providers": {
+                "test_prov": {
+                    "adapter": "codex_cli",
+                    "model": "gpt-5.6-terra",
+                    "default_reasoning_effort": "medium",
+                }
+            },
+        }
+        custom_resolver = production_invoker.RoleResolver(config=custom_cfg)
+        self.assertTrue(custom_resolver.is_role("custom_worker"))
+        resolved = custom_resolver.resolve_role("custom_worker")
+        self.assertEqual(resolved.role_id, "custom_worker")
+        self.assertEqual(resolved.provider_id, "test_prov")
+        self.assertEqual(resolved.model, "gpt-5.6-terra")
+
+
+class RoleResolutionFallbackTests(unittest.TestCase):
+    """Unit tests for preference fallback resolution along provider chains."""
+
+    def setUp(self) -> None:
+        self.resolver = production_invoker.get_default_role_resolver()
+
+    def test_resolves_primary_provider_by_default(self) -> None:
+        resolved = self.resolver.resolve_role("planner")
+        self.assertEqual(resolved.role_id, "planner")
+        self.assertEqual(resolved.provider_id, "claude_opus_5")
+        self.assertEqual(resolved.model, "claude-opus-5")
+        self.assertEqual(resolved.reasoning_effort, "high")
+
+    def test_falls_back_to_second_provider_when_primary_unavailable(self) -> None:
+        resolved = self.resolver.resolve_role(
+            "planner", unavailable_providers=["claude_opus_5"]
+        )
+        self.assertEqual(resolved.provider_id, "claude_fable_5")
+        self.assertEqual(resolved.model, "claude-fable-5")
+
+    def test_falls_back_to_third_provider_when_first_two_unavailable(self) -> None:
+        resolved = self.resolver.resolve_role(
+            "planner", unavailable_providers=["claude_opus_5", "claude_fable_5"]
+        )
+        self.assertEqual(resolved.provider_id, "codex_sol")
+        self.assertEqual(resolved.model, "gpt-5.6-sol")
+
+    def test_raises_runtime_error_when_all_preferred_providers_exhausted(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, r"No available provider found for role 'planner'"):
+            self.resolver.resolve_role(
+                "planner",
+                unavailable_providers=["claude_opus_5", "claude_fable_5", "codex_sol"],
+            )
+
+    def test_availability_checker_callable(self) -> None:
+        def fake_checker(pid: str) -> bool:
+            return pid == "gemini_flash_high"
+
+        resolved = self.resolver.resolve_role(
+            "builder_heavy", availability_checker=fake_checker
+        )
+        self.assertEqual(resolved.provider_id, "gemini_flash_high")
+        self.assertEqual(resolved.model, "gemini-3.6-flash")
+
+    def test_effort_override_is_preserved_on_resolution(self) -> None:
+        resolved = self.resolver.resolve_role("planner", effort="ultra")
+        self.assertEqual(resolved.reasoning_effort, "ultra")
+
+
+class LocalFailClosedTests(unittest.TestCase):
+    """Unit tests for strict fail-closed enforcement of local_only roles."""
+
+    def setUp(self) -> None:
+        self.resolver = production_invoker.get_default_role_resolver()
+
+    def test_adjudicator_resolves_local_model_when_available(self) -> None:
+        resolved = self.resolver.resolve_role("adjudicator")
+        self.assertEqual(resolved.provider_id, "lm_studio_local")
+        self.assertEqual(resolved.model, "qwen3-coder-30b")
+        self.assertTrue(resolved.capability_requirements.local_only)
+
+    def test_sensitive_executor_resolves_local_model_when_available(self) -> None:
+        resolved = self.resolver.resolve_role("sensitive_executor")
+        self.assertEqual(resolved.provider_id, "lm_studio_local")
+        self.assertEqual(resolved.model, "qwen3-coder-30b")
+        self.assertTrue(resolved.capability_requirements.local_only)
+
+    def test_adjudicator_fails_closed_when_local_offline(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Local provider 'lm_studio_local' for role 'adjudicator' is unavailable; cloud fallback is rejected for local_only roles",
+        ):
+            self.resolver.resolve_role(
+                "adjudicator", unavailable_providers=["lm_studio_local"]
+            )
+
+    def test_sensitive_executor_fails_closed_when_local_offline(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Local provider 'lm_studio_local' for role 'sensitive_executor' is unavailable; cloud fallback is rejected for local_only roles",
+        ):
+            self.resolver.resolve_role(
+                "sensitive_executor", unavailable_providers=["lm_studio_local"]
+            )
+
+    def test_local_only_role_with_failing_checker_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Local provider 'lm_studio_local' for role 'sensitive_executor' is unavailable; cloud fallback is rejected for local_only roles",
+        ):
+            self.resolver.resolve_role(
+                "sensitive_executor", availability_checker=lambda _: False
+            )
+
+
+class BuildWorkerCommandRoleResolutionTests(unittest.TestCase):
+    """Unit tests for build_worker_command with role names and fallback kwargs."""
+
+    def test_builder_heavy_resolves_to_claude_command(self) -> None:
+        command = production_invoker.build_worker_command(
+            "builder_heavy", "high", "Write code"
+        )
+        self.assertEqual(command[0], "claude")
+        self.assertIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-5")
+        self.assertEqual(command[command.index("--effort") + 1], "high")
+        self.assertEqual(command[-1], "[WORKER-MODE: AGY-NESTED-EXEC] Write code")
+
+    def test_builder_light_resolves_to_codex_command(self) -> None:
+        command = production_invoker.build_worker_command(
+            "builder_light", "medium", "Fix typo"
+        )
+        self.assertEqual(command[0:2], ["codex", "exec"])
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-terra")
+        self.assertIn('model_reasoning_effort="medium"', command)
+
+    def test_reviewer_maintainability_resolves_to_agy_command(self) -> None:
+        command = production_invoker.build_worker_command(
+            "reviewer_maintainability", "medium", "Audit DRY"
+        )
+        self.assertEqual(command[0], "agy")
+        self.assertEqual(command[1], "-p")
+        self.assertEqual(command[-1], "[WORKER-MODE: AGY-NESTED-EXEC] Audit DRY")
+
+    def test_adjudicator_resolves_to_local_curl_command(self) -> None:
+        command = production_invoker.build_worker_command(
+            "adjudicator", "high", "Adjudicate"
+        )
+        self.assertEqual(command[0], "curl")
+        self.assertIn(production_invoker.LOCAL_MODEL_CHAT_ENDPOINT, command)
+        payload = json.loads(command[-1])
+        self.assertEqual(payload["model"], "qwen3-coder-30b")
+
+    def test_sensitive_executor_resolves_to_local_curl_command(self) -> None:
+        command = production_invoker.build_worker_command(
+            "sensitive_executor", "high", "Process secret"
+        )
+        self.assertEqual(command[0], "curl")
+        payload = json.loads(command[-1])
+        self.assertEqual(payload["model"], "qwen3-coder-30b")
+
+    def test_build_worker_command_with_unavailable_providers_fallback(self) -> None:
+        command = production_invoker.build_worker_command(
+            "planner",
+            "high",
+            "Plan",
+            unavailable_providers=["claude_opus_5", "claude_fable_5"],
+        )
+        self.assertEqual(command[0:2], ["codex", "exec"])
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-sol")
+
+    def test_build_worker_command_local_only_fail_closed(self) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Local provider 'lm_studio_local' for role 'sensitive_executor' is unavailable; cloud fallback is rejected for local_only roles",
+        ):
+            production_invoker.build_worker_command(
+                "sensitive_executor",
+                "high",
+                "Process secret",
+                unavailable_providers=["lm_studio_local"],
+            )
+
+    def test_build_worker_command_explicit_model_remains_backward_compatible(self) -> None:
+        command = production_invoker.build_worker_command(
+            "claude-sonnet-5", "high", "Implement"
+        )
+        self.assertEqual(command[0], "claude")
+        self.assertEqual(command[command.index("--model") + 1], "claude-sonnet-5")
+
+
+class ModelIdAndFamilyResolutionWithRolesTests(unittest.TestCase):
+    """Unit tests for _resolve_model_id_and_family with abstract roles."""
+
+    def test_resolves_role_to_concrete_model_id_and_family(self) -> None:
+        cases = (
+            ("planner", "claude-opus-5", "claude"),
+            ("builder_heavy", "claude-sonnet-5", "claude"),
+            ("builder_light", "gpt-5.6-terra", "codex"),
+            ("reviewer_architecture", "gpt-5.6-sol", "codex"),
+            ("reviewer_maintainability", "gemini-3.6-flash", "agy"),
+            ("adjudicator", "qwen3-coder-30b", "lm-studio"),
+            ("sensitive_executor", "qwen3-coder-30b", "lm-studio"),
+        )
+        for role_name, expected_model, expected_family in cases:
+            with self.subTest(role=role_name):
+                model_id, family = production_invoker._resolve_model_id_and_family(role_name)
+                self.assertEqual(model_id, expected_model)
+                self.assertEqual(family, expected_family)
+
+
+class JournaledInvokeWorkerRoleTests(unittest.TestCase):
+    """Unit tests for make_journaled_invoke_worker with abstract role names."""
+
+    def test_journal_records_concrete_model_and_cost_for_role_invocation(self) -> None:
+        runner = Mock(
+            return_value=subprocess.CompletedProcess([], 0, "builder output", "")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            journaled = production_invoker.make_journaled_invoke_worker(
+                "task-role-03",
+                root_dir=root,
+                runner=runner,
+                clock=_FakeClock([0.0, 1.0]),
+            )
+            output = journaled("builder_heavy", "high", "Build it")
+            self.assertEqual(output, "builder output")
+
+            records = _read_jsonl(learning_journal.journal_path(root))
+
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record["task_id"], "task-role-03")
+        self.assertEqual(record["model_id"], "claude-sonnet-5")
+        self.assertEqual(record["model_family"], "claude")
+        self.assertTrue(record["success"])
+        self.assertEqual(record["duration_ms"], 1000)
+        self.assertAlmostEqual(record["cost_estimate_usd"], 0.006, places=4)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,10 +4,10 @@
 
 **Blocked by:** 02 — Declarative Role & Provider Schema in routing-config.json
 
-**Status:** ready-for-agent
+**Status:** completed
 
-- [ ] Implement RoleResolver to parse roles and providers from routing-config.json.
-- [ ] Refactor build_worker_command to accept either an explicit model string or an abstract role identifier.
-- [ ] Implement preference fallback when a primary provider is unavailable or over quota.
-- [ ] Enforce strict fail-closed behavior for sensitive_executor when local LM Studio endpoint is offline.
-- [ ] Add comprehensive unit tests in skills/worker-routing/test_production_invoker.py and verify 100% pass.
+- [x] Implement RoleResolver to parse roles and providers from routing-config.json.
+- [x] Refactor build_worker_command to accept either an explicit model string or an abstract role identifier.
+- [x] Implement preference fallback when a primary provider is unavailable or over quota.
+- [x] Enforce strict fail-closed behavior for sensitive_executor when local LM Studio endpoint is offline.
+- [x] Add comprehensive unit tests in skills/worker-routing/test_production_invoker.py and verify 100% pass.

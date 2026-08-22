@@ -99,6 +99,15 @@
         "local_only": true
       },
       "preferred_providers": ["lm_studio_local"]
+    },
+    "sensitive_executor": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "workspace-write",
+        "min_context": 32000,
+        "local_only": true
+      },
+      "preferred_providers": ["lm_studio_local"]
     }
   },
   "providers": {
