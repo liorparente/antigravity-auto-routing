@@ -1,5 +1,13 @@
 # Worker Routing Fallbacks
 
+## 2026-08-22 — macOS Quarantine & File Permissions Block LM Studio Startup (`EPERM test.txt`)
+
+- Mission: Launch LM Studio and start local OpenAI-compatible inference server.
+- Failure: LM Studio GUI failed to start, popping modal `Failed to Start LM Studio. It appears that LM Studio does not have sufficient permissions to run. (Tried to write to /Users/liorparente/.lmstudio/test.txt). Raw Error: EPERM: operation not permitted, open '/Users/liorparente/.lmstudio/test.txt'`.
+- Root Cause: On macOS (Sonoma/Sequoia), downloading/updating LM Studio via Chrome marks `/Applications/LM Studio.app` with `com.apple.quarantine`. Gatekeeper isolation and translocation restrict the app's write access to user dotfiles (`~/.lmstudio`), causing EPERM on startup test file write.
+- Resolution: Ran `chmod -R 755 ~/.lmstudio` and `xattr -cr ~/.lmstudio` (and `xattr -cr "/Applications/LM Studio.app"`). Verified `~/.lmstudio/test.txt` write test succeeded and reopened LM Studio. The local server started cleanly on `http://127.0.0.1:1234` with model `qwen3.8-27b-mlx` loaded in `READY` status.
+- Lesson: When Electron/native macOS apps fail with EPERM on startup file-write checks in home directories, inspect extended attributes (`com.apple.quarantine`, `com.apple.provenance`) and reset directory write permissions.
+
 ## 2026-08-21 — Non-Interactive `agy` Background Task TTY / IPC Socket Lock
 
 - Mission: Dispatch worker task via `agy -p` (Antigravity CLI) as a background task from within the IDE.
