@@ -613,7 +613,7 @@ def extract_review_payload(
 
 def _with_worker_mode_token(prompt: str) -> str:
     """Return ``prompt`` with the nested-worker marker present exactly once."""
-    if prompt.startswith(WORKER_MODE_TOKEN) or prompt.startswith(LEGACY_WORKER_MODE_TOKEN):
+    if prompt.startswith((WORKER_MODE_TOKEN, LEGACY_WORKER_MODE_TOKEN)):
         return prompt
     return f"{WORKER_MODE_TOKEN} {prompt}"
 
@@ -858,7 +858,7 @@ def _extract_local_model_content(model: str, stdout_text: str) -> str:
             f"response; stdout: {stdout_text!r}"
         ) from error
     if not isinstance(content, str):
-        raise RuntimeError(
+        raise TypeError(
             f"Worker {model!r} (local) chat-completions response content was "
             f"not a string; stdout: {stdout_text!r}"
         )

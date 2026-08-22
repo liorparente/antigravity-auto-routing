@@ -9,7 +9,7 @@ import fnmatch
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 
 try:
     from .dialogue_contracts import (
@@ -458,7 +458,7 @@ def _is_word_char(char: str) -> bool:
     return char.isalnum() or char == "_"
 
 
-@lru_cache(maxsize=None)
+@cache
 def _keyword_pattern(keyword: str) -> re.Pattern[str]:
     """Compile a boundary-aware pattern for one keyword.
 
