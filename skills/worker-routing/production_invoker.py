@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import secrets
@@ -467,6 +468,8 @@ def build_worker_command(
     caller-side timeout to inherit, so without its own `--max-time` a stalled
     local server would hang past the caller's own deadline.
     """
+    if timeout <= 0 or not math.isfinite(timeout):
+        raise ValueError("timeout must be a positive finite number")
     routed_prompt = _with_worker_mode_token(prompt)
     _validated_effort(effort)
     normalized_model = MODEL_ALIASES.get(model)
@@ -517,7 +520,7 @@ def build_worker_command(
             "-s",
             "--fail",
             "--max-time",
-            f"{max(0.001, timeout):g}",
+            f"{timeout:.3f}".rstrip("0").rstrip("."),
             "-X",
             "POST",
             LOCAL_MODEL_CHAT_ENDPOINT,

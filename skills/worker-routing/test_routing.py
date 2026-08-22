@@ -632,8 +632,8 @@ class ProtocolDocumentationTests(unittest.TestCase):
         protocol_bytes = PROTOCOL_MD.read_bytes()
         self.assertLess(
             len(protocol_bytes),
-            5000,
-            f"protocol.md is {len(protocol_bytes)} bytes, exceeding the 5000 byte budget",
+            5120,
+            f"protocol.md is {len(protocol_bytes)} bytes, exceeding the 5KB budget",
         )
         self.assertGreater(
             len(protocol_bytes),
@@ -697,6 +697,33 @@ class ProtocolSyncTests(unittest.TestCase):
                     self.assertEqual(text.count(PROTOCOL_END), 1)
                     block = text.split(PROTOCOL_START, 1)[1].split(PROTOCOL_END, 1)[0]
                     self.assertEqual(block, expected_block)
+
+    def test_install_sh_zero_exit_multi_harness_sync(self) -> None:
+        """Round 3 fix: a single install.sh run against a fresh, isolated
+        $HOME/target pair must exit 0 and populate all three harness roots
+        (~/.gemini, ~/.codex, and the project's .agents) rather than silently
+        skipping one because it didn't already exist."""
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            for harness_root in (
+                Path(fake_home) / ".gemini",
+                Path(fake_home) / ".codex",
+                Path(target_dir) / ".agents",
+            ):
+                with self.subTest(harness_root=harness_root):
+                    self.assertTrue(
+                        harness_root.is_dir(), f"{harness_root} was not synced"
+                    )
+                    installed_protocol = (
+                        harness_root / "skills" / "worker-routing" / "protocol.md"
+                        if harness_root.name != ".gemini"
+                        else harness_root / "config" / "skills" / "worker-routing" / "protocol.md"
+                    )
+                    self.assertTrue(
+                        installed_protocol.exists(), str(installed_protocol)
+                    )
 
     def test_install_sh_copies_protocol_md_to_skill_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:

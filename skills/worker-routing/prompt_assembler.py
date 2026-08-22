@@ -28,7 +28,6 @@ __all__ = [
     "CRITIC_VERDICT_APPROVE",
     "CRITIC_VERDICT_REVISE",
     "GOLDEN_RULES",
-    "GOLDEN_RULES_TEXT",
     "MISSION_COPY",
     "SCOPED_MEMORY_BEGIN",
     "SCOPED_MEMORY_END",
@@ -363,15 +362,6 @@ _WORD_RE = re.compile(r"[a-z0-9][a-z0-9_-]{2,}")
 
 def _format_golden_rule(rule: GoldenRule) -> str:
     return f"{rule.id}. [{rule.category}] {rule.title} — {rule.directive}"
-
-
-# The full `GOLDEN_RULES` catalog, pre-formatted as one blank-line-separated
-# text blob. This is what lets a caller with its own free-text memory
-# document (e.g. `learned_state.get_scoped_memory`) fold the catalog into
-# that document's text and score both pools together via one
-# `extract_scoped_memory(memory_content=...)` call, instead of duplicating
-# `_format_golden_rule`'s formatting or losing the catalog outright.
-GOLDEN_RULES_TEXT = "\n\n".join(_format_golden_rule(rule) for rule in GOLDEN_RULES)
 
 
 def _file_basename(path: str) -> str:

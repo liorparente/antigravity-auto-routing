@@ -154,13 +154,6 @@ class GoldenRulesCatalogTests(unittest.TestCase):
                 self.assertTrue(rule.directive)
                 self.assertTrue(rule.category)
 
-    def test_golden_rules_text_contains_every_rule_formatted_once(self) -> None:
-        blocks = prompt_assembler.GOLDEN_RULES_TEXT.split("\n\n")
-        self.assertEqual(len(blocks), 20)
-        for rule in prompt_assembler.GOLDEN_RULES:
-            with self.subTest(rule_id=rule.id):
-                self.assertIn(f"{rule.id}. [{rule.category}] {rule.title}", prompt_assembler.GOLDEN_RULES_TEXT)
-
 
 class GoldenRuleKeywordMatchingTests(unittest.TestCase):
     """Council Review fix: `_score_golden_rules` must match keywords on a
