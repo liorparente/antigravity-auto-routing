@@ -156,6 +156,21 @@ argument at all. A caller cannot make this module damage a live file even by
 misusing it, because there is no argument through which a live file's path
 could arrive.
 
+**Decision 4's one exception — `get_scoped_memory` (spec 0011 ticket 03),
+a read-only convenience wrapper, not a second writer.** It imports
+`prompt_assembler`, which the rest of this decision forbids for any module
+that could *write* through the import. `prompt_assembler` cannot: it has no
+filesystem, subprocess, or network imports of its own (see its own module
+docstring), so importing it gives this module no new way to touch
+`knowledge/`, `routing-config.json`, or anything else Decision 4 protects.
+`get_scoped_memory` itself only reads this store's own `memory` document
+through `read_current` — already this module's own function — and hands
+the text to `prompt_assembler.extract_scoped_memory`, a pure function of
+its arguments. The boundary Decision 4 exists to hold — no path from this
+module to a live repository file it does not own — is unchanged; only the
+"never imports a sibling" clause narrows to "never imports a sibling that
+could write."
+
 **Decision 5 — the target is named from a closed vocabulary
 (`LearnedDocument`); no parameter anywhere accepts a filesystem path.** This
 is what makes ticket 20's "no code path from the learner to the protocol
@@ -229,6 +244,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast, get_args
+
+try:
+    from . import prompt_assembler
+except (ImportError, ValueError):
+    import prompt_assembler  # type: ignore[no-redef]
 
 # The closed vocabulary of documents this store versions. See Decision 5:
 # nothing outside this set is a valid `document`, ever — in particular,
@@ -1468,6 +1488,33 @@ def roll_back(*, root_dir: Path, now: datetime, change_id: str | None = None) ->
     return entry
 
 
+def get_scoped_memory(
+    root_dir: Path,
+    task_description: str,
+    target_files: Sequence[str] | None = None,
+    max_rules: int = 5,
+) -> str:
+    """The top matching institutional-memory rules for one task, scoped
+    against this store's currently adopted `memory` document if one exists.
+
+    Delegates all scoring and formatting to
+    `prompt_assembler.extract_scoped_memory` — see Decision 4's exception
+    above for why importing it does not compromise this module's
+    write-boundary guarantee. `read_current(root_dir).get("memory")` is
+    `None` on a store where `memory` has never been adopted (including an
+    entirely empty store), in which case `extract_scoped_memory` falls back
+    to its own built-in `GOLDEN_RULES` catalog rather than caller-supplied
+    text.
+    """
+    current_memory = read_current(root_dir).get("memory")
+    return prompt_assembler.extract_scoped_memory(
+        task_description,
+        target_files=target_files,
+        max_rules=max_rules,
+        memory_content=current_memory,
+    )
+
+
 __all__ = [
     "LEARNED_DOCUMENTS",
     "LEARNED_STATE_RELATIVE_PATH",
@@ -1477,6 +1524,7 @@ __all__ = [
     "VersionEntry",
     "adopt",
     "current_version_dir",
+    "get_scoped_memory",
     "most_recent_live_adoption",
     "read_current",
     "read_history",

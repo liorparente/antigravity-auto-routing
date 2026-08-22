@@ -42,6 +42,21 @@ def _change(document: learned_state.LearnedDocument, content: str) -> learned_st
     return learned_state.DocumentChange(document=document, content=content)
 
 
+_SCOPED_MEMORY_BEGIN = "=== BEGIN SCOPED INSTITUTIONAL MEMORY ==="
+_SCOPED_MEMORY_END = "=== END SCOPED INSTITUTIONAL MEMORY ==="
+
+
+def _scoped_memory_blocks(scoped: str) -> list[str]:
+    """The individual rule/entry blocks inside a `get_scoped_memory` result.
+
+    Mirrors `test_prompt_assembler._scoped_rule_blocks`: entries are joined
+    with a blank line, so this splits on that separator rather than on raw
+    newlines, which would over-count multi-line entries.
+    """
+    body = scoped[len(_SCOPED_MEMORY_BEGIN) + 1 : -(len(_SCOPED_MEMORY_END) + 1)]
+    return [block for block in body.split("\n\n") if block.strip()]
+
+
 class AdoptTests(unittest.TestCase):
     def test_adopt_on_an_empty_root_creates_v0001_and_read_current_returns_exactly_what_was_adopted(
         self,
@@ -1957,6 +1972,60 @@ class VersionEntryValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             learned_state.VersionEntry(**kwargs)  # type: ignore[arg-type]
         self.assertIn("names no real instant", str(ctx.exception))
+
+
+class GetScopedMemoryTests(unittest.TestCase):
+    """Spec 0011 ticket 03: `get_scoped_memory` on an empty store falls back
+    to `prompt_assembler`'s built-in `GOLDEN_RULES`; on a store with an
+    adopted `memory` document, it scopes against that document's own text.
+    """
+
+    def test_on_an_empty_store_falls_back_to_the_golden_rules_catalog(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            scoped = learned_state.get_scoped_memory(root, "Fix a subprocess zombie leak")
+
+            self.assertTrue(scoped.startswith("=== BEGIN SCOPED INSTITUTIONAL MEMORY ===\n"))
+            blocks = _scoped_memory_blocks(scoped)
+            self.assertGreaterEqual(len(blocks), 3)
+            self.assertLessEqual(len(blocks), 5)
+
+    def test_on_a_store_with_adopted_memory_scopes_against_that_document(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_content = (
+                "Entry about database migration ordering.\n\n"
+                "Entry about router keyword scoring and prompt injection.\n\n"
+                "Entry about unrelated wombats.\n\n"
+                "Entry about unrelated gadgets."
+            )
+            learned_state.adopt(
+                [_change("memory", memory_content)],
+                root_dir=root,
+                now=_NOW,
+            )
+
+            scoped = learned_state.get_scoped_memory(
+                root, "Improve the router keyword scoring", max_rules=3
+            )
+
+            self.assertIn("router keyword scoring", scoped)
+            self.assertEqual(len(_scoped_memory_blocks(scoped)), 3)
+
+    def test_respects_max_rules_and_target_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            scoped = learned_state.get_scoped_memory(
+                root,
+                "Update install.sh for the new module",
+                target_files=["install.sh"],
+                max_rules=4,
+            )
+
+            self.assertEqual(len(_scoped_memory_blocks(scoped)), 4)
+            self.assertIn("[Multi-Harness Sync & Governance]", scoped)
 
 
 if __name__ == "__main__":
