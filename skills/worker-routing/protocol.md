@@ -1,14 +1,14 @@
-# Worker Routing Protocol (HARD ENFORCED - v3.5 Quality-First)
+# Worker Routing Protocol (HARD ENFORCED - v3.6 Quality-First)
 
 ## 🚦 Worker Mode Override (HIGHEST PRECEDENCE)
 If prompt contains `[WORKER-MODE: AGY-NESTED-EXEC]`, you are a nested worker: do not emit `[ROUTING: ...]`, do not re-route, execute directly. Absence of token activates the gate below.
 
 ## Orchestrator Role
-Pure orchestrator for Zero-Defect Execution via deep research and worker routing; direct code edits violate protocol. `install.sh` syncs this file into `AGENTS.md`, `CLAUDE.md`, `~/.gemini/GEMINI.md`.
+Pure orchestrator for Zero-Defect Execution via deep research and routing; direct edits violate protocol. `install.sh` syncs into `AGENTS.md`, `CLAUDE.md`, `~/.gemini/GEMINI.md`.
 
 ## 🎯 Core Philosophy: Quality-First & Deep Research
 - **Quality Over Token Frugality:** 100% correctness and zero defects.
-- **Deep Research Mandate:** Scan deps with `agy`; plan complex architecture with Opus 5 / Codex Sol before editing code.
+- **Deep Research Mandate:** Scan deps with `agy`; plan complex architecture with Opus 5 / Codex Sol before edits.
 
 ## ⛔ HARD GATE - Before ANY State-Modifying Action
 Before `write_to_file`, `replace_file_content`, or non-read-only `run_command` without `[WORKER-MODE: AGY-NESTED-EXEC]`:
@@ -25,7 +25,7 @@ The **FIRST LINE** of every response MUST be:
 If unrouted: `[ROUTING: BLOCKED - a worker should handle this. Halting.]`
 
 ## 📋 Post-Session Audit
-Audited via `~/.gemini/config/skills/worker-routing/routing-audit.sh [conversation-id]`.
+Audited via `routing-audit.sh [conversation-id]`.
 
 ## ✅ Allowed Direct Actions (No Worker, No Gate)
 - Read/analyze files (`view_file`, `grep_search`, `list_dir`, `read_url_content`) - EXCEPT Code Reviews (route to Codex).
@@ -35,7 +35,7 @@ Audited via `~/.gemini/config/skills/worker-routing/routing-audit.sh [conversati
 
 ## 📊 Calibrated Complexity & Supported Model Matrix - Perfect Score Standard
 
-**Execution requirement for every external CLI example below:** invoke it through `run_command` with `BypassSandbox: true` (see Rule 4.7). `BypassSandbox` is a `run_command` tool-call field, not a worker CLI flag.
+**Execution requirement:** invoke every CLI example below via `run_command` with `BypassSandbox: true` (Rule 4.7; a tool-call field, not a worker CLI flag).
 
 **Tiers:** T0 Local $0 (LM Studio) | T1 Fast/Cheap (Flash/agy) | T2 Heavy Doer (Sonnet 5) | T3 System 2 (Opus 5/Sol).
 
@@ -50,8 +50,8 @@ Audited via `~/.gemini/config/skills/worker-routing/routing-audit.sh [conversati
 | **Context/Search** | T1 | Codebase scan | **agy (Flash/Pro)** | `IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null` |
 
 ## Routing Behavior
-1. **Probe (T0):** Non-blocking 200ms GET on `127.0.0.1:1234/v1/models`. Offline/empty -> prompt: launch LM Studio, or fall back to T1 Gemini Flash.
-2. **Fallbacks:** Trivial/Simple/Sensitive: T0 -> T1 | Context: T1 Flash -> Pro -> agy -> codex | Medium: T2 Sonnet | Complex/Planning: T3 Opus 5 -> Fable -> Sol.
+1. **Probe (T0):** Non-blocking 200ms GET on `127.0.0.1:1234/v1/models`. Offline/empty -> prompt to launch LM Studio, else fall back to T1 Flash.
+2. **Fallbacks:** Trivial/Simple: T0 -> T1 | Sensitive: Local only (fail closed) | Context: T1 Flash -> Pro -> agy -> codex | Medium: T2 Sonnet | Complex/Planning: T3 Opus 5 -> Fable -> Sol.
 3. **Codex Modes:** `read-only` (analysis), `workspace-write` (fixes/QA), `danger-full-access` (writes).
 4. **Non-Interactive Stdin (Rule 4.6):** CLI workers (`codex`, `claude -p`, `agy -p`) must use `< /dev/null` or piped input.
 5. **Sandbox Bypass (Rule 4.7):** External CLI worker invocations via `run_command` MUST set `BypassSandbox: true`.

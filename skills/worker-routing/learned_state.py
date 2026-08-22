@@ -1505,13 +1505,26 @@ def get_scoped_memory(
     entirely empty store), in which case `extract_scoped_memory` falls back
     to its own built-in `GOLDEN_RULES` catalog rather than caller-supplied
     text.
+
+    When a `memory` document *has* been adopted, it is not scored on its
+    own — that would let an adopted document that happens to be thin, or
+    off-topic for this particular task, silently displace the foundational
+    catalog entirely. Instead `GOLDEN_RULES_TEXT` is folded in ahead of the
+    adopted text and both are scored together as one candidate pool, so a
+    task that matches a golden rule better than anything in the adopted
+    document still surfaces that rule.
     """
     current_memory = read_current(root_dir).get("memory")
+    memory_content = (
+        f"{prompt_assembler.GOLDEN_RULES_TEXT}\n\n{current_memory}"
+        if current_memory is not None
+        else None
+    )
     return prompt_assembler.extract_scoped_memory(
         task_description,
         target_files=target_files,
         max_rules=max_rules,
-        memory_content=current_memory,
+        memory_content=memory_content,
     )
 
 

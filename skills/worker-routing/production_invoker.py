@@ -447,13 +447,25 @@ def _validated_run_id(run_id: str | None) -> None:
         )
 
 
-def build_worker_command(model: str, effort: str, prompt: str) -> list[str]:
+def build_worker_command(
+    model: str,
+    effort: str,
+    prompt: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> list[str]:
     """Build the documented CLI argv for a routed worker.
 
     Unknown models and unknown effort levels are rejected rather than
     guessed: launching an arbitrary executable, or handing a provider a
     reasoning-effort string it has never heard of, would both violate the
     consultation's fail-closed contract.
+
+    ``timeout`` only affects the `LOCAL_MODELS` `curl` branch, where it
+    becomes `--max-time`: `subprocess`/`asyncio` already enforce ``timeout``
+    on every other provider by killing the CLI process, but `curl` has no
+    caller-side timeout to inherit, so without its own `--max-time` a stalled
+    local server would hang past the caller's own deadline.
     """
     routed_prompt = _with_worker_mode_token(prompt)
     _validated_effort(effort)
@@ -503,6 +515,9 @@ def build_worker_command(model: str, effort: str, prompt: str) -> list[str]:
         return [
             "curl",
             "-s",
+            "--fail",
+            "--max-time",
+            str(int(timeout)),
             "-X",
             "POST",
             LOCAL_MODEL_CHAT_ENDPOINT,
@@ -526,6 +541,34 @@ def _diagnostic_text(value: str | bytes | None) -> str:
     return value
 
 
+def _extract_local_model_content(model: str, stdout_text: str) -> str:
+    """Parse a local LM Studio chat-completions JSON body into its content string.
+
+    `build_worker_command` routes `LOCAL_MODELS` through curl directly
+    against an OpenAI-compatible endpoint, so what a worker returns is the
+    raw chat-completions response body, not prose an extractor can read —
+    this pulls `choices[0].message.content` out of it. Fails closed with a
+    `RuntimeError` on anything else: invalid JSON, a missing `choices` key,
+    an empty `choices` list, or a non-string `content`, since a caller that
+    received a malformed local response has no better fallback than to know
+    it did.
+    """
+    try:
+        payload = json.loads(stdout_text)
+        content = payload["choices"][0]["message"]["content"]
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError) as error:
+        raise RuntimeError(
+            f"Worker {model!r} (local) returned an unparseable chat-completions "
+            f"response; stdout: {stdout_text!r}"
+        ) from error
+    if not isinstance(content, str):
+        raise RuntimeError(
+            f"Worker {model!r} (local) chat-completions response content was "
+            f"not a string; stdout: {stdout_text!r}"
+        )
+    return content
+
+
 def invoke_worker(
     model: str,
     effort: str,
@@ -540,7 +583,8 @@ def invoke_worker(
     receives a merged environment that marks the child as nested execution,
     an explicit EOF on stdin, and captured text diagnostics.
     """
-    command = build_worker_command(model, effort, prompt)
+    command = build_worker_command(model, effort, prompt, timeout=timeout)
+    normalized_model = MODEL_ALIASES.get(model)
     environment = {**os.environ, "IN_WORKER_ROUTING": "true"}
 
     try:
@@ -571,7 +615,10 @@ def invoke_worker(
             f"stderr: {_diagnostic_text(result.stderr)!r}"
         )
 
-    return _diagnostic_text(result.stdout)
+    stdout_text = _diagnostic_text(result.stdout)
+    if normalized_model in LOCAL_MODELS:
+        return _extract_local_model_content(model, stdout_text)
+    return stdout_text
 
 
 async def invoke_worker_async(
@@ -612,7 +659,7 @@ async def invoke_worker_async(
     no caller can observe a result without the process lifecycle having
     already been closed out — the guarantee spec 0005 asks for.
     """
-    command = build_worker_command(model, effort, prompt)
+    command = build_worker_command(model, effort, prompt, timeout=timeout)
     model_id, _ = _resolve_model_id_and_family(model)
     environment = {**os.environ, "IN_WORKER_ROUTING": "true"}
 
@@ -673,6 +720,12 @@ async def invoke_worker_async(
                 f"stderr: {stderr_text!r}"
             ),
         )
+
+    if model_id in LOCAL_MODELS:
+        try:
+            stdout_text = _extract_local_model_content(model, stdout_text)
+        except RuntimeError as error:
+            return failed_execution_result(str(error))
 
     return WorkerExecutionResult(
         raw_output=stdout_text,

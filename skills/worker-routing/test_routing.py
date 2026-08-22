@@ -632,14 +632,29 @@ class ProtocolDocumentationTests(unittest.TestCase):
         protocol_bytes = PROTOCOL_MD.read_bytes()
         self.assertLess(
             len(protocol_bytes),
-            5120,
-            f"protocol.md is {len(protocol_bytes)} bytes, exceeding the 5KB (5120 bytes) budget",
+            5000,
+            f"protocol.md is {len(protocol_bytes)} bytes, exceeding the 5000 byte budget",
         )
         self.assertGreater(
             len(protocol_bytes),
             2000,
             "protocol.md is unexpectedly truncated",
         )
+
+    def test_sensitive_fallback_fails_closed_without_a_cloud_hop(self) -> None:
+        """Council Review fix: Sensitive must never share a T0->T1 fallback
+
+        with Trivial/Simple — a shared fallback line implied a sensitive
+        task could hop to a cloud worker (T1) the same way a trivial one
+        does, contradicting "Sensitive: ... Fail closed if offline" in the
+        model matrix above it.
+        """
+        protocol_text = PROTOCOL_MD.read_text()
+        fallback_line = next(
+            line for line in protocol_text.splitlines() if "**Fallbacks:**" in line
+        )
+        self.assertIn("Sensitive: Local only (fail closed)", fallback_line)
+        self.assertNotIn("Trivial/Simple/Sensitive", fallback_line)
 
 
 
@@ -8781,6 +8796,29 @@ class WorkerRoutingPackageContractTests(unittest.TestCase):
                     "gpt-5.6-sol",
                 )
                 self.assertEqual(package.classify_complexity(" SIMPLE "), "simple")
+
+                production_invoker = importlib.import_module(
+                    "worker_routing.production_invoker"
+                )
+                self.assertIs(
+                    package.LocalModelCapabilities,
+                    production_invoker.LocalModelCapabilities,
+                )
+                self.assertIs(
+                    package.probe_local_model_availability,
+                    production_invoker.probe_local_model_availability,
+                )
+                self.assertIs(
+                    package.prompt_local_fallback_decision,
+                    production_invoker.prompt_local_fallback_decision,
+                )
+                for symbol in (
+                    "LocalModelCapabilities",
+                    "probe_local_model_availability",
+                    "prompt_local_fallback_decision",
+                ):
+                    with self.subTest(symbol=symbol):
+                        self.assertIn(symbol, package.__all__)
             finally:
                 sys.path.remove(str(package_root))
                 for name in list(sys.modules):

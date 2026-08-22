@@ -154,6 +154,47 @@ class GoldenRulesCatalogTests(unittest.TestCase):
                 self.assertTrue(rule.directive)
                 self.assertTrue(rule.category)
 
+    def test_golden_rules_text_contains_every_rule_formatted_once(self) -> None:
+        blocks = prompt_assembler.GOLDEN_RULES_TEXT.split("\n\n")
+        self.assertEqual(len(blocks), 20)
+        for rule in prompt_assembler.GOLDEN_RULES:
+            with self.subTest(rule_id=rule.id):
+                self.assertIn(f"{rule.id}. [{rule.category}] {rule.title}", prompt_assembler.GOLDEN_RULES_TEXT)
+
+
+class GoldenRuleKeywordMatchingTests(unittest.TestCase):
+    """Council Review fix: `_score_golden_rules` must match keywords on a
+
+    word boundary, not as a bare substring — a bare `keyword in task_lower`
+    check let short keywords like "ci" (rule 7) or "-a" (rule 18) fire
+    inside unrelated words ("specification", "decision", "sub-agent").
+    """
+
+    @staticmethod
+    def _rule_score(rule_id: int, task: str, files: tuple[str, ...] = ()) -> int:
+        scored = prompt_assembler._score_golden_rules(task.lower(), files)
+        return next(score for score, scored_id, _ in scored if scored_id == rule_id)
+
+    def test_short_keyword_does_not_match_inside_an_unrelated_word(self) -> None:
+        # Rule 7's "ci" keyword must not fire on "specification" or
+        # "decision" — both contain "ci" as a substring but not as a word.
+        self.assertEqual(
+            self._rule_score(7, "Update the specification and finalize the decision"), 0
+        )
+
+    def test_short_keyword_matches_as_a_standalone_word(self) -> None:
+        self.assertGreaterEqual(self._rule_score(7, "Run this job in CI please"), 1)
+
+    def test_hyphen_leading_keyword_does_not_match_inside_a_hyphenated_word(self) -> None:
+        # Rule 18's "-a" keyword must not fire on "sub-agent", which
+        # contains the literal substring "-a" but is not the CLI flag.
+        self.assertEqual(self._rule_score(18, "Delegate this to a sub-agent"), 0)
+
+    def test_hyphen_leading_keyword_matches_as_a_standalone_flag(self) -> None:
+        self.assertGreaterEqual(
+            self._rule_score(18, "Never git commit -a on a shared working tree"), 1
+        )
+
 
 def _scoped_rule_blocks(scoped: str) -> list[str]:
     """The individual rule/entry blocks `extract_scoped_memory` selected.

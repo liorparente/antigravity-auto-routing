@@ -116,6 +116,9 @@ evaluate_proposal_gate = _gate.evaluate_proposal
 AcceptanceGateResult = _gate.GateDecision
 
 invoke_worker = _invoker.invoke_worker
+LocalModelCapabilities = _invoker.LocalModelCapabilities
+probe_local_model_availability = _invoker.probe_local_model_availability
+prompt_local_fallback_decision = _invoker.prompt_local_fallback_decision
 
 
 def resolve_model_name(model: str) -> str:
@@ -153,7 +156,8 @@ __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tu
     "DebateState", "DebateTransport", "DegradationLadderState", "DegradationRung", "DialogueQualityRecord",
     "DialogueRound", "DocumentChange", "DocumentDelta", "ExecutiveDialogueReport", "GOLDEN_RULES",
     "GoldenRule", "InvokeWorker",
-    "IsFamilyReachable", "JournalRead", "LearnedState", "LearningJournal", "MissionCopy", "Occasion",
+    "IsFamilyReachable", "JournalRead", "LearnedState", "LearningJournal", "LocalModelCapabilities",
+    "MissionCopy", "Occasion",
     "OutcomeRecord", "PrivacyMode", "RecurringFailureNotifier", "ReplayBenchmarkRecord", "ReviewCouncil",
     "ReviewOutcome", "ReviewRequest", "RosterAssignment", "RosterResolution", "RosterResolutionError",
     "RosterRole", "RosterTopology", "RoundTurnResult", "SecurityVeto", "SecurityVetoHandler", "TaskIdentity",
@@ -162,6 +166,7 @@ __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tu
     "classify_complexity", "classify_model_family", "current_version_dir",
     "dispatch_post_mortem_consultation", "escalate_routing_effort", "evaluate_proposal_gate",
     "extract_issue_codes", "extract_scoped_memory", "get_scoped_memory", "invoke_worker", "journal_path",
+    "probe_local_model_availability", "prompt_local_fallback_decision",
     "read_current", "read_history", "read_journal",
     "record_plan_outcome", "record_review_verdict", "record_stalemate_resolution", "record_test_result",
     "reduce_outcomes_by_key", "reduce_outcomes_positionally",

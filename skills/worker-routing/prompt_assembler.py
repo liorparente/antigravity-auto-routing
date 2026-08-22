@@ -9,6 +9,7 @@ import fnmatch
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 
 try:
     from .dialogue_contracts import (
@@ -27,6 +28,7 @@ __all__ = [
     "CRITIC_VERDICT_APPROVE",
     "CRITIC_VERDICT_REVISE",
     "GOLDEN_RULES",
+    "GOLDEN_RULES_TEXT",
     "MISSION_COPY",
     "SCOPED_MEMORY_BEGIN",
     "SCOPED_MEMORY_END",
@@ -362,6 +364,15 @@ def _format_golden_rule(rule: GoldenRule) -> str:
     return f"{rule.id}. [{rule.category}] {rule.title} — {rule.directive}"
 
 
+# The full `GOLDEN_RULES` catalog, pre-formatted as one blank-line-separated
+# text blob. This is what lets a caller with its own free-text memory
+# document (e.g. `learned_state.get_scoped_memory`) fold the catalog into
+# that document's text and score both pools together via one
+# `extract_scoped_memory(memory_content=...)` call, instead of duplicating
+# `_format_golden_rule`'s formatting or losing the catalog outright.
+GOLDEN_RULES_TEXT = "\n\n".join(_format_golden_rule(rule) for rule in GOLDEN_RULES)
+
+
 def _file_basename(path: str) -> str:
     return path.replace("\\", "/").rsplit("/", 1)[-1]
 
@@ -378,12 +389,38 @@ def _matches_any_file(patterns: tuple[str, ...], files: tuple[str, ...]) -> bool
     return False
 
 
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+@lru_cache(maxsize=None)
+def _keyword_pattern(keyword: str) -> re.Pattern[str]:
+    """Compile a boundary-aware pattern for one keyword.
+
+    Plain `\\b` breaks for keywords like "-a" whose edge character is
+    already non-word (`\\b` needs a word char on one side, and "-" isn't
+    one) — such a keyword would then match nowhere, including its intended
+    standalone use as a CLI flag. Edges that start/end on a word character
+    use the normal word boundary; edges that don't fall back to "not
+    adjacent to another non-space character", so "-a" matches the flag in
+    "git commit -a" but not the "-a" inside "sub-agent".
+    """
+    escaped = re.escape(keyword)
+    left = r"(?<![A-Za-z0-9_])" if _is_word_char(keyword[0]) else r"(?<!\S)"
+    right = r"(?![A-Za-z0-9_])" if _is_word_char(keyword[-1]) else r"(?!\S)"
+    return re.compile(left + escaped + right)
+
+
 def _score_golden_rules(
     task_lower: str, files: tuple[str, ...]
 ) -> list[tuple[int, int, str]]:
     scored: list[tuple[int, int, str]] = []
     for rule in GOLDEN_RULES:
-        score = sum(1 for keyword in rule.keywords if keyword in task_lower)
+        score = sum(
+            1
+            for keyword in rule.keywords
+            if _keyword_pattern(keyword).search(task_lower)
+        )
         if _matches_any_file(rule.file_patterns, files):
             score += 1
         scored.append((score, rule.id, _format_golden_rule(rule)))
@@ -447,8 +484,10 @@ def extract_scoped_memory(
     """Return the top matching institutional-memory rules for one task.
 
     Scores each candidate rule by counting how many of its keywords appear
-    in `task_description` (case-insensitive substring match) plus one point
-    if any `target_files` entry matches one of its file patterns
+    in `task_description` (case-insensitive, word-boundary match — not a
+    bare substring match, so short keywords like "ci" don't fire inside
+    "specification") plus one point if any `target_files` entry matches
+    one of its file patterns
     (`fnmatch`, checked against both the full path and its basename).
     Candidates are ranked by `(-score, order)` — highest score first,
     lowest id/index breaking ties — so the result is deterministic.

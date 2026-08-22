@@ -2013,6 +2013,40 @@ class GetScopedMemoryTests(unittest.TestCase):
             self.assertIn("router keyword scoring", scoped)
             self.assertEqual(len(_scoped_memory_blocks(scoped)), 3)
 
+    def test_adopted_memory_enriches_rather_than_discards_the_golden_rules_catalog(
+        self,
+    ) -> None:
+        """Council Review fix: an adopted `memory` document used to fully
+
+        displace `GOLDEN_RULES` — a task that matched a golden rule far
+        better than anything in the adopted document would still lose that
+        rule, because `extract_scoped_memory` was scoring the adopted text
+        alone. Both pools must be scored together now.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory_content = (
+                "Entry about database migration ordering.\n\n"
+                "Entry about unrelated wombats.\n\n"
+                "Entry about unrelated gadgets."
+            )
+            learned_state.adopt(
+                [_change("memory", memory_content)],
+                root_dir=root,
+                now=_NOW,
+            )
+
+            scoped = learned_state.get_scoped_memory(
+                root,
+                "Need to await proc.wait() after proc.kill() to avoid a zombie subprocess",
+                max_rules=3,
+            )
+
+            # None of the adopted entries mention proc.wait/proc.kill/zombie
+            # at all, so the only way rule 9 can appear here is if the base
+            # catalog was folded in alongside the adopted document.
+            self.assertIn("9. [Subprocess & CLI Process Safety]", scoped)
+
     def test_respects_max_rules_and_target_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -335,6 +335,28 @@ class BuildWorkerCommandTests(unittest.TestCase):
                     [{"role": "user", "content": f"{production_invoker.WORKER_MODE_TOKEN} ping"}],
                 )
 
+    def test_local_model_curl_fails_closed_on_http_errors_and_bounds_its_own_timeout(self) -> None:
+        # `curl -s` alone swallows a non-2xx response as a "successful" empty
+        # body, and has no caller-side timeout of its own the way
+        # `subprocess`/`asyncio` enforce for every other provider — without
+        # `--fail`/`--max-time` a stalled or erroring local server would
+        # neither raise nor time out.
+        command = production_invoker.build_worker_command(
+            "local-lmstudio", "low", "ping", timeout=42.9
+        )
+
+        self.assertIn("--fail", command)
+        self.assertIn("--max-time", command)
+        self.assertEqual(command[command.index("--max-time") + 1], "42")
+
+    def test_local_model_curl_max_time_defaults_to_the_module_default_timeout(self) -> None:
+        command = production_invoker.build_worker_command("local-lmstudio", "low", "ping")
+
+        self.assertEqual(
+            command[command.index("--max-time") + 1],
+            str(int(production_invoker.DEFAULT_TIMEOUT_SECONDS)),
+        )
+
 
 class ProbeLocalModelAvailabilityTests(unittest.TestCase):
     """`probe_local_model_availability` is the active, sub-second discovery
@@ -702,6 +724,73 @@ class InvokeWorkerTests(unittest.TestCase):
             production_invoker.invoke_worker("agy", "high", "Research", runner=runner)
 
 
+class InvokeWorkerLocalModelParsingTests(unittest.TestCase):
+    """`LOCAL_MODELS` are routed through raw `curl`, so `invoke_worker` has
+
+    to unwrap the OpenAI-compatible chat-completions JSON body itself
+    rather than returning it as-is — otherwise a caller expecting worker
+    prose gets a raw JSON envelope instead.
+    """
+
+    def test_success_extracts_the_message_content(self) -> None:
+        runner = Mock(
+            return_value=subprocess.CompletedProcess(
+                [],
+                0,
+                json.dumps(
+                    {"choices": [{"message": {"content": "the actual reply"}}]}
+                ),
+                "",
+            )
+        )
+
+        output = production_invoker.invoke_worker(
+            "local-lmstudio", "low", "ping", runner=runner
+        )
+
+        self.assertEqual(output, "the actual reply")
+
+    def test_invalid_json_raises(self) -> None:
+        runner = Mock(
+            return_value=subprocess.CompletedProcess([], 0, "not json at all", "")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unparseable"):
+            production_invoker.invoke_worker("local-lmstudio", "low", "ping", runner=runner)
+
+    def test_missing_choices_key_raises(self) -> None:
+        runner = Mock(
+            return_value=subprocess.CompletedProcess([], 0, json.dumps({"other": "shape"}), "")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unparseable"):
+            production_invoker.invoke_worker("local-lmstudio", "low", "ping", runner=runner)
+
+    def test_empty_choices_list_raises(self) -> None:
+        runner = Mock(
+            return_value=subprocess.CompletedProcess([], 0, json.dumps({"choices": []}), "")
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "unparseable"):
+            production_invoker.invoke_worker("local-lmstudio", "low", "ping", runner=runner)
+
+    def test_non_local_model_stdout_is_returned_unparsed(self) -> None:
+        # A non-`LOCAL_MODELS` worker's stdout is prose, not a
+        # chat-completions envelope — it must pass through untouched even
+        # when it happens to look like JSON.
+        runner = Mock(
+            return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({"choices": [{"message": {"content": "x"}}]}), ""
+            )
+        )
+
+        output = production_invoker.invoke_worker(
+            "claude-sonnet-5", "high", "Implement it", runner=runner
+        )
+
+        self.assertEqual(output, json.dumps({"choices": [{"message": {"content": "x"}}]}))
+
+
 class _FakeAsyncProcess:
     """A fake standing in for the `AsyncWorkerProcess` slice of
     `asyncio.subprocess.Process` this module depends on.
@@ -843,6 +932,39 @@ class InvokeWorkerAsyncTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(runner.calls, [])
+
+    async def test_local_model_success_extracts_the_message_content(self) -> None:
+        process = _FakeAsyncProcess(
+            stdout=json.dumps(
+                {"choices": [{"message": {"content": "the actual reply"}}]}
+            ).encode("utf-8")
+        )
+        runner = _RecordingAsyncRunner(process)
+
+        result = await production_invoker.invoke_worker_async(
+            "local-lmstudio", "low", "ping", runner=runner
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.raw_output, "the actual reply")
+        # Downstream parsing (`extract_review_payload`) must see the pure
+        # content too, not the JSON envelope it was pulled from.
+        assert result.parsed_payload is not None
+
+    async def test_local_model_malformed_response_returns_a_failed_result_not_a_raise(
+        self,
+    ) -> None:
+        process = _FakeAsyncProcess(stdout=b"not json at all")
+        runner = _RecordingAsyncRunner(process)
+
+        result = await production_invoker.invoke_worker_async(
+            "local-lmstudio", "low", "ping", runner=runner
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.raw_output, "")
+        assert result.error is not None
+        self.assertIn("unparseable", result.error)
 
     async def test_process_lookup_error_on_kill_is_handled_gracefully(self) -> None:
         """A process that exits on its own right at the timeout boundary can
