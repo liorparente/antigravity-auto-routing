@@ -41,8 +41,8 @@ Audited via `~/.gemini/config/skills/worker-routing/routing-audit.sh [conversati
 
 | Complexity | Tier | Signs | Model | Effort & Command |
 |---|---|---|---|---|
-| **Trivial** | T1 | Single file | **Flash Low / Luna** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null` |
-| **Simple** | T1 | 1-2 files | **Flash Med / Terra** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null` |
+| **Trivial** | T0/T1 | Single file | **LM Studio / Flash Low / Luna** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-luna -c model_reasoning_effort="low" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null` |
+| **Simple** | T0/T1 | 1-2 files | **LM Studio / Flash Med / Terra** | `IN_WORKER_ROUTING=true codex exec --model gpt-5.6-terra -c model_reasoning_effort="medium" -s workspace-write "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null` |
 | **Medium** | T2 | 3-4 files | **Sonnet 5 / Flash High** | `IN_WORKER_ROUTING=true claude -p --no-session-persistence --model claude-sonnet-5 --effort high --allow-dangerously-skip-permissions --permission-mode bypassPermissions "[WORKER-MODE: AGY-NESTED-EXEC] ..." < /dev/null` |
 | **Complex** | T3 | 5+ files | **Opus 5 / Codex Sol** | Deep Research (`agy`) + System 2 Debate (up to 3 rounds) |
 | **Sensitive** | T0 | PII/secrets/keys | **LM Studio (Local)** | Local validation only. Fail closed if offline. |

@@ -397,7 +397,7 @@ class ProbeLocalModelAvailabilityTests(unittest.TestCase):
 
         assert result is not None
         self.assertEqual(result.family, "deepseek")
-        self.assertEqual(result.parameter_class, "unknown")
+        self.assertEqual(result.parameter_class, "R1")
 
     def test_empty_model_list_returns_none(self) -> None:
         urlopen_fn = Mock(return_value=self._fake_response({"data": []}))

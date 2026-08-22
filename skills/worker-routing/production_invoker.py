@@ -27,7 +27,7 @@ import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol, TextIO, cast
 from urllib.error import URLError
 from urllib.request import urlopen
 
@@ -38,6 +38,7 @@ else:
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 DEFAULT_TIMEOUT_SECONDS = 300.0
+DEFAULT_FALLBACK_MODEL = "gemini-3.7-flash"
 
 # The routing protocol uses human-readable names, while the worker CLIs need
 # stable model identifiers. Keep both the documented labels and already
@@ -161,11 +162,20 @@ def _infer_local_model_family(model_id: str) -> str:
 
 
 def _infer_local_parameter_class(model_id: str) -> str:
-    """Extract a parameter size like "27B" from a local model id, or "unknown"."""
+    """Extract a parameter size like "27B" from a local model id, or "unknown".
+
+    DeepSeek R1 distills are commonly named by their base model's parameter
+    count (e.g. "deepseek-r1-distill-qwen-32b"), but a bare "deepseek-r1"
+    advertises no size at all. That id is still worth classifying as "R1"
+    rather than falling through to "unknown", since the family is known even
+    when the parameter count is not.
+    """
     match = _LOCAL_PARAMETER_CLASS_RE.search(model_id)
-    if match is None:
-        return "unknown"
-    return f"{match.group(1)}B"
+    if match is not None:
+        return f"{match.group(1)}B"
+    if "r1" in model_id.lower():
+        return "R1"
+    return "unknown"
 
 
 def probe_local_model_availability(
@@ -212,14 +222,15 @@ def probe_local_model_availability(
 
 def prompt_local_fallback_decision(
     prompt_fn: Callable[[str], str] = input,
-    stream: Any = None,
+    stream: TextIO | None = None,
 ) -> str:
     """Ask the user how to proceed when `probe_local_model_availability` fails.
 
     Returns ``"launch-lmstudio"`` for an explicit "1", and
-    ``"gemini-3.7-flash"`` for "2" or anything else (including empty input) —
-    an unrecognized answer degrades to the cloud fallback rather than
-    blocking, since a local-only tier can't be relied on to stay reachable.
+    ``DEFAULT_FALLBACK_MODEL`` for "2" or anything else (including empty
+    input) — an unrecognized answer degrades to the cloud fallback rather
+    than blocking, since a local-only tier can't be relied on to stay
+    reachable.
     """
     message = (
         "LM Studio is offline. [1] Launch local model "
@@ -228,7 +239,7 @@ def prompt_local_fallback_decision(
     if stream is not None:
         print(message, file=stream)
     response = prompt_fn(message)
-    return "launch-lmstudio" if response.strip() == "1" else "gemini-3.7-flash"
+    return "launch-lmstudio" if response.strip() == "1" else DEFAULT_FALLBACK_MODEL
 
 
 async def _kill_and_reap_process(proc: AsyncWorkerProcess) -> None:
@@ -998,6 +1009,7 @@ def make_journaled_invoke_worker(
 
 
 __all__ = [
+    "DEFAULT_FALLBACK_MODEL",
     "DEFAULT_TIMEOUT_SECONDS",
     "LOCAL_MODELS",
     "LOCAL_MODEL_CHAT_ENDPOINT",
