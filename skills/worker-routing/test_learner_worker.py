@@ -444,6 +444,42 @@ class SessionEndLightTests(unittest.TestCase):
             self.assertEqual(journal.dialogues[0].task.task_id, "task-dialogue")
             self.assertEqual(journal.dialogues[0].occasion, "ambiguity")
 
+    def test_prompt_reduces_duplicate_outcomes_positionally(self) -> None:
+        """A task re-tested within the same session writes a second
+        `OutcomeRecord` under the same `(task_id, ground_truth)` pair. The
+        rendered prompt must count and list the reduced, authoritative
+        records — one per pair, last verdict wins — not the raw journal rows.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_outcome(root, task_id="task-dup", timestamp="2026-08-15T10:00:00Z")
+            _seed_outcome(
+                root,
+                task_id="task-dup",
+                timestamp="2026-08-15T11:00:00Z",
+            )
+            error = append_journal_record(
+                OutcomeRecord(
+                    task=TaskLabel.for_task("task-dup"),
+                    ground_truth="tests",
+                    verdict="fail",
+                    timestamp="2026-08-15T11:30:00Z",
+                ),
+                root_dir=root,
+            )
+            assert error is None, error
+            _seed_outcome(root, task_id="task-other", timestamp="2026-08-15T09:00:00Z")
+            worker = _RecordingWorker(_json_reply({"memory_lessons": []}))
+
+            _run_light_capturing_render_args(worker, root)
+
+            self.assertEqual(len(worker.calls), 1)
+            _model, _effort, prompt = worker.calls[0]
+            self.assertIn("outcomes: 2", prompt)
+            self.assertIn("task=task-dup ground_truth=tests verdict=fail", prompt)
+            self.assertNotIn("task=task-dup ground_truth=tests verdict=pass", prompt)
+            self.assertIn("task=task-other ground_truth=tests verdict=pass", prompt)
+
     def test_run_id_filter_excludes_other_runs_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -984,6 +1020,37 @@ class WeeklyDeepTests(unittest.TestCase):
             self.assertEqual(windowed.compliance[0].session_id, "s-in-window")
             self.assertEqual(len(windowed.replay_benchmarks), 1)
             self.assertEqual(windowed.replay_benchmarks[0].task_set, "bench-in")
+
+    def test_prompt_reduces_duplicate_outcomes_positionally(self) -> None:
+        """Same reduction contract as the light pass's own
+        `test_prompt_reduces_duplicate_outcomes_positionally`, applied to the
+        windowed outcomes the weekly deep prompt renders.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_outcome(root, task_id="task-dup", timestamp=_IN_WINDOW_TS)
+            error = append_journal_record(
+                OutcomeRecord(
+                    task=TaskLabel.for_task("task-dup"),
+                    ground_truth="tests",
+                    verdict="fail",
+                    timestamp="2026-08-11T09:00:00Z",
+                ),
+                root_dir=root,
+            )
+            assert error is None, error
+            _seed_outcome(root, task_id="task-other", timestamp="2026-08-12T09:00:00Z")
+            worker = _RecordingWorker(_json_reply({}))
+            runner, _ = _counting_runner(0.95)
+
+            _run_weekly_capturing_render_args(worker, root, runner)
+
+            self.assertEqual(len(worker.calls), 1)
+            _model, _effort, prompt = worker.calls[0]
+            self.assertIn("outcomes this window: 2", prompt)
+            self.assertIn("task=task-dup ground_truth=tests verdict=fail", prompt)
+            self.assertNotIn("task=task-dup ground_truth=tests verdict=pass", prompt)
+            self.assertIn("task=task-other ground_truth=tests verdict=pass", prompt)
 
     def test_weekly_deep_forwards_config_trials_and_threshold_to_the_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

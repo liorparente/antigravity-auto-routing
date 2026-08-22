@@ -81,6 +81,7 @@ if __package__:
     from . import (
         acceptance_gate,
         learning_journal,
+        learning_outcomes,
         learning_report,
         learning_scoreboard,
         risk_tiered_application,
@@ -89,6 +90,7 @@ if __package__:
 else:
     import acceptance_gate  # type: ignore[no-redef]
     import learning_journal  # type: ignore[no-redef]
+    import learning_outcomes  # type: ignore[no-redef]
     import learning_report  # type: ignore[no-redef]
     import learning_scoreboard  # type: ignore[no-redef]
     import risk_tiered_application  # type: ignore[no-redef]
@@ -496,8 +498,9 @@ def _render_session_light_prompt(
         )
     lines.append("")
 
-    lines.append(f"outcomes: {len(journal.outcomes)}")
-    for outcome_record in journal.outcomes:
+    reduced_outcomes = learning_outcomes.reduce_outcomes_positionally(journal.outcomes)
+    lines.append(f"outcomes: {len(reduced_outcomes)}")
+    for outcome_record in reduced_outcomes:
         lines.append(
             f"- task={outcome_record.task.task_id} ground_truth={outcome_record.ground_truth} "
             f"verdict={outcome_record.verdict}"
@@ -649,8 +652,9 @@ def _render_weekly_deep_prompt(
         )
     lines.append("")
 
-    lines.append(f"outcomes this window: {len(journal.outcomes)}")
-    for outcome_record in journal.outcomes:
+    reduced_outcomes = learning_outcomes.reduce_outcomes_positionally(journal.outcomes)
+    lines.append(f"outcomes this window: {len(reduced_outcomes)}")
+    for outcome_record in reduced_outcomes:
         lines.append(
             f"- task={outcome_record.task.task_id} ground_truth={outcome_record.ground_truth} "
             f"verdict={outcome_record.verdict}"
