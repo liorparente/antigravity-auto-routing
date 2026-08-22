@@ -692,3 +692,31 @@
   at. When the real invariant is "everything here must appear there", assert it directly and in both
   directions — and count the lists: this repo has four, and a fix that guards one says nothing about
   the other three.
+
+## 2026-08-22 — Protocol Slimming Accidentally Authorized Cloud Fallback for Sensitive Tasks
+
+- Mission: compact `protocol.md` from 22KB to <5KB while preserving all governance invariants (Spec 0011 Ticket 01).
+- Issue: the compacted Fallbacks summary collapsed `Trivial/Simple/Sensitive` into a single `T0 -> T1` rule. This contradicted the model matrix ("Sensitive: Fail closed if offline") and authorized sensitive tasks carrying PII, auth keys, or private tokens to fall back to cloud Gemini Flash.
+- Detection: caught during the multi-agent Council Review (Claude Opus 5) by comparing the slimmed protocol text against the pre-slimming rules and Spec 0011 User Story 11.
+- Root Cause: prose compaction grouped Tier-0 tiers without distinguishing between tiers that allow cloud hops (Trivial/Simple) and tiers that strictly fail closed (Sensitive).
+- Resolution: updated `protocol.md`'s Fallback rule to explicitly separate `Sensitive: Local only (fail closed)` from `Trivial/Simple: T0 -> T1`, and added regression unit test `test_sensitive_fallback_fails_closed_without_a_cloud_hop` in `test_routing.py`.
+- Lesson: when compacting security or routing policies, never merge fail-closed tiers with fail-open/fallback tiers into one shared rule line. Always assert policy rules with negative test assertions that explicitly verify forbidden transitions are absent.
+
+## 2026-08-22 — Substring Matching on Short/Hyphenated Keywords Broke Scoped Memory Retrieval Precision
+
+- Mission: score and retrieve 3–5 high-signal Golden Rules in `prompt_assembler.py` based on task context.
+- Issue: bare substring check (`keyword in task_lower`) caused short keywords (like `"ci"`) to fire inside common words (`"specification"`, `"decision"`), and symbol-leading flags (like `"-a"`) to fire inside hyphenated terms (`"sub-agent"`), filling the 3–5 slot window with irrelevant rules.
+- Detection: multi-agent review reproduction demonstrated that a prompt mentioning "specification decision" ranked Rule 7 (CI isolation) and Rule 17 (MANAGED_FILES) at the very top.
+- Root Cause: natural language tasks contain technical fragments as substrings inside everyday English vocabulary.
+- Resolution: implemented regex word-boundary matching (`\b`) with dedicated symbol/flag edge handling in `prompt_assembler._score_golden_rules`, backed by unit tests in `test_prompt_assembler.py`.
+- Lesson: never use raw substring `in` checks for keyword scoring when keyword length is short (<=3 chars) or contains punctuation. Use tokenization or boundary-aware regex to prevent semantic false-positive displacement.
+
+## 2026-08-22 — Curl Timeout Formatting Truncated Sub-Second Values to 0 and Disabled Limits
+
+- Mission: invoke local LM Studio models via curl command templates with configurable timeouts.
+- Issue: formatting timeouts via `str(int(timeout))` turned sub-second values (e.g. `0.2s`) into `"0"`, and `curl --max-time 0` disables curl timeout enforcement completely, allowing processes to hang. Formatting with `%g` rendered large numbers in scientific notation (e.g. `1e+06`), which curl rejects.
+- Detection: caught during Spec Review when checking timeout handling against sub-second capability probing.
+- Root Cause: assuming timeout is always an integer >= 1 second without checking decimal string representation requirements for CLI tools.
+- Resolution: updated `build_worker_command` to validate positive finite timeouts and format via `f"{timeout:.3f}".rstrip("0").rstrip(".")` (e.g. `0.2` and `10000`), with regression unit tests.
+- Lesson: when formatting CLI arguments for external binaries (like `curl`), format floats explicitly without scientific notation and ensure sub-second values never truncate to zero.
+
