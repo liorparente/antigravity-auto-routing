@@ -353,6 +353,16 @@ def reset_default_role_resolver() -> None:
     _DEFAULT_ROLE_RESOLVER = None
 
 
+# Maps a provider's `adapter` string (routing-config.json) to the CLI family
+# for build_worker_command dispatch.
+_ADAPTER_FAMILIES = {
+    "codex_cli": "codex",
+    "claude_code_cli": "claude",
+    "antigravity_cli": "agy",
+    "lm_studio_local": "local",
+}
+
+
 _LOCAL_FAMILY_KEYWORDS = ("qwen", "gemma", "deepseek", "llama", "mistral", "phi")
 
 # Matches a leading parameter count like "27b" or "4B" in a model id
@@ -698,6 +708,59 @@ def build_worker_command(
         )
         effective_model = resolved_role.model
         effective_effort = resolved_role.reasoning_effort
+        _validated_effort(effective_effort)
+        family = _ADAPTER_FAMILIES.get(resolved_role.adapter)
+
+        if family == "codex":
+            return [
+                "codex",
+                "exec",
+                "--model",
+                effective_model,
+                "-c",
+                f'model_reasoning_effort="{effective_effort}"',
+                "-s",
+                "workspace-write",
+                routed_prompt,
+            ]
+        if family == "claude":
+            return [
+                "claude",
+                "-p",
+                "--no-session-persistence",
+                "--model",
+                effective_model,
+                "--effort",
+                effective_effort,
+                "--allow-dangerously-skip-permissions",
+                "--permission-mode",
+                "bypassPermissions",
+                routed_prompt,
+            ]
+        if family == "agy":
+            return ["agy", "-p", routed_prompt]
+        if family == "local":
+            payload = json.dumps(
+                {
+                    "model": effective_model,
+                    "messages": [{"role": "user", "content": routed_prompt}],
+                    "temperature": 0,
+                }
+            )
+            return [
+                "curl",
+                "-s",
+                "--fail",
+                "--max-time",
+                f"{timeout:.3f}".rstrip("0").rstrip("."),
+                "-X",
+                "POST",
+                LOCAL_MODEL_CHAT_ENDPOINT,
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                payload,
+            ]
 
     _validated_effort(effective_effort)
     normalized_model = MODEL_ALIASES.get(effective_model)
@@ -1122,7 +1185,7 @@ def _resolve_model_id_and_family(
         try:
             resolved = active_resolver.resolve_role(model)
             effective_model = resolved.model
-        except Exception:  # noqa: BLE001 - an unresolvable role degrades to the unpriced marker below, not a raise.
+        except (ValueError, RuntimeError):
             effective_model = model
 
     normalized = MODEL_ALIASES.get(effective_model)
