@@ -16,6 +16,7 @@ if __package__:
         AdvisoryResolutionOption,
         AdvisoryStalemateReport,
         Occasion,
+        PerspectiveReviewResult,
         StructuredFinding,
     )
 else:
@@ -23,6 +24,7 @@ else:
         AdvisoryResolutionOption,
         AdvisoryStalemateReport,
         Occasion,
+        PerspectiveReviewResult,
         StructuredFinding,
     )
 
@@ -167,9 +169,9 @@ class CriticResponse:
 
 
 def _field(
-    vote: dict[str, Any] | CriticResponse, name: str, default: Any = None
+    vote: dict[str, Any] | CriticResponse | PerspectiveReviewResult, name: str, default: Any = None
 ) -> Any:
-    """Read a field from either supported critic-vote representation."""
+    """Read a field from any supported critic-vote representation."""
     return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
 
 
@@ -234,9 +236,9 @@ class SecurityVetoHandler:
 
     @staticmethod
     def _finding_to_dict(finding: Mapping[str, Any] | StructuredFinding) -> dict[str, Any]:
-        if isinstance(finding, (dict, MappingProxyType)):
-            return dict(finding)
-        return asdict(finding)
+        if isinstance(finding, StructuredFinding):
+            return asdict(finding)
+        return dict(finding)
 
     def _confidence(self, finding: Mapping[str, Any] | StructuredFinding) -> float:
         raw_confidence = self._finding_field(finding, "confidence", 1.0)
@@ -255,7 +257,7 @@ class SecurityVetoHandler:
         return {"claim": "unilateral security block verdict", "severity": "critical"}
 
     def check(
-        self, votes: Sequence[dict[str, Any] | CriticResponse]
+        self, votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult]
     ) -> SecurityVeto | None:
         """Return the first configured veto, treating malformed confidence as certain.
 
@@ -362,7 +364,7 @@ class ConsensusTable:
                 threshold = 0.60
         self.quorum_threshold = threshold if math.isfinite(threshold) and 0.0 <= threshold <= 1.0 else 0.60
 
-    def _confidence(self, vote: dict[str, Any] | CriticResponse) -> float:
+    def _confidence(self, vote: dict[str, Any] | CriticResponse | PerspectiveReviewResult) -> float:
         verdict = _field(vote, "vote", _field(vote, "verdict", ""))
         if _normalize_verdict(verdict) is None:
             return 0.0
@@ -377,7 +379,7 @@ class ConsensusTable:
             return 0.0
         return max(-1.0, min(1.0, value))
 
-    def _identity(self, vote: dict[str, Any] | CriticResponse) -> str:
+    def _identity(self, vote: dict[str, Any] | CriticResponse | PerspectiveReviewResult) -> str:
         """A vote's weight-lookup key: its Council `perspective` (spec 0012
         ticket 07) when present, else its legacy `provider`/`critic_id`."""
         return str(
@@ -386,7 +388,7 @@ class ConsensusTable:
         )
 
     def invalid_voters(
-        self, votes: Sequence[dict[str, Any] | CriticResponse]
+        self, votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult]
     ) -> tuple[str, ...]:
         invalid = []
         for vote in votes:
@@ -402,7 +404,7 @@ class ConsensusTable:
             return "INCOMPLETE"
         return outcome
 
-    def weighted_score(self, votes: Sequence[dict[str, Any] | CriticResponse]) -> float:
+    def weighted_score(self, votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult]) -> float:
         if not votes:
             return 0.0
         raw_weights = [self.weights.get(self._identity(vote), 0.0) for vote in votes]
@@ -418,7 +420,7 @@ class ConsensusTable:
 
     def evaluate(
         self,
-        votes: Sequence[dict[str, Any] | CriticResponse],
+        votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult],
         expected_hash: str | None = None,
         require_candidate_hashes: bool = False,
     ) -> str:
@@ -450,7 +452,7 @@ class ConsensusTable:
 
 
 def evaluate_weighted_quorum(
-    responses: Sequence[CriticResponse],
+    responses: Sequence[CriticResponse | PerspectiveReviewResult],
     weights: dict[str, float] | None = None,
     quorum_threshold: float = 0.60,
     require_candidate_hashes: bool = False,
