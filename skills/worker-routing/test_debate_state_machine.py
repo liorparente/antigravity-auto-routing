@@ -467,6 +467,36 @@ class DebateStateMachineTests(unittest.TestCase):
         handler = machine.SecurityVetoHandler(enabled=False)
         self.assertIsNone(handler.check(({"perspective": "reviewer_security", "vote": "blocked"},)))
 
+    def test_legacy_block_vote_without_a_security_finding_does_not_veto(self) -> None:
+        """A non-security provider voting "block" (plain disapproval, e.g. an
+        architecture Critic rejecting a plan) must not be read as a
+        unilateral security veto just because the word matches — only
+        `reviewer_security`'s own block, or a genuine attached critical/high
+        finding, is a security signal."""
+        handler = machine.SecurityVetoHandler()
+        self.assertIsNone(handler.check(({"provider": "critic_a", "vote": "block"},)))
+        self.assertIsNone(handler.check(({"provider": "planner", "verdict": "blocked"},)))
+        self.assertIsNone(
+            handler.check(({"perspective": "reviewer_architecture", "vote": "block"},))
+        )
+
+    def test_legacy_block_vote_with_a_genuine_high_severity_structured_finding_still_vetoes(self) -> None:
+        """The other half: a non-security provider's block is still a
+        genuine security signal if it carries its own critical/high
+        `StructuredFinding` — the vote's own severity, not a fabricated
+        default, is what's reported."""
+        handler = machine.SecurityVetoHandler()
+        finding = dialogue_contracts.StructuredFinding(
+            id="SEC-7", severity="high", claim="unsafe deserialization", confidence=0.5
+        )
+        veto = handler.check((
+            {"provider": "reviewer_architecture", "vote": "block", "findings": (finding,)},
+        ))
+        assert veto is not None
+        self.assertEqual(veto.provider, "reviewer_architecture")
+        self.assertEqual(veto.finding["id"], "SEC-7")
+        self.assertEqual(veto.finding["severity"], "high")
+
     def test_consensus_table_identity_prefers_perspective_over_provider(self) -> None:
         table = machine.ConsensusTable(
             weights={"reviewer_security": 0.25, "codex": 0.40},

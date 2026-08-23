@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import sys
 from pathlib import Path
 from typing import Any
@@ -101,6 +102,19 @@ class AgyAdapter(CLIReviewerAdapter):
         super().__init__("gemini", model, effort, "agy", runner=runner)
 
 
+# Explicit confidence per `dialogue_contracts.PerspectiveVerdict` outcome, so
+# every successful `PerspectiveReviewerAdapter.review()` carries a real
+# confidence rather than relying on `ConsensusTable`'s own verdict-keyed
+# default. "unparseable" gets the same 0.0 as abstain/error — it is not a
+# usable vote either.
+PERSPECTIVE_VERDICT_CONFIDENCE: dict[str, float] = {
+    "approved": 1.0,
+    "blocked": -1.0,
+    "revise": -0.3,
+    "unparseable": 0.0,
+}
+
+
 class PerspectiveReviewerAdapter(ReviewerAdapter):
     """Reviews an artifact through one of the four Council perspectives
     (spec 0012 / workflow-v2 ticket 07), rather than a vendor-branded
@@ -140,7 +154,7 @@ class PerspectiveReviewerAdapter(ReviewerAdapter):
     async def review(self, envelope: str, round_spec: int, deadline: int) -> dict[str, Any]:
         prompt = build_perspective_reviewer_prompt(
             self.perspective,
-            self.task_description or envelope,
+            self.task_description or "Proposal review",
             envelope,
             occasion=self.occasion,
         )
@@ -170,10 +184,12 @@ class PerspectiveReviewerAdapter(ReviewerAdapter):
                 "provider": self.perspective,
                 "perspective": review_result.perspective or self.perspective,
                 "vote": review_result.verdict,
+                "confidence": PERSPECTIVE_VERDICT_CONFIDENCE.get(review_result.verdict, 0.0),
                 "verified_quote_count": review_result.verified_quote_count,
                 "objection_count": review_result.objection_count,
                 "findings": [dataclasses.asdict(finding) for finding in review_result.findings],
                 "raw_vote": review_result.raw_vote,
+                "candidate_hash": hashlib.sha256(envelope.encode("utf-8")).hexdigest(),
             }
         except Exception as error:  # noqa: BLE001
             return {
@@ -186,19 +202,27 @@ class PerspectiveReviewerAdapter(ReviewerAdapter):
 
 
 class LMStudioAdapter(ReviewerAdapter):
+    """Local LM Studio endpoint invocation.
+
+    Not yet wired to a real endpoint — a stub that fabricated `"approve"`
+    would silently rubber-stamp every review and stalemate it adjudicates,
+    including while LM Studio is offline. Abstain with zero confidence
+    instead, so a caller relying on this adapter fails closed rather than
+    auto-approving.
+    """
+
     def __init__(self, model: str, effort: str) -> None:
         super().__init__("lm-studio")
         self.model = model
         self.effort = effort
 
     async def review(self, envelope: str, round_spec: int, deadline: int) -> dict[str, Any]:
-        # Local LM Studio endpoint invocation
         return {
             "provider": self.provider_id,
-            "vote": "approve",
-            "confidence": 1.0,
+            "vote": "abstain",
+            "confidence": 0.0,
             "findings": [],
-            "candidate_hash": envelope,
+            "error": "LMStudioAdapter is a stub — no local endpoint is wired up",
         }
 
 

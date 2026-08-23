@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent / "scripts")
 if SCRIPTS_DIR not in sys.path:
@@ -125,9 +126,12 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertEqual(len(adapters), 1)
         self.assertEqual(adapters[0].provider_id, "lm-studio")
 
-        # Verify async review passes with local adapter without zero-weight lockout
+        # The local adjudicator is a stub with no endpoint wired up: it
+        # abstains rather than fabricating an approval, so a local-only
+        # review fails closed to UNRESOLVED instead of silently rubber-
+        # stamping a sensitive task.
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
-        self.assertEqual(outcome.status, "UNANIMOUS")
+        self.assertEqual(outcome.status, "UNRESOLVED")
 
     # Slice 5: Secret Key Resolution with AGY_CALIBRATION_SECRET & Fallback
     def test_hmac_secret_resolution_fallback(self) -> None:
@@ -238,8 +242,22 @@ class CouncilReviewTDDTests(unittest.TestCase):
         }])
 
 
+_PERSPECTIVE_TEST_OBJECTIVE = "Add a caching layer"
+_PERSPECTIVE_TEST_CANDIDATE_HASH = hashlib.sha256(_PERSPECTIVE_TEST_OBJECTIVE.encode("utf-8")).hexdigest()
+
+
 def _perspective_vote(perspective: str, vote: str, **extra: Any) -> dict[str, Any]:
-    payload: dict[str, Any] = {"provider": perspective, "perspective": perspective, "vote": vote}
+    """A perspective vote for `_PERSPECTIVE_TEST_OBJECTIVE` — every round reviews
+    the same envelope in the by-perspective flow, so `candidate_hash` defaults to
+    the hash of that fixed objective, matching what `ConsensusTable.evaluate`'s
+    `expected_hash` ratification now requires. Override via `extra` to test
+    tamper detection."""
+    payload: dict[str, Any] = {
+        "provider": perspective,
+        "perspective": perspective,
+        "vote": vote,
+        "candidate_hash": _PERSPECTIVE_TEST_CANDIDATE_HASH,
+    }
     payload.update(extra)
     return payload
 
@@ -386,11 +404,13 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
         self.assertIn("reviewer_security", outcome.stalemate_report.critic_position)
         self.assertEqual([a.call_count for a in adapters], [3, 3, 3, 3])
 
-    def test_stalemate_resolved_by_configured_adjudicator(self) -> None:
-        # The default policy's stub `lm-studio` adjudicator always approves,
-        # so an irreconcilable Council stalemate resolves to QUALIFIED
-        # instead of surfacing to a human — the "route to Adjudicator" half
-        # of ticket 07's "Adjudicator or HITL" requirement.
+    def test_stalemate_fails_closed_when_configured_adjudicator_is_offline(self) -> None:
+        # The default policy's `lm-studio` adjudicator is a stub with no
+        # endpoint wired up: it abstains rather than fabricating an
+        # approval. A stalemate routed to it must therefore fail closed to
+        # UNRESOLVED/HITL, never resolve to QUALIFIED off a rubber-stamped
+        # vote — the fail-closed half of ticket 07's "Adjudicator or HITL"
+        # requirement.
         council = ReviewCouncil(ROUTING_CONFIG_PATH)
         req = ReviewRequest(
             objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
@@ -405,6 +425,34 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
             )
         })
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "UNRESOLVED")
+        self.assertEqual(outcome.unresolved_blockers, 1)
+        assert outcome.stalemate_report is not None
+
+    def test_stalemate_resolved_by_a_genuinely_approving_adjudicator(self) -> None:
+        # The counterpart to the fail-closed case above: an adjudicator that
+        # actively returns APPROVE still resolves the stalemate to
+        # QUALIFIED — the fail-closed fix must not make resolution
+        # impossible outright.
+        council = ReviewCouncil(ROUTING_CONFIG_PATH)
+        req = ReviewRequest(
+            objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._perspective_adapters({
+            perspective: [_perspective_vote(perspective, "revise")] * 3
+            for perspective in (
+                "reviewer_architecture",
+                "reviewer_risk",
+                "reviewer_maintainability",
+                "reviewer_security",
+            )
+        })
+        approving_adjudicator = FakeReviewerAdapter(
+            "lm-studio", [{"provider": "lm-studio", "vote": "approve", "confidence": 1.0}]
+        )
+        with patch("provider_adapters.build_adapter", return_value=approving_adjudicator):
+            outcome = asyncio.run(council.review(req, custom_adapters=adapters))
 
         self.assertEqual(outcome.status, "QUALIFIED")
         assert outcome.stalemate_report is not None

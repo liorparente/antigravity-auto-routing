@@ -61,6 +61,13 @@ DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
     "council_policy": {
         "fast_path_enabled": True,
         "quorum_threshold": 0.60,
+        "consensus_policy": [
+            "UNANIMOUS",
+            "QUALIFIED",
+            "MATERIAL_DISAGREEMENT",
+            "INCOMPLETE",
+            "UNRESOLVED",
+        ],
         "perspective_weights": {
             "reviewer_architecture": 0.30,
             "reviewer_risk": 0.25,
@@ -163,6 +170,16 @@ def _clean_council_policy_section(council: object) -> dict[str, Any] | None:
         clean_council["quorum_threshold"]
     ):
         clean_council.pop("quorum_threshold")
+    consensus_policy = clean_council.get("consensus_policy")
+    if "consensus_policy" in clean_council and (
+        not isinstance(consensus_policy, list)
+        or not consensus_policy
+        or not all(
+            isinstance(outcome, str) and outcome in VALID_CONSENSUS_OUTCOMES
+            for outcome in consensus_policy
+        )
+    ):
+        clean_council.pop("consensus_policy")
     if "perspective_weights" in clean_council:
         cleaned_weights = _clean_perspective_weights(clean_council["perspective_weights"])
         if cleaned_weights is None:

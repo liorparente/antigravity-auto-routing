@@ -697,14 +697,21 @@ class ReviewCouncil:
             "quorum_threshold", self.policy.get("weighting", {}).get("quorum_threshold", 0.60)
         )
         table = ConsensusTable(
-            self.policy.get("consensus_policy", []),
-            weights=council_policy.get("perspective_weights", {}),
+            council_policy.get("consensus_policy", self.policy.get("consensus_policy", [])),
+            weights=self._load_weights(request.workspace_root),
             quorum_threshold=quorum_threshold,
         )
         fast_path_enabled = bool(council_policy.get("fast_path_enabled", True))
         deadlines = council_policy.get("deadlines_seconds", {})
 
         adapters = custom_adapters if custom_adapters is not None else self._resolve_adapters(request)
+
+        # Every round reviews the same envelope (`request.objective`, unlike
+        # the legacy flow's hash-only rounds 2/3) — one `expected_hash`
+        # ratifies all three, so `ConsensusTable.evaluate` catches a
+        # perspective vote tampering with (or simply not echoing) the
+        # candidate it actually reviewed.
+        candidate_hash = hashlib.sha256(request.objective.encode("utf-8")).hexdigest()
 
         votes: list[dict[str, Any]] = []
         for round_num, default_deadline in ((1, 45), (2, 60), (3, 60)):
@@ -718,7 +725,7 @@ class ReviewCouncil:
 
             if round_num == 1 and not fast_path_enabled:
                 continue
-            outcome = table.evaluate(votes)
+            outcome = table.evaluate(votes, expected_hash=candidate_hash)
             if outcome in ("UNANIMOUS", "QUALIFIED"):
                 return self._finalize_perspective_outcome(outcome, run_id, request, initial_hash)
 
@@ -773,18 +780,29 @@ class ReviewCouncil:
         adjudicators = self.policy.get("adjudicators", [])
 
         if adjudicators:
-            build_adapter = _load_provider_adapters().build_adapter
-            adjudicator_adapter = build_adapter(adjudicators[0])
-            adjudicator_prompt = build_adjudicator_prompt(
-                request.objective,
-                stalemate_report.planner_position,
-                stalemate_report.critic_position,
+            # Fail closed on any adjudicator trouble — an unavailable adapter
+            # id, an offline endpoint, a raised exception, or a malformed
+            # payload all fall through to the UNRESOLVED/HITL path below
+            # rather than being read as an implicit approval. Only an
+            # adjudicator that actively returns APPROVE resolves a stalemate.
+            try:
+                build_adapter = _load_provider_adapters().build_adapter
+                adjudicator_adapter = build_adapter(adjudicators[0])
+                adjudicator_prompt = build_adjudicator_prompt(
+                    request.objective,
+                    stalemate_report.planner_position,
+                    stalemate_report.critic_position,
+                )
+                deadline = self.policy.get("council_policy", {}).get("deadlines_seconds", {}).get(
+                    "round_3", 60
+                )
+                result = await adjudicator_adapter.review(adjudicator_prompt, 4, deadline)
+            except Exception:  # noqa: BLE001
+                result = None
+                adjudicator_adapter = None
+            resolved_vote = (
+                str(result.get("vote", "")).strip().casefold() if isinstance(result, dict) else ""
             )
-            deadline = self.policy.get("council_policy", {}).get("deadlines_seconds", {}).get(
-                "round_3", 60
-            )
-            result = await adjudicator_adapter.review(adjudicator_prompt, 4, deadline)
-            resolved_vote = str(result.get("vote", "")).strip().casefold()
             if resolved_vote in ("approve", "approved", "unanimous"):
                 manifest_path = self._write_manifest(
                     "QUALIFIED",

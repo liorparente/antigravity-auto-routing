@@ -259,14 +259,20 @@ class SecurityVetoHandler:
     ) -> SecurityVeto | None:
         """Return the first configured veto, treating malformed confidence as certain.
 
-        Two independent triggers, checked per vote in this order: (1) the
-        vote's own verdict/vote field normalizes to `"BLOCK"` — spec 0012's
-        unilateral security veto, self-declared by a perspective reviewer's
-        `VERDICT: BLOCK` line (see `_normalize_verdict`) — which halts the
-        pipeline regardless of any finding's severity or confidence; (2) a
-        configured high-confidence, high-severity finding, exactly as
-        before. A finding may be a dict/MappingProxyType or a
-        `StructuredFinding` dataclass instance.
+        Two independent triggers, checked per vote: (1) a configured
+        high-confidence, high-severity finding (any provider, any verdict);
+        (2) an explicit `"BLOCK"` verdict (see `_normalize_verdict`), but
+        only when it is a genuine security signal — either the perspective
+        reviewer *is* `reviewer_security` (spec 0012's unilateral security
+        veto), or the vote carries a `StructuredFinding` whose own severity
+        is already critical/high. A raw `"block"` vote from any other
+        legacy provider with no attached security finding does NOT veto —
+        that is a plain disapproval, not a security signal. Every finding
+        reported here uses its genuine severity/claim; this handler never
+        fabricates one except for `reviewer_security`'s own unilateral
+        block, which carries no finding to report by definition. A finding
+        may be a dict/MappingProxyType or a `StructuredFinding` dataclass
+        instance.
         """
         if not self.enabled:
             return None
@@ -283,16 +289,6 @@ class SecurityVetoHandler:
                 or "unknown"
             )
 
-            verdict_value = _field(vote, "vote", _field(vote, "verdict", None))
-            if _normalize_verdict(verdict_value) == "BLOCK":
-                block_finding = next((f for f in findings if self._is_finding(f)), None)
-                finding_dict = (
-                    self._finding_to_dict(block_finding)
-                    if block_finding is not None
-                    else self._default_block_finding()
-                )
-                return SecurityVeto(provider, finding_dict)
-
             for finding in findings:
                 if not self._is_finding(finding):
                     continue
@@ -301,6 +297,29 @@ class SecurityVetoHandler:
                     continue
                 if self._confidence(finding) >= self.security_threshold:
                     return SecurityVeto(provider, self._finding_to_dict(finding))
+
+            verdict_value = _field(vote, "vote", _field(vote, "verdict", None))
+            if _normalize_verdict(verdict_value) != "BLOCK":
+                continue
+            block_finding = next((f for f in findings if self._is_finding(f)), None)
+            structured_high_severity = next(
+                (
+                    f
+                    for f in findings
+                    if isinstance(f, StructuredFinding)
+                    and str(f.severity).strip().casefold() in self.veto_severities
+                ),
+                None,
+            )
+            if provider == "reviewer_security":
+                finding_dict = (
+                    self._finding_to_dict(block_finding)
+                    if block_finding is not None
+                    else self._default_block_finding()
+                )
+                return SecurityVeto(provider, finding_dict)
+            if structured_high_severity is not None:
+                return SecurityVeto(provider, self._finding_to_dict(structured_high_severity))
         return None
 
 

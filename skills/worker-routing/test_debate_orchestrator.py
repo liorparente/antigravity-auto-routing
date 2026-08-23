@@ -1,7 +1,6 @@
 """Hermetic unit tests for pure debate orchestration state."""
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import io
@@ -869,117 +868,12 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             )
 
 
-class _FakeCouncilAdapter:
-    """A minimal `ReviewerAdapterProtocol` implementation: no CLI, no
-    filesystem, no network — a scripted response per round."""
-
-    def __init__(self, provider_id: str, responses: list[dict[str, Any]]) -> None:
-        self.provider_id = provider_id
-        self._responses = responses
-        self.call_count = 0
-
-    async def review(self, _envelope: str, _round_spec: int, _deadline: int) -> dict[str, Any]:
-        response = self._responses[min(self.call_count, len(self._responses) - 1)]
-        self.call_count += 1
-        return response
-
-
-def _perspective_vote(perspective: str, vote: str, **extra: Any) -> dict[str, Any]:
-    payload: dict[str, Any] = {"provider": perspective, "perspective": perspective, "vote": vote}
-    payload.update(extra)
-    return payload
-
-
-class ReviewCouncilPerspectiveFastPathTests(unittest.TestCase):
-    """Spec 0012 / workflow-v2 ticket 07, exercised through
-    `debate_orchestrator.ReviewCouncil` directly (as opposed to
-    `test_council_review.py`'s facade-level tests)."""
-
-    SECRET = b"ticket-07-test-secret"
-
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.workspace_root = Path(self._tmp.name)
-        key_path = self.workspace_root / ".ralph" / "cache" / "calibration.key"
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        key_path.write_bytes(self.SECRET)
-
-    def tearDown(self) -> None:
-        self._tmp.cleanup()
-
-    def _adapters(self, **votes_by_perspective: list[dict[str, Any]]) -> list[_FakeCouncilAdapter]:
-        return [_FakeCouncilAdapter(perspective, responses) for perspective, responses in votes_by_perspective.items()]
-
-    def test_one_shot_fast_path_terminates_round_1_with_all_four_perspectives_consulted(self) -> None:
-        council = debate_orchestrator.ReviewCouncil(debate_orchestrator.ROUTING_CONFIG_PATH)
-        request = debate_orchestrator.ReviewRequest(
-            objective="Add a caching layer",
-            workspace_root=str(self.workspace_root),
-            by_perspective=True,
-        )
-        adapters = self._adapters(
-            reviewer_architecture=[_perspective_vote("reviewer_architecture", "approved")],
-            reviewer_risk=[_perspective_vote("reviewer_risk", "approved")],
-            reviewer_maintainability=[_perspective_vote("reviewer_maintainability", "approved")],
-            reviewer_security=[_perspective_vote("reviewer_security", "approved")],
-        )
-
-        outcome = asyncio.run(council.review(request, custom_adapters=adapters))
-
-        self.assertIsInstance(outcome, debate_orchestrator.ReviewOutcome)
-        self.assertEqual(outcome.status, "UNANIMOUS")
-        self.assertEqual({adapter.call_count for adapter in adapters}, {1})
-
-    def test_unilateral_security_veto_beats_a_passing_quorum(self) -> None:
-        council = debate_orchestrator.ReviewCouncil(debate_orchestrator.ROUTING_CONFIG_PATH)
-        request = debate_orchestrator.ReviewRequest(
-            objective="Add a caching layer",
-            workspace_root=str(self.workspace_root),
-            by_perspective=True,
-        )
-        adapters = self._adapters(
-            reviewer_architecture=[_perspective_vote("reviewer_architecture", "approved")],
-            reviewer_risk=[_perspective_vote("reviewer_risk", "approved")],
-            reviewer_maintainability=[_perspective_vote("reviewer_maintainability", "approved")],
-            reviewer_security=[_perspective_vote(
-                "reviewer_security",
-                "blocked",
-                findings=[{"id": "SEC-1", "severity": "critical", "claim": "SQLi", "confidence": 0.9}],
-            )],
-        )
-
-        outcome = asyncio.run(council.review(request, custom_adapters=adapters))
-
-        self.assertEqual(outcome.status, "SECURITY_HALT")
-        self.assertEqual(outcome.unresolved_blockers, 1)
-
-    def test_stalemate_after_three_rounds_carries_an_advisory_report(self) -> None:
-        with tempfile.TemporaryDirectory() as config_tmp:
-            config_path = Path(config_tmp) / "routing-config.json"
-            base = json.loads(debate_orchestrator.ROUTING_CONFIG_PATH.read_text())
-            base.setdefault("consultation_policy", {})["adjudicators"] = []
-            config_path.write_text(json.dumps(base), encoding="utf-8")
-
-            council = debate_orchestrator.ReviewCouncil(config_path)
-            request = debate_orchestrator.ReviewRequest(
-                objective="Add a caching layer",
-                workspace_root=str(self.workspace_root),
-                by_perspective=True,
-            )
-            adapters = self._adapters(
-                reviewer_architecture=[_perspective_vote("reviewer_architecture", "revise")] * 3,
-                reviewer_risk=[_perspective_vote("reviewer_risk", "revise")] * 3,
-                reviewer_maintainability=[_perspective_vote("reviewer_maintainability", "revise")] * 3,
-                reviewer_security=[_perspective_vote("reviewer_security", "revise")] * 3,
-            )
-
-            outcome = asyncio.run(council.review(request, custom_adapters=adapters))
-
-        self.assertEqual(outcome.status, "UNRESOLVED")
-        assert outcome.stalemate_report is not None
-        self.assertIsInstance(outcome.stalemate_report, dialogue_contracts.AdvisoryStalemateReport)
-        self.assertEqual(outcome.stalemate_report.planner_position, "Add a caching layer")
-        self.assertEqual({adapter.call_count for adapter in adapters}, {3})
+# `ReviewCouncil`'s by-perspective fast path, unilateral security veto, and
+# stalemate escalation (spec 0012 / workflow-v2 ticket 07) are covered once,
+# at the facade level, in `skills/council-review/tests/test_council_review.py`
+# (`CouncilPerspectiveFastPathTests`) — `council_review.py` re-exports
+# `ReviewCouncil` from this module without wrapping it, so a second,
+# near-identical suite here exercised the same code path twice.
 
 
 if __name__ == "__main__":
