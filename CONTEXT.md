@@ -157,6 +157,9 @@ A pure voting aggregation rule evaluated over arbitrary sequences of critic resp
 ### AbstentionHandling
 The deliberate normalization of `"abstain"` / timeout critic responses into valid non-approval votes without triggering unparseable verdict errors or terminating the debate. Abstentions increment total participant count without contributing to affirmative approvals, allowing quorum policies to evaluate gracefully under partial panel availability.
 
+### Dyad
+A binary turn-based deliberation exchange between a single Planner and a single Critic across up to three revision rounds, orchestrated within `debate_orchestrator.py` for Medium-complexity tasks. Spec 0009.
+
 ### CouncilPanel
 A concurrent multi-model review ensemble evaluated under weighted scoring, soft confidence metrics, and selective HMAC-SHA256 manifest signing, orchestrated within `debate_orchestrator.py`. Spec 0009.
 

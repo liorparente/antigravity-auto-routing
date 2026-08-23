@@ -9,7 +9,7 @@ import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
-from typing import Any, overload
+from typing import Any, Literal, overload
 
 if __package__:
     from .dialogue_contracts import (
@@ -29,12 +29,14 @@ else:
     )
 
 __all__ = [
+    "CONSULTATION_TOPOLOGIES",
     "DEFAULT_VOTE_CONFIDENCE",
     "PANEL_TOPOLOGY_OCCASIONS",
     "VALID_CONSENSUS_OUTCOMES",
     "AdvisoryResolutionOption",
     "AdvisoryStalemateReport",
     "ConsensusTable",
+    "ConsultationTopology",
     "CriticResponse",
     "DebateRoundRecord",
     "DebateSessionState",
@@ -50,9 +52,18 @@ __all__ = [
     "evaluate_round_verdicts",
     "evaluate_weighted_quorum",
     "is_panel_topology",
+    "resolve_topology",
 ]
 
 PANEL_TOPOLOGY_OCCASIONS: tuple[Occasion, ...] = ("plan-review", "code-review")
+
+# Ticket 43.1: the two supported consultation shapes named as a closed
+# vocabulary, rather than left implicit in `is_panel_topology`'s boolean —
+# "dyad" is the 1-on-1 Planner/Critic pair (spec 0009's Medium-complexity
+# path), "council_panel" is the weighted N-reviewer quorum `ConsensusTable`
+# already evaluates (spec 0009/0012's Complex-complexity path).
+ConsultationTopology = Literal["dyad", "council_panel"]
+CONSULTATION_TOPOLOGIES: tuple[ConsultationTopology, ...] = ("dyad", "council_panel")
 
 DEFAULT_VOTE_CONFIDENCE: dict[str, float] = {
     "approve": 1.0,
@@ -71,6 +82,16 @@ VALID_CONSENSUS_OUTCOMES = frozenset({
 def is_panel_topology(occasion: Occasion, complexity: str) -> bool:
     """Return whether an occasion uses two independent Critics."""
     return occasion in PANEL_TOPOLOGY_OCCASIONS and complexity.lower().strip() == "complex"
+
+
+def resolve_topology(occasion: Occasion, complexity: str) -> ConsultationTopology:
+    """Resolve which `ConsultationTopology` an occasion/complexity pair uses.
+
+    A thin, named wrapper over `is_panel_topology`'s existing boolean: a
+    caller building a mission brief or a facade delegator wants the
+    topology's name, not a bit it has to re-interpret.
+    """
+    return "council_panel" if is_panel_topology(occasion, complexity) else "dyad"
 
 
 def build_stalemate_report(

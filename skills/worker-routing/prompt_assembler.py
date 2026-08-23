@@ -417,6 +417,39 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("dead code", "caller", "acceptance criteria", "unused", "ticket", "closure"),
         ("*.py", "*.md"),
     ),
+    GoldenRule(
+        21,
+        "Multi-Harness Sync & Governance",
+        "Centralize loose JSON into strongly-typed immutable schemas",
+        "When parsing shared configuration files across multiple consumers, replace ad "
+        "hoc dict reads with a single @dataclass(frozen=True) module (routing_config.py). "
+        "Downstream consumers should read typed models and public structural keys "
+        "(STRUCTURAL_KEYS), and section parsers must support per-key fallbacks for partial "
+        "configurations to prevent false-positive validation crashes during progressive "
+        "migrations.",
+        ("routing_config", "config", "dataclass", "centralize", "schema", "fallback", "validation"),
+        ("routing_config.py", "*.py", "*.json"),
+    ),
+    GoldenRule(
+        22,
+        "Architecture & Deep Modules",
+        "Consolidate multi-model debate into a unified topology engine behind a thin facade",
+        "Unify overlapping consultation scripts into a single state machine supporting "
+        "Dyad (1-on-1 pairs for Medium tasks) and CouncilPanel (weighted quorum for "
+        "Complex tasks), preserving legacy wrappers as sub-25-line delegators.",
+        ("debate", "council", "topology", "dyad", "councilpanel", "facade", "state machine"),
+        ("debate_*.py", "council_*.py", "*.py"),
+    ),
+    GoldenRule(
+        23,
+        "Testing & TDD Seams",
+        "Sequence architectural unifications as pure-reducer vertical slices before facade delegation",
+        "Build and unit-test the pure deterministic state machine logic (transitions, "
+        "voting weights, security halts) with zero subprocess mocking before touching "
+        "process transport, HMAC crypto, or legacy facade wrappers.",
+        ("reducer", "pure", "state machine", "tracer-bullet", "vertical slice", "seam"),
+        ("test_*.py", "debate_state_machine.py"),
+    ),
 )
 
 SCOPED_MEMORY_BEGIN = "=== BEGIN SCOPED INSTITUTIONAL MEMORY ==="

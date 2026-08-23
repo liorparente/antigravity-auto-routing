@@ -672,6 +672,116 @@ class DebateStateMachineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             machine.build_stalemate_report("planner")
 
+    # --- Ticket 43.1: ConsultationTopology / resolve_topology ---
+
+    def test_consultation_topologies_is_the_closed_dyad_council_panel_vocabulary(self) -> None:
+        self.assertEqual(machine.CONSULTATION_TOPOLOGIES, ("dyad", "council_panel"))
+
+    def test_resolve_topology_agrees_with_is_panel_topology_across_every_combination(self) -> None:
+        """`resolve_topology` is a thin name over `is_panel_topology`'s
+        boolean — this drives every occasion the module knows about, plus
+        both panel-eligible occasions at both cases of complexity, and
+        asserts the two never disagree."""
+        occasions: tuple[dialogue_contracts.Occasion, ...] = (
+            "ambiguity",
+            "plan-review",
+            "code-review",
+            "post-mortem",
+        )
+        complexities = ("Trivial", "Simple", "Medium", "Complex", " complex ", "COMPLEX")
+        for occasion in occasions:
+            for complexity in complexities:
+                with self.subTest(occasion=occasion, complexity=complexity):
+                    expected = (
+                        "council_panel"
+                        if machine.is_panel_topology(occasion, complexity)
+                        else "dyad"
+                    )
+                    self.assertEqual(machine.resolve_topology(occasion, complexity), expected)
+
+    def test_resolve_topology_selects_council_panel_only_for_complex_panel_occasions(self) -> None:
+        self.assertEqual(machine.resolve_topology("plan-review", "Complex"), "council_panel")
+        self.assertEqual(machine.resolve_topology("code-review", "complex"), "council_panel")
+
+    def test_resolve_topology_falls_back_to_dyad_for_non_panel_occasions_or_complexity(self) -> None:
+        # Panel-eligible occasion, but not Complex.
+        self.assertEqual(machine.resolve_topology("plan-review", "medium"), "dyad")
+        # Complex, but not a panel-eligible occasion.
+        self.assertEqual(machine.resolve_topology("ambiguity", "complex"), "dyad")
+        self.assertEqual(machine.resolve_topology("post-mortem", "complex"), "dyad")
+
+    def test_resolve_topology_return_value_is_a_member_of_consultation_topologies(self) -> None:
+        for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
+            for complexity in ("trivial", "medium", "complex"):
+                self.assertIn(
+                    machine.resolve_topology(occasion, complexity),
+                    machine.CONSULTATION_TOPOLOGIES,
+                )
+
+    # --- Ticket 43.1: Dyad vs CouncilPanel transitions through the reducer ---
+
+    def test_dyad_topology_drives_the_pair_session_state_machine_to_consensus(self) -> None:
+        topology = machine.resolve_topology("plan-review", "medium")
+        self.assertEqual(topology, "dyad")
+        state = machine.DebateSessionState("plan-review", "medium", 3, is_panel=(topology == "council_panel"))
+        advanced = machine.advance_debate_state(
+            state, machine.DebateRoundRecord(1, "plan one", "ok", critic_a_verdict="APPROVE")
+        )
+        assert isinstance(advanced, machine.DebateSessionState)
+        self.assertTrue(advanced.consensus_reached)
+        self.assertEqual(advanced.final_plan, "plan one")
+
+    def test_council_panel_topology_drives_the_weighted_general_reducer_to_consensus(self) -> None:
+        topology = machine.resolve_topology("code-review", "complex")
+        self.assertEqual(topology, "council_panel")
+        state = machine.DebateState("code-review", "task", "task-1", 0, 3, (), (), "in_progress")
+        votes = (
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_architecture"
+            ),
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_security"
+            ),
+        )
+        weights = {"reviewer_architecture": 0.5, "reviewer_security": 0.5}
+        advanced = machine.advance_debate_state(
+            state,
+            machine.RoundTurnResult(1, "council plan", votes),
+            "weighted",
+            weights=weights,
+            quorum_threshold=0.60,
+        )
+        assert isinstance(advanced, machine.DebateState)
+        self.assertEqual(advanced.status, "consensus")
+        self.assertEqual(advanced.final_plan, "council plan")
+
+    def test_council_panel_topology_reports_a_candidate_hash_material_disagreement_as_an_error(
+        self,
+    ) -> None:
+        """Mismatched `candidate_hash`es across a council panel's reviewers
+        must fail closed as an `"error"` state immediately, not merely fail
+        to reach quorum and continue looping toward a stalemate — the same
+        distinction `test_weighted_state_transitions` already exercises for
+        raw dict votes, driven here through `PerspectiveReviewResult`."""
+        state = machine.DebateState("plan-review", "task", "task-1", 0, 2, (), (), "in_progress")
+        votes = (
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_architecture", raw_vote="a"
+            ),
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_security", raw_vote="b"
+            ),
+        )
+        result = machine.advance_debate_state(
+            state,
+            machine.RoundTurnResult(1, "plan one", votes),
+            "weighted",
+            require_candidate_hashes=True,
+        )
+        assert isinstance(result, machine.DebateState)
+        self.assertEqual(result.status, "error")
+        self.assertEqual(result.error, "material disagreement in candidate hashes")
+
 
 if __name__ == "__main__":
     unittest.main()

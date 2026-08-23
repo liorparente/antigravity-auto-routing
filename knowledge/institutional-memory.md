@@ -1,4 +1,4 @@
-# Institutional Memory — 21 Golden Rules
+# Institutional Memory — 23 Golden Rules
 
 ## Metadata
 - **Last updated:** 2026-08-23
@@ -31,6 +31,10 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
    helper) keeps module identity stable in `sys.modules`, so
    `unittest.mock.patch.object` intercepts calls deterministically instead
    of silently missing them.
+22. **Consolidate multi-model debate into a unified topology engine behind a thin facade.**
+    Unify overlapping consultation scripts into a single state machine supporting `Dyad`
+    (1-on-1 pairs for Medium tasks) and `CouncilPanel` (weighted quorum for Complex tasks),
+    preserving legacy wrappers as sub-25-line delegators.
 
 ## Testing & TDD Seams
 
@@ -49,6 +53,10 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
    function.** A success-only test path leaves the matching error-path
    fields unasserted; the same construction is usually duplicated nearby
    and carries the same bug.
+23. **Sequence architectural unifications as pure-reducer vertical slices before facade delegation.**
+    Build and unit-test the pure deterministic state machine logic (transitions, voting weights,
+    security halts) with zero subprocess mocking before touching process transport, HMAC crypto,
+    or legacy facade wrappers.
 
 ## Subprocess & CLI Process Safety
 
