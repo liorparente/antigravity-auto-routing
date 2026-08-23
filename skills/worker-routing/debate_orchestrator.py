@@ -1360,11 +1360,13 @@ DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES = (
 def _load_canary_cadence_config(config_path: Path) -> tuple[int, float]:
     """Read the canary cadence's two settings from `config_path`'s
     `canary_cadence` section (via `routing_config`, ticket 42), falling
-    back to this module's `DEFAULT_*` constants for whichever key (or the
-    whole section) is absent — same pattern, including the no-try/except
-    contract, as `_load_code_review_risk_config` and
-    `_load_roster_fallback_chains` above: production always calls this with
-    the default `_CONFIG_PATH`, which is checked into the repo, so a
+    back to `routing_config.DEFAULT_ROUTING_CONFIG.canary_cadence`'s
+    matching field for whichever key (or the whole section) is absent — this
+    module's own `DEFAULT_CANARY_*` constants are merely aliases of those
+    same fields, not a second source the fallback reads from. Same pattern,
+    including the no-try/except contract, as `_load_code_review_risk_config`
+    and `_load_roster_fallback_chains` above: production always calls this
+    with the default `_CONFIG_PATH`, which is checked into the repo, so a
     missing/malformed `config_path` is a genuine caller mistake left to
     raise loudly rather than be swallowed.
     """
@@ -1628,10 +1630,14 @@ def needs_plan_review_consultation(complexity: str) -> bool:
 def _load_code_review_risk_config(config_path: Path) -> tuple[int, tuple[str, ...]]:
     """Read the code-review occasion's two risk-signal settings from
     `config_path`'s `critical_dialogue` section (via `routing_config`,
-    ticket 42), falling back to this module's `DEFAULT_*` constants for
-    whichever key (or the whole section) is absent — see the comment above
-    `_CONFIG_PATH` for why a fallback exists at all and why it is never
-    what production actually uses.
+    ticket 42), falling back to
+    `routing_config.DEFAULT_ROUTING_CONFIG.critical_dialogue`'s matching
+    field for whichever key (or the whole section) is absent — this
+    module's own `DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD` and
+    `DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS` are merely aliases of those
+    same fields, not a second source the fallback reads from. See the
+    comment above `_CONFIG_PATH` for why a fallback exists at all and why
+    it is never what production actually uses.
 
     Raises whatever `routing_config.load_routing_config` raises for a
     missing or malformed file: mirrors `routing_check.load_config`'s

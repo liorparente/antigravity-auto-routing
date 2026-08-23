@@ -77,20 +77,14 @@ def _load_degraded_roster_model(config_path: Path) -> str:
     non-blank alternative is the concrete model passed to a worker.
 
     Missing role data or an empty first alternative falls back to
-    :data:`_DEFAULT_DEGRADED_ROSTER_MODEL`.  As with
-    :func:`_load_dialogue_budget_config`, a missing or malformed config
+    :data:`_DEFAULT_DEGRADED_ROSTER_MODEL`.  A missing or malformed config
     *file* still raises so configuration mistakes do not become invisible
-    production defaults — but a `light_doer` block whose own `name` is
-    missing or empty is exactly the "partial config" case this function
-    exists to degrade gracefully from, so only that field's validation
-    error is swallowed here; any other malformed section still raises.
+    production defaults.  A `light_doer` block whose own `name` is missing
+    or empty no longer needs a special case here: `routing_config`'s
+    `light_doer` default (ticket 42 iteration 3) already resolves a
+    present-but-incomplete block's `name` to this same default model.
     """
-    try:
-        legacy_role = routing_config.load_routing_config(config_path).legacy_roles.get("light_doer")
-    except routing_config.ConfigValidationError as exc:
-        if exc.key_path != "light_doer.name":
-            raise
-        legacy_role = None
+    legacy_role = routing_config.load_routing_config(config_path).legacy_roles.get("light_doer")
     name = legacy_role.name if legacy_role is not None else _DEFAULT_DEGRADED_ROSTER_MODEL
     primary = name.split("/")[0].strip()
     return primary or _DEFAULT_DEGRADED_ROSTER_MODEL

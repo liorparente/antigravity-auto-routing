@@ -267,21 +267,6 @@ def load_consultation_policy(
     with open(config_path, "r", encoding="utf-8") as stream:
         config = json.load(stream)
 
-    # Ticket 42 iteration 2: route this load through the same centralized,
-    # validated loader every other consumer uses. A validation failure here
-    # is not itself fatal to *this* function — `load_consultation_policy`
-    # also accepts legacy flat policy files (`providers`/`weighting` at the
-    # top level, no `roles` section) and files with deliberately malformed
-    # fields it is meant to degrade rather than reject (`_validated_policy`
-    # below), per this module's own documented leniency contract — so
-    # `ConfigError` is swallowed here rather than propagated; the raw
-    # `config` dict already parsed above is what the merge below still
-    # uses either way.
-    try:
-        routing_config.load_routing_config(config_path, fallback_on_missing=True)
-    except routing_config.ConfigError:
-        pass
-
     if not isinstance(config, dict):
         return deepcopy(DEFAULT_CONSULTATION_POLICY)
     if "consultation_policy" in config:

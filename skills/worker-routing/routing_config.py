@@ -37,6 +37,7 @@ from typing import Any, TypeGuard
 __all__ = [
     "DEFAULT_ROUTING_CONFIG",
     "ROUTING_CONFIG_PATH",
+    "STRUCTURAL_KEYS",
     "AcceptanceGateConfig",
     "CanaryCadenceConfig",
     "CapabilityRequirements",
@@ -59,6 +60,7 @@ __all__ = [
     "get_default_routing_config",
     "load_routing_config",
     "parse_routing_config",
+    "validate_default_config",
 ]
 
 ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
@@ -67,8 +69,10 @@ ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
 # dict-valued top-level key (`planner`, `context_specialist`, ...) is a
 # legacy `{"name": ..., "patterns": [...]}` role entry — the same
 # routing_check.NON_ROLE_CONFIG_KEYS split, restated here as the
-# authoritative source both modules should agree with.
-_STRUCTURAL_KEYS = frozenset(
+# authoritative source both modules should agree with. Public (ticket 42
+# iteration 3): routing_check.py reads this directly rather than a
+# `routing_check`-local copy, so the two modules cannot silently drift.
+STRUCTURAL_KEYS = frozenset(
     {
         "roles",
         "providers",
@@ -274,9 +278,9 @@ class RoutingConfig:
 
         Round-trips through :func:`parse_routing_config`: legacy roles are
         re-flattened back to top-level keys, exactly where
-        :func:`parse_routing_config` found them. Composed from the same
-        per-section converters :meth:`get` dispatches to for a single key,
-        so the two can never drift apart on shape.
+        :func:`parse_routing_config` found them. Composed from
+        `_SECTION_CONVERTERS`, one converter per typed section, so a
+        section's shape is defined in exactly one place.
         """
         result: dict[str, Any] = {
             key: converter(self) for key, converter in _SECTION_CONVERTERS.items()
@@ -284,16 +288,6 @@ class RoutingConfig:
         for role_name, legacy_role in self.legacy_roles.items():
             result[role_name] = _legacy_role_to_dict(legacy_role)
         return result
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """Dict-like top-level lookup for exactly the section `to_dict()`
-        would produce under `key`, computed directly from that section's
-        own converter rather than reconstructing (and discarding) every
-        other section to read one."""
-        if key in self.legacy_roles:
-            return _legacy_role_to_dict(self.legacy_roles[key])
-        converter = _SECTION_CONVERTERS.get(key)
-        return converter(self) if converter is not None else default
 
 
 def _roles_to_dict(roles: Mapping[str, RoleConfig]) -> dict[str, Any]:
@@ -403,9 +397,8 @@ def _consultation_policy_to_dict(policy: ConsultationPolicyConfig) -> dict[str, 
     return result
 
 
-# Single dispatch table `RoutingConfig.to_dict()` and `.get()` both read from,
-# so a key's shape is defined once instead of as two parallel if/elif chains
-# that could silently drift apart.
+# Single dispatch table `RoutingConfig.to_dict()` reads from, so a section's
+# shape is defined once instead of duplicated as a hand-written if/elif chain.
 _SECTION_CONVERTERS: dict[str, Any] = {
     "roles": lambda config: _roles_to_dict(config.roles),
     "providers": lambda config: _providers_to_dict(config.providers),
@@ -583,10 +576,32 @@ def _parse_provider_config(provider_id: str, data: Any, key_path: str) -> Provid
     )
 
 
-def _parse_legacy_role_config(role_name: str, data: Any, key_path: str) -> LegacyRoleConfig:
+def _parse_legacy_role_config(
+    role_name: str, data: Any, key_path: str, *, fallback_on_missing: bool
+) -> LegacyRoleConfig:
+    """Parse one legacy top-level role entry, with per-field fallback.
+
+    When `fallback_on_missing` is set and `role_name` has a registered
+    default in `DEFAULT_ROUTING_CONFIG.legacy_roles` (currently only
+    `light_doer` — see `_DEFAULT_LEGACY_ROLES`), a present-but-incomplete
+    entry defaults whichever of `name`/`patterns` it omits from that role's
+    default instead of raising — mirroring `_parse_critical_dialogue`'s
+    independently-optional-keys contract. A role with no registered default,
+    or `fallback_on_missing=False`, still raises `ConfigValidationError` for
+    a missing/malformed field exactly as before.
+    """
     data = _require_dict(data, key_path)
-    name = _require_str(data, "name", key_path)
-    patterns = _require_str_tuple(data, "patterns", key_path)
+    default = DEFAULT_ROUTING_CONFIG.legacy_roles.get(role_name) if fallback_on_missing else None
+    name = (
+        default.name
+        if default is not None and "name" not in data
+        else _require_str(data, "name", key_path)
+    )
+    patterns = (
+        default.patterns
+        if default is not None and "patterns" not in data
+        else _require_str_tuple(data, "patterns", key_path)
+    )
     return LegacyRoleConfig(name=name, patterns=patterns)
 
 
@@ -770,19 +785,37 @@ def _parse_canary_cadence(data: Any, key_path: str) -> CanaryCadenceConfig:
 
 
 def _parse_dialogue_budget(data: Any, key_path: str) -> DialogueBudgetConfig:
+    """Parse the `dialogue_budget` section with per-key fallback — same
+    independently-optional-keys contract as `_parse_critical_dialogue`.
+    """
     data = _require_dict(data, key_path)
-    return DialogueBudgetConfig(session_dialogue_cap=_require_nonneg_int(data, "session_dialogue_cap", key_path))
+    default = DEFAULT_ROUTING_CONFIG.dialogue_budget
+    session_dialogue_cap = (
+        _require_nonneg_int(data, "session_dialogue_cap", key_path)
+        if "session_dialogue_cap" in data
+        else default.session_dialogue_cap
+    )
+    return DialogueBudgetConfig(session_dialogue_cap=session_dialogue_cap)
 
 
 def _parse_acceptance_gate(data: Any, key_path: str) -> AcceptanceGateConfig:
+    """Parse the `acceptance_gate` section with per-key fallback — same
+    independently-optional-keys contract as `_parse_critical_dialogue`.
+    """
     data = _require_dict(data, key_path)
-    trials = _require_nonneg_int(data, "trials", key_path)
-    if trials < 1:
-        raise ConfigValidationError(f"{key_path}.trials", "must be at least 1", trials)
-    return AcceptanceGateConfig(
-        trials=trials,
-        score_threshold=_require_unit_interval(data, "score_threshold", key_path),
+    default = DEFAULT_ROUTING_CONFIG.acceptance_gate
+    if "trials" in data:
+        trials = _require_nonneg_int(data, "trials", key_path)
+        if trials < 1:
+            raise ConfigValidationError(f"{key_path}.trials", "must be at least 1", trials)
+    else:
+        trials = default.trials
+    score_threshold = (
+        _require_unit_interval(data, "score_threshold", key_path)
+        if "score_threshold" in data
+        else default.score_threshold
     )
+    return AcceptanceGateConfig(trials=trials, score_threshold=score_threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -906,10 +939,24 @@ _DEFAULT_ACCEPTANCE_GATE = AcceptanceGateConfig(trials=5, score_threshold=0.8)
 
 _DEFAULT_CODE_EXTENSIONS: tuple[str, ...] = ("ts", "tsx", "css", "js", "jsx")
 
+# `light_doer`'s registered fallback: dialogue_degradation.py's
+# `_load_degraded_roster_model` reads `light_doer.name` for rung 2's cheaper
+# roster model, and needs a default for a config whose `light_doer` block is
+# present but incomplete. Mirrors dialogue_degradation.py's own pre-ticket-42
+# `_DEFAULT_DEGRADED_ROSTER_MODEL` literal rather than importing it — that
+# module already imports this one, so importing the other way would cycle.
+# No other legacy role is registered here: every other role's validation
+# failure on a present-but-incomplete entry is a genuine caller mistake for
+# that role's own consumers, not a partial-config case anything degrades
+# gracefully from.
+_DEFAULT_LEGACY_ROLES: dict[str, LegacyRoleConfig] = {
+    "light_doer": LegacyRoleConfig(name="Codex 5.6 Terra", patterns=()),
+}
+
 DEFAULT_ROUTING_CONFIG = RoutingConfig(
     roles=MappingProxyType({}),
     providers=MappingProxyType({}),
-    legacy_roles=MappingProxyType({}),
+    legacy_roles=MappingProxyType(_DEFAULT_LEGACY_ROLES),
     council_policy=_DEFAULT_COUNCIL_POLICY,
     consultation_policy=_DEFAULT_CONSULTATION_POLICY,
     critical_dialogue=_DEFAULT_CRITICAL_DIALOGUE,
@@ -971,9 +1018,11 @@ def parse_routing_config(
 
     legacy_roles: dict[str, LegacyRoleConfig] = {}
     for key, value in data.items():
-        if key in _STRUCTURAL_KEYS or not isinstance(value, dict):
+        if key in STRUCTURAL_KEYS or not isinstance(value, dict):
             continue
-        legacy_roles[key] = _parse_legacy_role_config(key, value, key)
+        legacy_roles[key] = _parse_legacy_role_config(
+            key, value, key, fallback_on_missing=fallback_on_missing
+        )
 
     council_policy = _section("council_policy", _parse_council_policy, DEFAULT_ROUTING_CONFIG.council_policy)
     consultation_policy = _section(
@@ -1044,8 +1093,15 @@ def load_routing_config(
     return parse_routing_config(raw, fallback_on_missing=fallback_on_missing)
 
 
-# Module-level load-time verification: importing this module fails fast if
-# the checked-in `routing-config.json` itself is malformed, rather than
-# deferring that discovery to whichever consumer happens to load it first at
-# runtime.
-load_routing_config(ROUTING_CONFIG_PATH, fallback_on_missing=True)
+def validate_default_config() -> RoutingConfig:
+    """Validate the checked-in `routing-config.json` against this module's
+    schema, on demand.
+
+    Ticket 42 iteration 3: this validation used to run automatically as a
+    bare statement at module import time, so merely importing this module —
+    to reach a type, or `DEFAULT_ROUTING_CONFIG` — paid for a disk read and
+    full parse whether or not the caller needed one. A caller that wants
+    that fail-fast guarantee (a test, or a future strict-mode CLI) now asks
+    for it explicitly by calling this function.
+    """
+    return load_routing_config(ROUTING_CONFIG_PATH, fallback_on_missing=True)

@@ -318,30 +318,13 @@ def _routing_config_module() -> Any | None:
     takes the whole audit down. Returns `None` when unavailable, and every
     caller below degrades to its own pre-ticket-42 literal default rather
     than raising.
-
-    `routing_config` also raises one of its own `ConfigError` subclasses at
-    *import* time when the checked-in `routing-config.json` it self-checks
-    against is malformed (its module-level load-time verification) —
-    degraded here exactly like a missing module, since a broken config
-    should never crash the audit that is trying to check routing behavior.
-    That exception's class can't be named directly in an `except` clause:
-    the `import` statement that raises it never finishes binding the
-    `routing_config` name, so `except routing_config.ConfigError` would
-    itself raise `NameError` before ever matching. Matching on the raised
-    exception's own `__module__` instead sidesteps that without needing the
-    name bound.
     """
-    module_name = f"{__package__}.routing_config" if __package__ else "routing_config"
     try:
         if __package__:
             from . import routing_config
         else:
             import routing_config  # type: ignore[no-redef]
     except ImportError:
-        return None
-    except Exception as exc:
-        if type(exc).__module__ != module_name:
-            raise
         return None
     return routing_config
 
@@ -367,7 +350,7 @@ def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
 def load_patterns(config: dict[str, Any]) -> list[str]:
     routing_config = _routing_config_module()
     non_role_keys = (
-        routing_config._STRUCTURAL_KEYS if routing_config is not None else NON_ROLE_CONFIG_KEYS
+        routing_config.STRUCTURAL_KEYS if routing_config is not None else NON_ROLE_CONFIG_KEYS
     )
     patterns: list[str] = []
     for key, role in config.items():

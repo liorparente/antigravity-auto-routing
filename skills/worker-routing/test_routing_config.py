@@ -85,12 +85,13 @@ class LoadCheckedInConfigTests(unittest.TestCase):
         self.assertIn("py", self.config.code_extensions)
         self.assertTrue(self.config.safe_commands)
 
-    def test_module_level_verification_already_ran_at_import_time(self) -> None:
-        """The module-level `load_routing_config(...)` call at the bottom of
-        routing_config.py already validated the checked-in file merely by
-        importing this module without raising — this test documents that
-        contract explicitly rather than leaving it implicit."""
-        self.assertIsInstance(routing_config.DEFAULT_ROUTING_CONFIG, routing_config.RoutingConfig)
+    def test_validate_default_config_validates_the_checked_in_file(self) -> None:
+        """Ticket 42 iteration 3: validating the checked-in
+        `routing-config.json` is no longer a module-import side effect —
+        `validate_default_config()` is the explicit call a caller (this
+        test, or a future strict-mode CLI) makes for that same fail-fast
+        guarantee on demand."""
+        self.assertIsInstance(routing_config.validate_default_config(), routing_config.RoutingConfig)
 
 
 class ImmutabilityTests(unittest.TestCase):
@@ -252,8 +253,18 @@ class FallbackBehaviorTests(unittest.TestCase):
     parameters"."""
 
     def test_empty_dict_falls_back_to_every_default(self) -> None:
+        # `legacy_roles` is excluded from the direct comparison: unlike
+        # every other section, it is discovered per top-level key present in
+        # the input rather than wholesale-filled from
+        # `DEFAULT_ROUTING_CONFIG` when absent, so parsing `{}` (no
+        # `light_doer` key at all) yields an empty `legacy_roles`, not
+        # `DEFAULT_ROUTING_CONFIG`'s registered `light_doer` default. See
+        # `test_partial_light_doer_legacy_role_defaults_missing_name` below
+        # for that per-field fallback's own coverage.
         config = routing_config.parse_routing_config({}, fallback_on_missing=True)
-        self.assertEqual(config, routing_config.DEFAULT_ROUTING_CONFIG)
+        self.assertEqual(
+            config, dataclasses.replace(routing_config.DEFAULT_ROUTING_CONFIG, legacy_roles={})
+        )
 
     def test_partial_canary_cadence_defaults_the_other_key(self) -> None:
         config = routing_config.parse_routing_config(
@@ -274,6 +285,35 @@ class FallbackBehaviorTests(unittest.TestCase):
             config.critical_dialogue.security_sensitive_path_patterns,
             routing_config.DEFAULT_ROUTING_CONFIG.critical_dialogue.security_sensitive_path_patterns,
         )
+
+    def test_partial_dialogue_budget_defaults_the_missing_key(self) -> None:
+        config = routing_config.parse_routing_config({"dialogue_budget": {}})
+        self.assertEqual(
+            config.dialogue_budget.session_dialogue_cap,
+            routing_config.DEFAULT_ROUTING_CONFIG.dialogue_budget.session_dialogue_cap,
+        )
+
+    def test_partial_acceptance_gate_defaults_the_missing_key(self) -> None:
+        config = routing_config.parse_routing_config({"acceptance_gate": {"trials": 3}})
+        self.assertEqual(config.acceptance_gate.trials, 3)
+        self.assertEqual(
+            config.acceptance_gate.score_threshold,
+            routing_config.DEFAULT_ROUTING_CONFIG.acceptance_gate.score_threshold,
+        )
+
+    def test_partial_light_doer_legacy_role_defaults_missing_name(self) -> None:
+        config = routing_config.parse_routing_config({"light_doer": {}})
+        default_light_doer = routing_config.DEFAULT_ROUTING_CONFIG.legacy_roles["light_doer"]
+        self.assertEqual(config.legacy_roles["light_doer"].name, default_light_doer.name)
+        self.assertEqual(config.legacy_roles["light_doer"].patterns, default_light_doer.patterns)
+
+    def test_legacy_role_without_registered_default_still_raises(self) -> None:
+        """A role with no registered default (anything but `light_doer`)
+        still raises on a missing required field, `fallback_on_missing`
+        notwithstanding — only `light_doer` has a fallback to give."""
+        with self.assertRaises(routing_config.ConfigValidationError) as ctx:
+            routing_config.parse_routing_config({"planner_helper": {}})
+        self.assertEqual(ctx.exception.key_path, "planner_helper.name")
 
     def test_missing_roles_and_providers_default_to_empty(self) -> None:
         config = routing_config.parse_routing_config({}, fallback_on_missing=True)
@@ -299,13 +339,6 @@ class ToDictRoundTripTests(unittest.TestCase):
         raw = json.loads(routing_config.ROUTING_CONFIG_PATH.read_text(encoding="utf-8"))
         self.assertEqual(as_dict["dialogue_budget"], raw["dialogue_budget"])
         self.assertEqual(as_dict["acceptance_gate"], raw["acceptance_gate"])
-
-    def test_get_reads_top_level_sections_like_a_dict(self) -> None:
-        config = routing_config.load_routing_config()
-        self.assertEqual(
-            config.get("dialogue_budget"), {"session_dialogue_cap": 10}
-        )
-        self.assertEqual(config.get("no-such-key", "fallback"), "fallback")
 
     def test_default_config_round_trips(self) -> None:
         default = routing_config.get_default_routing_config()
@@ -350,14 +383,13 @@ class LoadRoutingConfigFileErrorTests(unittest.TestCase):
         self.assertTrue(issubclass(routing_config.ConfigError, Exception))
 
 
-class RoutingConfigPathLoadTimeValidationTests(unittest.TestCase):
+class ValidateDefaultConfigTests(unittest.TestCase):
     """Ticket 42 AC: "Implement early schema validation at module load
-    time" fails closed. The module-level statement at the bottom of
-    routing_config.py is `load_routing_config(ROUTING_CONFIG_PATH,
-    fallback_on_missing=True)` verbatim, so this pins that exact call
-    against both ways the checked-in file could go bad — rather than
-    `importlib.reload`, which would just recompute `ROUTING_CONFIG_PATH`
-    from `__file__` again and mask any substitution."""
+    time" fails closed — now via the explicit `validate_default_config()`
+    call (iteration 3) rather than a module-import side effect. This pins
+    that function against both ways the checked-in file could go bad —
+    rather than `importlib.reload`, which would just recompute
+    `ROUTING_CONFIG_PATH` from `__file__` again and mask any substitution."""
 
     def test_invalid_json_at_routing_config_path_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -365,18 +397,14 @@ class RoutingConfigPathLoadTimeValidationTests(unittest.TestCase):
             bad_path.write_text("{not valid json", encoding="utf-8")
             with mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", bad_path):
                 with self.assertRaises(routing_config.ConfigParseError):
-                    routing_config.load_routing_config(
-                        routing_config.ROUTING_CONFIG_PATH, fallback_on_missing=True
-                    )
+                    routing_config.validate_default_config()
 
     def test_missing_file_at_routing_config_path_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             missing_path = Path(tmp) / "does-not-exist.json"
             with mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", missing_path):
                 with self.assertRaises(routing_config.ConfigFileNotFoundError):
-                    routing_config.load_routing_config(
-                        routing_config.ROUTING_CONFIG_PATH, fallback_on_missing=True
-                    )
+                    routing_config.validate_default_config()
 
 
 if __name__ == "__main__":
