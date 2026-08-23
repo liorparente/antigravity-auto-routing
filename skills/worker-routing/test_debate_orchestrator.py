@@ -1,6 +1,7 @@
 """Hermetic unit tests for pure debate orchestration state."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import io
@@ -868,12 +869,130 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             )
 
 
-# `ReviewCouncil`'s by-perspective fast path, unilateral security veto, and
-# stalemate escalation (spec 0012 / workflow-v2 ticket 07) are covered once,
-# at the facade level, in `skills/council-review/tests/test_council_review.py`
-# (`CouncilPerspectiveFastPathTests`) — `council_review.py` re-exports
-# `ReviewCouncil` from this module without wrapping it, so a second,
-# near-identical suite here exercised the same code path twice.
+class _FakePerspectiveAdapter:
+    """Minimal stand-in for `provider_adapters.FakeReviewerAdapter`, kept
+    local so this module's tests stay self-contained rather than reaching
+    into `council-review/scripts` for a fixture."""
+
+    def __init__(self, provider_id: str, fixed_responses: list[dict[str, Any]]) -> None:
+        self.provider_id = provider_id
+        self.fixed_responses = fixed_responses
+        self.call_count = 0
+
+    async def review(self, envelope: str, round_spec: int, deadline: int) -> dict[str, Any]:
+        if self.call_count < len(self.fixed_responses):
+            resp = self.fixed_responses[self.call_count]
+            self.call_count += 1
+            return resp
+        return {"provider": self.provider_id, "vote": "abstain", "confidence": 0.0}
+
+
+def _perspective_vote(perspective: str, vote: str, candidate_hash: str, **extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "provider": perspective,
+        "perspective": perspective,
+        "vote": vote,
+        "candidate_hash": candidate_hash,
+    }
+    payload.update(extra)
+    return payload
+
+
+# `ReviewCouncil`'s by-perspective fast path (spec 0012 / workflow-v2 ticket
+# 07, ADR 0012's 1-shot round), its unilateral security veto, and its
+# stalemate escalation. `skills/council-review/tests/test_council_review.py`
+# (`CouncilPerspectiveFastPathTests`) covers the same flow through the
+# `council_review` facade with a wider matrix of adjudicator scenarios; this
+# suite exercises `ReviewCouncil` directly, where it is actually defined.
+class ReviewCouncilByPerspectiveTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.workspace_root = self.temp_dir.name
+        cal_dir = os.path.join(self.workspace_root, ".ralph", "cache")
+        os.makedirs(cal_dir, exist_ok=True)
+        with open(os.path.join(cal_dir, "calibration.key"), "w") as f:
+            f.write("test_secret_key_12345")
+        self.objective = "Add a caching layer"
+        self.candidate_hash = hashlib.sha256(self.objective.encode("utf-8")).hexdigest()
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def _adapters(
+        self, votes: dict[str, str], overrides: dict[str, dict[str, Any]] | None = None
+    ) -> list[_FakePerspectiveAdapter]:
+        overrides = overrides or {}
+        return [
+            _FakePerspectiveAdapter(
+                perspective,
+                [_perspective_vote(perspective, vote, self.candidate_hash, **overrides.get(perspective, {}))],
+            )
+            for perspective, vote in votes.items()
+        ]
+
+    def test_one_shot_fast_path_approves_in_round_1(self) -> None:
+        council = debate_orchestrator.ReviewCouncil()
+        req = debate_orchestrator.ReviewRequest(
+            objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._adapters({
+            "reviewer_architecture": "approved",
+            "reviewer_risk": "approved",
+            "reviewer_maintainability": "approved",
+            "reviewer_security": "approved",
+        })
+
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertIsInstance(outcome, debate_orchestrator.ReviewOutcome)
+        self.assertEqual(outcome.status, "UNANIMOUS")
+        # 1-shot: every perspective reviewer ran exactly once.
+        self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
+
+    def test_unilateral_security_veto_with_dict_finding_halts_review(self) -> None:
+        council = debate_orchestrator.ReviewCouncil()
+        req = debate_orchestrator.ReviewRequest(
+            objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._adapters(
+            {
+                "reviewer_architecture": "approved",
+                "reviewer_risk": "approved",
+                "reviewer_maintainability": "approved",
+                "reviewer_security": "blocked",
+            },
+            overrides={
+                "reviewer_security": {
+                    "findings": [{"id": "SEC-1", "severity": "critical", "claim": "SQLi", "confidence": 0.95}]
+                }
+            },
+        )
+
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "SECURITY_HALT")
+        self.assertEqual(outcome.unresolved_blockers, 1)
+
+    def test_round_1_quorum_failure_escalates_to_stalemate(self) -> None:
+        council = debate_orchestrator.ReviewCouncil()
+        req = debate_orchestrator.ReviewRequest(
+            objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._adapters({
+            "reviewer_architecture": "revise",
+            "reviewer_risk": "revise",
+            "reviewer_maintainability": "revise",
+            "reviewer_security": "revise",
+        })
+
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "UNRESOLVED")
+        self.assertEqual(outcome.unresolved_blockers, 1)
+        assert outcome.stalemate_report is not None
+        self.assertEqual(outcome.stalemate_report.planner_position, self.objective)
+        # Escalation happens straight off round 1 — no second round is polled.
+        self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
 
 
 if __name__ == "__main__":

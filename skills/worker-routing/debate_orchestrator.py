@@ -420,8 +420,9 @@ class ReviewOutcome:
     manifest_path: str | None = None
     unresolved_blockers: int = 0
     source_changed: bool = False
-    # Populated only when a Council perspective review reaches an
-    # irreconcilable stalemate after round 3 (ticket 07) — the same
+    # Populated only when a Council perspective review's round 1 fails to
+    # reach quorum and escalation to the Adjudicator/HITL does not resolve
+    # it (ticket 07, ADR 0012's 1-shot fast path) — the same
     # `AdvisoryStalemateReport` shape spec 0003's Planner/Critic debates
     # already use, adapted for an N-way perspective panel via
     # `build_stalemate_report`'s `perspective_positions` parameter.
@@ -503,23 +504,30 @@ class ReviewCouncil:
                     "— failing closed rather than egressing data to cloud."
                 )
             return adapters
+        if request.by_perspective:
+            return self._resolve_perspective_adapters(request)
         providers = self.policy.get("providers", [])
-        if request.by_perspective or not providers:
-            return self._resolve_perspective_adapters()
         return [build_adapter(config) for config in providers]
 
-    def _resolve_perspective_adapters(self) -> list[ReviewerAdapterProtocol]:
+    def _resolve_perspective_adapters(self, request: ReviewRequest) -> list[ReviewerAdapterProtocol]:
         """Resolve the 4 Council perspective reviewers (ticket 07) via
         `RoleResolver`, one `PerspectiveReviewerAdapter` per
-        `ReviewerPerspective` in `dialogue_contracts.REVIEWER_PERSPECTIVES`."""
+        `ReviewerPerspective` in `dialogue_contracts.REVIEWER_PERSPECTIVES`,
+        each seeded with `request.objective` as its `task_description` so a
+        reviewer's prompt describes the actual mission under review rather
+        than `PerspectiveReviewerAdapter`'s generic "Proposal review"
+        default."""
         module = _load_provider_adapters()
-        resolver = _production_invoker.get_default_role_resolver()
+        resolver = _current_production_invoker().get_default_role_resolver()
         adapters: list[ReviewerAdapterProtocol] = []
         for perspective in _dialogue_contracts.REVIEWER_PERSPECTIVES:
             resolved = resolver.resolve_role(perspective)
             adapters.append(
                 module.PerspectiveReviewerAdapter(
-                    perspective, model=resolved.model, effort=resolved.reasoning_effort
+                    perspective,
+                    model=resolved.model,
+                    effort=resolved.reasoning_effort,
+                    task_description=request.objective,
                 )
             )
         return adapters
@@ -673,15 +681,15 @@ class ReviewCouncil:
         custom_adapters: Sequence[ReviewerAdapterProtocol] | None,
     ) -> ReviewOutcome:
         """The 4-perspective Council review flow (spec 0012 / workflow-v2
-        ticket 07): round 1 runs all 4 perspective reviewers concurrently
-        (`_execute_round` already gathers every adapter's `review()` call via
-        `asyncio.gather`); a unilateral security veto halts immediately
-        regardless of round; and a 1-shot fast path terminates in round 1 the
-        moment weighted quorum is met, skipping rounds 2/3 entirely. Only a
-        round that fails to reach quorum falls through to the next round;
-        round 3's own failure to reach quorum escalates to
-        `_route_perspective_stalemate` rather than degrading to a bare
-        "UNRESOLVED" status.
+        ticket 07, ADR 0012's 1-shot fast path): round 1 runs all 4
+        perspective reviewers concurrently (`_execute_round` already gathers
+        every adapter's `review()` call via `asyncio.gather`); a unilateral
+        security veto halts immediately. Round 1 is the panel's only round —
+        it either reaches weighted quorum and finalizes there, or it does
+        not and the review escalates immediately to the configured
+        Adjudicator (or HITL when none is configured) via
+        `_route_perspective_stalemate`, rather than re-polling the same
+        panel for a second or third round.
         """
         initial_hash = self._hash_source(request.subject)
         run_id = f"run-{uuid.uuid4().hex[:8]}"
@@ -701,33 +709,23 @@ class ReviewCouncil:
             weights=self._load_weights(request.workspace_root),
             quorum_threshold=quorum_threshold,
         )
-        fast_path_enabled = bool(council_policy.get("fast_path_enabled", True))
         deadlines = council_policy.get("deadlines_seconds", {})
 
         adapters = custom_adapters if custom_adapters is not None else self._resolve_adapters(request)
 
-        # Every round reviews the same envelope (`request.objective`, unlike
-        # the legacy flow's hash-only rounds 2/3) — one `expected_hash`
-        # ratifies all three, so `ConsensusTable.evaluate` catches a
-        # perspective vote tampering with (or simply not echoing) the
-        # candidate it actually reviewed.
         candidate_hash = hashlib.sha256(request.objective.encode("utf-8")).hexdigest()
 
-        votes: list[dict[str, Any]] = []
-        for round_num, default_deadline in ((1, 45), (2, 60), (3, 60)):
-            deadline = deadlines.get(f"round_{round_num}", default_deadline)
-            votes = await self._execute_round(adapters, request.objective, round_num, deadline)
-            veto_outcome = self._check_veto_and_halt(
-                votes, veto_handler, run_id, request.workspace_root
-            )
-            if veto_outcome is not None:
-                return veto_outcome
+        deadline = deadlines.get("round_1", 45)
+        votes = await self._execute_round(adapters, request.objective, 1, deadline)
+        veto_outcome = self._check_veto_and_halt(
+            votes, veto_handler, run_id, request.workspace_root
+        )
+        if veto_outcome is not None:
+            return veto_outcome
 
-            if round_num == 1 and not fast_path_enabled:
-                continue
-            outcome = table.evaluate(votes, expected_hash=candidate_hash)
-            if outcome in ("UNANIMOUS", "QUALIFIED"):
-                return self._finalize_perspective_outcome(outcome, run_id, request, initial_hash)
+        outcome = table.evaluate(votes, expected_hash=candidate_hash)
+        if outcome in ("UNANIMOUS", "QUALIFIED"):
+            return self._finalize_perspective_outcome(outcome, run_id, request, initial_hash)
 
         return await self._route_perspective_stalemate(votes, run_id, request)
 
@@ -742,6 +740,7 @@ class ReviewCouncil:
             status=final_status,
             run_id=run_id,
             source_changed=source_changed,
+            unresolved_blockers=1 if source_changed else 0,
             manifest_path=manifest_path,
         )
 

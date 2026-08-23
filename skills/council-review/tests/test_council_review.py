@@ -127,9 +127,14 @@ class CouncilReviewTDDTests(unittest.TestCase):
         self.assertEqual(adapters[0].provider_id, "lm-studio")
 
         # The local adjudicator is a stub with no endpoint wired up: it
-        # abstains rather than fabricating an approval, so a local-only
-        # review fails closed to UNRESOLVED instead of silently rubber-
-        # stamping a sensitive task.
+        # abstains rather than fabricating an approval, so its own vote
+        # payload must carry "abstain" directly...
+        vote_payload = asyncio.run(adapters[0].review(req.objective, 1, 30))
+        self.assertEqual(vote_payload["vote"], "abstain")
+        self.assertEqual(vote_payload["confidence"], 0.0)
+
+        # ...and a local-only review fails closed to UNRESOLVED instead of
+        # silently rubber-stamping a sensitive task.
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
         self.assertEqual(outcome.status, "UNRESOLVED")
 
@@ -347,7 +352,11 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
         self.assertEqual(outcome.status, "SECURITY_HALT")
         self.assertEqual(outcome.unresolved_blockers, 1)
 
-    def test_round_1_below_quorum_recovers_in_round_2(self) -> None:
+    def test_round_1_quorum_failure_never_polls_a_second_round(self) -> None:
+        # ADR 0012 / N-S3: the by-perspective flow is strictly 1-shot now —
+        # a round 1 that misses quorum escalates immediately rather than
+        # re-polling the panel, even when an adapter has a second response
+        # queued that would have recovered quorum.
         council = ReviewCouncil(ROUTING_CONFIG_PATH)
         req = ReviewRequest(
             objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
@@ -372,10 +381,11 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
         })
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
 
-        self.assertEqual(outcome.status, "UNANIMOUS")
-        self.assertEqual([a.call_count for a in adapters], [2, 2, 2, 2])
+        self.assertEqual(outcome.status, "UNRESOLVED")
+        self.assertEqual(outcome.unresolved_blockers, 1)
+        self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
 
-    def test_stalemate_after_round_3_escalates_with_advisory_report(self) -> None:
+    def test_round_1_quorum_failure_escalates_with_advisory_report(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "routing-config.json"
             base = json.loads(ROUTING_CONFIG_PATH.read_text())
@@ -387,7 +397,7 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
                 objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
             )
             adapters = self._perspective_adapters({
-                perspective: [_perspective_vote(perspective, "revise")] * 3
+                perspective: [_perspective_vote(perspective, "revise")]
                 for perspective in (
                     "reviewer_architecture",
                     "reviewer_risk",
@@ -402,7 +412,7 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
         assert outcome.stalemate_report is not None
         self.assertEqual(outcome.stalemate_report.planner_position, "Add a caching layer")
         self.assertIn("reviewer_security", outcome.stalemate_report.critic_position)
-        self.assertEqual([a.call_count for a in adapters], [3, 3, 3, 3])
+        self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
 
     def test_stalemate_fails_closed_when_configured_adjudicator_is_offline(self) -> None:
         # The default policy's `lm-studio` adjudicator is a stub with no
@@ -416,7 +426,7 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
             objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
         )
         adapters = self._perspective_adapters({
-            perspective: [_perspective_vote(perspective, "revise")] * 3
+            perspective: [_perspective_vote(perspective, "revise")]
             for perspective in (
                 "reviewer_architecture",
                 "reviewer_risk",
@@ -440,7 +450,7 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
             objective="Add a caching layer", workspace_root=self.workspace_root, by_perspective=True
         )
         adapters = self._perspective_adapters({
-            perspective: [_perspective_vote(perspective, "revise")] * 3
+            perspective: [_perspective_vote(perspective, "revise")]
             for perspective in (
                 "reviewer_architecture",
                 "reviewer_risk",

@@ -264,9 +264,12 @@ class SecurityVetoHandler:
         (2) an explicit `"BLOCK"` verdict (see `_normalize_verdict`), but
         only when it is a genuine security signal — either the perspective
         reviewer *is* `reviewer_security` (spec 0012's unilateral security
-        veto), or the vote carries a `StructuredFinding` whose own severity
-        is already critical/high. A raw `"block"` vote from any other
-        legacy provider with no attached security finding does NOT veto —
+        veto), or the vote carries a finding (dict/MappingProxyType or
+        `StructuredFinding`, checked by shape via `_is_finding`/
+        `_finding_field` so both representations are recognized
+        interchangeably) whose own severity is already critical/high. A raw
+        `"block"` vote from any other legacy provider with no attached
+        security finding does NOT veto —
         that is a plain disapproval, not a security signal. Every finding
         reported here uses its genuine severity/claim; this handler never
         fabricates one except for `reviewer_security`'s own unilateral
@@ -306,8 +309,8 @@ class SecurityVetoHandler:
                 (
                     f
                     for f in findings
-                    if isinstance(f, StructuredFinding)
-                    and str(f.severity).strip().casefold() in self.veto_severities
+                    if self._is_finding(f)
+                    and str(self._finding_field(f, "severity", "")).strip().casefold() in self.veto_severities
                 ),
                 None,
             )
