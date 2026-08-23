@@ -17,10 +17,14 @@ therefore correctly means every dialogue is skipped.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+if __package__:
+    from . import routing_config
+else:
+    import routing_config  # type: ignore[no-redef]
 
 __all__ = [
     "BUDGET_DEGRADATION_MARKER",
@@ -44,11 +48,12 @@ _DEGRADATION_RUNG_LABELS: dict[DegradationRung, str] = {
     3: "skip the dialogue entirely",
 }
 
-_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
+_CONFIG_PATH = routing_config.ROUTING_CONFIG_PATH
 
 
 def _load_dialogue_budget_config(config_path: Path) -> int:
-    """Read the session dialogue cap from ``config_path``.
+    """Read the session dialogue cap from ``config_path`` via
+    :mod:`routing_config` (ticket 42).
 
     The value comes from ``dialogue_budget.session_dialogue_cap`` and falls
     back to :data:`DEFAULT_SESSION_DIALOGUE_CAP` when that section or key is
@@ -56,14 +61,12 @@ def _load_dialogue_budget_config(config_path: Path) -> int:
     the checked-in default exists, so a missing or malformed injected path is a
     caller error that must remain visible rather than being silently ignored.
     """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    section = config.get("dialogue_budget", {})
-    return int(section.get("session_dialogue_cap", DEFAULT_SESSION_DIALOGUE_CAP))
+    return routing_config.load_routing_config(config_path).dialogue_budget.session_dialogue_cap
 
 
 def _load_degraded_roster_model(config_path: Path) -> str:
-    """Read rung 2's single, cheaper model from ``light_doer.name``.
+    """Read rung 2's single, cheaper model from ``light_doer.name`` via
+    :mod:`routing_config` (ticket 42).
 
     Rung 2 must cheapen both effort and roster.  Reusing the existing
     ``light_doer`` block avoids inventing a second roster resolver whose cost
@@ -76,10 +79,8 @@ def _load_degraded_roster_model(config_path: Path) -> str:
     :func:`_load_dialogue_budget_config`, missing or malformed files raise so
     configuration mistakes do not become invisible production defaults.
     """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    role_block = config.get("light_doer", {})
-    name = role_block.get("name", _DEFAULT_DEGRADED_ROSTER_MODEL)
+    legacy_role = routing_config.load_routing_config(config_path).legacy_roles.get("light_doer")
+    name = legacy_role.name if legacy_role is not None else _DEFAULT_DEGRADED_ROSTER_MODEL
     primary = name.split("/")[0].strip()
     return primary or _DEFAULT_DEGRADED_ROSTER_MODEL
 

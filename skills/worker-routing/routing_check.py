@@ -307,9 +307,43 @@ TARGET_FILE_RE = _kv_pattern("TargetFile")
 COMMAND_LINE_RE = _kv_pattern("CommandLine")
 
 
+def _routing_config_module() -> Any | None:
+    """Best-effort import of the sibling `routing_config` module (ticket 42).
+
+    Mirrors this file's existing `learning_journal` lazy-import pattern
+    (see `_task_id_pattern` above): `routing_check.py` is occasionally run
+    standalone (`routing-audit.sh` copies it, or a pared-down installation
+    lacks the optional module), so a module-level `from . import
+    routing_config` would turn a missing sibling into an ImportError that
+    takes the whole audit down. Returns `None` when unavailable, and every
+    caller below degrades to its own pre-ticket-42 literal default rather
+    than raising.
+    """
+    try:
+        if __package__:
+            from . import routing_config
+        else:
+            import routing_config  # type: ignore[no-redef]
+    except ImportError:
+        return None
+    return routing_config
+
+
 def load_config() -> dict[str, Any]:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)  # type: ignore[no-any-return]
+        config: dict[str, Any] = json.load(f)
+    # Ticket 42: fail closed, early, on a malformed checked-in config file —
+    # validated through the same typed schema every other consumer now
+    # shares — rather than letting a schema drift surface later as an
+    # obscure `KeyError`/`TypeError` inside whichever `load_*` helper below
+    # happens to touch the broken section first. The raw `config` dict
+    # returned here is unchanged either way: callers (and
+    # `test_load_config_matches_json_loads`) depend on this being
+    # byte-for-byte what `json.load` produced.
+    routing_config = _routing_config_module()
+    if routing_config is not None:
+        routing_config.parse_routing_config(config)
+    return config
 
 
 def load_patterns(config: dict[str, Any]) -> list[str]:
@@ -322,11 +356,21 @@ def load_patterns(config: dict[str, Any]) -> list[str]:
 
 
 def load_code_extensions(config: dict[str, Any]) -> list[str]:
-    return config.get("code_extensions", DEFAULT_CODE_EXTENSIONS)  # type: ignore[no-any-return]
+    routing_config = _routing_config_module()
+    default = (
+        list(routing_config.DEFAULT_ROUTING_CONFIG.code_extensions)
+        if routing_config is not None
+        else DEFAULT_CODE_EXTENSIONS
+    )
+    return config.get("code_extensions", default)  # type: ignore[no-any-return]
 
 
 def load_safe_patterns(config: dict[str, Any]) -> list[re.Pattern[str]]:
-    return [re.compile(p) for p in config.get("safe_commands", [])]
+    routing_config = _routing_config_module()
+    default = (
+        list(routing_config.DEFAULT_ROUTING_CONFIG.safe_commands) if routing_config is not None else []
+    )
+    return [re.compile(p) for p in config.get("safe_commands", default)]
 
 
 def _strip_command_wrappers(command: str) -> str:

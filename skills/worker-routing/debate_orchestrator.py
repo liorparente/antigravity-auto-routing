@@ -67,6 +67,7 @@ if __package__:
     from . import learning_outcomes as _learning_outcomes
     from . import production_invoker as _production_invoker
     from . import prompt_assembler as _prompt_assembler
+    from . import routing_config
     from . import sensitivity_redactor as _sensitivity_redactor
 else:
     import consultation_policy as _consultation_policy  # type: ignore[no-redef]
@@ -81,6 +82,7 @@ else:
     import learning_outcomes as _learning_outcomes  # type: ignore[no-redef]
     import production_invoker as _production_invoker  # type: ignore[no-redef]
     import prompt_assembler as _prompt_assembler  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
     import sensitivity_redactor as _sensitivity_redactor  # type: ignore[no-redef]
 
 # `_learning_journal` and `_learning_outcomes` are imported to ensure sibling modules
@@ -295,7 +297,7 @@ SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 # `config.get("code_extensions", DEFAULT_CODE_EXTENSIONS)` pattern — never
 # the value actually used when `routing-config.json` supplies its own
 # `critical_dialogue` section, which it does as of this ticket.
-_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
+_CONFIG_PATH = routing_config.ROUTING_CONFIG_PATH
 DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD = 300
 DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
     "auth",
@@ -1070,18 +1072,16 @@ DEFAULT_ROSTER_FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
 
 def _load_roster_fallback_chains(config_path: Path) -> dict[str, tuple[str, ...]]:
     """Read each role's fallback chain from `config_path`'s `roster_topology`
-    section, falling back to `DEFAULT_ROSTER_FALLBACK_CHAINS` per role (or
-    wholesale when the section itself is absent) — same pattern
-    `_load_code_review_risk_config` above uses for `critical_dialogue`,
-    including its no-try/except contract: a missing or malformed
-    `config_path` raises whatever `open`/`json.load` raises rather than
-    being silently swallowed, because production always calls this with the
-    default `_CONFIG_PATH`, which is checked into the repo.
+    section (via `routing_config`, ticket 42), falling back to
+    `DEFAULT_ROSTER_FALLBACK_CHAINS` per role (or wholesale when the section
+    itself is absent) — same pattern `_load_code_review_risk_config` above
+    uses for `critical_dialogue`, including its no-try/except contract: a
+    missing or malformed `config_path` raises whatever
+    `routing_config.load_routing_config` raises rather than being silently
+    swallowed, because production always calls this with the default
+    `_CONFIG_PATH`, which is checked into the repo.
     """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    section = config.get("roster_topology", {})
-    configured_chains = section.get("role_fallback_chains", {})
+    configured_chains = routing_config.load_routing_config(config_path).roster_topology.role_fallback_chains
     resolved: dict[str, tuple[str, ...]] = {}
     for role, default_chain in DEFAULT_ROSTER_FALLBACK_CHAINS.items():
         resolved[role] = tuple(configured_chains.get(role, default_chain))
@@ -1381,24 +1381,17 @@ DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES = 7 * 24 * 60 * 60
 
 def _load_canary_cadence_config(config_path: Path) -> tuple[int, float]:
     """Read the canary cadence's two settings from `config_path`'s
-    `canary_cadence` section, falling back to this module's `DEFAULT_*`
-    constants for whichever key (or the whole section) is absent — same
-    pattern, including the no-try/except contract, as
-    `_load_code_review_risk_config` and `_load_roster_fallback_chains`
-    above: production always calls this with the default `_CONFIG_PATH`,
-    which is checked into the repo, so a missing/malformed `config_path` is
-    a genuine caller mistake left to raise loudly rather than be swallowed.
+    `canary_cadence` section (via `routing_config`, ticket 42), falling
+    back to this module's `DEFAULT_*` constants for whichever key (or the
+    whole section) is absent — same pattern, including the no-try/except
+    contract, as `_load_code_review_risk_config` and
+    `_load_roster_fallback_chains` above: production always calls this with
+    the default `_CONFIG_PATH`, which is checked into the repo, so a
+    missing/malformed `config_path` is a genuine caller mistake left to
+    raise loudly rather than be swallowed.
     """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    section = config.get("canary_cadence", {})
-    dialogues_per_canary = section.get(
-        "dialogues_per_canary", DEFAULT_CANARY_DIALOGUES_PER_CANARY
-    )
-    seconds_between_canaries = section.get(
-        "seconds_between_canaries", DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES
-    )
-    return int(dialogues_per_canary), float(seconds_between_canaries)
+    cadence = routing_config.load_routing_config(config_path).canary_cadence
+    return cadence.dialogues_per_canary, float(cadence.seconds_between_canaries)
 
 
 def is_canary_dialogue(
@@ -1656,28 +1649,24 @@ def needs_plan_review_consultation(complexity: str) -> bool:
 
 def _load_code_review_risk_config(config_path: Path) -> tuple[int, tuple[str, ...]]:
     """Read the code-review occasion's two risk-signal settings from
-    `config_path`'s `critical_dialogue` section, falling back to this
-    module's `DEFAULT_*` constants for whichever key (or the whole section)
-    is absent — see the comment above `_CONFIG_PATH` for why a fallback
-    exists at all and why it is never what production actually uses.
+    `config_path`'s `critical_dialogue` section (via `routing_config`,
+    ticket 42), falling back to this module's `DEFAULT_*` constants for
+    whichever key (or the whole section) is absent — see the comment above
+    `_CONFIG_PATH` for why a fallback exists at all and why it is never
+    what production actually uses.
 
-    Raises whatever `open`/`json.load` raises for a missing or malformed
-    file: mirrors `routing_check.load_config`'s no-try/except contract
-    rather than silently swallowing a bad `config_path`, which would hide a
-    real caller mistake (production always calls this with the default
-    `_CONFIG_PATH`, which is checked into the repo).
+    Raises whatever `routing_config.load_routing_config` raises for a
+    missing or malformed file: mirrors `routing_check.load_config`'s
+    no-try/except contract rather than silently swallowing a bad
+    `config_path`, which would hide a real caller mistake (production
+    always calls this with the default `_CONFIG_PATH`, which is checked
+    into the repo).
     """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    section = config.get("critical_dialogue", {})
-    threshold = section.get(
-        "code_review_diff_line_threshold", DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD
+    critical_dialogue = routing_config.load_routing_config(config_path).critical_dialogue
+    return (
+        critical_dialogue.code_review_diff_line_threshold,
+        critical_dialogue.security_sensitive_path_patterns,
     )
-    patterns = section.get(
-        "security_sensitive_path_patterns",
-        list(DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS),
-    )
-    return int(threshold), tuple(patterns)
 
 
 def needs_code_review_consultation(

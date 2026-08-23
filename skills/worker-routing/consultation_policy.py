@@ -8,81 +8,29 @@ from pathlib import Path
 from typing import Any, TypeGuard
 
 try:
+    from . import routing_config
     from .debate_state_machine import VALID_CONSENSUS_OUTCOMES
 except (ImportError, ValueError):
+    import routing_config  # type: ignore[no-redef]
     from debate_state_machine import VALID_CONSENSUS_OUTCOMES  # type: ignore[no-redef]
 
-ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
-DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
-    "providers": [
-        {
-            "id": "claude",
-            "model": "claude-opus-5",
-            "effort_mapping": {"high": "high"},
-        },
-        {
-            "id": "codex",
-            "model": "gpt-5.6-sol",
-            "effort_mapping": {"high": "high"},
-        },
-        {
-            "id": "gemini",
-            "model": "gemini-3.1-pro",
-            "effort_mapping": {"high": "high"},
-        },
-    ],
-    "adjudicators": [
-        {
-            "id": "lm-studio",
-            "model": "qwen3-coder-30b",
-            "effort_mapping": {"high": "high"},
-        }
-    ],
-    "deadlines_seconds": {"round_1": 120, "round_2": 60, "round_3": 60},
-    "consensus_policy": [
-        "UNANIMOUS",
-        "QUALIFIED",
-        "MATERIAL_DISAGREEMENT",
-        "INCOMPLETE",
-        "UNRESOLVED",
-    ],
-    "weighting": {
-        "initial_weights": {"claude": 0.40, "codex": 0.40, "gemini": 0.20},
-        "min_weight": 0.05,
-        "max_weight": 0.65,
-        "quorum_threshold": 0.60,
-        "dynamic_weights_path": ".ralph/council_weights.json",
-    },
-    "security_veto": {
-        "enabled": True,
-        "veto_severities": ["critical", "high"],
-        "security_threshold": 0.80,
-    },
-    "council_policy": {
-        "fast_path_enabled": True,
-        "quorum_threshold": 0.60,
-        "consensus_policy": [
-            "UNANIMOUS",
-            "QUALIFIED",
-            "MATERIAL_DISAGREEMENT",
-            "INCOMPLETE",
-            "UNRESOLVED",
-        ],
-        "perspective_weights": {
-            "reviewer_architecture": 0.30,
-            "reviewer_risk": 0.25,
-            "reviewer_maintainability": 0.20,
-            "reviewer_security": 0.25,
-        },
-        "security_veto": {
-            "enabled": True,
-            "veto_severities": ["critical", "high"],
-            "security_threshold": 0.80,
-        },
-        "deadlines_seconds": {"round_1": 45, "round_2": 60, "round_3": 60, "adjudicator": 60},
-    },
-}
+# Ticket 42: the single file `routing_config` itself reads. Re-exported here
+# (rather than referenced only as `routing_config.ROUTING_CONFIG_PATH`) since
+# this module's own callers already import it as
+# `consultation_policy.ROUTING_CONFIG_PATH`.
+ROUTING_CONFIG_PATH = routing_config.ROUTING_CONFIG_PATH
 
+# Ticket 42: sourced from `routing_config`'s typed default
+# (`ConsultationPolicyConfig`) rather than duplicated as a hand-maintained
+# literal — `_merge_policy_defaults`/`_validated_policy` below still own this
+# module's lenient "drop the malformed field, keep the rest" merge semantics
+# (routing_config's own parser is deliberately fail-closed instead, per
+# ticket 42's "malformed configuration raises" mandate), so this module
+# keeps that behavior and simply delegates the *shape* of its defaults to
+# the shared typed model instead of hand-copying it a second time.
+DEFAULT_CONSULTATION_POLICY: dict[str, Any] = routing_config.parse_routing_config(
+    {}, fallback_on_missing=True
+).to_dict()["consultation_policy"]
 
 def _merge_policy_defaults(
     defaults: dict[str, Any], configured: object
@@ -337,9 +285,20 @@ def load_consultation_policy(
     ):
         configured = {**configured, "council_policy": config["council_policy"]}
 
-    return _merge_policy_defaults(
-        DEFAULT_CONSULTATION_POLICY, _validated_policy(configured)
-    )
+    merged = _merge_policy_defaults(DEFAULT_CONSULTATION_POLICY, _validated_policy(configured))
+
+    # Ticket 42: validate the merged, already-defaulted policy against
+    # `routing_config`'s typed `ConsultationPolicyConfig` before returning
+    # it, so a future bug in this module's own lenient merge can never
+    # silently hand back a shape the shared schema would reject. This never
+    # raises in practice — `_merge_policy_defaults` above already filled
+    # every required field from `DEFAULT_CONSULTATION_POLICY`, whose own
+    # shape is sourced from that same typed model — but validating rather
+    # than reconstructing the return value keeps the exact dict shape (e.g.
+    # a provider entry with no `effort_mapping` key stays that way) that
+    # callers and `test_loads_legacy_flat_policy` depend on byte-for-byte.
+    routing_config.parse_routing_config({"consultation_policy": merged}, fallback_on_missing=True)
+    return merged
 
 
 __all__ = [

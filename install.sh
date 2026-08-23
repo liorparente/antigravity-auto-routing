@@ -51,7 +51,7 @@ MANAGED_FILES=(
     consultation_policy.py debate_transport.py advisory_consultation.py
     production_invoker.py learning_journal.py learning_outcomes.py
     learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py
-    risk_tiered_application.py learner_worker.py protocol.md
+    risk_tiered_application.py learner_worker.py protocol.md routing_config.py
 )
 
 # Preserve the audited static manifest above while also propagating future

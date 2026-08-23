@@ -33,9 +33,10 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 if __package__:
-    from . import learning_journal
+    from . import learning_journal, routing_config
 else:
     import learning_journal  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: NESTED-EXEC]"
 LEGACY_WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
@@ -44,10 +45,11 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_FALLBACK_MODEL = "gemini-3.7-flash"
 
 # The declarative Role/Provider schema (ADR 0012 / spec 0012 ticket 02) this
-# module's `RoleResolver` reads `roles`/`providers` from. Same file
-# `routing_check.CONFIG_PATH` audits, kept as a second constant rather than
-# imported from there so this module never depends on `routing_check`.
-ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
+# module's `RoleResolver` reads `roles`/`providers` from, via `routing_config`
+# (ticket 42). Re-exported as a module-level constant rather than referenced
+# only as `routing_config.ROUTING_CONFIG_PATH` for backward compatibility:
+# existing call sites and tests reference `production_invoker.ROUTING_CONFIG_PATH`.
+ROUTING_CONFIG_PATH = routing_config.ROUTING_CONFIG_PATH
 
 # The routing protocol uses human-readable names, while the worker CLIs need
 # stable model identifiers. Keep both the documented labels and already
@@ -154,35 +156,15 @@ class LocalModelCapabilities:
     endpoint: str = "http://127.0.0.1:1234/v1"
 
 
-@dataclass(frozen=True)
-class CapabilityRequirements:
-    """One role's declared requirements, mirroring routing-config.json's
-    ``roles.<role>.capability_requirements`` shape (ADR 0012)."""
-
-    reasoning_tier: str
-    tool_access: str
-    min_context: int
-    local_only: bool = False
-
-
-@dataclass(frozen=True)
-class ProviderConfig:
-    """One entry from routing-config.json's ``providers`` map."""
-
-    provider_id: str
-    adapter: str
-    model: str
-    default_reasoning_effort: str
-
-
-@dataclass(frozen=True)
-class RoleConfig:
-    """One entry from routing-config.json's ``roles`` map: what a role
-    requires and which providers, in order, can satisfy it."""
-
-    role_id: str
-    capability_requirements: CapabilityRequirements
-    preferred_providers: tuple[str, ...]
+# Re-exported from `routing_config` (ticket 42) rather than defined here:
+# these three dataclasses used to be this module's own, and several other
+# modules (and this file's own tests) import them as
+# `production_invoker.CapabilityRequirements` etc., so the alias preserves
+# that surface while `routing_config` becomes the single place that ever
+# parses `routing-config.json`.
+CapabilityRequirements = routing_config.CapabilityRequirements
+ProviderConfig = routing_config.ProviderConfig
+RoleConfig = routing_config.RoleConfig
 
 
 @dataclass(frozen=True)
@@ -218,39 +200,22 @@ class RoleResolver:
         self,
         config_path: Path | str | None = None,
         *,
-        config: dict[str, Any] | None = None,
+        config: dict[str, Any] | routing_config.RoutingConfig | None = None,
         availability_checker: Callable[[str], bool] | None = None,
     ) -> None:
         if config is None:
             path = Path(config_path) if config_path is not None else ROUTING_CONFIG_PATH
-            with open(path, "r", encoding="utf-8") as handle:
-                config = json.load(handle)
+            resolved = routing_config.load_routing_config(path)
         elif config_path is not None:
             raise TypeError("config_path and config are mutually exclusive")
+        elif isinstance(config, routing_config.RoutingConfig):
+            resolved = config
+        else:
+            resolved = routing_config.parse_routing_config(config)
 
         self._availability_checker = availability_checker
-        self._providers: dict[str, ProviderConfig] = {
-            provider_id: ProviderConfig(
-                provider_id=provider_id,
-                adapter=provider["adapter"],
-                model=provider["model"],
-                default_reasoning_effort=provider["default_reasoning_effort"],
-            )
-            for provider_id, provider in config.get("providers", {}).items()
-        }
-        self._roles: dict[str, RoleConfig] = {
-            role_id: RoleConfig(
-                role_id=role_id,
-                capability_requirements=CapabilityRequirements(
-                    reasoning_tier=role["capability_requirements"]["reasoning_tier"],
-                    tool_access=role["capability_requirements"]["tool_access"],
-                    min_context=role["capability_requirements"]["min_context"],
-                    local_only=role["capability_requirements"].get("local_only", False),
-                ),
-                preferred_providers=tuple(role.get("preferred_providers", [])),
-            )
-            for role_id, role in config.get("roles", {}).items()
-        }
+        self._providers: dict[str, ProviderConfig] = dict(resolved.providers)
+        self._roles: dict[str, RoleConfig] = dict(resolved.roles)
 
     def is_role(self, identifier: str) -> bool:
         """True if ``identifier`` names a role this resolver knows, as
