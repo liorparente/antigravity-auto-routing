@@ -1,5 +1,21 @@
 # Worker Routing Fallbacks
 
+## 2026-08-24 — Test Spy Argument Type Incompatibility in Mypy Strict Mode
+
+- Mission: Run CI checks on PR #91.
+- Failure: `worker_routing/test_debate_orchestrator.py:512: error: Argument 1 has incompatible type "str"; expected "Literal['ambiguity', 'plan-review', 'code-review', 'post-mortem']" [arg-type]`.
+- Root Cause: Mock `spy` parameter was typed with primitive `occasion: str` instead of the domain's literal type alias `dialogue_contracts.Occasion` when delegating to `_resolve_topology(occasion: Occasion, ...)`.
+- Resolution: Updated `spy` signature in `test_debate_orchestrator.py` to `def spy(occasion: dialogue_contracts.Occasion, complexity: str) -> debate_orchestrator.ConsultationTopology:`.
+- Lesson: When mocking or spying on typed domain reducers, annotate mock parameters with the domain's explicit literal union types rather than primitive `str` to satisfy static type checkers.
+
+## 2026-08-24 — Dual-Store Catalog Count Drift between Institutional Memory and Prompt Assembler
+
+- Mission: Run full test suite validation after Ticket 44 documentation sync.
+- Failure: `test_learned_state.py` failed with `AssertionError: 25 != 23` in `test_institutional_memory_matches_golden_rules`.
+- Root Cause: Rules 24 & 25 were added to `knowledge/institutional-memory.md` without updating `GOLDEN_RULES` in `prompt_assembler.py` and rule-count assertions in `test_prompt_assembler.py` / `test_learned_state.py`.
+- Resolution: Added `GoldenRule` entries 24 and 25 to `prompt_assembler.py` and updated catalog length assertions from 23 to 25.
+- Lesson: `knowledge/institutional-memory.md` and `prompt_assembler.GOLDEN_RULES` form a strictly synchronized dual-store; updating human-facing Markdown rules requires updating `GOLDEN_RULES` tuples and test invariants in lockstep.
+
 ## 2026-08-23 — CLI Worker Piped-Stdin Deadlock and Swift Fallback to Codex Exec
 
 - Mission: Dispatch Ticket 44 implementation task to `claude -p` worker via background process runner.
