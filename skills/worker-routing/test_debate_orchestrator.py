@@ -898,6 +898,40 @@ def _perspective_vote(perspective: str, vote: str, candidate_hash: str, **extra:
     return payload
 
 
+class _TamperingPerspectiveAdapter(_FakePerspectiveAdapter):
+    """Like `_FakePerspectiveAdapter`, but overwrites `subject_path`'s
+    on-disk content the first time `review()` is awaited — simulating a
+    source file that changes underneath an in-flight review, so the
+    pre-round-1/post-round-1 hash comparison must trip."""
+
+    def __init__(
+        self, provider_id: str, fixed_responses: list[dict[str, Any]], subject_path: str
+    ) -> None:
+        super().__init__(provider_id, fixed_responses)
+        self._subject_path = subject_path
+        self._tampered = False
+
+    async def review(self, envelope: str, round_spec: int, deadline: int) -> dict[str, Any]:
+        if not self._tampered:
+            self._tampered = True
+            with open(self._subject_path, "w", encoding="utf-8") as stream:  # noqa: ASYNC230 - tiny local test fixture write, not production I/O
+                stream.write("tampered content")
+        return await super().review(envelope, round_spec, deadline)
+
+
+class _FakeProviderAdaptersModule:
+    """Stand-in for the `provider_adapters` module `_load_provider_adapters`
+    returns — exposes just the `build_adapter` seam `_route_perspective_stalemate`
+    calls, so a test can hand back a fixed adjudicator adapter regardless of
+    which adjudicator config is passed in."""
+
+    def __init__(self, adapter: Any) -> None:
+        self._adapter = adapter
+
+    def build_adapter(self, config: dict[str, Any]) -> Any:
+        return self._adapter
+
+
 # `ReviewCouncil`'s by-perspective fast path (spec 0012 / workflow-v2 ticket
 # 07, ADR 0012's 1-shot round), its unilateral security veto, and its
 # stalemate escalation. `skills/council-review/tests/test_council_review.py`
@@ -992,6 +1026,108 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         assert outcome.stalemate_report is not None
         self.assertEqual(outcome.stalemate_report.planner_position, self.objective)
         # Escalation happens straight off round 1 — no second round is polled.
+        self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
+
+    def test_perspective_fast_path_tampered_source_fails_closed_to_unresolved(self) -> None:
+        subject_path = os.path.join(self.workspace_root, "subject.txt")
+        with open(subject_path, "w", encoding="utf-8") as stream:
+            stream.write("original content")
+        council = debate_orchestrator.ReviewCouncil()
+        req = debate_orchestrator.ReviewRequest(
+            objective=self.objective,
+            workspace_root=self.workspace_root,
+            subject=subject_path,
+            by_perspective=True,
+        )
+        approvals = {
+            "reviewer_architecture": "approved",
+            "reviewer_risk": "approved",
+            "reviewer_maintainability": "approved",
+            "reviewer_security": "approved",
+        }
+        adapters = [
+            _TamperingPerspectiveAdapter(
+                perspective,
+                [_perspective_vote(perspective, vote, self.candidate_hash)],
+                subject_path,
+            )
+            for perspective, vote in approvals.items()
+        ]
+
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "UNRESOLVED")
+        self.assertTrue(outcome.source_changed)
+        self.assertEqual(outcome.unresolved_blockers, 1)
+
+    def test_perspective_adjudicator_tampered_source_fails_closed_to_unresolved(self) -> None:
+        subject_path = os.path.join(self.workspace_root, "subject.txt")
+        with open(subject_path, "w", encoding="utf-8") as stream:
+            stream.write("original content")
+        council = debate_orchestrator.ReviewCouncil()
+        req = debate_orchestrator.ReviewRequest(
+            objective=self.objective,
+            workspace_root=self.workspace_root,
+            subject=subject_path,
+            by_perspective=True,
+        )
+        revises = {
+            "reviewer_architecture": "revise",
+            "reviewer_risk": "revise",
+            "reviewer_maintainability": "revise",
+            "reviewer_security": "revise",
+        }
+        adapters = [
+            _TamperingPerspectiveAdapter(
+                perspective,
+                [_perspective_vote(perspective, vote, self.candidate_hash)],
+                subject_path,
+            )
+            for perspective, vote in revises.items()
+        ]
+        approving_adjudicator = _FakePerspectiveAdapter(
+            "lm-studio", [{"provider": "lm-studio", "vote": "approve", "confidence": 1.0}]
+        )
+
+        with patch.object(
+            debate_orchestrator,
+            "_load_provider_adapters",
+            return_value=_FakeProviderAdaptersModule(approving_adjudicator),
+        ):
+            outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        self.assertEqual(outcome.status, "UNRESOLVED")
+        self.assertTrue(outcome.source_changed)
+        self.assertEqual(outcome.unresolved_blockers, 1)
+
+    def test_fast_path_disabled_escalates_to_adjudicator_despite_quorum(self) -> None:
+        base = json.loads(debate_orchestrator.ROUTING_CONFIG_PATH.read_text())
+        base.setdefault("consultation_policy", {})["council_policy"] = {"fast_path_enabled": False}
+        with tempfile.TemporaryDirectory() as config_dir:
+            config_path = Path(config_dir) / "routing-config.json"
+            config_path.write_text(json.dumps(base), encoding="utf-8")
+            council = debate_orchestrator.ReviewCouncil(config_path)
+
+        req = debate_orchestrator.ReviewRequest(
+            objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
+        )
+        adapters = self._adapters({
+            "reviewer_architecture": "approved",
+            "reviewer_risk": "approved",
+            "reviewer_maintainability": "approved",
+            "reviewer_security": "approved",
+        })
+
+        outcome = asyncio.run(council.review(req, custom_adapters=adapters))
+
+        # Round 1 had quorum, but with fast_path disabled the panel must
+        # still escalate to the Adjudicator/HITL route rather than
+        # finalizing directly off round 1 — the stub lm-studio adjudicator
+        # abstains, so this fails closed to UNRESOLVED with a stalemate
+        # report attached (only the stalemate route ever populates
+        # `stalemate_report`; a direct fast-path finalize never does).
+        self.assertEqual(outcome.status, "UNRESOLVED")
+        assert outcome.stalemate_report is not None
         self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
 
 

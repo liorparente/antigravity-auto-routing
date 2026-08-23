@@ -482,12 +482,12 @@ class DebateStateMachineTests(unittest.TestCase):
 
     def test_legacy_block_vote_with_a_genuine_high_severity_structured_finding_still_vetoes(self) -> None:
         """The other half: a non-security provider's block is still a
-        genuine security signal if it carries its own critical/high
-        `StructuredFinding` — the vote's own severity, not a fabricated
-        default, is what's reported."""
+        genuine security signal if it carries its own critical/high,
+        sufficiently-confident `StructuredFinding` — the vote's own
+        severity, not a fabricated default, is what's reported."""
         handler = machine.SecurityVetoHandler()
         finding = dialogue_contracts.StructuredFinding(
-            id="SEC-7", severity="high", claim="unsafe deserialization", confidence=0.5
+            id="SEC-7", severity="high", claim="unsafe deserialization", confidence=0.9
         )
         veto = handler.check((
             {"provider": "reviewer_architecture", "vote": "block", "findings": (finding,)},
@@ -496,6 +496,21 @@ class DebateStateMachineTests(unittest.TestCase):
         self.assertEqual(veto.provider, "reviewer_architecture")
         self.assertEqual(veto.finding["id"], "SEC-7")
         self.assertEqual(veto.finding["severity"], "high")
+
+    def test_legacy_block_vote_with_a_low_confidence_finding_does_not_veto(self) -> None:
+        """A non-security provider's block with a critical/high-severity
+        finding whose confidence falls below `security_threshold` is not a
+        sufficiently certain security signal to unilaterally veto — same
+        confidence gate the severity-threshold trigger already enforces on
+        any vote's attached finding."""
+        handler = machine.SecurityVetoHandler()
+        finding = dialogue_contracts.StructuredFinding(
+            id="SEC-8", severity="high", claim="maybe unsafe deserialization", confidence=0.5
+        )
+        veto = handler.check((
+            {"provider": "reviewer_architecture", "vote": "block", "findings": (finding,)},
+        ))
+        self.assertIsNone(veto)
 
     def test_consensus_table_identity_prefers_perspective_over_provider(self) -> None:
         table = machine.ConsensusTable(

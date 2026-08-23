@@ -79,7 +79,7 @@ DEFAULT_CONSULTATION_POLICY: dict[str, Any] = {
             "veto_severities": ["critical", "high"],
             "security_threshold": 0.80,
         },
-        "deadlines_seconds": {"round_1": 45, "round_2": 60, "round_3": 60},
+        "deadlines_seconds": {"round_1": 45, "round_2": 60, "round_3": 60, "adjudicator": 60},
     },
 }
 
@@ -100,6 +100,9 @@ def _merge_policy_defaults(
             isinstance(value, type(default_value))
             or (isinstance(default_value, float) and _is_number(value))
         ):
+            merged[key] = deepcopy(value)
+    for key, value in configured.items():
+        if key not in defaults:
             merged[key] = deepcopy(value)
     return merged
 

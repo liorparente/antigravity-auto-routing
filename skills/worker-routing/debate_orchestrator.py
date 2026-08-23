@@ -420,12 +420,9 @@ class ReviewOutcome:
     manifest_path: str | None = None
     unresolved_blockers: int = 0
     source_changed: bool = False
-    # Populated only when a Council perspective review's round 1 fails to
-    # reach quorum and escalation to the Adjudicator/HITL does not resolve
-    # it (ticket 07, ADR 0012's 1-shot fast path) — the same
-    # `AdvisoryStalemateReport` shape spec 0003's Planner/Critic debates
-    # already use, adapted for an N-way perspective panel via
-    # `build_stalemate_report`'s `perspective_positions` parameter.
+    # Populated when a Council perspective review round 1 fails to reach
+    # quorum (or fast path is disabled) and stalemate escalation to the
+    # Adjudicator/HITL is performed (ticket 07, ADR 0012 1-shot fast path).
     stalemate_report: AdvisoryStalemateReport | None = None
 
 
@@ -723,25 +720,36 @@ class ReviewCouncil:
         if veto_outcome is not None:
             return veto_outcome
 
-        outcome = table.evaluate(votes, expected_hash=candidate_hash)
-        if outcome in ("UNANIMOUS", "QUALIFIED"):
-            return self._finalize_perspective_outcome(outcome, run_id, request, initial_hash)
+        fast_path_enabled = council_policy.get("fast_path_enabled", True)
+        if fast_path_enabled:
+            outcome = table.evaluate(votes, expected_hash=candidate_hash)
+            if outcome in ("UNANIMOUS", "QUALIFIED"):
+                return self._finalize_perspective_outcome(outcome, run_id, request, initial_hash)
 
-        return await self._route_perspective_stalemate(votes, run_id, request)
+        return await self._route_perspective_stalemate(votes, run_id, request, initial_hash)
 
     def _finalize_perspective_outcome(
-        self, status: str, run_id: str, request: ReviewRequest, initial_hash: str
+        self,
+        status: str,
+        run_id: str,
+        request: ReviewRequest,
+        initial_hash: str,
+        events: list[dict[str, Any]] | None = None,
+        stalemate_report: AdvisoryStalemateReport | None = None,
     ) -> ReviewOutcome:
         final_hash = self._hash_source(request.subject)
         source_changed = bool(request.subject) and initial_hash != final_hash
         final_status = "UNRESOLVED" if source_changed else status
-        manifest_path = self._write_manifest(final_status, run_id, request.workspace_root)
+        manifest_path = self._write_manifest(
+            final_status, run_id, request.workspace_root, events=events
+        )
         return ReviewOutcome(
             status=final_status,
             run_id=run_id,
             source_changed=source_changed,
-            unresolved_blockers=1 if source_changed else 0,
+            unresolved_blockers=1 if source_changed or final_status == "UNRESOLVED" else 0,
             manifest_path=manifest_path,
+            stalemate_report=stalemate_report,
         )
 
     @staticmethod
@@ -769,12 +777,16 @@ class ReviewCouncil:
         return build_stalemate_report(request.objective, perspective_positions=positions)
 
     async def _route_perspective_stalemate(
-        self, votes: Sequence[dict[str, Any]], run_id: str, request: ReviewRequest
+        self,
+        votes: Sequence[dict[str, Any]],
+        run_id: str,
+        request: ReviewRequest,
+        initial_hash: str,
     ) -> ReviewOutcome:
-        """Round 3 failed to reach weighted quorum: escalate to the
-        configured Adjudicator, or fail closed to HITL when none is
-        configured, carrying the summarized `AdvisoryStalemateReport` either
-        way (ticket 07's acceptance criterion)."""
+        """Panel failed to reach weighted quorum in 1-shot execution (or fast
+        path disabled): escalate to the configured Adjudicator, or fail
+        closed to HITL when none is configured, carrying the summarized
+        AdvisoryStalemateReport either way (ticket 07 acceptance criterion)."""
         stalemate_report = self._build_perspective_stalemate_report(request, votes)
         adjudicators = self.policy.get("adjudicators", [])
 
@@ -792,9 +804,8 @@ class ReviewCouncil:
                     stalemate_report.planner_position,
                     stalemate_report.critic_position,
                 )
-                deadline = self.policy.get("council_policy", {}).get("deadlines_seconds", {}).get(
-                    "round_3", 60
-                )
+                deadlines = self.policy.get("council_policy", {}).get("deadlines_seconds", {})
+                deadline = deadlines.get("adjudicator", deadlines.get("round_3", 60))
                 result = await adjudicator_adapter.review(adjudicator_prompt, 4, deadline)
             except Exception:  # noqa: BLE001
                 result = None
@@ -803,35 +814,26 @@ class ReviewCouncil:
                 str(result.get("vote", "")).strip().casefold() if isinstance(result, dict) else ""
             )
             if resolved_vote in ("approve", "approved", "unanimous"):
-                manifest_path = self._write_manifest(
+                return self._finalize_perspective_outcome(
                     "QUALIFIED",
                     run_id,
-                    request.workspace_root,
+                    request,
+                    initial_hash,
                     events=[
                         {
                             "type": "adjudicator_resolved",
                             "adjudicator": getattr(adjudicator_adapter, "provider_id", "unknown"),
                         }
                     ],
-                )
-                return ReviewOutcome(
-                    status="QUALIFIED",
-                    run_id=run_id,
-                    manifest_path=manifest_path,
                     stalemate_report=stalemate_report,
                 )
 
-        manifest_path = self._write_manifest(
+        return self._finalize_perspective_outcome(
             "UNRESOLVED",
             run_id,
-            request.workspace_root,
+            request,
+            initial_hash,
             events=[{"type": "stalemate_report", **dataclasses.asdict(stalemate_report)}],
-        )
-        return ReviewOutcome(
-            status="UNRESOLVED",
-            run_id=run_id,
-            manifest_path=manifest_path,
-            unresolved_blockers=1,
             stalemate_report=stalemate_report,
         )
 

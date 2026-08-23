@@ -304,25 +304,26 @@ class SecurityVetoHandler:
             verdict_value = _field(vote, "vote", _field(vote, "verdict", None))
             if _normalize_verdict(verdict_value) != "BLOCK":
                 continue
-            block_finding = next((f for f in findings if self._is_finding(f)), None)
-            structured_high_severity = next(
-                (
-                    f
-                    for f in findings
-                    if self._is_finding(f)
-                    and str(self._finding_field(f, "severity", "")).strip().casefold() in self.veto_severities
-                ),
-                None,
-            )
             if provider == "reviewer_security":
+                block_finding = next((f for f in findings if self._is_finding(f)), None)
                 finding_dict = (
                     self._finding_to_dict(block_finding)
                     if block_finding is not None
                     else self._default_block_finding()
                 )
                 return SecurityVeto(provider, finding_dict)
-            if structured_high_severity is not None:
-                return SecurityVeto(provider, self._finding_to_dict(structured_high_severity))
+            veto_finding = next(
+                (
+                    f
+                    for f in findings
+                    if self._is_finding(f)
+                    and str(self._finding_field(f, "severity", "")).strip().casefold() in self.veto_severities
+                    and self._confidence(f) >= self.security_threshold
+                ),
+                None,
+            )
+            if veto_finding is not None:
+                return SecurityVeto(provider, self._finding_to_dict(veto_finding))
         return None
 
 
