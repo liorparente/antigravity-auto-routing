@@ -1,6 +1,6 @@
 # Spec 0009 — Unified Consultation and Council Engine: Topology-Driven Multi-Agent Debate, Universal Security Veto, and Facade Consolidation
 
-* **Status:** ready-for-agent
+* **Status:** done
 * **Date:** 2026-08-19
 * **Related:** Spec 0001 (Advisory Consultation), Spec 0003 (Critical Dialogue), Spec 0007 (Critical Dialogue Engine Phase 2 Decomposition), Spec 0008 (Debate Engine Modular Decomposition), ADR 0001, ADR 0004, ADR 0007, ADR 0010
 * **Issue:** [Issue 43: Unify Council Review & Critical Dialogue Engine](file:///Users/liorparente/Projects/auto-routing/.scratch/routing-backlog/issues/43-unify-council-review-and-debate-engine.md)

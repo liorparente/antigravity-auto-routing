@@ -2,7 +2,7 @@
 
 * **Category:** Core Architecture & Deep Modules
 * **Priority:** High (Recommended Step 3)
-* **Status:** ready-for-agent
+* **Status:** done
 * **Spec:** [docs/specs/0009-unified-consultation-and-council-engine.md](file:///Users/liorparente/Projects/auto-routing/docs/specs/0009-unified-consultation-and-council-engine.md)
 * **Implementation Plan:** [implementation_plan.md](file:///Users/liorparente/.gemini/antigravity/brain/8bc8d27e-5072-48cf-b2ff-5d7543c0e153/implementation_plan.md)
 
@@ -19,8 +19,8 @@
 5. **Universal Security Veto:** Trigger immediate `Security Halt` in both `Dyad` and `CouncilPanel` topologies when a critical vulnerability is detected.
 
 ## Acceptance Criteria
-- [ ] Refactor `debate_orchestrator.py` and `debate_state_machine.py` to support `Dyad` and `CouncilPanel` topologies.
-- [ ] Implement selective HMAC manifest signing and universal `SecurityVetoHandler`.
-- [ ] Migrate council configuration parameters to `routing-config.json`.
-- [ ] Reduce `skills/council-review/scripts/council_review.py` to a thin delegator.
-- [ ] Pass all 1,010 existing unit tests and council review tests with zero regression.
+- [x] Refactor `debate_orchestrator.py` and `debate_state_machine.py` to support `Dyad` and `CouncilPanel` topologies.
+- [x] Implement selective HMAC manifest signing and universal `SecurityVetoHandler`.
+- [x] Migrate council configuration parameters to `routing-config.json`.
+- [x] Reduce `skills/council-review/scripts/council_review.py` to a thin delegator.
+- [x] Pass all 1,010 existing unit tests and council review tests with zero regression.
