@@ -482,7 +482,7 @@ def evaluate_weighted_quorum(
 
 
 def evaluate_quorum(
-    responses: Sequence[CriticResponse], policy: str = "unanimous"
+    responses: Sequence[VoteInput], policy: str = "unanimous"
 ) -> tuple[bool, str | None]:
     """Evaluate valid Critic votes, failing closed for malformed input.
 
@@ -494,11 +494,21 @@ def evaluate_quorum(
         return False, f"unknown quorum policy: {policy}"
     if not responses:
         return False, "unparseable verdict: no critic responses"
-    invalid = [response for response in responses if _normalize_verdict(response.verdict) is None]
+    invalid = [
+        response for response in responses
+        if _normalize_verdict(_field(response, "verdict", _field(response, "vote", None))) is None
+    ]
     if invalid:
-        labels = ", ".join(f"{response.critic_id}={response.verdict}" for response in invalid)
+        labels = ", ".join(
+            f"{_field(response, 'critic_id', _field(response, 'provider', 'unknown'))}="
+            f"{_field(response, 'verdict', _field(response, 'vote', None))}"
+            for response in invalid
+        )
         return False, f"unparseable verdict: {labels}"
-    approvals = sum(_normalize_verdict(response.verdict) == "APPROVE" for response in responses)
+    approvals = sum(
+        _normalize_verdict(_field(response, "verdict", _field(response, "vote", None))) == "APPROVE"
+        for response in responses
+    )
     count = len(responses)
     if normalized_policy == "unanimous":
         required = count
@@ -562,7 +572,7 @@ class DebateSessionState:
 class RoundTurnResult:
     round_index: int
     planner_proposal: str
-    critic_responses: tuple[CriticResponse, ...]
+    critic_responses: tuple[VoteInput, ...]
     is_consensus: bool = False
     error: str | None = None
 
@@ -575,7 +585,7 @@ class DebateState:
     round_number: int
     max_rounds: int
     planner_proposals: tuple[str, ...]
-    critic_responses: tuple[tuple[CriticResponse, ...], ...]
+    critic_responses: tuple[tuple[VoteInput, ...], ...]
     status: str
     final_plan: str | None = None
     stalemate_report: AdvisoryStalemateReport | None = None
@@ -676,8 +686,8 @@ def _advance_general_state(
             error=None,
         )
     if len(proposals) >= state.max_rounds:
-        critic_a = turn.critic_responses[0].response if turn.critic_responses else ""
-        critic_b = turn.critic_responses[1].response if len(turn.critic_responses) > 1 else None
+        critic_a = str(_field(turn.critic_responses[0], "response", "")) if turn.critic_responses else ""
+        critic_b = str(_field(turn.critic_responses[1], "response", "")) if len(turn.critic_responses) > 1 else None
         report = build_stalemate_report(turn.planner_proposal, critic_a, critic_b)
         return replace(
             state,
