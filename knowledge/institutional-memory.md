@@ -2,7 +2,7 @@
 
 ## Metadata
 - **Last updated:** 2026-08-23
-- **Format:** distilled from 104 historical entries; full history in
+- **Format:** distilled from 109 historical entries; full history in
   [`knowledge/archive/institutional-memory-legacy.md`](archive/institutional-memory-legacy.md).
 - **Retrieval:** `skills/worker-routing/prompt_assembler.extract_scoped_memory`
   scores these rules against a task description and target files, and

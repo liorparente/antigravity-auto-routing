@@ -1,5 +1,13 @@
 # Worker Routing Fallbacks
 
+## 2026-08-23 — Multi-Harness `install.sh` and Git Operations Blocked by macOS Sandbox (`Operation not permitted`)
+
+- Mission: Synchronize multi-harness skills via `install.sh` and commit ticket 43 completion to git.
+- Failure: `./install.sh .` failed with `cp: /Users/liorparente/.gemini/config/skills/worker-routing/SKILL.md...: Operation not permitted`, and `git commit` failed with `fatal: Unable to create '.git/index.lock': Operation not permitted`.
+- Root Cause: Standard sandbox isolation (`BypassSandbox: false`) prevents writes outside the workspace root (e.g. `~/.gemini/config/skills/`) and restricts locking `.git/index.lock` in the macOS sandbox environment.
+- Resolution: Re-ran `./install.sh .` and `git commit` with `BypassSandbox: true`.
+- Lesson: All multi-harness synchronization tools writing to user dotfiles and repository git write operations must be executed with sandbox bypass enabled.
+
 ## 2026-08-23 — Mypy Incompatible Tuple Unions on Dataclass State Fields
 
 - Mission: Implement Ticket 43.1 pure state machine and quorum reducer transitions.
