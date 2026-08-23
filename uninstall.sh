@@ -74,9 +74,9 @@ INSTALLED_FILES=(
     sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py
     consultation_policy.py debate_transport.py advisory_consultation.py
     production_invoker.py learning_journal.py learning_outcomes.py
-    learning_scoreboard.py learning_report.py acceptance_gate.py learned_state.py
-    risk_tiered_application.py learner_worker.py protocol.md routing-config.json
-    routing_config.py
+    learning_scoreboard.py learning_report.py learning_report_html.py acceptance_gate.py
+    learned_state.py risk_tiered_application.py learner_worker.py protocol.md
+    routing-config.json routing_config.py
 )
 
 # Mirrors install.sh's own dynamic discovery of future production modules —

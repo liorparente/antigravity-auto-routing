@@ -43,10 +43,11 @@ learning_journal`). See implementation_plan.md Section 2.
 """
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import os
 import tempfile
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TypeVar
@@ -429,3 +430,73 @@ def write_weekly_report(
     path = report_path(root_dir, now=now)
     _atomic_text_write(path, content)
     return path
+
+
+def _parse_injected_now(value: str) -> datetime:
+    """Parse an aware ISO-8601 instant supplied by the CLI caller."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"invalid ISO-8601 timestamp: {value!r}") from error
+    try:
+        _require_aware_now(parsed)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+    return parsed
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Write Markdown and, with ``--html``, the matching HTML dashboard.
+
+    ``--html`` writes the default dashboard, ``--html PATH`` selects a path,
+    and ``--html -`` prints the document. ``--no-markdown`` makes HTML the
+    only output. The timestamp is explicit so this module remains clock-free.
+    """
+    parser = argparse.ArgumentParser(description="Write learning-loop reports")
+    parser.add_argument("--root-dir", type=Path, default=Path("."))
+    parser.add_argument("--now", type=_parse_injected_now, required=True)
+    parser.add_argument("--window-days", type=int, default=DEFAULT_WINDOW_DAYS)
+    parser.add_argument("--html", nargs="?", const="", metavar="PATH")
+    parser.add_argument("--no-markdown", action="store_true")
+    args = parser.parse_args(argv)
+    if args.no_markdown and args.html is None:
+        parser.error("--no-markdown requires --html")
+
+    if not args.no_markdown:
+        print(write_weekly_report(args.root_dir, now=args.now, window_days=args.window_days))
+    if args.html is not None:
+        if __package__:
+            from . import learning_report_html
+        else:
+            import learning_report_html  # type: ignore[no-redef]
+        if args.html == "-":
+            journal = learning_journal.read_journal(args.root_dir)
+            board = learning_scoreboard.compute_scoreboard(
+                journal, now=args.now, window_days=args.window_days
+            )
+            baseline = learning_scoreboard.compute_scoreboard(
+                journal,
+                now=args.now - timedelta(days=args.window_days),
+                window_days=args.window_days,
+            )
+            print(
+                learning_report_html.render_html_report(
+                    journal, board, baseline, now=args.now, window_days=args.window_days
+                ),
+                end="",
+            )
+        else:
+            output_path = Path(args.html) if args.html else None
+            print(
+                learning_report_html.write_html_report(
+                    args.root_dir,
+                    now=args.now,
+                    window_days=args.window_days,
+                    output_path=output_path,
+                )
+            )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

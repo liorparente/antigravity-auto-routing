@@ -48,6 +48,8 @@ jobs:
         skills/worker-routing/test_learning_scoreboard.py
         skills/worker-routing/learning_report.py
         skills/worker-routing/test_learning_report.py
+        skills/worker-routing/learning_report_html.py
+        skills/worker-routing/test_learning_report_html.py
         skills/worker-routing/acceptance_gate.py
         skills/worker-routing/test_acceptance_gate.py
         skills/worker-routing/learned_state.py
@@ -84,6 +86,7 @@ jobs:
         skills/worker-routing/test_production_invoker.py
         skills/worker-routing/test_learning_scoreboard.py
         skills/worker-routing/test_learning_report.py
+        skills/worker-routing/test_learning_report_html.py
         skills/worker-routing/test_acceptance_gate.py
         skills/worker-routing/test_learned_state.py
         skills/worker-routing/test_risk_tiered_application.py

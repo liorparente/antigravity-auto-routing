@@ -199,6 +199,21 @@ class NoClockTests(unittest.TestCase):
         self.assertEqual(_find_forbidden_clock_reads(tree), [])
 
 
+class HtmlCliTests(unittest.TestCase):
+    def test_html_option_writes_a_dashboard_alongside_the_markdown_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html_path = root / "dashboard.html"
+
+            exit_code = learning_report.main(
+                ["--root-dir", str(root), "--now", "2026-01-08T00:00:00Z", "--html", str(html_path)]
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(html_path.exists())
+            self.assertTrue(learning_report.report_path(root, now=_NOW).exists())
+
+
 # --- Slice 2: empty journal ---
 
 
