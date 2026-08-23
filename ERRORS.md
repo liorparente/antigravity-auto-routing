@@ -1,5 +1,21 @@
 # Worker Routing Fallbacks
 
+## 2026-08-23 — Mypy Incompatible Tuple Unions on Dataclass State Fields
+
+- Mission: Implement Ticket 43.1 pure state machine and quorum reducer transitions.
+- Failure: CI type checking failed with `Argument 3 to "RoundTurnResult" has incompatible type "tuple[PerspectiveReviewResult, PerspectiveReviewResult]"; expected "tuple[CriticResponse, ...]"` in `test_debate_state_machine.py`.
+- Root Cause: Dataclasses `RoundTurnResult` and `DebateState` narrowly typed `critic_responses` as `tuple[CriticResponse, ...]` rather than using the polymorphic union alias `tuple[VoteInput, ...]`. In Mypy, tuple types are invariant; a tuple of a concrete type cannot be passed where a different member of a union is expected.
+- Resolution: Widened dataclass sequence annotations (`RoundTurnResult.critic_responses` and `DebateState.critic_responses`) and helper signatures (`evaluate_quorum`) to accept `tuple[VoteInput, ...]`, using polymorphic `_field()` access.
+- Lesson: When state containers and reducers are designed to support multiple input shapes via a union type (`VoteInput`), dataclass fields and helper arguments must type sequence containers directly with the polymorphic union rather than a concrete subclass.
+
+## 2026-08-23 — Ruff SIM117 Linter Error on Sequential Test Context Managers
+
+- Mission: Validate default routing configuration failure paths in `test_routing_config.py`.
+- Failure: GitHub Actions CI failed during `ruff check` on `SIM117 Use a single 'with' statement with multiple contexts instead of nested 'with' statements` at lines 398 and 405.
+- Root Cause: Test methods nested `with mock.patch.object(...):` directly enclosing `with self.assertRaises(...):` without intermediate statements.
+- Resolution: Combined the nested contexts into single parenthesized multi-context statements: `with (mock.patch.object(...), self.assertRaises(...)):`.
+- Lesson: In Python 3.9+, always use parenthesized multi-context managers when wrapping test assertions with both mock patches and exception checks to prevent SIM117 linter violations.
+
 ## 2026-08-23 — Strict Whole-File Validation Crashing Partial Legacy Config Readers
 
 - Mission: Unify disparate JSON config readers into centralized `routing_config.py` (Ticket 42).
