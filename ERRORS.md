@@ -1,5 +1,13 @@
 # Worker Routing Fallbacks
 
+## 2026-08-23 — Zsh Markdown Backtick Substitution in Double-Quoted Worker Prompts
+
+- Mission: Dispatch worker task via `claude -p` with mission brief passed as an inline shell string.
+- Failure: Inline string contained markdown backticks and parentheses inside double quotes (`"[WORKER-MODE: NESTED-EXEC] ... \`test_production_invoker.py\` ..."`), causing zsh to interpret backticks as command substitutions and parentheses as subshell syntax, resulting in `zsh: command not found: test_every_declared_role_builds_a_valid_command` and exit code 1.
+- Root Cause: In zsh, double quotes allow parameter expansion, command substitution (`\`` and `$()`), and arithmetic expansion. Unescaped backticks in markdown prompt strings are evaluated as shell commands before the string reaches the CLI binary.
+- Resolution: Saved the mission prompt to a dedicated scratch file and dispatched the worker by redirecting stdin (`< prompt.txt < /dev/null`).
+- Lesson: Never pass multi-line prompts containing markdown backticks or code identifiers directly as double-quoted inline arguments in zsh; always use file/stdin redirection or single-quoted strings.
+
 ## 2026-08-22 — macOS Quarantine & File Permissions Block LM Studio Startup (`EPERM test.txt`)
 
 - Mission: Launch LM Studio and start local OpenAI-compatible inference server.

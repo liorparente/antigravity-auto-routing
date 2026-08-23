@@ -164,7 +164,7 @@ A concurrent multi-model review ensemble evaluated under weighted scoring, soft 
 The lightweight, backward-compatible 19-line delegating module in `skills/council-review/scripts/council_review.py` that routes external CLI and library callers directly to `debate_orchestrator.ReviewCouncil` without duplicating state machines or policy files. Spec 0009.
 
 ### SecurityVetoHandler
-The universal veto detection subsystem in `production_invoker.py` and `debate_orchestrator.py` combining structured finding severity analysis with word-boundary regex scanning over unformatted review prose to trigger immediate `SECURITY_HALT` upon detecting unnegated critical security indicators. Spec 0009.
+The universal fail-closed circuit breaker in `production_invoker.py` and `debate_state_machine.py` combining domain-agnostic finding severity/confidence evaluation (Trigger 1: any perspective with Critical/High finding at confidence $\ge 0.80$ halts debate) with perspective-exclusive unilateral block evaluation (Trigger 2: `reviewer_security` explicit `BLOCK` verdict halts debate unconditionally, while non-security `BLOCK` votes participate in weighted quorum reduction). Spec 0009, Spec 0012.
 
 ### DynamicCandidateHash
 The SHA-256 digest calculated over the exact proposal content reviewed by a council panel, verified against critic candidate hashes during consensus reduction to detect and reject prompt tampering or stale candidate reviews. Spec 0009.
