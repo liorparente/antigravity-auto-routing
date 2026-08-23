@@ -198,3 +198,7 @@ One of four strictly isolated tiers of prompt and memory state (Global memory, P
 
 ### PerspectiveReviewer
 A specialized reviewer within a [[CouncilPanel]] assigned to evaluate an architectural plan or code diff through one specific analytical domain lens (`reviewer_architecture`, `reviewer_risk`, `reviewer_maintainability`, or `reviewer_security`) rather than a model brand identity.
+
+### LearningReportHtml
+A pure, clock-free standalone HTML dashboard generator rendering empirical learning metrics, model family performance breakdowns, and compliance/degradation audit event streams directly from [[LearningJournal]] records beside the Markdown weekly report. Ticket 44.
+

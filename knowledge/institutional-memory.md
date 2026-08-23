@@ -1,8 +1,8 @@
-# Institutional Memory — 23 Golden Rules
+# Institutional Memory — 25 Golden Rules
 
 ## Metadata
 - **Last updated:** 2026-08-23
-- **Format:** distilled from 109 historical entries; full history in
+- **Format:** distilled from 111 historical entries; full history in
   [`knowledge/archive/institutional-memory-legacy.md`](archive/institutional-memory-legacy.md).
 - **Retrieval:** `skills/worker-routing/prompt_assembler.extract_scoped_memory`
   scores these rules against a task description and target files, and
@@ -57,6 +57,11 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
     Build and unit-test the pure deterministic state machine logic (transitions, voting weights,
     security halts) with zero subprocess mocking before touching process transport, HMAC crypto,
     or legacy facade wrappers.
+24. **Render visual observability dashboards as pure, clock-free functions with atomic I/O.**
+    Keep report rendering (`render_html_report`) strictly pure, deterministic, and clock-free by injecting an aware `now: datetime`, and delegate disk writes to an atomic tempfile-replace helper (`write_html_report`). All dynamic HTML values must pass through `html.escape`.
+25. **Enforce injected-now CLI arguments to preserve clock-free AST test invariants.**
+    When exposing CLI entry points on clock-free modules, require an ISO-8601 `--now` argument rather than reading live system clocks in `main()`, preserving reproducible historical replay and passing AST clock guards.
+
 
 ## Subprocess & CLI Process Safety
 

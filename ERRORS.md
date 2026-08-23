@@ -1,5 +1,13 @@
 # Worker Routing Fallbacks
 
+## 2026-08-23 — CLI Worker Piped-Stdin Deadlock and Swift Fallback to Codex Exec
+
+- Mission: Dispatch Ticket 44 implementation task to `claude -p` worker via background process runner.
+- Failure: Task `task-93` hung with 0 bytes of log output for 20+ minutes, blocking pipeline progress.
+- Root Cause: On macOS in certain background subshell contexts, `claude -p --no-session-persistence` can deadlock waiting on tty/stdin if permissions or input streaming pipes block silently.
+- Resolution: Killed the stuck background task immediately and routed the mission brief to `codex exec --model gpt-5.6-terra -s workspace-write "< /dev/null"`, which completed in 77 seconds with 100% test pass.
+- Lesson: When a background CLI worker process emits 0 log bytes past a short grace period (e.g. 60 seconds), do not wait blindly; cancel immediately and activate the alternative worker CLI in the fallback matrix (`codex exec`).
+
 ## 2026-08-23 — Multi-Harness `install.sh` and Git Operations Blocked by macOS Sandbox (`Operation not permitted`)
 
 - Mission: Synchronize multi-harness skills via `install.sh` and commit ticket 43 completion to git.
