@@ -782,6 +782,43 @@ class DebateStateMachineTests(unittest.TestCase):
         self.assertEqual(result.status, "error")
         self.assertEqual(result.error, "material disagreement in candidate hashes")
 
+    # --- Review-fix: `_verdict_field` consistency across `evaluate_quorum` ---
+
+    def test_evaluate_quorum_accepts_dict_votes(self) -> None:
+        votes = (
+            {"critic_id": "a", "vote": "approve"},
+            {"critic_id": "b", "vote": "approved"},
+        )
+        self.assertEqual(machine.evaluate_quorum(votes, "unanimous"), (True, None))
+        malformed = (
+            {"critic_id": "a", "vote": "approve"},
+            {"critic_id": "b", "vote": "maybe"},
+        )
+        self.assertEqual(
+            machine.evaluate_quorum(malformed, "unanimous"),
+            (False, "unparseable verdict: b=maybe"),
+        )
+
+    def test_evaluate_quorum_accepts_perspective_review_result_votes(self) -> None:
+        votes = (
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_architecture"
+            ),
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_security"
+            ),
+        )
+        self.assertEqual(machine.evaluate_quorum(votes, "unanimous"), (True, None))
+        mixed = (
+            dialogue_contracts.PerspectiveReviewResult(
+                "approved", 1, 0, perspective="reviewer_architecture"
+            ),
+            dialogue_contracts.PerspectiveReviewResult(
+                "revise", 1, 0, perspective="reviewer_security"
+            ),
+        )
+        self.assertEqual(machine.evaluate_quorum(mixed, "unanimous"), (False, None))
+
 
 if __name__ == "__main__":
     unittest.main()

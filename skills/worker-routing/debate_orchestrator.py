@@ -152,6 +152,9 @@ SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 # Pure state-machine API, re-exported here for the historic orchestration API.
 PANEL_TOPOLOGY_OCCASIONS = _debate_state_machine.PANEL_TOPOLOGY_OCCASIONS
 is_panel_topology = _debate_state_machine.is_panel_topology
+ConsultationTopology = _debate_state_machine.ConsultationTopology
+CONSULTATION_TOPOLOGIES = _debate_state_machine.CONSULTATION_TOPOLOGIES
+resolve_topology = _debate_state_machine.resolve_topology
 build_stalemate_report = _debate_state_machine.build_stalemate_report
 evaluate_round_verdicts = _debate_state_machine.evaluate_round_verdicts
 advance_debate_state = _debate_state_machine.advance_debate_state
@@ -162,6 +165,7 @@ _load_consultation_policy = load_consultation_policy
 evaluate_quorum = _debate_state_machine.evaluate_quorum
 _PANEL_TOPOLOGY_OCCASIONS = PANEL_TOPOLOGY_OCCASIONS
 _is_panel_topology = is_panel_topology
+_resolve_topology = resolve_topology
 _build_stalemate_report = build_stalemate_report
 
 
@@ -2276,7 +2280,8 @@ def run_advisory_consultation_debate(
             f"unknown occasion {occasion!r}; expected one of {tuple(_MISSION_COPY)}"
         )
 
-    panel_mode = _is_panel_topology(occasion, complexity)
+    topology = _resolve_topology(occasion, complexity)
+    panel_mode = topology == "council_panel"
     effective_consultation_policy = (
         consultation_policy
         if consultation_policy is not None

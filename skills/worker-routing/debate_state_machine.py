@@ -198,6 +198,11 @@ def _field(vote: VoteInput, name: str, default: Any = None) -> Any:
     return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
 
 
+def _verdict_field(vote: VoteInput) -> Any:
+    """Read verdict/vote field from any supported representation with consistent priority."""
+    return _field(vote, "vote", _field(vote, "verdict", None))
+
+
 class SecurityVeto(Exception):
     """A unilateral security finding that halts a consultation."""
 
@@ -324,7 +329,7 @@ class SecurityVetoHandler:
                 if self._confidence(finding) >= self.security_threshold:
                     return SecurityVeto(provider, self._finding_to_dict(finding))
 
-            verdict_value = _field(vote, "vote", _field(vote, "verdict", None))
+            verdict_value = _verdict_field(vote)
             if _normalize_verdict(verdict_value) != "BLOCK":
                 continue
             if provider == "reviewer_security":
@@ -374,7 +379,7 @@ class ConsensusTable:
         self.quorum_threshold = threshold if math.isfinite(threshold) and 0.0 <= threshold <= 1.0 else 0.60
 
     def _confidence(self, vote: VoteInput) -> float:
-        verdict = _field(vote, "vote", _field(vote, "verdict", ""))
+        verdict = _verdict_field(vote)
         if _normalize_verdict(verdict) is None:
             return 0.0
         confidence = _field(vote, "confidence")
@@ -399,7 +404,7 @@ class ConsensusTable:
     def invalid_voters(self, votes: Sequence[VoteInput]) -> tuple[str, ...]:
         invalid = []
         for vote in votes:
-            verdict = _field(vote, "vote", _field(vote, "verdict", ""))
+            verdict = _verdict_field(vote)
             if _normalize_verdict(verdict) is None:
                 invalid.append(f"{self._identity(vote)}={verdict}")
         return tuple(invalid)
@@ -420,7 +425,7 @@ class ConsensusTable:
         total_weight = total_weight if total_weight > 0 else float(len(votes))
         score = 0.0
         for vote, weight in zip(votes, effective_weights):
-            verdict = _field(vote, "vote", _field(vote, "verdict", ""))
+            verdict = _verdict_field(vote)
             if _normalize_verdict(verdict) == "APPROVE":
                 score += weight * max(0.0, self._confidence(vote))
         return score / total_weight
@@ -451,7 +456,7 @@ class ConsensusTable:
         if score < self.quorum_threshold:
             return self._enforce_policy("UNRESOLVED")
         vote_names = [
-            str(_field(vote, "vote", _field(vote, "verdict", ""))).strip().casefold()
+            str(_verdict_field(vote)).strip().casefold()
             for vote in votes
         ]
         is_unanimous = all(_normalize_verdict(vote) == "APPROVE" for vote in vote_names)
@@ -496,17 +501,17 @@ def evaluate_quorum(
         return False, "unparseable verdict: no critic responses"
     invalid = [
         response for response in responses
-        if _normalize_verdict(_field(response, "verdict", _field(response, "vote", None))) is None
+        if _normalize_verdict(_verdict_field(response)) is None
     ]
     if invalid:
         labels = ", ".join(
             f"{_field(response, 'critic_id', _field(response, 'provider', 'unknown'))}="
-            f"{_field(response, 'verdict', _field(response, 'vote', None))}"
+            f"{_verdict_field(response)}"
             for response in invalid
         )
         return False, f"unparseable verdict: {labels}"
     approvals = sum(
-        _normalize_verdict(_field(response, "verdict", _field(response, "vote", None))) == "APPROVE"
+        _normalize_verdict(_verdict_field(response)) == "APPROVE"
         for response in responses
     )
     count = len(responses)

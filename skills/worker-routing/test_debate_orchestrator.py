@@ -492,6 +492,36 @@ class ProductionOrchestrationTests(unittest.TestCase):
             self.assertIn("## Recurring worker failure", contents)
             self.assertIn("Consecutive failures: 1", contents)
 
+    def test_run_advisory_consultation_debate_calls_through_resolve_topology(self) -> None:
+        """Ticket 43.1: `run_advisory_consultation_debate` must resolve its
+        `panel_mode` local through `resolve_topology` (re-exported from
+        `debate_state_machine` as `_resolve_topology`) rather than
+        duplicating `is_panel_topology`'s boolean inline, so
+        `resolve_topology` has a real production caller."""
+
+        def invoker(_model: str, _effort: str, prompt: str) -> str:
+            if "You are the Planner" in prompt:
+                return "Proposed plan"
+            return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
+
+        real_resolve_topology = debate_orchestrator._resolve_topology
+        calls: list[tuple[str, str]] = []
+
+        def spy(occasion: str, complexity: str) -> str:
+            calls.append((occasion, complexity))
+            return real_resolve_topology(occasion, complexity)
+
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            debate_orchestrator, "_resolve_topology", spy
+        ):
+            result = debate_orchestrator.run_advisory_consultation_debate(
+                "Plan the implementation", invoker, root_dir=Path(tmp), complexity="medium"
+            )
+
+        self.assertEqual(calls, [("ambiguity", "medium")])
+        self.assertEqual(result.outcome, "consensus")
+        self.assertEqual(result.topology, "pair")
+
 
 class SecurityVetoAndManifestTests(unittest.TestCase):
     SECRET = b"ticket-03-test-secret"
