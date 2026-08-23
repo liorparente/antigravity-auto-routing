@@ -1,8 +1,8 @@
-# Institutional Memory — 20 Golden Rules
+# Institutional Memory — 21 Golden Rules
 
 ## Metadata
-- **Last updated:** 2026-08-22
-- **Format:** distilled from 103 historical entries; full history in
+- **Last updated:** 2026-08-23
+- **Format:** distilled from 104 historical entries; full history in
   [`knowledge/archive/institutional-memory-legacy.md`](archive/institutional-memory-legacy.md).
 - **Retrieval:** `skills/worker-routing/prompt_assembler.extract_scoped_memory`
   scores these rules against a task description and target files, and
@@ -112,3 +112,9 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
     One acceptance criterion must name the actual caller, and one test must
     reach the new code through that caller's path, not the entry point
     directly.
+21. **Centralize loose JSON into strongly-typed immutable schemas with per-key fallbacks.**
+    When parsing shared configuration files across multiple consumers, replace ad hoc
+    dict reads with a single `@dataclass(frozen=True)` module (`routing_config.py`).
+    Downstream consumers should read typed models and public structural keys
+    (`STRUCTURAL_KEYS`), and section parsers must support per-key fallbacks for partial
+    configurations to prevent false-positive validation crashes during progressive migrations.

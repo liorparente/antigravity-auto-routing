@@ -1,5 +1,13 @@
 # Worker Routing Fallbacks
 
+## 2026-08-23 — Strict Whole-File Validation Crashing Partial Legacy Config Readers
+
+- Mission: Unify disparate JSON config readers into centralized `routing_config.py` (Ticket 42).
+- Failure: Refactoring section-specific loaders (`_load_dialogue_budget_config`, `_load_degraded_roster_model`, `_load_acceptance_gate_config`) to call `load_routing_config()` caused valid partial configs (e.g. `{"dialogue_budget": {}}` or `{"light_doer": {"patterns": [...]}}`) to raise fatal `ConfigValidationError` exceptions due to missing subkeys, breaking existing fallback contracts.
+- Root Cause: Top-level section parsers treated presence of a section dictionary as an all-or-nothing requirement for all keys, rather than falling back per-key/per-field to immutable default constants.
+- Resolution: Updated `_parse_dialogue_budget`, `_parse_acceptance_gate`, and `_parse_legacy_role_config` to check key presence individually and substitute defaults for omitted fields (`DEFAULT_ROUTING_CONFIG`).
+- Lesson: When replacing loose dictionary lookups with typed schema validators, always support granular per-key fallback defaults for optional and partial dictionaries to ensure zero breaking changes during progressive migrations.
+
 ## 2026-08-23 — Zsh Markdown Backtick Substitution in Double-Quoted Worker Prompts
 
 - Mission: Dispatch worker task via `claude -p` with mission brief passed as an inline shell string.
