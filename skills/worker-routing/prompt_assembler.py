@@ -450,6 +450,27 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("reducer", "pure", "state machine", "tracer-bullet", "vertical slice", "seam"),
         ("test_*.py", "debate_state_machine.py"),
     ),
+    GoldenRule(
+        24,
+        "Testing & TDD Seams",
+        "Render visual observability dashboards as pure, clock-free functions with atomic I/O",
+        "Keep report rendering (render_html_report) strictly pure, deterministic, and "
+        "clock-free by injecting an aware now: datetime, and delegate disk writes to an "
+        "atomic tempfile-replace helper (write_html_report). All dynamic HTML values must "
+        "pass through html.escape.",
+        ("render_html_report", "html", "dashboard", "clock-free", "atomic", "observability", "escape"),
+        ("learning_report_html.py", "test_learning_report_html.py", "*.py"),
+    ),
+    GoldenRule(
+        25,
+        "Testing & TDD Seams",
+        "Enforce injected-now CLI arguments to preserve clock-free AST test invariants",
+        "When exposing CLI entry points on clock-free modules, require an ISO-8601 --now "
+        "argument rather than reading live system clocks in main(), preserving reproducible "
+        "historical replay and passing AST clock guards.",
+        ("cli", "now", "iso-8601", "clock-free", "ast", "invariants", "replay"),
+        ("learning_report.py", "learning_report_html.py", "*.py"),
+    ),
 )
 
 SCOPED_MEMORY_BEGIN = "=== BEGIN SCOPED INSTITUTIONAL MEMORY ==="

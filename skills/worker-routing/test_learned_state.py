@@ -2091,7 +2091,7 @@ class InstitutionalMemorySyncTests(unittest.TestCase):
     def test_institutional_memory_matches_golden_rules(self) -> None:
         """`knowledge/institutional-memory.md` is a human-readable rendering
         of `prompt_assembler.GOLDEN_RULES` (spec 0011 ticket 03) — the two
-        must never silently drift apart: same 23 rules, same ids, same
+        must never silently drift apart: same 25 rules, same ids, same
         categories.
         """
         memory_path = REPO_ROOT / "knowledge" / "institutional-memory.md"
@@ -2099,8 +2099,8 @@ class InstitutionalMemorySyncTests(unittest.TestCase):
             memory_path.read_text(encoding="utf-8")
         )
 
-        self.assertEqual(len(parsed), 23)
-        self.assertEqual(len(prompt_assembler.GOLDEN_RULES), 23)
+        self.assertEqual(len(parsed), 25)
+        self.assertEqual(len(prompt_assembler.GOLDEN_RULES), 25)
 
         parsed_categories_by_id = dict(parsed)
         golden_rules_by_id = {rule.id: rule.category for rule in prompt_assembler.GOLDEN_RULES}

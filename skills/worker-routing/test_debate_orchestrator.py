@@ -505,9 +505,11 @@ class ProductionOrchestrationTests(unittest.TestCase):
             return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
 
         real_resolve_topology = debate_orchestrator._resolve_topology
-        calls: list[tuple[str, str]] = []
+        calls: list[tuple[dialogue_contracts.Occasion, str]] = []
 
-        def spy(occasion: str, complexity: str) -> str:
+        def spy(
+            occasion: dialogue_contracts.Occasion, complexity: str
+        ) -> debate_orchestrator.ConsultationTopology:
             calls.append((occasion, complexity))
             return real_resolve_topology(occasion, complexity)
 
