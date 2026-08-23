@@ -107,10 +107,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 if __package__:
-    from . import learning_journal, learning_scoreboard
+    from . import learning_journal, learning_scoreboard, routing_config
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_scoreboard  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
 
 # The trailing window `evaluate_proposal` uses to compare scoreboards before
 # and after a trial batch, re-exported from `learning_scoreboard` rather than
@@ -118,8 +119,13 @@ else:
 # documents for its own `DEFAULT_WINDOW_DAYS`.
 DEFAULT_WINDOW_DAYS: int = learning_scoreboard.DEFAULT_WINDOW_DAYS
 
-DEFAULT_TRIAL_COUNT: int = 5
-DEFAULT_SCORE_THRESHOLD: float = 0.8
+# Ticket 42: sourced from `routing_config`'s shared `DEFAULT_ROUTING_CONFIG
+# .acceptance_gate` rather than a second hand-maintained literal, so this
+# module's defaults and the checked-in `routing-config.json` schema's own
+# `acceptance_gate` defaults (`learner_worker._load_acceptance_gate_config`'s
+# fallback) can never drift apart.
+DEFAULT_TRIAL_COUNT: int = routing_config.DEFAULT_ROUTING_CONFIG.acceptance_gate.trials
+DEFAULT_SCORE_THRESHOLD: float = routing_config.DEFAULT_ROUTING_CONFIG.acceptance_gate.score_threshold
 
 
 def _require_aware_now(now: datetime) -> None:

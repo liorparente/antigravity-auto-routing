@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -279,18 +279,7 @@ class RoutingConfig:
         so the two can never drift apart on shape.
         """
         result: dict[str, Any] = {
-            "roles": _roles_to_dict(self.roles),
-            "providers": _providers_to_dict(self.providers),
-            "council_policy": _council_policy_to_dict(self.council_policy),
-            "consultation_policy": _consultation_policy_to_dict(self.consultation_policy),
-            "critical_dialogue": _critical_dialogue_to_dict(self.critical_dialogue),
-            "roster_topology": _roster_topology_to_dict(self.roster_topology),
-            "canary_cadence": _canary_cadence_to_dict(self.canary_cadence),
-            "dialogue_budget": _dialogue_budget_to_dict(self.dialogue_budget),
-            "acceptance_gate": _acceptance_gate_to_dict(self.acceptance_gate),
-            "code_extensions": list(self.code_extensions),
-            "safe_commands": list(self.safe_commands),
-            "supported_models": list(self.supported_models),
+            key: converter(self) for key, converter in _SECTION_CONVERTERS.items()
         }
         for role_name, legacy_role in self.legacy_roles.items():
             result[role_name] = _legacy_role_to_dict(legacy_role)
@@ -303,31 +292,8 @@ class RoutingConfig:
         other section to read one."""
         if key in self.legacy_roles:
             return _legacy_role_to_dict(self.legacy_roles[key])
-        if key == "roles":
-            return _roles_to_dict(self.roles)
-        if key == "providers":
-            return _providers_to_dict(self.providers)
-        if key == "council_policy":
-            return _council_policy_to_dict(self.council_policy)
-        if key == "consultation_policy":
-            return _consultation_policy_to_dict(self.consultation_policy)
-        if key == "critical_dialogue":
-            return _critical_dialogue_to_dict(self.critical_dialogue)
-        if key == "roster_topology":
-            return _roster_topology_to_dict(self.roster_topology)
-        if key == "canary_cadence":
-            return _canary_cadence_to_dict(self.canary_cadence)
-        if key == "dialogue_budget":
-            return _dialogue_budget_to_dict(self.dialogue_budget)
-        if key == "acceptance_gate":
-            return _acceptance_gate_to_dict(self.acceptance_gate)
-        if key == "code_extensions":
-            return list(self.code_extensions)
-        if key == "safe_commands":
-            return list(self.safe_commands)
-        if key == "supported_models":
-            return list(self.supported_models)
-        return default
+        converter = _SECTION_CONVERTERS.get(key)
+        return converter(self) if converter is not None else default
 
 
 def _roles_to_dict(roles: Mapping[str, RoleConfig]) -> dict[str, Any]:
@@ -435,6 +401,25 @@ def _consultation_policy_to_dict(policy: ConsultationPolicyConfig) -> dict[str, 
     if policy.council_policy is not None:
         result["council_policy"] = _council_policy_to_dict(policy.council_policy)
     return result
+
+
+# Single dispatch table `RoutingConfig.to_dict()` and `.get()` both read from,
+# so a key's shape is defined once instead of as two parallel if/elif chains
+# that could silently drift apart.
+_SECTION_CONVERTERS: dict[str, Any] = {
+    "roles": lambda config: _roles_to_dict(config.roles),
+    "providers": lambda config: _providers_to_dict(config.providers),
+    "council_policy": lambda config: _council_policy_to_dict(config.council_policy),
+    "consultation_policy": lambda config: _consultation_policy_to_dict(config.consultation_policy),
+    "critical_dialogue": lambda config: _critical_dialogue_to_dict(config.critical_dialogue),
+    "roster_topology": lambda config: _roster_topology_to_dict(config.roster_topology),
+    "canary_cadence": lambda config: _canary_cadence_to_dict(config.canary_cadence),
+    "dialogue_budget": lambda config: _dialogue_budget_to_dict(config.dialogue_budget),
+    "acceptance_gate": lambda config: _acceptance_gate_to_dict(config.acceptance_gate),
+    "code_extensions": lambda config: list(config.code_extensions),
+    "safe_commands": lambda config: list(config.safe_commands),
+    "supported_models": lambda config: list(config.supported_models),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +588,31 @@ def _parse_legacy_role_config(role_name: str, data: Any, key_path: str) -> Legac
     name = _require_str(data, "name", key_path)
     patterns = _require_str_tuple(data, "patterns", key_path)
     return LegacyRoleConfig(name=name, patterns=patterns)
+
+
+def _parse_id_keyed_section(
+    data: dict[str, Any],
+    key: str,
+    parser: Callable[[str, Any, str], Any],
+    default: Mapping[str, Any],
+    *,
+    fallback_on_missing: bool,
+) -> dict[str, Any]:
+    """Parse a top-level `{id: {...}}` section (`roles`, `providers`):
+    missing follows `fallback_on_missing` exactly like every other section
+    (see `parse_routing_config`'s own `_section` helper), present parses
+    each entry through `parser` keyed by its own id-scoped path.
+    """
+    section_data = data.get(key)
+    if section_data is None:
+        if fallback_on_missing:
+            return dict(default)
+        raise ConfigValidationError(key, "required section is missing", None)
+    section_data = _require_dict(section_data, key)
+    return {
+        item_id: parser(item_id, item_data, f"{key}.{item_id}")
+        for item_id, item_data in section_data.items()
+    }
 
 
 def _parse_security_veto(data: Any, key_path: str) -> SecurityVetoConfig:
@@ -950,29 +960,14 @@ def parse_routing_config(
             raise ConfigValidationError(key, "required section is missing", None)
         return parser(data[key], key)
 
-    roles_data = data.get("roles")
-    if roles_data is None:
-        if not fallback_on_missing:
-            raise ConfigValidationError("roles", "required section is missing", None)
-        roles: dict[str, RoleConfig] = dict(DEFAULT_ROUTING_CONFIG.roles)
-    else:
-        roles_data = _require_dict(roles_data, "roles")
-        roles = {
-            role_id: _parse_role_config(role_id, role_data, f"roles.{role_id}")
-            for role_id, role_data in roles_data.items()
-        }
-
-    providers_data = data.get("providers")
-    if providers_data is None:
-        if not fallback_on_missing:
-            raise ConfigValidationError("providers", "required section is missing", None)
-        providers: dict[str, ProviderConfig] = dict(DEFAULT_ROUTING_CONFIG.providers)
-    else:
-        providers_data = _require_dict(providers_data, "providers")
-        providers = {
-            provider_id: _parse_provider_config(provider_id, provider_data, f"providers.{provider_id}")
-            for provider_id, provider_data in providers_data.items()
-        }
+    roles: dict[str, RoleConfig] = _parse_id_keyed_section(
+        data, "roles", _parse_role_config, DEFAULT_ROUTING_CONFIG.roles,
+        fallback_on_missing=fallback_on_missing,
+    )
+    providers: dict[str, ProviderConfig] = _parse_id_keyed_section(
+        data, "providers", _parse_provider_config, DEFAULT_ROUTING_CONFIG.providers,
+        fallback_on_missing=fallback_on_missing,
+    )
 
     legacy_roles: dict[str, LegacyRoleConfig] = {}
     for key, value in data.items():

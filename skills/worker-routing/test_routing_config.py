@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -347,6 +348,35 @@ class LoadRoutingConfigFileErrorTests(unittest.TestCase):
         self.assertTrue(issubclass(routing_config.ConfigParseError, routing_config.ConfigError))
         self.assertTrue(issubclass(routing_config.ConfigValidationError, routing_config.ConfigError))
         self.assertTrue(issubclass(routing_config.ConfigError, Exception))
+
+
+class RoutingConfigPathLoadTimeValidationTests(unittest.TestCase):
+    """Ticket 42 AC: "Implement early schema validation at module load
+    time" fails closed. The module-level statement at the bottom of
+    routing_config.py is `load_routing_config(ROUTING_CONFIG_PATH,
+    fallback_on_missing=True)` verbatim, so this pins that exact call
+    against both ways the checked-in file could go bad — rather than
+    `importlib.reload`, which would just recompute `ROUTING_CONFIG_PATH`
+    from `__file__` again and mask any substitution."""
+
+    def test_invalid_json_at_routing_config_path_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_path = Path(tmp) / "routing-config.json"
+            bad_path.write_text("{not valid json", encoding="utf-8")
+            with mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", bad_path):
+                with self.assertRaises(routing_config.ConfigParseError):
+                    routing_config.load_routing_config(
+                        routing_config.ROUTING_CONFIG_PATH, fallback_on_missing=True
+                    )
+
+    def test_missing_file_at_routing_config_path_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_path = Path(tmp) / "does-not-exist.json"
+            with mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", missing_path):
+                with self.assertRaises(routing_config.ConfigFileNotFoundError):
+                    routing_config.load_routing_config(
+                        routing_config.ROUTING_CONFIG_PATH, fallback_on_missing=True
+                    )
 
 
 if __name__ == "__main__":

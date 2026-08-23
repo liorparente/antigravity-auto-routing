@@ -346,8 +346,9 @@ def _routing_config_module() -> Any | None:
     return routing_config
 
 
-def load_config() -> dict[str, Any]:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
+    path = Path(config_path) if config_path is not None else CONFIG_PATH
+    with open(path, "r", encoding="utf-8") as f:
         config: dict[str, Any] = json.load(f)
     # Ticket 42: fail closed, early, on a malformed checked-in config file —
     # validated through the same typed schema every other consumer now
@@ -364,9 +365,13 @@ def load_config() -> dict[str, Any]:
 
 
 def load_patterns(config: dict[str, Any]) -> list[str]:
+    routing_config = _routing_config_module()
+    non_role_keys = (
+        routing_config._STRUCTURAL_KEYS if routing_config is not None else NON_ROLE_CONFIG_KEYS
+    )
     patterns: list[str] = []
     for key, role in config.items():
-        if key in NON_ROLE_CONFIG_KEYS or not isinstance(role, dict):
+        if key in non_role_keys or not isinstance(role, dict):
             continue
         patterns.extend(role.get("patterns", []))
     return patterns
@@ -1125,8 +1130,7 @@ class RoutingAuditEngine:
         self._legacy_config: dict[str, Any] | None = None
 
         if config is None:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                legacy_config: dict[str, Any] = json.load(f)
+            legacy_config: dict[str, Any] = load_config(self.config_path)
             self._legacy_config = legacy_config
             config = AuditConfig(
                 worker_patterns=[
@@ -1357,8 +1361,7 @@ class RoutingAuditEngine:
 
         legacy_config = self._legacy_config
         if legacy_config is None:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                legacy_config = json.load(f)
+            legacy_config = load_config(self.config_path)
         evaluator = PolicyEvaluator(legacy_config, security_ctx=self.security_ctx)
         metrics = evaluator.evaluate(steps)
 
