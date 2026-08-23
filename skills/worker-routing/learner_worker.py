@@ -79,21 +79,21 @@ from typing import Any, Literal
 
 if __package__:
     from . import (
-        acceptance_gate,
         learning_journal,
         learning_outcomes,
         learning_report,
         learning_scoreboard,
         risk_tiered_application,
+        routing_config,
     )
     from .risk_tiered_application import RevertOutcome, TierOutcome
 else:
-    import acceptance_gate  # type: ignore[no-redef]
     import learning_journal  # type: ignore[no-redef]
     import learning_outcomes  # type: ignore[no-redef]
     import learning_report  # type: ignore[no-redef]
     import learning_scoreboard  # type: ignore[no-redef]
     import risk_tiered_application  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
     from risk_tiered_application import RevertOutcome, TierOutcome  # type: ignore[no-redef]
 
 # The seam every worker invocation in this repository shares: `(model,
@@ -324,30 +324,35 @@ def _validate_score_threshold(value: object, field_name: str = "score_threshold"
 
 def _load_acceptance_gate_config(config_path: Path) -> tuple[int, float]:
     """Read `trials`/`score_threshold` from `config_path`'s `acceptance_gate`
-    section, falling back to `acceptance_gate.DEFAULT_TRIAL_COUNT` /
-    `DEFAULT_SCORE_THRESHOLD` when the section (or either key) is absent —
-    the same pattern, including the no-try/except contract, as
-    `advisory_consultation._load_dialogue_budget_config`: production always
-    calls this with the default `_CONFIG_PATH`, which is checked into the
-    repo, so a missing or malformed `config_path` is a genuine caller
-    mistake left to raise loudly rather than be swallowed.
+    section via :mod:`routing_config` (ticket 42) — the same shared,
+    validated schema every other consumer in this package now reads
+    through — rather than this module's own raw `json.load` + `dict.get`
+    chain. `routing_config.load_routing_config` already falls back to
+    `routing_config.DEFAULT_ROUTING_CONFIG.acceptance_gate` (`trials=5`,
+    `score_threshold=0.8`, matching `acceptance_gate.py`'s own
+    `DEFAULT_TRIAL_COUNT`/`DEFAULT_SCORE_THRESHOLD`) when the section is
+    absent, and raises `routing_config.ConfigValidationError` for a
+    malformed *present* value or a missing/malformed `config_path` — the
+    same no-try/except contract `advisory_consultation
+    ._load_dialogue_budget_config` uses for the latter, since production
+    always calls this with the default `_CONFIG_PATH`, which is checked
+    into the repo.
 
-    Validated with this module's own `_validate_trials`/
-    `_validate_score_threshold` before any coercion — a raw `True` for
+    A malformed present value is re-raised as `ValueError` (via this
+    module's own `_validate_trials`/`_validate_score_threshold`) so this
+    function's exception contract stays independent of which layer caught
+    the problem, and re-checked before any coercion — a raw `True` for
     `trials` or a raw `float` would otherwise survive `int()`/`float()`
     silently (`bool` is an `int` subclass, and `int(1.9)` truncates rather
-    than rejects), which is exactly the class of malformed config this
-    module's own docstring on `_IDENTIFIER_UNSAFE_RE`-adjacent validation
-    elsewhere refuses to let through unchecked.
+    than rejects).
     """
-    with open(config_path, "r", encoding="utf-8") as stream:
-        config = json.load(stream)
-    section = config.get("acceptance_gate", {})
-    raw_trials = section.get("trials", acceptance_gate.DEFAULT_TRIAL_COUNT)
-    raw_threshold = section.get("score_threshold", acceptance_gate.DEFAULT_SCORE_THRESHOLD)
-    _validate_trials(raw_trials, "trials")
-    _validate_score_threshold(raw_threshold, "score_threshold")
-    return raw_trials, float(raw_threshold)
+    try:
+        gate = routing_config.load_routing_config(config_path).acceptance_gate
+    except routing_config.ConfigValidationError as exc:
+        raise ValueError(str(exc)) from exc
+    _validate_trials(gate.trials, "trials")
+    _validate_score_threshold(gate.score_threshold, "score_threshold")
+    return gate.trials, gate.score_threshold
 
 
 def _in_window(ts: datetime, *, window_start: datetime, now: datetime) -> bool:

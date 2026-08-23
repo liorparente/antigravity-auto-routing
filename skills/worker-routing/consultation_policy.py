@@ -20,17 +20,20 @@ except (ImportError, ValueError):
 # `consultation_policy.ROUTING_CONFIG_PATH`.
 ROUTING_CONFIG_PATH = routing_config.ROUTING_CONFIG_PATH
 
-# Ticket 42: sourced from `routing_config`'s typed default
-# (`ConsultationPolicyConfig`) rather than duplicated as a hand-maintained
-# literal — `_merge_policy_defaults`/`_validated_policy` below still own this
-# module's lenient "drop the malformed field, keep the rest" merge semantics
-# (routing_config's own parser is deliberately fail-closed instead, per
-# ticket 42's "malformed configuration raises" mandate), so this module
-# keeps that behavior and simply delegates the *shape* of its defaults to
-# the shared typed model instead of hand-copying it a second time.
-DEFAULT_CONSULTATION_POLICY: dict[str, Any] = routing_config.parse_routing_config(
-    {}, fallback_on_missing=True
-).to_dict()["consultation_policy"]
+# Ticket 42: sourced directly from `routing_config`'s shared
+# `DEFAULT_ROUTING_CONFIG` singleton (`ConsultationPolicyConfig`) rather than
+# duplicated as a hand-maintained literal — `_merge_policy_defaults`/
+# `_validated_policy` below still own this module's lenient "drop the
+# malformed field, keep the rest" merge semantics (routing_config's own
+# parser is deliberately fail-closed instead, per ticket 42's "malformed
+# configuration raises" mandate), so this module keeps that behavior and
+# simply delegates the *shape* of its defaults to the shared typed model
+# instead of hand-copying it a second time. No `parse_routing_config({})`
+# round-trip is needed: `DEFAULT_ROUTING_CONFIG` already *is* that parse's
+# result.
+DEFAULT_CONSULTATION_POLICY: dict[str, Any] = routing_config.DEFAULT_ROUTING_CONFIG.to_dict()[
+    "consultation_policy"
+]
 
 def _merge_policy_defaults(
     defaults: dict[str, Any], configured: object
@@ -286,18 +289,6 @@ def load_consultation_policy(
         configured = {**configured, "council_policy": config["council_policy"]}
 
     merged = _merge_policy_defaults(DEFAULT_CONSULTATION_POLICY, _validated_policy(configured))
-
-    # Ticket 42: validate the merged, already-defaulted policy against
-    # `routing_config`'s typed `ConsultationPolicyConfig` before returning
-    # it, so a future bug in this module's own lenient merge can never
-    # silently hand back a shape the shared schema would reject. This never
-    # raises in practice — `_merge_policy_defaults` above already filled
-    # every required field from `DEFAULT_CONSULTATION_POLICY`, whose own
-    # shape is sourced from that same typed model — but validating rather
-    # than reconstructing the return value keeps the exact dict shape (e.g.
-    # a provider entry with no `effort_mapping` key stays that way) that
-    # callers and `test_loads_legacy_flat_policy` depend on byte-for-byte.
-    routing_config.parse_routing_config({"consultation_policy": merged}, fallback_on_missing=True)
     return merged
 
 

@@ -296,21 +296,15 @@ SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 # mirroring `routing_check.load_code_extensions`'s identical
 # `config.get("code_extensions", DEFAULT_CODE_EXTENSIONS)` pattern — never
 # the value actually used when `routing-config.json` supplies its own
-# `critical_dialogue` section, which it does as of this ticket.
+# `critical_dialogue` section, which it does as of this ticket. Sourced from
+# `routing_config`'s typed default (ticket 42) rather than duplicated as a
+# hand-maintained literal.
 _CONFIG_PATH = routing_config.ROUTING_CONFIG_PATH
-DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD = 300
+DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD = (
+    routing_config.DEFAULT_ROUTING_CONFIG.critical_dialogue.code_review_diff_line_threshold
+)
 DEFAULT_SECURITY_SENSITIVE_PATH_PATTERNS: tuple[str, ...] = (
-    "auth",
-    "credential",
-    "secret",
-    ".env",
-    "password",
-    "token",
-    "/keys/",
-    "security",
-    "iam",
-    "acl",
-    "permission",
+    routing_config.DEFAULT_ROUTING_CONFIG.critical_dialogue.security_sensitive_path_patterns
 )
 
 
@@ -1044,30 +1038,12 @@ class RosterResolutionError(RuntimeError):
 # fallback ordering (`protocol.md` section 3.5, "Complex/Planning: Claude
 # Opus 5 (Thinking) -> Claude Fable/Opus 4.8 -> codex Sol") before ending on
 # a local model, so "local families qualify" (the spec's own phrase) is a
-# real, reachable last resort in every chain, not merely a claim.
-DEFAULT_ROSTER_FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
-    "planner": (
-        "Claude Opus 5 (Thinking)",
-        "Claude Fable 5",
-        "Codex 5.6 Sol",
-        "Gemini 3.6 Flash (High)",
-        "Gemma 4 E4B",
-    ),
-    "critic_a": (
-        "Codex 5.6 Sol",
-        "GPT-OSS 120B (Medium)",
-        "Gemini 3.6 Flash (High)",
-        "Claude Opus 5 (Thinking)",
-        "Qwen3.8-27B-MLX-6bit",
-    ),
-    "critic_b": (
-        "Gemini 3.6 Flash",
-        "Gemini 3.1 Pro (High)",
-        "Codex 5.6 Sol",
-        "Claude Opus 5 (Thinking)",
-        "Gemma 4 E4B",
-    ),
-}
+# real, reachable last resort in every chain, not merely a claim. Sourced
+# from `routing_config`'s typed default (ticket 42) rather than duplicated
+# as a hand-maintained literal.
+DEFAULT_ROSTER_FALLBACK_CHAINS: dict[str, tuple[str, ...]] = dict(
+    routing_config.DEFAULT_ROUTING_CONFIG.roster_topology.role_fallback_chains
+)
 
 
 def _load_roster_fallback_chains(config_path: Path) -> dict[str, tuple[str, ...]]:
@@ -1372,11 +1348,13 @@ CANARY_FIXTURES: tuple[CanaryFixture, ...] = (
 # of its two keys) — same role as `DEFAULT_CODE_REVIEW_DIFF_LINE_THRESHOLD`
 # and `DEFAULT_ROSTER_FALLBACK_CHAINS` above, never what production
 # actually uses, since `routing-config.json` supplies its own section as of
-# this ticket. `DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES` is one week in
-# seconds, spelled out as the arithmetic rather than the literal `604800`
-# so the "weekly" claim is legible at the definition site.
-DEFAULT_CANARY_DIALOGUES_PER_CANARY = 20
-DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES = 7 * 24 * 60 * 60
+# this ticket. Sourced from `routing_config`'s typed default (ticket 42,
+# itself one week in seconds) rather than duplicated as a hand-maintained
+# literal.
+DEFAULT_CANARY_DIALOGUES_PER_CANARY = routing_config.DEFAULT_ROUTING_CONFIG.canary_cadence.dialogues_per_canary
+DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES = (
+    routing_config.DEFAULT_ROUTING_CONFIG.canary_cadence.seconds_between_canaries
+)
 
 
 def _load_canary_cadence_config(config_path: Path) -> tuple[int, float]:

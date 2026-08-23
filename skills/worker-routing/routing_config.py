@@ -274,70 +274,120 @@ class RoutingConfig:
 
         Round-trips through :func:`parse_routing_config`: legacy roles are
         re-flattened back to top-level keys, exactly where
-        :func:`parse_routing_config` found them.
+        :func:`parse_routing_config` found them. Composed from the same
+        per-section converters :meth:`get` dispatches to for a single key,
+        so the two can never drift apart on shape.
         """
         result: dict[str, Any] = {
-            "roles": {
-                role_id: {
-                    "capability_requirements": {
-                        "reasoning_tier": role.capability_requirements.reasoning_tier,
-                        "tool_access": role.capability_requirements.tool_access,
-                        "min_context": role.capability_requirements.min_context,
-                        "local_only": role.capability_requirements.local_only,
-                    },
-                    "preferred_providers": list(role.preferred_providers),
-                }
-                for role_id, role in self.roles.items()
-            },
-            "providers": {
-                provider_id: {
-                    "adapter": provider.adapter,
-                    "model": provider.model,
-                    "default_reasoning_effort": provider.default_reasoning_effort,
-                }
-                for provider_id, provider in self.providers.items()
-            },
+            "roles": _roles_to_dict(self.roles),
+            "providers": _providers_to_dict(self.providers),
             "council_policy": _council_policy_to_dict(self.council_policy),
             "consultation_policy": _consultation_policy_to_dict(self.consultation_policy),
-            "critical_dialogue": {
-                "code_review_diff_line_threshold": self.critical_dialogue.code_review_diff_line_threshold,
-                "security_sensitive_path_patterns": list(
-                    self.critical_dialogue.security_sensitive_path_patterns
-                ),
-            },
-            "roster_topology": {
-                "role_fallback_chains": {
-                    role: list(chain)
-                    for role, chain in self.roster_topology.role_fallback_chains.items()
-                }
-            },
-            "canary_cadence": {
-                "dialogues_per_canary": self.canary_cadence.dialogues_per_canary,
-                "seconds_between_canaries": self.canary_cadence.seconds_between_canaries,
-            },
-            "dialogue_budget": {
-                "session_dialogue_cap": self.dialogue_budget.session_dialogue_cap,
-            },
-            "acceptance_gate": {
-                "trials": self.acceptance_gate.trials,
-                "score_threshold": self.acceptance_gate.score_threshold,
-            },
+            "critical_dialogue": _critical_dialogue_to_dict(self.critical_dialogue),
+            "roster_topology": _roster_topology_to_dict(self.roster_topology),
+            "canary_cadence": _canary_cadence_to_dict(self.canary_cadence),
+            "dialogue_budget": _dialogue_budget_to_dict(self.dialogue_budget),
+            "acceptance_gate": _acceptance_gate_to_dict(self.acceptance_gate),
             "code_extensions": list(self.code_extensions),
             "safe_commands": list(self.safe_commands),
             "supported_models": list(self.supported_models),
         }
         for role_name, legacy_role in self.legacy_roles.items():
-            result[role_name] = {
-                "name": legacy_role.name,
-                "patterns": list(legacy_role.patterns),
-            }
+            result[role_name] = _legacy_role_to_dict(legacy_role)
         return result
 
     def get(self, key: str, default: Any = None) -> Any:
-        """Dict-like top-level lookup over :meth:`to_dict`, for callers
-        migrating off the old ``config.get("dialogue_budget", {})`` idiom
-        without rewriting every call site in one pass."""
-        return self.to_dict().get(key, default)
+        """Dict-like top-level lookup for exactly the section `to_dict()`
+        would produce under `key`, computed directly from that section's
+        own converter rather than reconstructing (and discarding) every
+        other section to read one."""
+        if key in self.legacy_roles:
+            return _legacy_role_to_dict(self.legacy_roles[key])
+        if key == "roles":
+            return _roles_to_dict(self.roles)
+        if key == "providers":
+            return _providers_to_dict(self.providers)
+        if key == "council_policy":
+            return _council_policy_to_dict(self.council_policy)
+        if key == "consultation_policy":
+            return _consultation_policy_to_dict(self.consultation_policy)
+        if key == "critical_dialogue":
+            return _critical_dialogue_to_dict(self.critical_dialogue)
+        if key == "roster_topology":
+            return _roster_topology_to_dict(self.roster_topology)
+        if key == "canary_cadence":
+            return _canary_cadence_to_dict(self.canary_cadence)
+        if key == "dialogue_budget":
+            return _dialogue_budget_to_dict(self.dialogue_budget)
+        if key == "acceptance_gate":
+            return _acceptance_gate_to_dict(self.acceptance_gate)
+        if key == "code_extensions":
+            return list(self.code_extensions)
+        if key == "safe_commands":
+            return list(self.safe_commands)
+        if key == "supported_models":
+            return list(self.supported_models)
+        return default
+
+
+def _roles_to_dict(roles: Mapping[str, RoleConfig]) -> dict[str, Any]:
+    return {
+        role_id: {
+            "capability_requirements": {
+                "reasoning_tier": role.capability_requirements.reasoning_tier,
+                "tool_access": role.capability_requirements.tool_access,
+                "min_context": role.capability_requirements.min_context,
+                "local_only": role.capability_requirements.local_only,
+            },
+            "preferred_providers": list(role.preferred_providers),
+        }
+        for role_id, role in roles.items()
+    }
+
+
+def _providers_to_dict(providers: Mapping[str, ProviderConfig]) -> dict[str, Any]:
+    return {
+        provider_id: {
+            "adapter": provider.adapter,
+            "model": provider.model,
+            "default_reasoning_effort": provider.default_reasoning_effort,
+        }
+        for provider_id, provider in providers.items()
+    }
+
+
+def _legacy_role_to_dict(legacy_role: LegacyRoleConfig) -> dict[str, Any]:
+    return {"name": legacy_role.name, "patterns": list(legacy_role.patterns)}
+
+
+def _critical_dialogue_to_dict(critical_dialogue: CriticalDialogueConfig) -> dict[str, Any]:
+    return {
+        "code_review_diff_line_threshold": critical_dialogue.code_review_diff_line_threshold,
+        "security_sensitive_path_patterns": list(critical_dialogue.security_sensitive_path_patterns),
+    }
+
+
+def _roster_topology_to_dict(roster_topology: RosterTopologyConfig) -> dict[str, Any]:
+    return {
+        "role_fallback_chains": {
+            role: list(chain) for role, chain in roster_topology.role_fallback_chains.items()
+        }
+    }
+
+
+def _canary_cadence_to_dict(canary_cadence: CanaryCadenceConfig) -> dict[str, Any]:
+    return {
+        "dialogues_per_canary": canary_cadence.dialogues_per_canary,
+        "seconds_between_canaries": canary_cadence.seconds_between_canaries,
+    }
+
+
+def _dialogue_budget_to_dict(dialogue_budget: DialogueBudgetConfig) -> dict[str, Any]:
+    return {"session_dialogue_cap": dialogue_budget.session_dialogue_cap}
+
+
+def _acceptance_gate_to_dict(acceptance_gate: AcceptanceGateConfig) -> dict[str, Any]:
+    return {"trials": acceptance_gate.trials, "score_threshold": acceptance_gate.score_threshold}
 
 
 def _council_policy_to_dict(policy: CouncilPolicyConfig) -> dict[str, Any]:
@@ -474,6 +524,28 @@ def _require_number_mapping(data: dict[str, Any], key: str, key_path: str) -> di
             f"{key_path}.{key}", "must be an object of string to non-negative number", value
         )
     return {k: float(v) for k, v in value.items()}
+
+
+def _parse_optional_top_level_str_list(
+    data: dict[str, Any], key: str, default: tuple[str, ...], *, fallback_on_missing: bool
+) -> tuple[str, ...]:
+    """One of the three flat top-level list-of-strings sections
+    (`code_extensions`, `safe_commands`, `supported_models`): a validated
+    tuple of strings when `key` is present, `default` when absent and
+    `fallback_on_missing` is set, else a `ConfigValidationError` naming the
+    missing section — the same `fallback_on_missing` contract every other
+    top-level section in `parse_routing_config` already honors. The three
+    call sites differ only in which field of `DEFAULT_ROUTING_CONFIG`
+    supplies `default`.
+    """
+    value = data.get(key)
+    if value is None:
+        if fallback_on_missing:
+            return default
+        raise ConfigValidationError(key, "required section is missing", None)
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ConfigValidationError(key, "must be a list of strings", value)
+    return tuple(value)
 
 
 def _require_int_mapping(data: dict[str, Any], key: str, key_path: str) -> dict[str, int]:
@@ -928,35 +1000,15 @@ def parse_routing_config(
         "acceptance_gate", _parse_acceptance_gate, DEFAULT_ROUTING_CONFIG.acceptance_gate
     )
 
-    code_extensions_data = data.get("code_extensions")
-    if code_extensions_data is None:
-        code_extensions = DEFAULT_ROUTING_CONFIG.code_extensions
-    else:
-        if not isinstance(code_extensions_data, list) or not all(
-            isinstance(item, str) for item in code_extensions_data
-        ):
-            raise ConfigValidationError("code_extensions", "must be a list of strings", code_extensions_data)
-        code_extensions = tuple(code_extensions_data)
-
-    safe_commands_data = data.get("safe_commands")
-    if safe_commands_data is None:
-        safe_commands = DEFAULT_ROUTING_CONFIG.safe_commands
-    else:
-        if not isinstance(safe_commands_data, list) or not all(
-            isinstance(item, str) for item in safe_commands_data
-        ):
-            raise ConfigValidationError("safe_commands", "must be a list of strings", safe_commands_data)
-        safe_commands = tuple(safe_commands_data)
-
-    supported_models_data = data.get("supported_models")
-    if supported_models_data is None:
-        supported_models = DEFAULT_ROUTING_CONFIG.supported_models
-    else:
-        if not isinstance(supported_models_data, list) or not all(
-            isinstance(item, str) for item in supported_models_data
-        ):
-            raise ConfigValidationError("supported_models", "must be a list of strings", supported_models_data)
-        supported_models = tuple(supported_models_data)
+    code_extensions = _parse_optional_top_level_str_list(
+        data, "code_extensions", DEFAULT_ROUTING_CONFIG.code_extensions, fallback_on_missing=fallback_on_missing
+    )
+    safe_commands = _parse_optional_top_level_str_list(
+        data, "safe_commands", DEFAULT_ROUTING_CONFIG.safe_commands, fallback_on_missing=fallback_on_missing
+    )
+    supported_models = _parse_optional_top_level_str_list(
+        data, "supported_models", DEFAULT_ROUTING_CONFIG.supported_models, fallback_on_missing=fallback_on_missing
+    )
 
     return RoutingConfig(
         roles=MappingProxyType(roles),

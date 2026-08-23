@@ -36,7 +36,9 @@ __all__ = [
 
 DegradationRung = Literal[0, 1, 2, 3]
 
-DEFAULT_SESSION_DIALOGUE_CAP = 10
+# Ticket 42: sourced from routing_config's typed default rather than
+# duplicated as a hand-maintained literal.
+DEFAULT_SESSION_DIALOGUE_CAP = routing_config.DEFAULT_ROUTING_CONFIG.dialogue_budget.session_dialogue_cap
 _DEGRADED_ROUND_CAP = 1
 _DEGRADED_EFFORT = "low"
 _DEFAULT_DEGRADED_ROSTER_MODEL = "Codex 5.6 Terra"
@@ -76,10 +78,19 @@ def _load_degraded_roster_model(config_path: Path) -> str:
 
     Missing role data or an empty first alternative falls back to
     :data:`_DEFAULT_DEGRADED_ROSTER_MODEL`.  As with
-    :func:`_load_dialogue_budget_config`, missing or malformed files raise so
-    configuration mistakes do not become invisible production defaults.
+    :func:`_load_dialogue_budget_config`, a missing or malformed config
+    *file* still raises so configuration mistakes do not become invisible
+    production defaults — but a `light_doer` block whose own `name` is
+    missing or empty is exactly the "partial config" case this function
+    exists to degrade gracefully from, so only that field's validation
+    error is swallowed here; any other malformed section still raises.
     """
-    legacy_role = routing_config.load_routing_config(config_path).legacy_roles.get("light_doer")
+    try:
+        legacy_role = routing_config.load_routing_config(config_path).legacy_roles.get("light_doer")
+    except routing_config.ConfigValidationError as exc:
+        if exc.key_path != "light_doer.name":
+            raise
+        legacy_role = None
     name = legacy_role.name if legacy_role is not None else _DEFAULT_DEGRADED_ROSTER_MODEL
     primary = name.split("/")[0].strip()
     return primary or _DEFAULT_DEGRADED_ROSTER_MODEL
