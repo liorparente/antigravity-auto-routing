@@ -512,6 +512,94 @@ class DebateStateMachineTests(unittest.TestCase):
         ))
         self.assertIsNone(veto)
 
+    def test_non_security_reviewers_block_with_no_findings_does_not_veto(self) -> None:
+        """Trigger 2 (unilateral block) is exclusive to `reviewer_security` —
+        no other perspective's bare BLOCK, with nothing attached for Trigger
+        1 to catch, is a security signal."""
+        handler = machine.SecurityVetoHandler()
+        for perspective in (
+            "reviewer_architecture",
+            "reviewer_maintainability",
+            "reviewer_risk",
+            "critic_a",
+        ):
+            with self.subTest(perspective=perspective):
+                self.assertIsNone(
+                    handler.check(({"perspective": perspective, "vote": "block"},))
+                )
+
+    def test_non_security_reviewers_block_with_low_or_medium_severity_finding_does_not_veto(
+        self,
+    ) -> None:
+        """A non-security reviewer's BLOCK with an attached finding whose
+        severity isn't configured for Trigger 1 (default: critical/high)
+        doesn't veto either — the finding itself isn't severe enough, and
+        the provider isn't `reviewer_security`."""
+        handler = machine.SecurityVetoHandler()
+        for perspective in (
+            "reviewer_architecture",
+            "reviewer_maintainability",
+            "reviewer_risk",
+            "critic_a",
+        ):
+            for severity in ("low", "medium"):
+                with self.subTest(perspective=perspective, severity=severity):
+                    finding = dialogue_contracts.StructuredFinding(
+                        id="SEC-LOW", severity=severity, claim="cosmetic issue", confidence=1.0
+                    )
+                    veto = handler.check((
+                        {"perspective": perspective, "vote": "block", "findings": (finding,)},
+                    ))
+                    self.assertIsNone(veto)
+
+    def test_non_security_reviewer_high_severity_confident_finding_vetoes_regardless_of_verdict(
+        self,
+    ) -> None:
+        """Trigger 1 is verdict-agnostic: a Critical/High finding at or
+        above the confidence threshold vetoes whether the vote carrying it
+        approves, revises, or blocks."""
+        handler = machine.SecurityVetoHandler()
+        for perspective in (
+            "reviewer_architecture",
+            "reviewer_maintainability",
+            "reviewer_risk",
+            "critic_a",
+        ):
+            for verdict in ("approve", "revise", "block"):
+                with self.subTest(perspective=perspective, verdict=verdict):
+                    finding = dialogue_contracts.StructuredFinding(
+                        id="SEC-HIGH", severity="high", claim="unsafe deserialization", confidence=0.80
+                    )
+                    veto = handler.check((
+                        {"perspective": perspective, "vote": verdict, "findings": (finding,)},
+                    ))
+                    assert veto is not None
+                    self.assertEqual(veto.provider, perspective)
+                    self.assertEqual(veto.finding["id"], "SEC-HIGH")
+
+    def test_non_security_reviewer_high_severity_low_confidence_finding_does_not_veto(
+        self,
+    ) -> None:
+        """The confidence gate on Trigger 1 applies no matter the verdict —
+        below threshold, a Critical/High finding is not certain enough to
+        veto even from an APPROVE or REVISE vote."""
+        handler = machine.SecurityVetoHandler()
+        for perspective in (
+            "reviewer_architecture",
+            "reviewer_maintainability",
+            "reviewer_risk",
+            "critic_a",
+        ):
+            for verdict in ("approve", "revise", "block"):
+                with self.subTest(perspective=perspective, verdict=verdict):
+                    finding = dialogue_contracts.StructuredFinding(
+                        id="SEC-LOWCONF", severity="high", claim="maybe unsafe", confidence=0.79
+                    )
+                    veto = handler.check((
+                        {"perspective": perspective, "vote": verdict, "findings": (finding,)},
+                    ))
+                    self.assertIsNone(veto)
+
     def test_consensus_table_identity_prefers_perspective_over_provider(self) -> None:
         table = machine.ConsensusTable(
             weights={"reviewer_security": 0.25, "codex": 0.40},

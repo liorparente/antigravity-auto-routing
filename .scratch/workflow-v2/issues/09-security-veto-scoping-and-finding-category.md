@@ -4,7 +4,7 @@
 
 **Blocked by:** 07 — Fast-Path 1-Shot Council Review & Security Veto Engine
 
-**Status:** open
+**Status:** complete
 
 ## Background
 
@@ -35,3 +35,12 @@ N-P1 (deferred from ticket 07's Pass 4 review) asks: should trigger 2's non-`rev
 
 - Whichever option is chosen must not weaken trigger 1 (the confidence/severity check for *any* vote's attached finding), since that is settled behavior from ticket 07 and N-S1, not part of this question.
 - If category discrimination is adopted (option 2), it should be applied to `_finding_field(f, "category", ...)` reads consistent with the existing `_finding_field`/`_is_finding` shape-dispatch already used for `severity`/`confidence`, so both dict/`MappingProxyType` and `StructuredFinding` findings are handled identically.
+
+## Resolution
+
+Adopted a hybrid of options 1 and 3: **dual-trigger scoping**, not a single uniform rule.
+
+- **Trigger 1 (severity/confidence on any attached finding) stays domain-agnostic** (option 3), per the Notes constraint that it must not be weakened: any perspective's vote — `APPROVE`, `REVISE`, or `BLOCK` — carrying a finding whose severity is in `veto_severities` (default critical/high) at `confidence >= security_threshold` (default 0.80) vetoes, regardless of which reviewer lens produced it. No `category` field was introduced (option 2 rejected) — it would have required every perspective adapter to reliably populate a new field and made "no category" an ambiguous fail-open/fail-closed choice, for a check that severity + confidence already gate adequately.
+- **Trigger 2 (unilateral `BLOCK`) is now scoped strictly to `perspective == "reviewer_security"`** (option 1): the redundant non-`reviewer_security` `BLOCK`-vote branch was removed from `SecurityVetoHandler.check` in `debate_state_machine.py` as dead weight — it duplicated exactly the same severity/confidence check Trigger 1 already performs unconditionally on every vote, so it could never fire on a case Trigger 1 hadn't already caught first. Removing it makes the security-halt semantics match ADR 0007/0012's framing precisely: `reviewer_security`'s own `BLOCK` *is* the security signal (no finding required, unilateral by identity); every other perspective's `BLOCK` is a plain disapproval unless it also clears Trigger 1's bar.
+
+Net effect: identical veto behavior to the prior "domain-agnostic BLOCK + severity check" branch (since that branch was provably unreachable once Trigger 1 ran first), but a simpler, more literal implementation with no behavior change and no new finding-schema dependency. Verified by `test_debate_state_machine.py`'s expanded `SecurityVetoHandler` coverage: `reviewer_security` `BLOCK` vetoes with or without findings; non-`reviewer_security` `BLOCK` with no or low/medium-severity findings does not veto; non-`reviewer_security` votes (`APPROVE`/`REVISE`/`BLOCK`) with a Critical/High, sufficiently confident finding veto uniformly; the same findings below the confidence threshold never veto.

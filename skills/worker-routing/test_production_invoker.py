@@ -1966,5 +1966,67 @@ class JournaledInvokeWorkerRoleTests(unittest.TestCase):
         self.assertAlmostEqual(record["cost_estimate_usd"], 0.006, places=4)
 
 
+class DeclaredRoleCommandBuildTests(unittest.TestCase):
+    """End-to-end dry-run validation (spec 0012 ticket 08): every declared
+    role in routing-config.json must build a valid, non-interactive worker
+    command without invoking a real worker."""
+
+    DECLARED_ROLES = (
+        "planner",
+        "builder_heavy",
+        "builder_light",
+        "reviewer_architecture",
+        "reviewer_risk",
+        "reviewer_maintainability",
+        "reviewer_security",
+        "adjudicator",
+        "sensitive_executor",
+    )
+
+    def test_every_declared_role_builds_a_valid_command(self) -> None:
+        resolver = production_invoker.get_default_role_resolver()
+        self.assertEqual(set(resolver.list_roles()), set(self.DECLARED_ROLES))
+        for role in self.DECLARED_ROLES:
+            with self.subTest(role=role):
+                command = production_invoker.build_worker_command(role, "high", "Dry run")
+                self.assertTrue(command)
+                self.assertTrue(all(isinstance(part, str) for part in command))
+                self.assertIn(production_invoker.WORKER_MODE_TOKEN, command[-1])
+
+    def test_cli_commands_carry_worker_mode_token_and_non_interactive_args(self) -> None:
+        cli_roles = tuple(
+            role for role in self.DECLARED_ROLES if role not in ("adjudicator", "sensitive_executor")
+        )
+        for role in cli_roles:
+            with self.subTest(role=role):
+                command = production_invoker.build_worker_command(role, "high", "Dry run")
+                self.assertIn(production_invoker.WORKER_MODE_TOKEN, command[-1])
+                if command[0] == "codex":
+                    self.assertIn("exec", command)
+                    self.assertIn("-s", command)
+                    self.assertIn("workspace-write", command)
+                elif command[0] == "claude":
+                    self.assertIn("-p", command)
+                    self.assertIn("--no-session-persistence", command)
+                    self.assertIn("--allow-dangerously-skip-permissions", command)
+                elif command[0] == "agy":
+                    self.assertIn("-p", command)
+                else:
+                    self.fail(f"unexpected CLI family for role {role!r}: {command[0]!r}")
+
+    def test_local_roles_generate_curl_payloads_targeting_lmstudio_endpoint(self) -> None:
+        for role in ("adjudicator", "sensitive_executor"):
+            with self.subTest(role=role):
+                command = production_invoker.build_worker_command(role, "high", "Dry run")
+                self.assertEqual(command[0], "curl")
+                self.assertIn(production_invoker.LOCAL_MODEL_CHAT_ENDPOINT, command)
+                payload = json.loads(command[-1])
+                self.assertIn("model", payload)
+                self.assertEqual(
+                    payload["messages"][0]["content"],
+                    f"{production_invoker.WORKER_MODE_TOKEN} Dry run",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

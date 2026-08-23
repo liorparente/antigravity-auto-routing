@@ -43,6 +43,7 @@ __all__ = [
     "RoundTurnResult",
     "SecurityVeto",
     "SecurityVetoHandler",
+    "VoteInput",
     "advance_debate_state",
     "build_stalemate_report",
     "evaluate_quorum",
@@ -168,9 +169,10 @@ class CriticResponse:
         object.__setattr__(self, "findings", tuple(_deep_freeze(finding) for finding in self.findings))
 
 
-def _field(
-    vote: dict[str, Any] | CriticResponse | PerspectiveReviewResult, name: str, default: Any = None
-) -> Any:
+VoteInput = dict[str, Any] | CriticResponse | PerspectiveReviewResult
+
+
+def _field(vote: VoteInput, name: str, default: Any = None) -> Any:
     """Read a field from any supported critic-vote representation."""
     return vote.get(name, default) if isinstance(vote, dict) else getattr(vote, name, default)
 
@@ -223,22 +225,20 @@ class SecurityVetoHandler:
 
     @staticmethod
     def _is_finding(value: Any) -> bool:
-        return isinstance(value, (dict, MappingProxyType, StructuredFinding))
+        return isinstance(value, (Mapping, StructuredFinding))
 
     @staticmethod
-    def _finding_field(finding: Mapping[str, Any] | StructuredFinding, name: str, default: Any = None) -> Any:
+    def _finding_field(
+        finding: Mapping[str, Any] | StructuredFinding, name: str, default: Any = None
+    ) -> Any:
         """Read one field from either supported finding representation — a
-        dict/MappingProxyType (the wire shape) or a `StructuredFinding`
-        dataclass instance (spec 0012's parsed perspective-reviewer shape)."""
-        if isinstance(finding, (dict, MappingProxyType)):
-            return finding.get(name, default)
-        return getattr(finding, name, default)
+        Mapping (the wire shape) or a `StructuredFinding` dataclass instance
+        (spec 0012's parsed perspective-reviewer shape)."""
+        return finding.get(name, default) if isinstance(finding, Mapping) else getattr(finding, name, default)
 
     @staticmethod
     def _finding_to_dict(finding: Mapping[str, Any] | StructuredFinding) -> dict[str, Any]:
-        if isinstance(finding, StructuredFinding):
-            return asdict(finding)
-        return dict(finding)
+        return asdict(finding) if isinstance(finding, StructuredFinding) else dict(finding)
 
     def _confidence(self, finding: Mapping[str, Any] | StructuredFinding) -> float:
         raw_confidence = self._finding_field(finding, "confidence", 1.0)
@@ -256,28 +256,28 @@ class SecurityVetoHandler:
     def _default_block_finding() -> dict[str, Any]:
         return {"claim": "unilateral security block verdict", "severity": "critical"}
 
-    def check(
-        self, votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult]
-    ) -> SecurityVeto | None:
+    def check(self, votes: Sequence[VoteInput]) -> SecurityVeto | None:
         """Return the first configured veto, treating malformed confidence as certain.
 
-        Two independent triggers, checked per vote: (1) a configured
-        high-confidence, high-severity finding (any provider, any verdict);
-        (2) an explicit `"BLOCK"` verdict (see `_normalize_verdict`), but
-        only when it is a genuine security signal — either the perspective
-        reviewer *is* `reviewer_security` (spec 0012's unilateral security
-        veto), or the vote carries a finding (dict/MappingProxyType or
-        `StructuredFinding`, checked by shape via `_is_finding`/
-        `_finding_field` so both representations are recognized
-        interchangeably) whose own severity is already critical/high. A raw
-        `"block"` vote from any other legacy provider with no attached
-        security finding does NOT veto —
-        that is a plain disapproval, not a security signal. Every finding
-        reported here uses its genuine severity/claim; this handler never
-        fabricates one except for `reviewer_security`'s own unilateral
-        block, which carries no finding to report by definition. A finding
-        may be a dict/MappingProxyType or a `StructuredFinding` dataclass
-        instance.
+        Two independent triggers, checked per vote in order:
+
+        Trigger 1 — domain-agnostic finding severity. Any vote, from any
+        provider, carrying a finding (a Mapping or a `StructuredFinding`,
+        checked by shape via `_is_finding`/`_finding_field` so both
+        representations are recognized interchangeably) whose severity is
+        configured (`veto_severities`, default critical/high) and whose
+        confidence meets `security_threshold` vetoes — regardless of that
+        vote's own verdict (APPROVE/REVISE/BLOCK all trigger).
+
+        Trigger 2 — unilateral `reviewer_security` block. An explicit
+        `"BLOCK"` verdict (see `_normalize_verdict`) from the perspective
+        reviewer named `reviewer_security` vetoes unconditionally, using its
+        first attached finding if present or a synthesized default finding
+        otherwise (spec 0012's unilateral security veto — this is the one
+        case the handler fabricates a finding, since a bare `BLOCK` carries
+        none to report). A `"BLOCK"` verdict from any other provider does
+        NOT veto by itself — that is a plain disapproval, not a security
+        signal; it can still veto, but only through Trigger 1.
         """
         if not self.enabled:
             return None
@@ -314,18 +314,6 @@ class SecurityVetoHandler:
                     else self._default_block_finding()
                 )
                 return SecurityVeto(provider, finding_dict)
-            veto_finding = next(
-                (
-                    f
-                    for f in findings
-                    if self._is_finding(f)
-                    and str(self._finding_field(f, "severity", "")).strip().casefold() in self.veto_severities
-                    and self._confidence(f) >= self.security_threshold
-                ),
-                None,
-            )
-            if veto_finding is not None:
-                return SecurityVeto(provider, self._finding_to_dict(veto_finding))
         return None
 
 
@@ -364,7 +352,7 @@ class ConsensusTable:
                 threshold = 0.60
         self.quorum_threshold = threshold if math.isfinite(threshold) and 0.0 <= threshold <= 1.0 else 0.60
 
-    def _confidence(self, vote: dict[str, Any] | CriticResponse | PerspectiveReviewResult) -> float:
+    def _confidence(self, vote: VoteInput) -> float:
         verdict = _field(vote, "vote", _field(vote, "verdict", ""))
         if _normalize_verdict(verdict) is None:
             return 0.0
@@ -379,7 +367,7 @@ class ConsensusTable:
             return 0.0
         return max(-1.0, min(1.0, value))
 
-    def _identity(self, vote: dict[str, Any] | CriticResponse | PerspectiveReviewResult) -> str:
+    def _identity(self, vote: VoteInput) -> str:
         """A vote's weight-lookup key: its Council `perspective` (spec 0012
         ticket 07) when present, else its legacy `provider`/`critic_id`."""
         return str(
@@ -387,9 +375,7 @@ class ConsensusTable:
             or ""
         )
 
-    def invalid_voters(
-        self, votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult]
-    ) -> tuple[str, ...]:
+    def invalid_voters(self, votes: Sequence[VoteInput]) -> tuple[str, ...]:
         invalid = []
         for vote in votes:
             verdict = _field(vote, "vote", _field(vote, "verdict", ""))
@@ -404,7 +390,7 @@ class ConsensusTable:
             return "INCOMPLETE"
         return outcome
 
-    def weighted_score(self, votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult]) -> float:
+    def weighted_score(self, votes: Sequence[VoteInput]) -> float:
         if not votes:
             return 0.0
         raw_weights = [self.weights.get(self._identity(vote), 0.0) for vote in votes]
@@ -420,7 +406,7 @@ class ConsensusTable:
 
     def evaluate(
         self,
-        votes: Sequence[dict[str, Any] | CriticResponse | PerspectiveReviewResult],
+        votes: Sequence[VoteInput],
         expected_hash: str | None = None,
         require_candidate_hashes: bool = False,
     ) -> str:
@@ -452,7 +438,7 @@ class ConsensusTable:
 
 
 def evaluate_weighted_quorum(
-    responses: Sequence[CriticResponse | PerspectiveReviewResult],
+    responses: Sequence[VoteInput],
     weights: dict[str, float] | None = None,
     quorum_threshold: float = 0.60,
     require_candidate_hashes: bool = False,
