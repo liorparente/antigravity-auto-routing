@@ -318,7 +318,7 @@ class CircuitBreakerTests(unittest.TestCase):
         breaker.record_success(model)
         self.assertEqual(breaker.get_status(model), transport.CircuitState.CLOSED)
         self.assertTrue(breaker.is_available(model))
-        self.assertEqual(breaker.state(model), transport.CircuitState.CLOSED)
+        self.assertEqual(breaker.get_status(model), transport.CircuitState.CLOSED)
 
     def test_failed_probe_reopens_circuit_with_a_fresh_cooldown(self) -> None:
         clock = {"now": 0.0}
@@ -355,7 +355,7 @@ class CircuitBreakerTests(unittest.TestCase):
             transport.CircuitBreaker(cooldown_seconds=0)
 
     def test_thread_safe_under_concurrent_failures(self) -> None:
-        breaker = transport.CircuitBreaker(failure_threshold=10_000, cooldown_seconds=60.0)
+        breaker = transport.CircuitBreaker(failure_threshold=1_000, cooldown_seconds=60.0)
         model = "gpt-5.6-sol"
 
         def hammer() -> None:
@@ -368,8 +368,12 @@ class CircuitBreakerTests(unittest.TestCase):
         for thread in threads:
             thread.join()
 
-        with breaker._lock:
-            self.assertEqual(breaker._failure_counts[model], 1000)
+        # 5 threads x 200 failures each = exactly `failure_threshold` failures.
+        # If the shared counter raced, the circuit would open early or never;
+        # observing OPEN here (via public behavior only) confirms every
+        # increment was serialized correctly under concurrent access.
+        self.assertEqual(breaker.get_status(model), transport.CircuitState.OPEN)
+        self.assertFalse(breaker.is_available(model))
 
 
 class DebateTransportCircuitBreakerTests(unittest.TestCase):

@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -216,6 +217,16 @@ class CircuitBreakerOpenError(RuntimeError):
     """Raised by `DebateTransport.invoke_worker` for a circuit-broken model."""
 
 
+@dataclass
+class _CircuitEntry:
+    """A single model's circuit-breaker bookkeeping, grouped so state stays coherent."""
+
+    consecutive_failures: int = 0
+    state: CircuitState = field(default=CircuitState.CLOSED)
+    opened_at: float = 0.0
+    probing: bool = False
+
+
 class CircuitBreaker:
     """Per-model failure tracking that stops calling a model that keeps failing.
 
@@ -253,18 +264,12 @@ class CircuitBreaker:
         self.cooldown_seconds = cooldown_seconds
         self._clock = clock
         self._lock = threading.Lock()
-        self._failure_counts: dict[str, int] = {}
-        self._states: dict[str, CircuitState] = {}
-        self._opened_at: dict[str, float] = {}
-        self._probing: set[str] = set()
+        self._entries: dict[str, _CircuitEntry] = {}
 
     def record_success(self, model: str) -> None:
         """Close the circuit for ``model``, clearing any failure history."""
         with self._lock:
-            self._failure_counts.pop(model, None)
-            self._states[model] = CircuitState.CLOSED
-            self._opened_at.pop(model, None)
-            self._probing.discard(model)
+            self._entries[model] = _CircuitEntry()
 
     def record_failure(self, model: str) -> None:
         """Record one failure for ``model``, opening the circuit at the threshold.
@@ -276,13 +281,13 @@ class CircuitBreaker:
         breaker trusts that result.
         """
         with self._lock:
-            was_probing = model in self._probing
-            self._probing.discard(model)
-            count = self._failure_counts.get(model, 0) + 1
-            self._failure_counts[model] = count
-            if was_probing or count >= self.failure_threshold:
-                self._states[model] = CircuitState.OPEN
-                self._opened_at[model] = self._clock()
+            entry = self._entries.setdefault(model, _CircuitEntry())
+            was_probing = entry.probing
+            entry.probing = False
+            entry.consecutive_failures += 1
+            if was_probing or entry.consecutive_failures >= self.failure_threshold:
+                entry.state = CircuitState.OPEN
+                entry.opened_at = self._clock()
 
     def is_available(self, model: str) -> bool:
         """True if a caller may invoke ``model`` right now.
@@ -294,26 +299,22 @@ class CircuitBreaker:
         slot.
         """
         with self._lock:
-            state = self._states.get(model, CircuitState.CLOSED)
-            if state == CircuitState.CLOSED:
+            entry = self._entries.setdefault(model, _CircuitEntry())
+            if entry.state == CircuitState.CLOSED:
                 return True
-            if state == CircuitState.HALF_OPEN:
+            if entry.state == CircuitState.HALF_OPEN:
                 return False
-            opened_at = self._opened_at.get(model, 0.0)
-            if self._clock() - opened_at < self.cooldown_seconds:
+            if self._clock() - entry.opened_at < self.cooldown_seconds:
                 return False
-            self._states[model] = CircuitState.HALF_OPEN
-            self._probing.add(model)
+            entry.state = CircuitState.HALF_OPEN
+            entry.probing = True
             return True
 
     def get_status(self, model: str) -> CircuitState:
         """The last-recorded state for ``model`` (CLOSED if never seen)."""
         with self._lock:
-            return self._states.get(model, CircuitState.CLOSED)
-
-    def state(self, model: str) -> CircuitState:
-        """Alias for `get_status`, kept for callers that read state as a noun."""
-        return self.get_status(model)
+            entry = self._entries.get(model)
+            return entry.state if entry is not None else CircuitState.CLOSED
 
 
 class RecurringFailureNotifier:
