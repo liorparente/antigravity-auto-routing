@@ -395,16 +395,20 @@ class ValidateDefaultConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bad_path = Path(tmp) / "routing-config.json"
             bad_path.write_text("{not valid json", encoding="utf-8")
-            with mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", bad_path):
-                with self.assertRaises(routing_config.ConfigParseError):
-                    routing_config.validate_default_config()
+            with (
+                mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", bad_path),
+                self.assertRaises(routing_config.ConfigParseError),
+            ):
+                routing_config.validate_default_config()
 
     def test_missing_file_at_routing_config_path_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             missing_path = Path(tmp) / "does-not-exist.json"
-            with mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", missing_path):
-                with self.assertRaises(routing_config.ConfigFileNotFoundError):
-                    routing_config.validate_default_config()
+            with (
+                mock.patch.object(routing_config, "ROUTING_CONFIG_PATH", missing_path),
+                self.assertRaises(routing_config.ConfigFileNotFoundError),
+            ):
+                routing_config.validate_default_config()
 
 
 if __name__ == "__main__":
