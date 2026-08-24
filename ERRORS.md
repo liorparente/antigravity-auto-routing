@@ -1,5 +1,14 @@
 # Worker Routing Fallbacks
 
+## 2026-08-24 — Dual-Store Invariant Violation by Appending Freeform Session Learnings to `institutional-memory.md`
+
+- Mission: Run CI checks after documentation sync.
+- Failure: `test_learned_state.py` failed with `AssertionError: 28 != 25` in `test_institutional_memory_matches_golden_rules`.
+- Root Cause: In commit `d4934ac`, three session takeaways were appended to `knowledge/institutional-memory.md` with duplicate IDs (`23`, `24`, `25`), breaking the strict 25-rule 1:1 sync invariant with `prompt_assembler.GOLDEN_RULES`.
+- Resolution: Removed the duplicate trailing entries from `knowledge/institutional-memory.md` to restore exact 25-rule parity with `prompt_assembler.GOLDEN_RULES`.
+- Lesson: `knowledge/institutional-memory.md` and `prompt_assembler.GOLDEN_RULES` form a strictly synchronized dual-store; session learnings must route to `CONTEXT.md` (domain glossary) or `ERRORS.md` (incident learnings), and must never append freeform text to the fixed Golden Rules catalog without code-level catalog updates.
+
+
 ## 2026-08-24 — Speculative Model Names Drift in Static Configuration vs Live CLI Identifiers
 
 - Mission: Inspect model roster for Role Matrix configuration dashboard (Ticket 45 / PRD 0013).
