@@ -202,3 +202,13 @@ A specialized reviewer within a [[CouncilPanel]] assigned to evaluate an archite
 ### LearningReportHtml
 A pure, clock-free standalone HTML dashboard generator rendering empirical learning metrics, model family performance breakdowns, and compliance/degradation audit event streams directly from [[LearningJournal]] records beside the Markdown weekly report. Ticket 44.
 
+### ModelCapabilityRegistry
+A centralized, strongly-typed registry mapping every supported [[Model]] to its valid reasoning effort levels (`supported_efforts`), factory default effort (`default_effort`), reasoning tier, and context capacity. It enables frontend interfaces to reject unsupported reasoning settings before runtime invocation. Ticket 45 / Spec 0013.
+
+### AutoSnap
+The client-side state machine behavior that automatically resets a role's selected reasoning effort level to the target model's `default_effort` whenever the user selects a new [[Model]] that does not support the currently active effort level, preventing invalid CLI worker invocations. Ticket 48 / Spec 0013.
+
+### FloatingActionPill
+A sticky glassmorphic bottom control bar in the Role Configuration Matrix dashboard that tracks uncommitted user edits (dirty state), provides a live change count with visual pulse, and exposes atomic Save, Undo, and Reset-to-Default actions. Ticket 49 / Spec 0013.
+
+

@@ -1,5 +1,14 @@
 # Worker Routing Fallbacks
 
+## 2026-08-24 — Speculative Model Names Drift in Static Configuration vs Live CLI Identifiers
+
+- Mission: Inspect model roster for Role Matrix configuration dashboard (Ticket 45 / PRD 0013).
+- Failure: Static `routing-config.json` contained future/speculative model names (`Claude Sonnet 5`, `Codex 5.6 Sol`, `Claude Fable 5`, `Gemini 3.6 Flash`) which do not match wire model flags accepted by live CLI providers (`claude -p`, `codex exec`, `agy -p`).
+- Root Cause: Model roster was authored as an idealized specification without dynamic reachability/parameter validation against installed CLI binaries.
+- Resolution: Created Ticket 53 as a prerequisite audit to decouple display labels from wire CLI identifiers, map exact reasoning effort parameters per provider, and build `probe_models.py` / LM Studio runtime probing.
+- Lesson: Configuration schemas must never conflate user-facing display names with wire CLI model IDs; always gate model rosters with runtime capability probes and provider-specific parameter schemas.
+
+
 ## 2026-08-24 — `protocol.md` Size Budget Exceeded by Link Documentation Updates
 
 - Mission: Update repository documentation, SKILL.md, and protocol.md to v3.6.0 Quality-First Standard.
