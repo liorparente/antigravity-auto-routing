@@ -76,7 +76,7 @@ records it: test results, review verdicts, stalemate resolutions, **and a plan y
 `learning_outcomes.py`'s `record_test_result` / `record_review_verdict` /
 `record_stalemate_resolution` / `record_plan_outcome`, each once its fact is known. Accepted plans
 record themselves and rejected ones do not, so the hand-recorded half is what keeps the family from
-drifting toward "every plan was accepted". See [`protocol.md`](protocol.md#-learning-journal-ground-truth-recording-spec-0004-ticket-25) for exactly which step, which producer, and why.
+drifting toward "every plan was accepted". See [`REFERENCE.md`](REFERENCE.md#📓-learning-journal-ground-truth-recording-spec-0004--spec-0011) for exactly which step, which producer, and why.
 
 ---
 

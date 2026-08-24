@@ -55,7 +55,7 @@ Audited via `routing-audit.sh [conversation-id]`.
 3. **Codex Modes:** `read-only` (analysis), `workspace-write` (fixes/QA), `danger-full-access` (writes).
 4. **Non-Interactive Stdin (Rule 4.6):** CLI workers (`codex`, `claude -p`, `agy -p`) must use `< /dev/null` or piped input.
 5. **Sandbox Bypass (Rule 4.7):** External CLI worker invocations via `run_command` MUST set `BypassSandbox: true`.
-6. **Reference:** Debate protocol in `.scratch/planning_debate.md`; CLI recipes in [`REFERENCE.md`](skills/worker-routing/REFERENCE.md).
+6. **Reference:** Debate in [`docs/specs/0003-critical-dialogue.md`](docs/specs/0003-critical-dialogue.md); CLI in [`REFERENCE.md`](skills/worker-routing/REFERENCE.md).
 
 ## Pushback Protocol & Escalation Triggers
 - Refuse unrouted execution, unresearched work, effort downgrades.

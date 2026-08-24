@@ -1,111 +1,197 @@
-# antigravity-worker-routing
+# antigravity-auto-routing
 
-**Auto Routing & Collaboration Protocol v3.3** — a multi-model orchestration protocol, audit tooling, and installer for the Antigravity CLI ecosystem (Gemini `agy`, Claude Code, Codex).
+**Auto Routing & Collaboration Protocol v3.6.0 (Quality-First Standard)** — Deterministic multi-model orchestration, multi-agent advisory council, audit tooling, and continuous learning engine for the Antigravity CLI ecosystem (Gemini `agy`, Claude Code, Codex, LM Studio).
 
-The core idea: the orchestrator model (Antigravity) should never spend its own expensive tokens writing code or running commands. Instead, it assesses task complexity and **routes** every unit of work — context gathering, planning, implementation, and QA — to the cheapest model capable of doing it correctly. Tokens saved on the orchestrator are cost saved across the whole session.
+The core philosophy: **Quality Over Token Frugality — 100% correctness and zero defects**. Antigravity acts as a **pure orchestrator**, never executing state-modifying code directly. Instead, it calibrates worker reasoning effort (`low`, `medium`, `high`, `ultra`) across specialized foundation models to conduct deep research, architectural debate, calibrated execution, and strict zero-defect verification.
 
 ---
 
-## What this repository contains
+## 📦 What this repository contains
 
 ```
-antigravity-worker-routing/
+antigravity-auto-routing/
 ├── LICENSE
 ├── README.md
-├── install.sh                        # idempotent installer
-├── uninstall.sh                      # removes everything install.sh added
-├── .github/workflows/test.yml        # CI: unit tests + shellcheck
+├── pyproject.toml                     # Standard package configuration for worker_routing
+├── test_suite.py                     # Unified test suite discovery runner (900+ tests)
+├── install.sh                        # Atomic multi-harness installer and protocol injector
+├── uninstall.sh                      # Idempotent uninstaller and cleanup
+├── .github/workflows/test.yml        # CI: unit/integration tests + ruff + mypy + shellcheck
+├── docs/
+│   ├── adr/                          # 11 Architecture Decision Records (ADRs)
+│   ├── specs/                        # 11 Functional and technical specifications
+│   └── research/                     # 9 In-depth research papers, telemetry & benchmarks
+├── knowledge/
+│   └── institutional-memory.md       # Long-term domain lessons and historical context
 └── skills/
-    └── worker-routing/
-        ├── protocol.md                # single source of truth for the enforced protocol text
-        ├── SKILL.md                   # full protocol specification (roles, lifecycle, CLI reference)
-        ├── routing-audit.sh           # thin wrapper: locates the log, delegates to routing_check.py
-        ├── routing_check.py           # audit engine: log parsing + all routing metrics + violations
-        ├── routing-config.json        # worker role → model name + CLI pattern mapping (user-customizable)
-        ├── test_routing.py            # unit + integration tests
-        └── tests/fixtures/            # sample logs (plain text and JSON Lines) used by the tests
+    ├── council-review/               # Multi-agent peer review skill
+    │   ├── SKILL.md                  # Council Review specification and trigger rules
+    │   ├── scripts/
+    │   │   ├── council_review.py     # Compatibility facade for the unified debate engine
+    │   │   └── provider_adapters.py  # Transport adapters for Claude, Codex, agy, LM Studio
+    │   ├── references/               # Manifest schemas & member review contracts
+    │   └── tests/                    # Council review test suite
+    └── worker-routing/               # Core routing, debate, and learning engine
+        ├── protocol.md               # Single source of truth for the injected protocol block
+        ├── SKILL.md                  # Canonical protocol specification (roles, lifecycle, rules)
+        ├── REFERENCE.md              # CLI command reference, REST APIs & learning journal calls
+        ├── routing-config.json       # Worker roles, provider mappings, and council policy
+        ├── routing-audit.sh          # Wrapper: locates conversation logs and invokes audit
+        ├── routing_check.py          # Log audit engine: step-bounded parsing & violation checks
+        ├── agent_council.py          # Deterministic 3-tier task routing decision engine & HMAC signer
+        ├── debate_orchestrator.py    # Unified debate engine (canary, advisory, post-mortem)
+        ├── debate_state_machine.py   # Pure debate state machine, consensus table & quorum evaluator
+        ├── debate_transport.py       # Isolated worker transport & recurring failure notifications
+        ├── dialogue_contracts.py     # Pure contract types, quotes/objections parser & verdicts
+        ├── dialogue_degradation.py   # Dialogue budget degradation ladder & fallback mechanisms
+        ├── dialogue_transcript.py    # Transcript formatting, telemetry & journal persistence
+        ├── executive_dialogue_report.py # Executive markdown summary and degradation alerts
+        ├── learned_state.py          # Atomic CAS versioned store for adopted rules & memory
+        ├── learner_worker.py         # Background worker for weekly & session-end learning cycles
+        ├── learning_journal.py       # Append-only JSON Lines journal for task execution telemetry
+        ├── learning_outcomes.py      # Ground-truth recorder (tests, review, plan, stalemates)
+        ├── learning_report.py        # Structured markdown learning report generator
+        ├── learning_report_html.py   # Pure standalone HTML learning metrics dashboard
+        ├── learning_scoreboard.py    # Empirical scoring engine for provider routing & replay
+        ├── acceptance_gate.py        # Anti-ratchet acceptance gate for proposed learning lessons
+        ├── production_invoker.py     # Subprocess runner, timeout wrapper & prompt assemblers
+        ├── prompt_assembler.py       # Prompt templates for planners, critics, and adjudicators
+        ├── risk_tiered_application.py# Atomic memory lesson accumulation & risk tiering
+        ├── routing_config.py         # Typed parser and validator for routing-config.json
+        ├── sensitivity_redactor.py   # Zero-leakage token redactor and secret detector
+        └── test_*.py                 # Exhaustive offline unit and integration test suites
 ```
-
-- **`skills/worker-routing/protocol.md`** — the single source of truth for the hard-enforced protocol (the gate, response template, complexity matrix, escalation triggers). `install.sh` injects it verbatim between sentinel markers in `AGENTS.md` and `CLAUDE.md` at the target project root, and in `~/.gemini/GEMINI.md`, preserving any other custom content already in those files. Edit only this file — the injected copies are refreshed on every install.
-- **`skills/worker-routing/SKILL.md`** — the canonical protocol document. Defines the agent mesh (Orchestrator, Context Specialist, Planner, Critic, Heavy/Light Doers, Local/Sensitive Doer, QA/Auditor), the task lifecycle, and CLI command references for `agy`, `claude`, `codex`, and LM Studio — and points to `protocol.md` for the enforced complexity/routing matrix.
-- **`skills/worker-routing/routing-audit.sh`** — locates a conversation's log (auto-detecting `overview.txt` or `transcript.jsonl` under `~/.gemini/antigravity/brain/<conversation-id>/.system_generated/logs/`) and hands it to `routing_check.py`, relaying its exit code directly. Accepts `--strict` and relays it through.
-- **`skills/worker-routing/routing_check.py`** — the audit engine. Parses the log — plain text or JSON Lines (including Antigravity's own `overview.txt`, which is JSON Lines wearing a `.txt` extension) — into per-step tool calls, then computes every metric (total writes, code-file writes, `[ROUTING:]` declarations, worker CLI calls, and unrouted code edit violations) strictly within each step's own boundaries, so a worker mention in one step can never clear a violation in another. A step that writes a source code file with zero worker calls of its own is a violation regardless of what its `[ROUTING:]` label says. Worker-CLI detection only looks at the actual `CommandLine` of a `run_command` tool call — never at surrounding prose — and code-file detection matches file extensions exactly (via `Path(filename).suffix`), so `.html`/`package.json`/`.pyc` can't be mistaken for `.h`/`.js`/`.py`.
-- **`skills/worker-routing/routing-config.json`** — the source of truth for which models/CLIs count as "workers." See [Configuring workers](#configuring-workers) below.
-- **`install.sh [target_project_dir]`** — copies the skill files into every supported agent target directory, and injects the protocol block from `protocol.md` between sentinel markers into `AGENTS.md`/`CLAUDE.md` in the target project (defaulting to the current directory) and into `~/.gemini/GEMINI.md` (Antigravity's global instruction file) — preserving any other custom content in those files, and backing up any pre-existing file the first time it's touched.
-- **`uninstall.sh [target_project_dir]`** — removes the installed skill directories and strips the protocol block back out of `AGENTS.md`, `CLAUDE.md`, and `~/.gemini/GEMINI.md` in place, preserving any other custom content. `AGENTS.md`/`CLAUDE.md` are deleted entirely only if nothing but the block was ever there.
 
 ---
 
-## The Agent Mesh
+## 👥 The Agent Mesh & Roles
 
-The full Agent Mesh table (every role, its primary model, CLI interface, and operational purpose) lives in [`skills/worker-routing/SKILL.md`](skills/worker-routing/SKILL.md#-the-agent-mesh--roles) — this README no longer keeps its own copy, so the two can't drift out of sync.
+| Role | Primary Model | CLI / Interface | Operational Purpose |
+| :--- | :--- | :--- | :--- |
+| **Orchestrator** | Antigravity / Claude Code | Active Workspace CLI | Parses user requests, plans workflows, and orchestrates workers. **Prohibited from direct code edits.** |
+| **Deep Context Specialist** | **Gemini 3.6 Flash** / **Gemini 3.1 Pro** | `agy -p` (PTY wrapped) | Deep semantic code search, dependency mapping, and 1,000–2,000 token context distillation. |
+| **Planner / Deep Thinker** | **Claude Opus 5 (Thinking)** / Claude Fable 5 | `claude -p --model` | High-precision architectural planning, interface design, and invariant reasoning. |
+| **Critic / Peer Reviewer** | **Codex 5.6 Sol** / **GPT-OSS 120B** | `codex exec` | Deep reasoning review of drafts, edge-case analysis, and invariant verification. |
+| **Heavy Doer** | **Claude Sonnet 5 (Thinking)** | `claude -p` | Multi-file code modifications, refactorings, and logic implementation. |
+| **Light Doer** | **Codex 5.6 Terra / Luna** / **Gemini 3.6 Flash (Low)** | `codex exec` / `agy -p` | Focused fixes, single-file edits, unit tests, and mechanical boilerplate. |
+| **Local / Sensitive Doer** | **LM Studio (Local Model)** | `http://127.0.0.1:1234/v1` | Isolated execution for credentials, secrets, and private data. Fails closed if offline. |
+| **QA / Auditor** | **Codex 5.6 Sol** / **Claude Opus 5** | `codex review` | Pre-commit zero-defect diff audits (`codex review --uncommitted` with `high` effort). |
+| **Adjudicator** | **LM Studio (Local Model)** / Codex | Local API | Resolves stalemates in council debates using deterministic heuristics and local inference. |
 
-### Planner–Critic Consensus Loop
+---
 
-For every **Medium** and **Complex** task, the protocol enforces a peer-review step before any code is written:
+## 🔄 Task Lifecycle & Collaboration Pipeline
 
-1. **Draft** — the Planner (Claude Fable 5, or Opus 4.8 for architectural-tier work) writes a proposed plan to `.claude/plan_draft.md`.
-2. **Review** — the Critic (Codex 5.6 Sol) is handed that draft and asked to flag edge cases, performance bottlenecks, and architectural inconsistencies:
-   ```bash
-   cat .claude/plan_draft.md | codex exec "Review this plan. Check for edge cases, performance bottlenecks, and architectural violations."
-   ```
-3. **Refine** — the Planner folds the Critic's feedback into a final `implementation_plan.md`, which goes to the user for approval before execution begins.
+For every non-trivial task, the Orchestrator enforces a 4-phase sequential workflow:
 
-This loop exists so the orchestrator never commits expensive-model tokens to speculative planning that a cheaper reviewer would have caught — disagreements surface *before* the Heavy Doer starts editing files.
+```
+[Phase 0: Deep Research] ➔ [Phase 1: Deep Thinking & Debate] ➔ [Phase 2: Calibrated Execution] ➔ [Phase 3: Zero-Defect QA]
+         (agy)                   (Opus 5 + Codex Sol)             (Sonnet 5 / Terra / Luna)            (Codex Sol Review)
+```
 
-### Context Specialist (`agy` / Gemini 3.5 Flash)
-
-Before any planning happens, the orchestrator delegates codebase understanding to `agy`, wrapped in a PTY (`script -q /dev/null`) to prevent CLI hangs on long-running scans:
-
+### Phase 0: Deep Research & Context Distillation
+Before any plan is drafted, codebase structure and dependencies are investigated with `agy`:
 ```bash
-script -q /dev/null agy -p "Scan the codebase and locate all references to {TOPIC}. Output a distilled context summary."
+IN_WORKER_ROUTING=true agy -p "[WORKER-MODE: NESTED-EXEC] Perform deep research on {TOPIC}. Map affected files, interfaces, and breaking changes." < /dev/null
 ```
 
-The goal is a 1,000–2,000 token distilled brief — not raw file dumps — so the Planner's context window stays clean and focused on decision-making rather than search.
+### Phase 1: Deep Thinking & Planner–Critic Debate
+For Medium and Complex tasks, planning undergoes peer review and critique:
+1. **Drafting:** The **Planner** writes an interface-first plan to `.claude/plan_draft.md`.
+2. **Autonomous Debate Loop:** The **Critic** inspects the draft with `high` reasoning effort:
+   ```bash
+   cat .claude/plan_draft.md | IN_WORKER_ROUTING=true codex exec --model gpt-5.6-sol -c model_reasoning_effort="high" "[WORKER-MODE: NESTED-EXEC] Review this plan for race conditions, type safety, and edge cases." < /dev/null
+   ```
+3. **Consensus Delivery:** Up to 3 debate rounds until consensus is reached, then saved to `implementation_plan.md` for human approval.
 
-### Difficulty-Aware Routing Matrix
+### Phase 2: Task Decomposition & Calibrated Execution
+Sub-tasks are executed by calibrated workers based on complexity and reasoning effort:
+- **Trivial (1 file):** Codex Luna (`gpt-5.6-luna`, effort `low`)
+- **Simple (1–2 files):** Codex Terra (`gpt-5.6-terra`, effort `medium`)
+- **Medium (3–4 files):** Claude Sonnet 5 (`claude-sonnet-5`, effort `high`)
+- **Complex (5+ files):** Claude Opus 5 / Codex Sol with Deep Research (`agy`)
 
-The authoritative Trivial → Sensitive routing matrix is defined once, in [`skills/worker-routing/protocol.md`](skills/worker-routing/protocol.md) — the same hard-enforced text that `install.sh` injects into `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md`. This README and `SKILL.md` used to each carry their own slightly-diverging copy of this table; now both just point here.
-
-Full command syntax for `agy`, `claude`, `codex`, and the LM Studio REST API is in [`skills/worker-routing/SKILL.md`](skills/worker-routing/SKILL.md).
+### Phase 3: Zero-Defect Verification & QA Audit
+1. The **Doer** runs local test suites to verify behavior.
+2. The **QA Auditor** audits uncommitted workspace changes before marking completion:
+   ```bash
+   IN_WORKER_ROUTING=true codex review --uncommitted -c sandbox_mode="workspace-write" -c model="gpt-5.6-sol" -c model_reasoning_effort="high" "[WORKER-MODE: NESTED-EXEC] Perform zero-defect audit on uncommitted changes." < /dev/null
+   ```
 
 ---
 
-## Configuring workers
+## 🏛️ Multi-Agent Council Review (`skills/council-review`)
 
-`skills/worker-routing/routing-config.json` is the single source of truth for what counts as a "worker" during auditing. It maps each role in the agent mesh to a display `name` and a list of `patterns` — substrings that identify that worker's CLI invocation in a conversation log:
+The **Council Review** skill coordinates a panel of distinct models evaluating proposals along 4 specialized perspective lenses:
+1. `reviewer_architecture` (Deep module boundaries, loose coupling, interface clarity)
+2. `reviewer_risk` (Edge cases, race conditions, failure recovery, regression risk)
+3. `reviewer_maintainability` (Clean code, documentation accuracy, testability)
+4. `reviewer_security` (Veto authority on secret exposure, unsafe commands, auth flaws)
+
+Council reviews generate signed decision manifests stored in `.ralph/decisions/<task_id>.json` with a 24-hour cache.
+
+---
+
+## 🧠 Continuous Learning Loop & Learned State
+
+The system continuously self-improves through empirical ground-truth tracking:
+
+```
+Telemetry Stream (.ralph/learning_journal.jsonl)
+       │
+       ▼
+Ground Truth Recording (learning_outcomes.py: tests, review, plan, stalemates)
+       │
+       ▼
+Acceptance Gate & Replay Benchmark (acceptance_gate.py: anti-ratchet validation)
+       │
+       ▼
+Atomic CAS Versioning (learned_state.py: adopt rules/memory, one-step rollback)
+       │
+       ▼
+Visual HTML Dashboard (learning_report_html.py: standalone browser telemetry)
+```
+
+- **Ground-Truth Recording:** Record real outcomes via `learning_outcomes.record_test_result`, `record_review_verdict`, `record_plan_outcome`, and `record_stalemate_resolution`.
+- **Learned State Management:** Learned memory lessons and routing policies accumulate atomically with CAS precondition checks in `.ralph/learned-state/`.
+- **HTML Dashboard:** Generates a zero-dependency standalone HTML dashboard displaying TTFT, TPS, compliance rates, and degradation events.
+
+---
+
+## ⚙️ Configuring Workers
+
+`skills/worker-routing/routing-config.json` is the central configuration for models, CLI patterns, roles, and council policy.
 
 ```json
 {
-  "heavy_doer": {
-    "name": "Claude Sonnet 5",
-    "patterns": ["claude -p"]
-  },
-  "sensitive_doer": {
-    "name": "LM Studio (Local Model)",
-    "patterns": ["127.0.0.1:1234/v1/chat", "localhost:1234/v1/chat"]
+  "roles": {
+    "planner": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "read",
+        "min_context": 200000
+      },
+      "preferred_providers": ["claude_opus_5", "claude_fable_5", "codex_sol"]
+    },
+    "builder_heavy": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "workspace-write",
+        "min_context": 128000
+      },
+      "preferred_providers": ["claude_sonnet_5", "gemini_flash_high"]
+    }
   }
 }
 ```
 
-`routing_check.py <log-file>` reads this file at runtime — it is never hardcoded. It parses the log into steps, uses the configured patterns to decide whether each step's `run_command` calls actually invoked a recognized worker CLI, and prints the complete metrics report. Pass `--strict` to also fail (exit 1) when only a 🟡 warning was emitted, not just on a 🔴 violation. `routing-audit.sh` is a thin wrapper around this mode — it only locates the right log file and relays the flags and exit code.
-
-### Customizing for your own stack
-
-To swap in different models or tools, edit `routing-config.json` — no changes to the shell script or Python are needed:
-
-- **Different CLI for an existing role** — change `patterns`, e.g. point `heavy_doer` at a different command.
-- **Local models via Ollama** — add a pattern matching your invocation, e.g. `"patterns": ["ollama run"]`.
-- **A custom in-house script** — add its invocation string, e.g. `"patterns": ["./scripts/my-worker.sh"]`.
-- **New role** — add a new top-level key with `name` and `patterns`; it's picked up automatically by every log-file check.
-
-Patterns are treated as literal substrings (regex-escaped internally), so no special quoting is needed — just list the exact text that appears in your logs when that worker is invoked.
-
-After editing the repo's copy, re-run `bash install.sh`. For a new installation, the installer copies `routing-config.json`; for an existing installation, it preserves custom values while merging in missing managed top-level sections such as `consultation_policy`. An existing customized `consultation_policy` is never overwritten. To force-refresh the entire installed config, delete the installed copy first, then re-run `install.sh`.
+Custom configurations are preserved during re-installations, with missing managed keys merged automatically.
 
 ---
 
-## Setup
+## 🚀 Setup & Installation
+
+### Quick Install
 
 ```bash
 git clone https://github.com/liorparente/auto-routing.git
@@ -113,22 +199,24 @@ cd auto-routing
 bash install.sh
 ```
 
-Running `install.sh` again is safe — it does not duplicate the protocol block in `~/.gemini/GEMINI.md`, and file copies are simple overwrites.
-
-By default the installer targets the current directory as the project it installs into. Pass a different path to install into (or dogfood against) another project without `cd`-ing there first:
-
+To install into another workspace without changing directories:
 ```bash
-bash install.sh /path/to/some/other/project
+bash install.sh /path/to/target/project
 ```
 
-### What the installer does
+### What `install.sh` Does
 
-1. Creates each supported target directory if it doesn't already exist (`~/.gemini/config/skills/worker-routing/`, `~/.codex/skills/worker-routing/`, and local `.agents/`, `.codex/` copies inside the target project).
-2. Copies `SKILL.md`, `routing-audit.sh`, and `routing_check.py` into each directory (always overwritten).
-3. Marks `routing-audit.sh` executable (`chmod +x`).
-4. Copies `routing-config.json` into each directory **only if it doesn't already exist**, so any customizations you've made to your installed copy (see [Configuring workers](#configuring-workers)) survive re-running the installer.
-5. Backs up `AGENTS.md`, `CLAUDE.md`, and `~/.gemini/GEMINI.md` to `<file>.bak` the first time each is touched, and that backup is never overwritten on subsequent runs.
-6. Injects the protocol block from `skills/worker-routing/protocol.md` — the single source of truth for the enforced protocol text — between two versionless sentinel markers (`# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ===` / `... END ===`) in `AGENTS.md`, `CLAUDE.md`, and `~/.gemini/GEMINI.md`. Any other content already in those files is left untouched. If a block already exists between those markers, it's replaced in place. If a legacy v3.0 block (from older versions of this installer) is found instead, it's removed and replaced with the new versionless block automatically.
+1. **Deploys 25+ Production Modules:** Copies `worker-routing` and `council-review` to all supported harnesses:
+   - `~/.gemini/config/skills/worker-routing/` & `~/.gemini/config/skills/council-review/`
+   - `~/.codex/skills/worker-routing/` & `~/.codex/skills/council-review/`
+   - `<target_project>/.agent/skills/` & `<target_project>/.agents/skills/` & `<target_project>/.codex/skills/`
+2. **Injects Protocol Block:** Injects the enforced protocol from `protocol.md` between sentinel markers into:
+   - `<target_project>/AGENTS.md`
+   - `<target_project>/CLAUDE.md`
+   - `~/.gemini/GEMINI.md` (Antigravity global instructions)
+3. **Deploys Claude Code Rules:** Copies `worker-routing.md` to `<target_project>/.claude/rules/`.
+4. **Propagates Learned State:** Synchronizes `.ralph/learned-state/history.jsonl` and snapshot versions.
+5. **Preserves Custom Configurations:** Never overwrites custom user rules, existing docs, or custom `routing-config.json` parameters.
 
 ### Uninstalling
 
@@ -136,42 +224,39 @@ bash install.sh /path/to/some/other/project
 bash uninstall.sh [target_project_dir]
 ```
 
-This removes the installed skill directories and strips the protocol block back out of `AGENTS.md`, `CLAUDE.md`, and `~/.gemini/GEMINI.md` in place — recognizing both the current versionless markers and the legacy v3.0 heading — while preserving any other custom content in those files. `AGENTS.md`/`CLAUDE.md` are deleted entirely only if nothing but the block (and surrounding blank lines) was ever there; `GEMINI.md` is never deleted outright, only the block is removed.
+Removes installed skill directories, cleans up Claude Code rules, and strips protocol blocks while leaving all custom project content intact.
 
 ---
 
-## Usage
+## 🔍 Audit & Compliance Verification
 
-Once installed, Antigravity's global instructions (`~/.gemini/GEMINI.md`) enforce the routing gate on every state-modifying action: before writing a file or running a non-read-only command, it must declare `[ROUTING: {worker} — complexity: {level} — reason: ...]` or `[ROUTING: Direct — reason: {allowed exception}]` as the first line of its response. Allowed direct exceptions are read-only operations, documentation/`.md`/`.html` edits, MCP tool calls, and QA routing itself — never source code.
+The audit engine verifies that the orchestrator never modified source code directly and correctly declared routing on every step.
 
-### Verifying compliance
-
-Run the audit script against the most recent Antigravity conversation:
-
+Run audit on the latest conversation:
 ```bash
 ~/.gemini/config/skills/worker-routing/routing-audit.sh
 ```
 
-Or target a specific conversation by ID, and add `--strict` to also fail on warnings, not just violations:
-
+Run audit on a specific conversation with strict warning enforcement:
 ```bash
 ~/.gemini/config/skills/worker-routing/routing-audit.sh --strict <conversation-id>
 ```
 
-The audit log can be plain text (`overview.txt`, split on `Step N:` markers) or JSON Lines (one step object per line) — `routing-audit.sh` auto-detects which one exists for the conversation, and `routing_check.py` auto-detects JSON Lines content regardless of file extension, since Antigravity's own `overview.txt` is written as JSON Lines. All metrics are computed strictly within each step's own boundaries, so a worker call in one step can never be mistaken for routing in another, and only an actual `run_command` tool call's `CommandLine` counts as a worker invocation — a conversational mention of a worker's name in prose never does.
+### Test Suite
 
-The script reports:
-- Total file-write tool calls and how many targeted source code files (matched by exact extension against `code_extensions` in `routing-config.json`)
-- Number of `[ROUTING:]` declarations and worker CLI invocations found in the log
-- Unrouted code edit violations — a step wrote a source code file but made zero worker calls of its own, regardless of what its `[ROUTING:]` label says
-- A 🔴 violation if source code was edited with zero worker calls anywhere in the log
-- A 🟡 warning if code edits outnumber worker calls, or no routing declarations were found at all
-- A breakdown of which source files were touched, by edit count
+Run the complete 900+ test suite:
+```bash
+python3 test_suite.py
+```
 
-Exit codes: `0` — audit ran, no violations (and, with `--strict`, no warnings). `1` — audit ran, violations found (or, with `--strict`, warnings found). `2` — the audit itself couldn't run (no conversation/log found, no steps parsed from a non-empty log, or the log/config failed to parse) — it fails closed rather than silently treating an unreadable log as clean. Wire it into CI or a pre-commit hook if you want enforcement at that layer.
+Run linter and type-checker:
+```bash
+ruff check skills/worker-routing/ test_suite.py
+mypy --config-file pyproject.toml skills/worker-routing/ test_suite.py
+```
 
 ---
 
-## License
+## 📄 License
 
 MIT — see [LICENSE](LICENSE).
