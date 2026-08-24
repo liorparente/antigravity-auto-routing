@@ -131,14 +131,4 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
     Downstream consumers should read typed models and public structural keys
     (`STRUCTURAL_KEYS`), and section parsers must support per-key fallbacks for partial
     configurations to prevent false-positive validation crashes during progressive migrations.
-23. **Bind heterogeneous model reasoning effort dynamically with auto-snap to valid defaults.**
-    Models have disparate reasoning effort spaces (e.g. Luna supports only `low`, Sol/Opus support `high`/`ultra`).
-    The configuration layer must filter effort options reactively by model and auto-snap invalid selections to
-    the model's `default_effort` to eliminate runtime CLI worker invocation failures.
-24. **Decompose complex features into single-file vertical slices for local Tier-0 offloading.**
-    Partitioning work into atomic, single-file tickets (Tickets 45-53) allows 80%+ of implementation to run
-    cost-free on local models (LM Studio / Tier 0), reserving Tier-3 models strictly for council review and quality gates.
-25. **Audit live CLI provider model IDs and decouple them from human-readable display labels.**
-    Never assume static config names match callable CLI flags; probe runtime providers dynamically (`probe_models.py`
-    and LM Studio probe) and map display labels to verified wire CLI identifiers.
 
