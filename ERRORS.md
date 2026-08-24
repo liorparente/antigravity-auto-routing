@@ -1,5 +1,13 @@
 # Worker Routing Fallbacks
 
+## 2026-08-24 — `protocol.md` Size Budget Exceeded by Link Documentation Updates
+
+- Mission: Update repository documentation, SKILL.md, and protocol.md to v3.6.0 Quality-First Standard.
+- Failure: `test_routing.py` failed with `AssertionError: 5121 not less than 5120 : protocol.md is 5121 bytes, exceeding the 5KB budget` in `test_protocol_md_size_is_under_5kb`.
+- Root Cause: Adding verbose markdown links to line 58 of `protocol.md` pushed total file size to 5,121 bytes (1 byte over the 5,120 byte hard limit enforced by the test).
+- Resolution: Shortened link and reference text in line 58 of `skills/worker-routing/protocol.md` while keeping permanent targets (`docs/specs/0003-critical-dialogue.md` and `REFERENCE.md`), bringing file size safely under 5KB.
+- Lesson: `skills/worker-routing/protocol.md` is strictly size-budgeted to prevent token bloat across agent rule files; always verify file byte size (`len(bytes) < 5120`) when editing protocol text.
+
 ## 2026-08-24 — Test Spy Argument Type Incompatibility in Mypy Strict Mode
 
 - Mission: Run CI checks on PR #91.
