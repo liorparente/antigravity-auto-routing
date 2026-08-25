@@ -194,8 +194,8 @@ Custom configurations are preserved during re-installations, with missing manage
 ### Quick Install
 
 ```bash
-git clone https://github.com/liorparente/auto-routing.git
-cd auto-routing
+git clone https://github.com/liorparente/antigravity-auto-routing.git
+cd antigravity-auto-routing
 bash install.sh
 ```
 

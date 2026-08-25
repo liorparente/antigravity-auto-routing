@@ -1,7 +1,8 @@
 # Spec 0010 — Standard Python Package Architecture & Sibling Loader Elimination
 
-* **Status:** ready-for-agent
+* **Status:** done
 * **Date:** 2026-08-20
+* **Issues:** [#10](https://github.com/liorparente/antigravity-auto-routing/issues/10)–[#15](https://github.com/liorparente/antigravity-auto-routing/issues/15) (tickets 01–06) — all closed 2026-08-25.
 * **Related:** Spec 0001 (Advisory Consultation), Spec 0005 (Unified Worker Invocation), Spec 0008 (Debate Engine Modular Decomposition), Spec 0009 (Unified Consultation and Council Engine), ADR 0001, ADR 0004, ADR 0007, ADR 0010
 * **Glossary:** **AllowedDirectAction**, **SecurityContext**, **WorkerInvocation**, **ReviewCouncilFacade**, **LearningJournal**, **LearnedState** (`CONTEXT.md`)
 

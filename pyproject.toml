@@ -24,9 +24,9 @@ eval = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/liorparente/auto-routing"
-"Repository" = "https://github.com/liorparente/auto-routing.git"
-"Issues" = "https://github.com/liorparente/auto-routing/issues"
+"Homepage" = "https://github.com/liorparente/antigravity-auto-routing"
+"Repository" = "https://github.com/liorparente/antigravity-auto-routing.git"
+"Issues" = "https://github.com/liorparente/antigravity-auto-routing/issues"
 
 [tool.setuptools]
 package-dir = {"worker_routing" = "skills/worker-routing"}
