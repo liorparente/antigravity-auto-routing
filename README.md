@@ -54,6 +54,7 @@ antigravity-auto-routing/
         ├── learning_report_html.py   # Pure standalone HTML learning metrics dashboard
         ├── learning_scoreboard.py    # Empirical scoring engine for provider routing & replay
         ├── acceptance_gate.py        # Anti-ratchet acceptance gate for proposed learning lessons
+        ├── probe_models.py           # Live model catalog probe & CLI capability audit
         ├── production_invoker.py     # Subprocess runner, timeout wrapper & prompt assemblers
         ├── prompt_assembler.py       # Prompt templates for planners, critics, and adjudicators
         ├── risk_tiered_application.py# Atomic memory lesson accumulation & risk tiering

@@ -76,7 +76,7 @@ INSTALLED_FILES=(
     production_invoker.py learning_journal.py learning_outcomes.py
     learning_scoreboard.py learning_report.py learning_report_html.py acceptance_gate.py
     learned_state.py risk_tiered_application.py learner_worker.py protocol.md
-    routing-config.json routing_config.py
+    routing-config.json routing_config.py probe_models.py
 )
 
 # Mirrors install.sh's own dynamic discovery of future production modules —

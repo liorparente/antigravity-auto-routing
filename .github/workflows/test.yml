@@ -61,6 +61,8 @@ jobs:
         skills/worker-routing/test_declarative_schema.py
         skills/worker-routing/routing_config.py
         skills/worker-routing/test_routing_config.py
+        skills/worker-routing/probe_models.py
+        skills/worker-routing/test_probe_models.py
         skills/council-review/scripts/provider_adapters.py
         skills/council-review/scripts/council_review.py
         skills/council-review/tests/test_council_review.py
@@ -93,6 +95,7 @@ jobs:
         skills/worker-routing/test_learner_worker.py
         skills/worker-routing/test_declarative_schema.py
         skills/worker-routing/test_routing_config.py
+        skills/worker-routing/test_probe_models.py
         skills/council-review/tests/test_council_review.py
     steps:
       - uses: actions/checkout@v4
