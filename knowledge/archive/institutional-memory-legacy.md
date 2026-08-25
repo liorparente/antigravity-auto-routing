@@ -1,10 +1,13 @@
 # 🏛️ Institutional Memory
 
 ## 📊 Metadata
-- **עדכון אחרון:** 2026-08-23
-- **סה"כ תובנות:** 109
+- **עדכון אחרון:** 2026-08-25
+- **סה"כ תובנות:** 111
 
 ## התובנות
+
+- `[2026-08-25] [auto-routing] [importance:4] [workflow]` - **סנכרון דו-כיווני בין צבר המשימות המקומי ל-GitHub Issues:** בעת סנכרון כרטיסי Backlog ל-GitHub, כרטיסים שהושלמו (כגון Issues 10–20 בגין Spec 0010, מפקח תהליכים, מנהל תצורה, ודשבורד Observability) נסגרים ב-GitHub בליווי הפניה מדויקת ל-Commit הרלוונטי. כרטיסי פיתוח חדשים (Issues 21–29 עבור PRD 0013 – Role & Model Configuration Matrix Dashboard) נפתחים ב-GitHub עם תווית `ready-for-agent` ומסונכרנים בהדדיות לתוך קובצי ה-Markdown המקומיים.
+- `[2026-08-25] [auto-routing] [importance:3] [architecture]` - **שימור אחידות כתובות המאגר הרשמי בתיעוד ובקונפיגורציית החבילה:** עדכון כתובות המאגר הרשמיות (`https://github.com/liorparente/antigravity-auto-routing.git`) בקובצי `pyproject.toml`, `README.md` ומסמכי ארכיטקטורה מבטיח קישוריות תקינה להפצת החבילה ולמניעת קישורים שבורים.
 
 - `[2026-08-23] [auto-routing] [importance:4] [architecture]` - **איחוד מנוע הדיבייט והמועצה (Spec 0009 / כרטיס 43) לתוך מנוע טופולוגי אחוד:** איחוד מנוע ה-Council ומנוע ה-Critical Dialogue למכונת מצבים אחודה (`debate_state_machine.py` ו-`debate_orchestrator.py`) התומכת בטופולוגיות `Dyad` ו-`CouncilPanel` עם קוורום משוקלל וחתימות HMAC סלקטיביות. מעטפת `council_review.py` צומצמה ל-29 שורות ומאצילה ישירות, תוך שימור 100% תאימות ו-1,352 בדיקות ירוקות.
 - `[2026-08-23] [auto-routing] [importance:3] [domain]` - **התכנסות צבר המשימות של הפרויקט לכרטיס פתוח יחיד (כרטיס 44):** עם השלמת וסגירת כרטיס 43 (ו-42 הכרטיסים הקודמים, 9 כרטיסי workflow-v2, 7 כרטיסי standard-package ו-5 כרטיסי reorg), צבר המשימות הפתוחות התכנס למשימה אחת בלבד: פיתוח דשבורד ויזואלי מבוסס HTML ללמידה וביצועי מודלים (כרטיס 44).

@@ -1,5 +1,14 @@
 # Worker Routing Fallbacks
 
+## 2026-08-25 — TLS Certificate Verification & Network Failure for `gh` CLI in Standard Sandbox
+
+- Mission: Synchronize local backlog tickets and query GitHub issues via `gh issue list`.
+- Failure: Command failed with `Post "https://api.github.com/graphql": tls: failed to verify certificate: x509: “api.github.com” certificate is not trusted` and sandbox socket isolation.
+- Root Cause: Standard sandbox mode (`BypassSandbox: false`) enforces strict local network isolation and blocks TLS certificate validation to external APIs.
+- Resolution: Executed `gh` CLI commands (`gh issue list`, `gh issue close`, `gh issue create`) with `BypassSandbox: true`.
+- Lesson: Remote CLI tools (`gh`, `git push`, remote registry fetches) require network access and must be executed with sandbox bypass enabled, while purely local file inspection and build tools remain sandboxed.
+
+
 ## 2026-08-24 — Dual-Store Invariant Violation by Appending Freeform Session Learnings to `institutional-memory.md`
 
 - Mission: Run CI checks after documentation sync.
