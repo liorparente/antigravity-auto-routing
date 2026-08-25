@@ -1,5 +1,7 @@
 # 50 — Live JSON Drawer & Clipboard Export
 
+**GitHub Issue:** [#26](https://github.com/liorparente/antigravity-auto-routing/issues/26)
+
 **What to build:** A collapsible bottom code drawer displaying a real-time syntax-highlighted preview of `routing-config.json` reflecting user adjustments with a single-click clipboard copy button.
 
 **Blocked by:** 49 — Client State Machine & Floating Action Pill

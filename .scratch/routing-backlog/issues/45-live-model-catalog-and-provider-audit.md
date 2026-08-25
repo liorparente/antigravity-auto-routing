@@ -1,5 +1,7 @@
 # 45 — Live Model Catalog & CLI Provider Capability Audit
 
+**GitHub Issue:** [#21](https://github.com/liorparente/antigravity-auto-routing/issues/21)
+
 **What to build:** An authoritative audit of real, callable models and reasoning effort parameters accepted by installed CLI tools (`claude`, `codex`, `agy`, and local LM Studio), establishing the genuine model catalog for the project.
 
 **Blocked by:** None — can start immediately.

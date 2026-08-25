@@ -1,5 +1,7 @@
 # 42 — Strongly-Typed Centralized Configuration Manager
 
+**GitHub Issue:** [#18](https://github.com/liorparente/antigravity-auto-routing/issues/18)
+
 * **Category:** Maintainability & Developer Experience
 * **Priority:** Medium (Recommended Step 2)
 * **Status:** done

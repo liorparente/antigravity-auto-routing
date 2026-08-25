@@ -1,5 +1,7 @@
 # 43 — Unify Council Review & Critical Dialogue Engine
 
+**GitHub Issue:** [#19](https://github.com/liorparente/antigravity-auto-routing/issues/19)
+
 * **Category:** Core Architecture & Deep Modules
 * **Priority:** High (Recommended Step 3)
 * **Status:** done

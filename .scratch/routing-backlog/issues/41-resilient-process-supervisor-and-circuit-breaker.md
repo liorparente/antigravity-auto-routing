@@ -1,5 +1,7 @@
 # 41 — Resilient Process Supervisor & Circuit Breaker for Worker CLIs
 
+**GitHub Issue:** [#17](https://github.com/liorparente/antigravity-auto-routing/issues/17)
+
 * **Category:** Reliability & Resilience
 * **Priority:** High (Recommended Step 1)
 * **Status:** done

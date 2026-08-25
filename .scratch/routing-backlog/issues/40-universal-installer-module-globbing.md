@@ -1,5 +1,7 @@
 # 40 — Universal Python Module Globbing in Installer (`install.sh` & `uninstall.sh`)
 
+**GitHub Issue:** [#16](https://github.com/liorparente/antigravity-auto-routing/issues/16)
+
 * GitHub Issue: [#9](https://github.com/liorparente/antigravity-auto-routing/issues/9)
 * Spec: [docs/specs/0008-debate-engine-modular-decomposition.md](file:///Users/liorparente/Projects/auto-routing/docs/specs/0008-debate-engine-modular-decomposition.md)
 

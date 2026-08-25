@@ -1,5 +1,7 @@
 # 51 — Local Dashboard Server & Atomic Save API
 
+**GitHub Issue:** [#27](https://github.com/liorparente/antigravity-auto-routing/issues/27)
+
 **What to build:** An embedded lightweight HTTP server in `learning_report.py` (`--serve [PORT]`) providing a `POST /api/config` endpoint that validates and atomically saves updated configurations directly to disk.
 
 **Blocked by:** 50 — Live JSON Drawer & Clipboard Export

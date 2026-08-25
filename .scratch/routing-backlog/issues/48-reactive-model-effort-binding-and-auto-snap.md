@@ -1,5 +1,7 @@
 # 48 — Reactive Model-Effort Binding & Auto-Snap
 
+**GitHub Issue:** [#24](https://github.com/liorparente/antigravity-auto-routing/issues/24)
+
 **What to build:** Client-side dynamic binding where changing a role's model immediately filters the reasoning effort dropdown to only supported choices and automatically snaps to the model's default effort.
 
 **Blocked by:** 47 — Two-Tab Navigation & Bento Grid Layout

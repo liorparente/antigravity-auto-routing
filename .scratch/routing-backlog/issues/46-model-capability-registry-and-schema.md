@@ -1,5 +1,7 @@
 # 46 — Model Capability Registry & Schema Contracts
 
+**GitHub Issue:** [#22](https://github.com/liorparente/antigravity-auto-routing/issues/22)
+
 **What to build:** A strongly-typed model capability schema and registry in `routing_config.py` mapping every model to its supported reasoning efforts, default effort, reasoning tier, and context window.
 
 **Blocked by:** 45 — Live Model Catalog & CLI Provider Capability Audit

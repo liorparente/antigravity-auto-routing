@@ -1,5 +1,7 @@
 # 53 — Multi-Harness Sync & Council Review Verification Gate
 
+**GitHub Issue:** [#29](https://github.com/liorparente/antigravity-auto-routing/issues/29)
+
 **What to build:** Post-feature audit executing multi-agent Council Review across uncommitted changes and running `./install.sh` to sync the updated routing protocol across Antigravity, Claude Code, and Codex harnesses.
 
 **Blocked by:** 52 — Automated Unit Tests & AST Invariants

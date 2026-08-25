@@ -1,5 +1,7 @@
 # 44 — Visual Learning Report & Observability Dashboard
 
+**GitHub Issue:** [#20](https://github.com/liorparente/antigravity-auto-routing/issues/20)
+
 * **Category:** Observability & UI
 * **Priority:** Medium (Recommended Step 4)
 * **Status:** closed
