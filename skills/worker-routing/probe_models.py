@@ -47,7 +47,6 @@ Run it directly for a human-readable report::
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import shutil
 import subprocess
@@ -151,14 +150,21 @@ class UnknownProviderError(ModelCatalogError):
 
 
 class UnsupportedEffortError(ModelCatalogError):
-    """Raised when a reasoning effort is outside a provider's CLI enum."""
+    """Raised when a reasoning effort is outside the ladder that was checked.
 
-    def __init__(self, provider_id: str, effort: str, accepted: tuple[str, ...]) -> None:
+    ``ladder`` names which enum was violated — a specific model's
+    ``supported_efforts`` when the model is audited, or the provider's whole
+    CLI enum when it is not — so the message tells a caller which table to
+    go fix rather than just repeating the rejected value.
+    """
+
+    def __init__(self, provider_id: str, effort: str, accepted: tuple[str, ...], *, ladder: str) -> None:
         self.provider_id = provider_id
         self.effort = effort
         self.accepted = accepted
+        self.ladder = ladder
         super().__init__(
-            f"{provider_id} does not accept reasoning effort {effort!r} "
+            f"{provider_id} does not accept reasoning effort {effort!r} for {ladder} "
             f"(accepted: {list(accepted)})"
         )
 
@@ -194,6 +200,22 @@ class CliContract:
         `UnsupportedEffortError` for an effort the provider's flag cannot
         parse — the two failures the routing protocol used to discover only
         when the subprocess exited non-zero.
+
+        The effort is checked against ``model_id``'s own ladder in
+        `AUDITED_MODEL_CATALOG` when the model is known **and** its audited
+        entry belongs to *this* contract's provider — Luna's ladder stops at
+        ``max`` while Sol and Terra reach ``ultra``, so the provider-wide
+        `accepted_efforts` union alone would wave a Luna+``ultra`` pairing
+        through. `AUDITED_MODEL_CATALOG` is keyed by bare model id, not
+        ``(provider_id, model_id)`` (see docs/research/live-model-catalog-
+        audit.md §3, finding F7), so a model two providers both publish —
+        `claude-sonnet-4-6` is audited under `antigravity_cli` but the
+        `claude` binary's own catalog also accepts it, with a longer ladder —
+        would otherwise have the *other* provider's narrower ladder wrongly
+        applied to it. A model unaudited for this provider — either not in
+        the catalog at all, or audited only under a different provider's
+        contract — falls back to this provider's whole CLI enum, since no
+        per-model ladder for *this* provider exists for it yet.
         """
         if self.model_argv_template is None:
             raise ModelCatalogError(
@@ -202,13 +224,20 @@ class CliContract:
         argv = tuple(token.format(model=model_id) for token in self.model_argv_template)
         if effort is None:
             return argv
-        if effort not in self.accepted_efforts:
-            raise UnsupportedEffortError(self.provider_id, effort, self.accepted_efforts)
+        audited = AUDITED_MODEL_CATALOG.get(model_id)
+        if audited is not None and audited.provider_id == self.provider_id:
+            ladder = audited.supported_efforts
+            ladder_name = f"model {model_id!r}"
+        else:
+            ladder = self.accepted_efforts
+            ladder_name = f"provider {self.provider_id}"
+        if effort not in ladder:
+            raise UnsupportedEffortError(self.provider_id, effort, ladder, ladder=ladder_name)
         effort_argv = self.effort_argv_template or ()
         return argv + tuple(token.format(effort=effort) for token in effort_argv)
 
 
-# Audited 2026-08-25 against claude 2.1.241, codex-cli 0.144.1, agy 1.1.19.
+# Audited 2026-08-25 against claude 2.1.241, codex-cli 0.144.1, agy 1.1.20.
 PROVIDER_CLI_CONTRACTS: Mapping[str, CliContract] = MappingProxyType(
     {
         "claude_code_cli": CliContract(
@@ -244,7 +273,7 @@ PROVIDER_CLI_CONTRACTS: Mapping[str, CliContract] = MappingProxyType(
             accepted_efforts=("low", "medium", "high"),
             list_models_argv=("models",),
             models_cache_path=None,
-            notes="agy 1.1.19 lists models as `<id>\\t<label>`; most of its identifiers already carry the effort as a suffix. `agy models` fetches over the network, so it is skipped on a latency-sensitive launch probe.",
+            notes="agy 1.1.20 lists models as `<id>\\t<label>`; most of its identifiers already carry the effort as a suffix. `agy models` fetches over the network, so it is skipped on a latency-sensitive launch probe.",
         ),
         "lm_studio_local": CliContract(
             provider_id="lm_studio_local",
@@ -287,11 +316,14 @@ class AuditedModel:
 
 
 _CLAUDE_EVIDENCE = (
-    "claude 2.1.241 `--effort` enum; per-model support and default are resolved dynamically by the API "
-    "model catalog, and `high` is the CLI's own fallback when that catalog publishes no default"
+    "claude 2.1.241's own model catalog, read directly from the installed binary "
+    "(~/.local/share/claude/versions/2.1.241): default_effort and context.window are stated "
+    "literally per model there — claude-opus-5, claude-sonnet-5, and claude-fable-5 each publish "
+    'default_effort:"high" and context.window:1_000_000. The CLI does carry a `?? "high"` fallback '
+    "for a model whose catalog entry omits a default, but that fallback never fires for these three"
 )
 _CODEX_EVIDENCE = "codex-cli 0.144.1 live model catalog cache (~/.codex/models_cache.json)"
-_AGY_EVIDENCE = "`agy models` (agy 1.1.19)"
+_AGY_EVIDENCE = "`agy models` (agy 1.1.20)"
 _LM_STUDIO_EVIDENCE = "live `GET /v1/models` on LM Studio, 2026-08-25"
 
 _CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
@@ -323,7 +355,7 @@ _AUDITED_MODELS: tuple[AuditedModel, ...] = (
         provider_id="claude_code_cli",
         supported_efforts=_CLAUDE_EFFORTS,
         default_effort="high",
-        context_window=None,
+        context_window=1_000_000,
         local_only=False,
         evidence=_CLAUDE_EVIDENCE,
     ),
@@ -333,7 +365,7 @@ _AUDITED_MODELS: tuple[AuditedModel, ...] = (
         provider_id="claude_code_cli",
         supported_efforts=_CLAUDE_EFFORTS,
         default_effort="high",
-        context_window=None,
+        context_window=1_000_000,
         local_only=False,
         evidence=_CLAUDE_EVIDENCE,
     ),
@@ -343,7 +375,7 @@ _AUDITED_MODELS: tuple[AuditedModel, ...] = (
         provider_id="claude_code_cli",
         supported_efforts=_CLAUDE_EFFORTS,
         default_effort="high",
-        context_window=None,
+        context_window=1_000_000,
         local_only=False,
         evidence=_CLAUDE_EVIDENCE,
     ),
@@ -355,9 +387,13 @@ _AUDITED_MODELS: tuple[AuditedModel, ...] = (
         # but it has no reasoning-effort ladder to select from.
         supported_efforts=(),
         default_effort=None,
-        context_window=None,
+        context_window=200_000,
         local_only=False,
-        evidence="accepted model identifier in claude 2.1.241; predates the reasoning-effort ladder",
+        evidence=(
+            "accepted model identifier in claude 2.1.241's own model catalog; predates the "
+            "reasoning-effort ladder (no default_effort published), but the catalog entry still "
+            "states context.window:200_000 literally"
+        ),
     ),
     # --- Codex CLI ------------------------------------------------------
     AuditedModel(
@@ -504,15 +540,19 @@ AUDITED_MODEL_CATALOG: Mapping[str, AuditedModel] = MappingProxyType(
 )
 
 
-def _build_label_index() -> Mapping[str, str]:
-    """Every accepted spelling → wire identifier.
+def _build_label_index(models: Iterable[AuditedModel]) -> Mapping[str, str]:
+    """Every accepted spelling → wire identifier, over ``models``.
 
     Collisions are a programming error rather than a runtime condition:
     two models answering to one label is exactly the ambiguity this table
-    exists to remove, so it raises at import.
+    exists to remove, so it raises rather than silently letting the later
+    model win. ``models`` is a parameter — rather than reading
+    `_AUDITED_MODELS` directly — so a test can hand this a deliberately
+    colliding pair and observe the raise without needing two real catalog
+    entries to disagree.
     """
     index: dict[str, str] = {}
-    for model in _AUDITED_MODELS:
+    for model in models:
         for label in (model.model_id, model.display_label, *model.aliases):
             existing = index.get(label)
             if existing is not None and existing != model.model_id:
@@ -523,7 +563,7 @@ def _build_label_index() -> Mapping[str, str]:
     return MappingProxyType(index)
 
 
-DISPLAY_LABEL_TO_MODEL_ID: Mapping[str, str] = _build_label_index()
+DISPLAY_LABEL_TO_MODEL_ID: Mapping[str, str] = _build_label_index(_AUDITED_MODELS)
 
 _CASEFOLDED_LABEL_INDEX: Mapping[str, str] = MappingProxyType(
     {label.casefold(): model_id for label, model_id in DISPLAY_LABEL_TO_MODEL_ID.items()}
@@ -742,6 +782,22 @@ def _audited_models_for(provider_id: str) -> tuple[ProbedModel, ...]:
     )
 
 
+@dataclass(frozen=True)
+class _CliProbeContext:
+    """The ``(contract, binary_path, audited)`` trio every degrade-to-the-
+    snapshot path in `probe_cli_provider` needs to build a `ProviderProbe`.
+
+    Bundled so it travels as one argument through `_cli_fallback` and
+    `_probe_cached_catalog` instead of three positional ones that must stay
+    in the same order at every call site — `probe_cli_provider` builds it
+    once, as soon as the binary is confirmed present.
+    """
+
+    contract: CliContract
+    binary_path: str
+    audited: tuple[ProbedModel, ...]
+
+
 def probe_cli_provider(
     provider_id: str,
     *,
@@ -784,19 +840,11 @@ def probe_cli_provider(
         )
 
     audited = _audited_models_for(contract.provider_id)
+    context = _CliProbeContext(contract=contract, binary_path=binary_path, audited=audited)
     if contract.list_models_argv is None or not list_models:
         if contract.models_cache_path is None:
-            return ProviderProbe(
-                provider_id=contract.provider_id,
-                available=True,
-                binary_path=binary_path,
-                endpoint=None,
-                models=audited,
-                error=None,
-            )
-        return _probe_cached_catalog(
-            contract, contract.models_cache_path, binary_path, audited, cache_reader
-        )
+            return _cli_fallback(context, None)
+        return _probe_cached_catalog(context, cache_reader)
 
     argv = [contract.binary, *contract.list_models_argv]
     try:
@@ -809,17 +857,17 @@ def probe_cli_provider(
             stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
-        return _cli_fallback(contract, binary_path, audited, f"`{' '.join(argv)}` timed out after {timeout}s")
+        return _cli_fallback(context, f"`{' '.join(argv)}` timed out after {timeout}s")
     except OSError as error:
-        return _cli_fallback(contract, binary_path, audited, f"`{' '.join(argv)}` failed: {error}")
+        return _cli_fallback(context, f"`{' '.join(argv)}` failed: {error}")
 
     if completed.returncode != 0:
         reason = (completed.stderr or "").strip() or f"exit status {completed.returncode}"
-        return _cli_fallback(contract, binary_path, audited, reason)
+        return _cli_fallback(context, reason)
 
     listed = _parse_listed_models(completed.stdout or "", contract)
     if not listed:
-        return _cli_fallback(contract, binary_path, audited, f"`{' '.join(argv)}` listed no models")
+        return _cli_fallback(context, f"`{' '.join(argv)}` listed no models")
     return ProviderProbe(
         provider_id=contract.provider_id,
         available=True,
@@ -830,26 +878,25 @@ def probe_cli_provider(
     )
 
 
-def _cli_fallback(
-    contract: CliContract, binary_path: str, audited: tuple[ProbedModel, ...], error: str
-) -> ProviderProbe:
+def _cli_fallback(context: _CliProbeContext, error: str | None) -> ProviderProbe:
+    """Degrade to the audited snapshot for `context.contract`'s provider.
+
+    ``error=None`` is the deliberate-skip case (``list_models=False`` with no
+    on-disk cache to fall back to further) — the audited models are exactly
+    as callable then as they are after a failed live probe, so it is the same
+    shape with nothing to report.
+    """
     return ProviderProbe(
-        provider_id=contract.provider_id,
+        provider_id=context.contract.provider_id,
         available=True,
-        binary_path=binary_path,
+        binary_path=context.binary_path,
         endpoint=None,
-        models=audited,
+        models=context.audited,
         error=error,
     )
 
 
-def _probe_cached_catalog(
-    contract: CliContract,
-    cache_path: Path,
-    binary_path: str,
-    audited: tuple[ProbedModel, ...],
-    cache_reader: CacheReader,
-) -> ProviderProbe:
+def _probe_cached_catalog(context: _CliProbeContext, cache_reader: CacheReader) -> ProviderProbe:
     """Read a provider's on-disk catalog cache.
 
     This is what stops the Codex half of the audit from rotting: the copy
@@ -857,17 +904,28 @@ def _probe_cached_catalog(
     hand-transcribed snapshot of it is wrong the day a model ships. An
     unreadable or malformed cache degrades to the snapshot rather than
     emptying the provider.
+
+    ``cache_path`` is read from ``context.contract.models_cache_path`` rather
+    than threaded through as its own parameter — the only caller reaches this
+    function after already confirming that path is not `None`, so a second
+    parameter carrying the same fact would just re-split the clump
+    `_CliProbeContext` exists to close. The `is None` check below exists to
+    narrow the type for mypy, not because it is reachable at runtime.
     """
+    contract = context.contract
+    cache_path = contract.models_cache_path
+    if cache_path is None:
+        return _cli_fallback(context, None)
     try:
         raw = cache_reader(cache_path)
     except OSError as error:
-        return _cli_fallback(contract, binary_path, audited, f"{cache_path} is unreadable: {error}")
+        return _cli_fallback(context, f"{cache_path} is unreadable: {error}")
     try:
         payload = json.loads(raw)
     except ValueError as error:
-        return _cli_fallback(contract, binary_path, audited, f"{cache_path} is not valid JSON: {error}")
+        return _cli_fallback(context, f"{cache_path} is not valid JSON: {error}")
     if not isinstance(payload, dict):
-        return _cli_fallback(contract, binary_path, audited, f"{cache_path} is not a JSON object")
+        return _cli_fallback(context, f"{cache_path} is not a JSON object")
 
     models = tuple(
         _cached_entry_to_model(entry, contract)
@@ -878,11 +936,11 @@ def _probe_cached_catalog(
         if isinstance(entry, dict) and entry.get("visibility") == "list" and entry.get("slug")
     )
     if not models:
-        return _cli_fallback(contract, binary_path, audited, f"{cache_path} lists no selectable models")
+        return _cli_fallback(context, f"{cache_path} lists no selectable models")
     return ProviderProbe(
         provider_id=contract.provider_id,
         available=True,
-        binary_path=binary_path,
+        binary_path=context.binary_path,
         endpoint=None,
         models=models,
         error=None,
@@ -899,7 +957,13 @@ def _cached_entry_to_model(entry: Mapping[str, Any], contract: CliContract) -> P
     default = entry.get("default_reasoning_level")
     context = entry.get("context_window")
     audited = AUDITED_MODEL_CATALOG.get(slug)
-    label = entry.get("display_name") or (audited.display_label if audited else slug)
+    # The audited label wins for a model this audit already knows — codex's
+    # own `display_name` ("GPT-5.6-Sol") disagrees with the spelling
+    # `routing-config.json` and `DISPLAY_LABEL_TO_MODEL_ID` use ("Codex 5.6
+    # Sol"), and `_build_label_index` exists precisely so one model has one
+    # name. The provider's label is the fallback for a model the audit does
+    # not list at all.
+    label = audited.display_label if audited is not None else (entry.get("display_name") or slug)
     return ProbedModel(
         model_id=slug,
         display_label=str(label),
@@ -929,12 +993,12 @@ def _parse_listed_models(stdout: str, contract: CliContract) -> tuple[ProbedMode
             continue
         audited = AUDITED_MODEL_CATALOG.get(model_id)
         if audited is not None:
-            probed = ProbedModel.from_audited(audited, source="live")
-            # The provider's own label wins over the snapshot's: it is the one
-            # thing this listing knows better than the audit does.
-            models.append(
-                dataclasses.replace(probed, display_label=label) if label else probed
-            )
+            # The audited label wins over `agy`'s own listing: it is the
+            # spelling `routing-config.json` and `DISPLAY_LABEL_TO_MODEL_ID`
+            # already use, and `_build_label_index` exists precisely so one
+            # model answers to one name rather than to whatever a given
+            # provider happens to print this run.
+            models.append(ProbedModel.from_audited(audited, source="live"))
             continue
         supported, default = _infer_efforts_from_model_id(model_id, contract)
         models.append(
@@ -1022,9 +1086,12 @@ def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFindi
     Three kinds of drift are reported: ``unknown_model`` (a configured
     provider names an identifier no installed CLI publishes),
     ``unsupported_effort`` (its default effort is outside that model's ladder),
-    and ``unmapped_label`` (a `supported_models` label that resolves to no
-    wire identifier). Findings are the audit's regression guard — a config
-    edit that reintroduces a stale identifier fails the test that pins them.
+    and ``unmapped_label`` (a label that resolves to no wire identifier — both
+    in `supported_models` and in `roster_topology.role_fallback_chains`, since
+    a fallback chain entry reaches a provider's ``--model`` flag exactly the
+    way a `supported_models` entry does). Findings are the audit's regression
+    guard — a config edit that reintroduces a stale identifier fails the test
+    that pins them.
     """
     findings: list[DriftFinding] = []
     for provider_id, provider in config.providers.items():
@@ -1062,6 +1129,18 @@ def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFindi
                     detail=f"label {label!r} maps to no wire identifier in the audited catalog",
                 )
             )
+    for role, chain in config.roster_topology.role_fallback_chains.items():
+        for label in chain:
+            try:
+                resolve_model_id(label)
+            except UnknownModelError:
+                findings.append(
+                    DriftFinding(
+                        kind="unmapped_label",
+                        subject=f"roster_topology.{role}[{label}]",
+                        detail=f"label {label!r} maps to no wire identifier in the audited catalog",
+                    )
+                )
     deduplicated = tuple(dict.fromkeys(findings))
     return tuple(sorted(deduplicated, key=lambda finding: (finding.kind, finding.subject)))
 
@@ -1123,23 +1202,50 @@ def main(
         default=DEFAULT_PROBE_TIMEOUT_SECONDS,
         help=f"LM Studio probe timeout in seconds (default {DEFAULT_PROBE_TIMEOUT_SECONDS})",
     )
+    parser.add_argument(
+        "--cli-timeout",
+        type=float,
+        default=CLI_PROBE_TIMEOUT_SECONDS,
+        help=f"CLI provider list-command timeout in seconds (default {CLI_PROBE_TIMEOUT_SECONDS})",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "skip the network-backed `agy models` listing (spec 0013's non-blocking launch probe); "
+            "every provider stays local, at the cost of agy's live listing"
+        ),
+    )
     args = parser.parse_args(argv)
     stream = stdout if stdout is not None else sys.stdout
 
     snapshot = probe_all(
-        timeout=args.timeout, opener=opener, which=which, runner=runner, cache_reader=cache_reader
+        timeout=args.timeout,
+        opener=opener,
+        which=which,
+        runner=runner,
+        cache_reader=cache_reader,
+        cli_timeout=args.cli_timeout,
+        list_models=not args.fast,
     )
+    findings = audit_config_drift(config_loader()) if args.audit else ()
+
     if args.json:
-        json.dump(snapshot.to_dict(), stream, indent=2, sort_keys=True)
+        payload = snapshot.to_dict()
+        if args.audit:
+            payload["drift"] = [
+                {"kind": finding.kind, "subject": finding.subject, "detail": finding.detail}
+                for finding in findings
+            ]
+        json.dump(payload, stream, indent=2, sort_keys=True)
         stream.write("\n")
-        return 0
+        return 1 if findings else 0
 
     stream.write(_render_text_report(snapshot))
     stream.write("\n")
     if not args.audit:
         return 0
 
-    findings = audit_config_drift(config_loader())
     stream.write("\n")
     stream.write(_render_drift_report(findings))
     stream.write("\n")

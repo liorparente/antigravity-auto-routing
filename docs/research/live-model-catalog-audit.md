@@ -25,7 +25,7 @@ or memory. Each catalog entry in `probe_models.py` carries its provenance in an
 |---|---|---|---|
 | Claude Code | `claude` | 2.1.241 | `claude --help`; effort enum and model identifiers read from the shipped binary |
 | Codex | `codex` | codex-cli 0.144.1 | `~/.codex/models_cache.json` — the catalog the CLI fetched from the API (`supported_reasoning_levels` per model) |
-| Antigravity | `agy` | 1.1.19 | `agy models`, `agy --help` |
+| Antigravity | `agy` | 1.1.20 | `agy models`, `agy --help` |
 | LM Studio | — (HTTP) | — | `GET http://127.0.0.1:1234/v1/models` |
 
 ## 1. Wire CLI flags and reasoning-effort parameters
@@ -85,17 +85,29 @@ bake the effort in: `gemini-3.7-flash-{high,medium,low}`,
 models (`claude-sonnet-4-6`, `claude-opus-4-6-thinking`). **Gemini 3.1 Pro has
 no `medium` rung** — exactly the heterogeneity spec 0013 was written for.
 
-**Claude Code** publishes no list command, and its per-model effort support is
-resolved at runtime from the API model catalog (`supportsEffort`,
-`supportedEffortLevels`, `default_effort`). The audited entries therefore cover
-the models this project routes — `claude-opus-5`, `claude-sonnet-5`,
-`claude-fable-5`, and the pre-effort `claude-3-7-sonnet` — and record the
-CLI-level enum rather than a per-model snapshot that would go stale silently.
-The binary documents `xhigh` as available on *Fable 5, Opus 4.7+, Sonnet 5* and
-`max` on *Fable 5, Opus 4.6+, Sonnet 4.6+*. The `default_effort: "high"` on the
-three Claude 5 entries is the CLI's own fallback (`…?.default_effort ?? "high"`)
-for a model whose catalog entry publishes no default — not a per-model figure
-the CLI states anywhere.
+**Claude Code** publishes no list command, but the installed binary
+(`~/.local/share/claude/versions/2.1.241`) carries its own model catalog, and
+`default_effort` and `context.window` are read directly from it rather than
+inferred:
+
+| Model | Default effort | Context window |
+|---|---|---|
+| `claude-opus-5` | `high` | 1,000,000 |
+| `claude-sonnet-5` | `high` | 1,000,000 |
+| `claude-fable-5` | `high` | 1,000,000 |
+| `claude-3-7-sonnet` | *(none published)* | 200,000 |
+
+The audited entries therefore cover the models this project routes —
+`claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, and the pre-effort
+`claude-3-7-sonnet` — and record the CLI-level effort enum rather than a
+per-model snapshot that would go stale silently. The binary documents `xhigh`
+as available on *Fable 5, Opus 4.7+, Sonnet 5* and `max` on *Fable 5, Opus
+4.6+, Sonnet 4.6+*. The `default_effort: "high"` on the three Claude 5 entries
+is a value the catalog states literally per model, not the CLI's own
+`?? "high"` fallback: that fallback exists in the binary for a model whose
+catalog entry omits a default, but it never fires for these three —
+`claude-3-7-sonnet` is the entry that actually omits one, and it is recorded
+as `None` rather than defaulted to `"high"`.
 
 `agy models` is a **network** call (it prints "Fetching available models…"
 first). Spec 0013 asks for a non-blocking launch probe, so
@@ -135,22 +147,54 @@ names `qwen3-coder-30b`; LM Studio serves `qwen3.8-27b-mlx` and
 `Qwen3.8-27B-MLX-6bit` and `Gemma 4 E4B`, neither of which is a served
 identifier either (both are carried as aliases in the audited catalog).
 
-**F5 — two `supported_models` labels are not models.** `Gemini 3.7 Flash` has
-no bare identifier (only the three effort-suffixed ones), and
-`LM Studio (Local Model)` is a placeholder for whatever is loaded.
+**F5 — three labels are not models.** `supported_models` names `Gemini 3.7
+Flash`, which has no bare identifier (only the three effort-suffixed ones),
+and `LM Studio (Local Model)`, a placeholder for whatever is loaded.
+`roster_topology.role_fallback_chains.critic_b` separately names the bare
+`Gemini 3.6 Flash` — the same shape of drift, in the fallback chains rather
+than in `supported_models`: `resolve_model_id("Gemini 3.6 Flash")` raises
+`UnknownModelError` exactly as the other two do.
 
 **F6 — local models have no effort ladder.** `providers.lm_studio_local`
 declares `default_reasoning_effort: "medium"`, but the OpenAI-compatible API
 exposes no such parameter. Spec 0013's effort dropdown should be hidden, not
 defaulted, for `local_only` models.
 
+**F7 — a flat model-id keying cannot express a model two providers both
+publish.** `agy models` lists `claude-sonnet-4-6`, and the `claude` binary's
+own catalog also carries it — with a *different*, longer effort ladder
+(`low`, `medium`, `high`, `xhigh`, `max` vs. `agy`'s `low`, `medium`, `high`).
+`AUDITED_MODEL_CATALOG` is keyed by `model_id` alone, so it can only hold one
+entry per identifier; it holds the `antigravity_cli` entry. Before this round,
+`CliContract.format_argv` consulted that single audited entry regardless of
+which provider was asking, so `PROVIDER_CLI_CONTRACTS["claude_code_cli"]
+.format_argv("claude-sonnet-4-6", "max")` raised `UnsupportedEffortError`
+even though the `claude` CLI itself accepts `max` for that model — the
+audited entry made the claude path strictly *worse* than an unaudited one.
+The narrow fix applied here: `format_argv` now consults the audited ladder
+only when `audited.provider_id == self.provider_id`; otherwise it falls back
+to the provider-wide `accepted_efforts` union, exactly as it already does for
+a model the audit does not list at all. This is latent rather than live
+today — `routing-config.json` configures no agy-hosted Claude model, so no
+config currently drives `claude_code_cli.format_argv("claude-sonnet-4-6",
+...)` — but the fix closes the gap before the registry work reopens it.
+Re-keying `AUDITED_MODEL_CATALOG` to `(provider_id, model_id)` so both
+providers' entries for this model can coexist is deliberately **not** done
+here: the registry schema is ticket 46's to design, and `_build_label_index`
+raising on a duplicate id is load-bearing today (`test_build_label_index_
+raises_on_a_genuine_label_collision`). Ticket 46 should decide the keying
+when it builds the capability registry this module currently has no caller
+for.
+
 ## 4. What this ticket changed, and what it deliberately did not
 
 Delivered: the audited catalog, the CLI wire contracts, the label → identifier
 mapping, and the live probe — plus `audit_config_drift()`, which turns **F2, F4
-and F5** into assertions rather than prose. `test_probe_models.py` pins the
-resulting five findings exactly, so a config edit that adds a sixth fails CI and
-one that fixes an existing finding forces the pin to shrink deliberately.
+and F5** into assertions rather than prose, walking both `supported_models` and
+`roster_topology.role_fallback_chains` for the `unmapped_label` check.
+`test_probe_models.py` pins the resulting six findings exactly, so a config
+edit that adds a seventh fails CI and one that fixes an existing finding forces
+the pin to shrink deliberately.
 
 F1, F3 and F6 are *not* machine-checked, and deliberately so: F1 and F3 are
 facts about `learning_journal.py` and `production_invoker.py` rather than about
@@ -158,10 +202,23 @@ the config, and F6 cannot fire while F4 stands — `providers.lm_studio_local`
 names a model that fails to resolve at all, so the drift audit reports
 `unknown_model` and never reaches the effort check. Fixing F4 will surface F6.
 
-Not changed: `routing-config.json`, `production_invoker.py`, and the effort
-vocabulary. Correcting F1–F4 alters which model a role actually dispatches to,
-which belongs with ticket 46's capability registry and its consumers — not with
-the audit that found them.
+F7 is also not machine-checked, and for a similar reason: it is a fact about
+`AUDITED_MODEL_CATALOG`'s keying (a registry-design question) rather than
+about `routing-config.json`, and it is latent — no configured provider
+currently names an agy-hosted Claude model — so `audit_config_drift()` has
+nothing to observe yet. Unlike F1–F6, this round did apply a narrow code fix
+for the consequence F7 describes (`CliContract.format_argv` no longer
+misattributes another provider's audited ladder to itself); the underlying
+single-key schema is unchanged and is called out explicitly as ticket 46's to
+decide.
+
+Not changed: `routing-config.json`, `production_invoker.py`, the effort
+vocabulary, and `AUDITED_MODEL_CATALOG`'s single-key-per-model-id schema.
+Correcting F1–F4 alters which model a role actually dispatches to, which
+belongs with ticket 46's capability registry and its consumers — not with the
+audit that found them. Re-keying the catalog to admit two providers
+publishing the same model id is the same kind of registry-design decision,
+and belongs there too (see F7).
 
 **No production caller yet** (Golden Rule 20). Outside its own CLI entry point
 and tests, nothing imports this module: ticket 46 is where
@@ -180,3 +237,13 @@ python3 skills/worker-routing/probe_models.py --audit
 Reports live provider status, the merged live/audited model list, and current
 config drift; exits non-zero when any drift exists. Use `--json` for the
 payload spec 0013's `GET /api/model-capabilities` serves.
+
+Two more flags tune the probe itself, both passed through to `probe_all()`:
+
+* `--fast` — skip `agy models`'s network-backed listing (spec 0013's
+  non-blocking launch probe); every CLI provider stays local, at the cost of
+  `agy`'s live listing degrading to the audited snapshot.
+* `--cli-timeout SECONDS` — the deadline for a CLI provider's list command
+  (default `CLI_PROBE_TIMEOUT_SECONDS`, 15s). `--timeout SECONDS` is the
+  separate, much shorter deadline for the LM Studio HTTP probe (default
+  `DEFAULT_PROBE_TIMEOUT_SECONDS`, 0.2s).

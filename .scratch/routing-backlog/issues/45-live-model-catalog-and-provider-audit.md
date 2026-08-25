@@ -21,10 +21,12 @@
 tests in `test_probe_models.py`, and the written audit in
 [`docs/research/live-model-catalog-audit.md`](../../../docs/research/live-model-catalog-audit.md).
 
-Six drift findings (F1–F6) were recorded and deliberately left unfixed: correcting
+Seven drift findings (F1–F7) were recorded and deliberately left unfixed: correcting
 them changes which model a role dispatches to, which belongs with ticket 46.
 Three of them (F2, F4, F5) are machine-checked by `audit_config_drift()` and
-pinned as five concrete findings in `test_probe_models.py`.
+pinned as six concrete findings in `test_probe_models.py` — `roster_topology.
+role_fallback_chains` is walked for the `unmapped_label` check alongside
+`supported_models`, which is what brought the pin from five to six.
 
 **Caller (Golden Rule 20):** the only shipped caller today is this module's own
 `--audit` CLI entry point. The production consumer is ticket 46
