@@ -42,8 +42,10 @@ produces the argv fragment and refuses an effort the provider cannot parse.
 
 Notes:
 
-* `claude --effort` also accepts the alias `med` → `medium`. (`ultracode` maps to
-  `xhigh` inside the CLI, but as a session keyword, not an `--effort` value.)
+* `claude --effort` also accepts the alias `med` → `medium`, and silently
+  accepts `ultracode` → `xhigh` too — `claude --help` lists only the
+  five-value enum (`low`, `medium`, `high`, `xhigh`, `max`), so this alias is
+  undocumented there, not rejected as an invalid `--effort` value.
 * `claude --model` additionally accepts the latest-model aliases `fable`, `opus`,
   and `sonnet`. They are deliberately **not** in `DISPLAY_LABEL_TO_MODEL_ID`:
   each resolves to whatever is latest at call time, so pinning one to a wire
@@ -163,7 +165,9 @@ defaulted, for `local_only` models.
 **F7 — a flat model-id keying cannot express a model two providers both
 publish.** `agy models` lists `claude-sonnet-4-6`, and the `claude` binary's
 own catalog also carries it — with a *different*, longer effort ladder
-(`low`, `medium`, `high`, `xhigh`, `max` vs. `agy`'s `low`, `medium`, `high`).
+(`low`, `medium`, `high`, `max` vs. `agy`'s `low`, `medium`, `high`; the
+binary's `xhigh` availability list names "Sonnet 5", not "Sonnet 4.6", so
+`xhigh` is not part of the `claude`-side ladder for this model either).
 `AUDITED_MODEL_CATALOG` is keyed by `model_id` alone, so it can only hold one
 entry per identifier; it holds the `antigravity_cli` entry. Before this round,
 `CliContract.format_argv` consulted that single audited entry regardless of
@@ -174,7 +178,13 @@ audited entry made the claude path strictly *worse* than an unaudited one.
 The narrow fix applied here: `format_argv` now consults the audited ladder
 only when `audited.provider_id == self.provider_id`; otherwise it falls back
 to the provider-wide `accepted_efforts` union, exactly as it already does for
-a model the audit does not list at all. This is latent rather than live
+a model the audit does not list at all — *except* for `claude-sonnet-4-6` on
+`claude_code_cli` specifically, where `_CROSS_PROVIDER_EFFORT_LADDERS` now
+narrows that union to exclude `xhigh`: the whole-provider enum contains
+`xhigh`, but this model does not carry it on the `claude` side, and a
+config-drift round found `format_argv` waving that exact pairing through
+before this narrow, explicit correction (a data-level patch, not a re-keying
+of `AUDITED_MODEL_CATALOG`). This is latent rather than live
 today — `routing-config.json` configures no agy-hosted Claude model, so no
 config currently drives `claude_code_cli.format_argv("claude-sonnet-4-6",
 ...)` — but the fix closes the gap before the registry work reopens it.

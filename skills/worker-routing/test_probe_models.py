@@ -91,7 +91,14 @@ class CliContractTests(unittest.TestCase):
 
         with self.assertRaises(probe_models.UnsupportedEffortError) as caught:
             contract.format_argv("gpt-5.6-luna", "ultra")
-        self.assertIn("gpt-5.6-luna", str(caught.exception))
+        message = str(caught.exception)
+        # Pin the *full* ladder name, not just a substring: the override
+        # spelling `_CROSS_PROVIDER_EFFORT_LADDERS[('codex_cli',
+        # 'gpt-5.6-luna')]` also contains "gpt-5.6-luna", so a bare
+        # `assertIn("gpt-5.6-luna", ...)` would not catch the audited branch
+        # falsely naming the override table.
+        self.assertIn("for model 'gpt-5.6-luna'", message)
+        self.assertNotIn("_CROSS_PROVIDER_EFFORT_LADDERS", message)
         self.assertEqual(contract.format_argv("gpt-5.6-sol", "ultra")[:2], ("--model", "gpt-5.6-sol"))
 
     def test_format_argv_rejects_any_effort_for_a_model_with_no_ladder(self) -> None:
@@ -114,8 +121,10 @@ class CliContractTests(unittest.TestCase):
         contract wrongly inherited `agy`'s narrower ladder and rejected `max`
         even though the `claude` CLI itself accepts it — the audited entry
         made the claude path strictly worse than an unaudited model. The agy
-        path must still narrow to its own ladder; only the claude path must
-        fall back to its own provider-wide enum for this model."""
+        path must still narrow to its own ladder; the claude path narrows to
+        the `_CROSS_PROVIDER_EFFORT_LADDERS` override for this exact model
+        instead — it does *not* fall back to its own provider-wide enum,
+        which still contains `xhigh` (see the next test)."""
         audited = probe_models.AUDITED_MODEL_CATALOG["claude-sonnet-4-6"]
         self.assertEqual(audited.provider_id, "antigravity_cli")
         self.assertEqual(audited.supported_efforts, ("low", "medium", "high"))
@@ -135,19 +144,116 @@ class CliContractTests(unittest.TestCase):
             ("--model", "claude-sonnet-4-6", "--effort", "max"),
         )
 
+    def test_format_argv_falls_back_to_the_providers_enum_for_a_model_audited_elsewhere(self) -> None:
+        """Regression guard for finding F7 (live-model-catalog-audit.md §3):
+        a model audited under a *different* provider, with no
+        `_CROSS_PROVIDER_EFFORT_LADDERS` override for this exact pairing,
+        must fall through to *this* provider's whole CLI enum rather than
+        the other provider's narrower ladder.
+
+        `claude-sonnet-4-6` no longer witnesses this on its own: the test
+        above shows the `claude_code_cli` contract narrows it via the
+        `_CROSS_PROVIDER_EFFORT_LADDERS` override (branch 2), not the plain
+        provider-enum fallback (branch 3) — so no test reached branch 3 with
+        an audited model until this one. `claude-opus-4-6-thinking` and
+        `gpt-oss-120b-medium` are both audited under `antigravity_cli` too,
+        but neither has an override entry for `claude_code_cli` or
+        `codex_cli`, so routing them through those contracts must reach
+        branch 3 and succeed at efforts their *own* audited ladder does not
+        contain. Re-introducing the original F7 bug — consulting
+        `audited.supported_efforts` whenever the model is audited at all,
+        regardless of which provider it belongs to — makes both calls below
+        raise instead of returning argv, because `claude-opus-4-6-thinking`'s
+        audited ladder (`("low", "medium", "high")`) omits `max` and
+        `gpt-oss-120b-medium`'s (`("medium",)`) omits `high`. This guard must
+        survive ticket 46's re-keying of `AUDITED_MODEL_CATALOG`."""
+        opus_thinking = probe_models.AUDITED_MODEL_CATALOG["claude-opus-4-6-thinking"]
+        self.assertEqual(opus_thinking.provider_id, "antigravity_cli")
+        self.assertNotIn(
+            ("claude_code_cli", "claude-opus-4-6-thinking"),
+            probe_models._CROSS_PROVIDER_EFFORT_LADDERS,
+        )
+        claude_contract = probe_models.PROVIDER_CLI_CONTRACTS["claude_code_cli"]
+        self.assertEqual(
+            claude_contract.format_argv("claude-opus-4-6-thinking", "max"),
+            ("--model", "claude-opus-4-6-thinking", "--effort", "max"),
+        )
+
+        oss = probe_models.AUDITED_MODEL_CATALOG["gpt-oss-120b-medium"]
+        self.assertEqual(oss.provider_id, "antigravity_cli")
+        self.assertNotIn(
+            ("codex_cli", "gpt-oss-120b-medium"),
+            probe_models._CROSS_PROVIDER_EFFORT_LADDERS,
+        )
+        codex_contract = probe_models.PROVIDER_CLI_CONTRACTS["codex_cli"]
+        self.assertEqual(
+            codex_contract.format_argv("gpt-oss-120b-medium", "high"),
+            ("--model", "gpt-oss-120b-medium", "-c", 'model_reasoning_effort="high"'),
+        )
+
+    def test_format_argv_rejects_xhigh_for_the_agy_hosted_claude_sonnet_4_6(self) -> None:
+        """live-model-catalog-audit.md §3, finding F7: the doc previously claimed
+        `claude-sonnet-4-6` carries `xhigh` on the `claude` side too, but the
+        binary's own `xhigh` availability list names "Sonnet 5", not "Sonnet
+        4.6" — only `max` is real there. `xhigh` *is* in `claude_code_cli`'s
+        whole-provider `accepted_efforts` enum, so without the
+        `_CROSS_PROVIDER_EFFORT_LADDERS` correction the fallback branch above
+        would wave this exact pairing through as an argv the `claude` CLI
+        itself rejects."""
+        claude_contract = probe_models.PROVIDER_CLI_CONTRACTS["claude_code_cli"]
+        self.assertIn("xhigh", claude_contract.accepted_efforts)
+        with self.assertRaises(probe_models.UnsupportedEffortError):
+            claude_contract.format_argv("claude-sonnet-4-6", "xhigh")
+        self.assertEqual(
+            claude_contract.format_argv("claude-sonnet-4-6", "max"),
+            ("--model", "claude-sonnet-4-6", "--effort", "max"),
+        )
+
+    def test_the_cross_provider_override_names_its_own_table_not_the_providers_enum(self) -> None:
+        """Mirrors the `assertIn("for model 'gpt-5.6-luna'", ...)` pinning on
+        the audited branch above (`test_format_argv_checks_the_models_own_
+        ladder_not_the_provider_union`): `UnsupportedEffortError`'s message
+        must name the table that was actually consulted. Before this fix the
+        override branch reused `f"provider {self.provider_id}"` even when
+        `_CROSS_PROVIDER_EFFORT_LADDERS` supplied the ladder — sending a
+        maintainer to `claude_code_cli`'s `accepted_efforts`, which *does*
+        contain `xhigh`, so the plausible-looking fix (deleting `xhigh` from
+        that tuple) would silently break `claude-opus-5`/`claude-sonnet-5`/
+        `claude-fable-5`, which really do carry it."""
+        claude_contract = probe_models.PROVIDER_CLI_CONTRACTS["claude_code_cli"]
+        with self.assertRaises(probe_models.UnsupportedEffortError) as caught:
+            claude_contract.format_argv("claude-sonnet-4-6", "xhigh")
+        message = str(caught.exception)
+        self.assertIn("_CROSS_PROVIDER_EFFORT_LADDERS", message)
+        self.assertIn("claude-sonnet-4-6", message)
+        self.assertNotIn(f"provider {claude_contract.provider_id}", message)
+        self.assertIn("(accepted: ['low', 'medium', 'high', 'max'])", message)
+
     def test_format_argv_falls_back_to_the_provider_union_for_an_unaudited_model(self) -> None:
         """A model discovered live after this audit ran has no per-model
         ladder to consult, so the provider's whole CLI enum governs — this is
         what keeps a freshly-released model routable before the audit catches
-        up to it."""
+        up to it.
+
+        Mirrors the override branch's message pinning
+        (`test_the_cross_provider_override_names_its_own_table_not_the_
+        providers_enum`), which was itself hard-pinned while this branch's
+        `ladder_name` was asserted nowhere: the fallback branch must name
+        the *provider* whose whole enum was consulted, not the model and not
+        the override table."""
         contract = probe_models.PROVIDER_CLI_CONTRACTS["antigravity_cli"]
         self.assertNotIn("brand-new-model-high", probe_models.AUDITED_MODEL_CATALOG)
         self.assertEqual(
             contract.format_argv("brand-new-model-high", "high"),
             ("--model", "brand-new-model-high", "--effort", "high"),
         )
-        with self.assertRaises(probe_models.UnsupportedEffortError):
+        with self.assertRaises(probe_models.UnsupportedEffortError) as caught:
             contract.format_argv("brand-new-model-high", "xhigh")
+        message = str(caught.exception)
+        self.assertIn(f"for provider {contract.provider_id}", message)
+        self.assertNotIn("brand-new-model-high", message)
+        self.assertNotIn("_CROSS_PROVIDER_EFFORT_LADDERS", message)
+        self.assertIn("(accepted: ['low', 'medium', 'high'])", message)
 
 
 class AuditedCatalogTests(unittest.TestCase):
@@ -243,6 +349,64 @@ class AuditedCatalogTests(unittest.TestCase):
             contract = probe_models.PROVIDER_CLI_CONTRACTS[model.provider_id]
             with self.subTest(model_id=model_id):
                 self.assertLessEqual(set(model.supported_efforts), set(contract.accepted_efforts))
+
+    def test_cross_provider_effort_ladders_stay_inside_the_providers_enum_and_reachable(self) -> None:
+        """Golden Rule 8: `_CROSS_PROVIDER_EFFORT_LADDERS` is `format_argv`'s
+        other ladder table, and the test above gives `AUDITED_MODEL_CATALOG`
+        a guard this one never got. Two invariants:
+        (a) every override ladder is a subset of that provider's whole CLI
+            enum — a value the CLI cannot parse (e.g. `"ultra"` for
+            `claude_code_cli`) would make `format_argv` emit an argv the
+            provider rejects, inverting the fail-closed contract described
+            at probe_models.py:203-206.
+        (b) no dead keys — a `(provider_id, model_id)` pair whose model is
+            audited *under that same provider* takes `format_argv`'s audited
+            branch (probe_models.py:236-239) before this table is ever
+            consulted, so such a key could never fire."""
+        for (provider_id, model_id), ladder in probe_models._CROSS_PROVIDER_EFFORT_LADDERS.items():
+            with self.subTest(provider_id=provider_id, model_id=model_id):
+                contract = probe_models.PROVIDER_CLI_CONTRACTS[provider_id]
+                self.assertLessEqual(set(ladder), set(contract.accepted_efforts))
+
+                audited = probe_models.AUDITED_MODEL_CATALOG.get(model_id)
+                reachable = audited is None or audited.provider_id != provider_id
+                self.assertTrue(
+                    reachable,
+                    f"({provider_id!r}, {model_id!r}) is audited under {provider_id!r} itself "
+                    "and can never fall through to this table",
+                )
+
+    def test_claude_5_models_carry_the_full_five_rung_ladder_and_a_high_default(self) -> None:
+        """`_CLAUDE_EVIDENCE` states, per model, `default_effort:"high"` and
+        the five-rung ladder (low, medium, high, xhigh, max) read directly
+        from the installed `claude` 2.1.241 binary's catalog — this
+        project's own T3 workers. Only `context_window` was pinned before
+        (`test_claude_context_windows_match_the_installed_binarys_catalog`
+        above); narrowing `_CLAUDE_EFFORTS` to `("low", "medium", "high")`
+        left the whole suite green until this test."""
+        for model_id in ("claude-opus-5", "claude-sonnet-5", "claude-fable-5"):
+            with self.subTest(model_id=model_id):
+                model = probe_models.AUDITED_MODEL_CATALOG[model_id]
+                self.assertEqual(model.supported_efforts, ("low", "medium", "high", "xhigh", "max"))
+                self.assertEqual(model.default_effort, "high")
+
+    def test_gpt_oss_120b_is_audited_under_antigravity_not_codex(self) -> None:
+        """The audit's own headline drift finding: `production_invoker.
+        CODEX_MODELS` wrongly classifies `gpt-oss-120b-medium` as a Codex
+        model, but `agy models` lists it, not `codex`'s catalog."""
+        self.assertEqual(
+            probe_models.AUDITED_MODEL_CATALOG["gpt-oss-120b-medium"].provider_id,
+            "antigravity_cli",
+        )
+
+    def test_claude_opus_4_6_thinking_is_pinned_to_the_agy_three_rung_ladder(self) -> None:
+        """Audited under `antigravity_cli` (`agy models`), so its ladder is
+        the shorter `agy --help` enum (low|medium|high) rather than the
+        `claude` binary's own five-rung one."""
+        self.assertEqual(
+            probe_models.AUDITED_MODEL_CATALOG["claude-opus-4-6-thinking"].supported_efforts,
+            ("low", "medium", "high"),
+        )
 
 
 class DisplayLabelMappingTests(unittest.TestCase):
@@ -356,6 +520,28 @@ class LmStudioProbeTests(unittest.TestCase):
         self.assertTrue(all(model.source == "live" for model in probe.models))
         self.assertIsNone(probe.error)
 
+    def test_the_audited_label_wins_over_the_raw_lm_studio_model_id(self) -> None:
+        """The twin of `CliProviderProbeTests.test_the_audited_label_wins_
+        over_agys_own_listed_label` and `CodexCatalogCacheTests.test_the_
+        audited_label_wins_over_codexs_own_display_name`, closed here on the
+        LM Studio side: `_local_probed_model`'s `if audited is not None:`
+        branch is what supplies the audited display label
+        `"Qwen3.8 27B MLX (Local)"` rather than the raw id
+        `"qwen3.8-27b-mlx"` LM Studio's `/v1/models` actually returns —
+        `display_label` is the only field that differs between the audited
+        and not-audited branches, so a test only checking `model_id` and
+        `source` (as the test above does) cannot catch that branch being
+        disabled."""
+
+        def opener(url: str, timeout: float) -> io.BytesIO:
+            return self._response({"data": [{"id": "qwen3.8-27b-mlx"}]})
+
+        probe = probe_models.probe_lm_studio(opener=opener)
+
+        qwen = probe.models[0]
+        self.assertEqual(qwen.display_label, "Qwen3.8 27B MLX (Local)")
+        self.assertNotEqual(qwen.display_label, "qwen3.8-27b-mlx")
+
     def test_probe_lm_studio_defaults_to_the_module_constant_timeout(self) -> None:
         """Golden Rule 6: the previous version of this test passed
         `timeout=0.2` explicitly and then asserted the captured value equals
@@ -375,6 +561,27 @@ class LmStudioProbeTests(unittest.TestCase):
         # `probe_models.DEFAULT_PROBE_TIMEOUT_SECONDS` would be a tautology
         # that can't notice the constant itself drifting away from 0.2.
         self.assertEqual(captured["timeout"], 0.2)
+
+    def test_probe_lm_studio_defaults_to_the_module_constant_endpoint(self) -> None:
+        """`LM_STUDIO_MODELS_ENDPOINT` is the third member of the probe
+        contract, alongside `DEFAULT_PROBE_TIMEOUT_SECONDS` (pinned just
+        above) and `CLI_PROBE_TIMEOUT_SECONDS` — but it was the only one
+        never pinned to a literal. The routing protocol documents this exact
+        address as `127.0.0.1:1234/v1/models`."""
+        captured: dict[str, object] = {}
+
+        def opener(url: str, timeout: float) -> io.BytesIO:
+            captured["url"] = url
+            return self._response({"data": [{"id": "qwen3.8-27b-mlx"}]})
+
+        probe_models.probe_lm_studio(opener=opener)
+
+        # Literal, not the constant: the routing protocol documents LM
+        # Studio's probe address as 127.0.0.1:1234/v1/models. Comparing
+        # against `probe_models.LM_STUDIO_MODELS_ENDPOINT` would be a
+        # tautology that can't notice the constant itself drifting away
+        # from that address.
+        self.assertEqual(captured["url"], "http://127.0.0.1:1234/v1/models")
 
     def test_probe_lm_studio_forwards_a_non_default_endpoint_to_the_opener(self) -> None:
         captured: dict[str, object] = {}
@@ -464,6 +671,7 @@ class LmStudioProbeTests(unittest.TestCase):
         self.assertEqual(discovered.display_label, "brand-new-local-model")
         self.assertEqual(discovered.supported_efforts, ())
         self.assertTrue(discovered.local_only)
+        self.assertEqual(discovered.source, "live")
 
     def test_an_unreachable_server_degrades_instead_of_raising(self) -> None:
         def opener(url: str, timeout: float) -> io.BytesIO:
@@ -896,6 +1104,18 @@ class CliProviderProbeTests(unittest.TestCase):
             probe_models.probe_cli_provider("lm_studio_local")
         self.assertIn("probe_lm_studio", str(caught.exception))
 
+    def test_an_unrecognized_provider_id_raises_unknown_provider_error(self) -> None:
+        """`UnknownProviderError` is exported in `__all__`, but before this
+        test nothing reached `probe_cli_provider`'s `if contract is None:
+        raise UnknownProviderError(...)` guard — the twin guard three lines
+        below (the `lm_studio_local` case just above) already had a test.
+        Swapping the raised class for the module's own `ModelCatalogError`
+        base class left the whole suite green until this pinned the
+        subclass specifically."""
+        with self.assertRaises(probe_models.UnknownProviderError) as caught:
+            probe_models.probe_cli_provider("totally_unknown_provider")
+        self.assertIn("totally_unknown_provider", str(caught.exception))
+
 
 class CodexCatalogCacheTests(unittest.TestCase):
     """`codex` publishes no list command but caches the catalog it fetched.
@@ -937,7 +1157,11 @@ class CodexCatalogCacheTests(unittest.TestCase):
 
         probe = self._probe(reader)
 
-        self.assertEqual(seen, [probe_models.CODEX_MODELS_CACHE_PATH])
+        # Literal, not the constant: the module docstring commits Codex's
+        # catalog cache to ~/.codex/models_cache.json. Comparing against
+        # `probe_models.CODEX_MODELS_CACHE_PATH` would be a tautology that
+        # can't notice the constant itself drifting away from that path.
+        self.assertEqual(seen, [Path.home() / ".codex" / "models_cache.json"])
         sol = {model.model_id: model for model in probe.models}["gpt-5.6-sol"]
         self.assertEqual(sol.source, "live")
         self.assertEqual(sol.supported_efforts, ("low", "ultra"))
@@ -1206,13 +1430,48 @@ class SnapshotTests(unittest.TestCase):
         )
 
     def test_to_dict_is_json_serializable_and_keeps_capability_fields(self) -> None:
+        """Golden Rule 5: `assertIn("providers", round_tripped)` used to pass
+        even when `CatalogSnapshot.to_dict()`'s `providers` list (probe_
+        models.py's `to_dict` methods) was replaced with hardcoded
+        constants — it never checked the list's actual contents. This also
+        pins `ProbedModel.to_dict()`'s `local_only`, `context_window`,
+        `source`, and `display_label`, which were unasserted the same way
+        (`provider_id`, `supported_efforts`, and `default_effort` were
+        already pinned above)."""
         payload = self._snapshot().to_dict()
         round_tripped = json.loads(json.dumps(payload))
         sol = round_tripped["models"]["gpt-5.6-sol"]
         self.assertEqual(sol["provider_id"], "codex_cli")
         self.assertEqual(sol["supported_efforts"], ["low", "medium", "high", "xhigh", "max", "ultra"])
         self.assertEqual(sol["default_effort"], "low")
-        self.assertIn("providers", round_tripped)
+        # The codex cache reader in `_snapshot()` raises `FileNotFoundError`,
+        # so this entry is the audited-snapshot fallback, not a live one.
+        self.assertEqual(sol["source"], "audited")
+        self.assertEqual(sol["context_window"], 272000)
+        self.assertFalse(sol["local_only"])
+        self.assertEqual(sol["display_label"], "Codex 5.6 Sol")
+
+        providers = round_tripped["providers"]
+        self.assertEqual(len(providers), 4)
+        by_provider = {provider["provider_id"]: provider for provider in providers}
+        self.assertEqual(set(by_provider), set(probe_models.PROVIDER_IDS))
+
+        agy = by_provider["antigravity_cli"]
+        self.assertTrue(agy["available"])
+        self.assertEqual(agy["binary_path"], "/bin/agy")
+        self.assertIsNone(agy["endpoint"])
+        self.assertIsNone(agy["error"])
+        self.assertEqual(agy["model_ids"], ["gemini-3.7-flash-low"])
+
+        lm_studio = by_provider["lm_studio_local"]
+        self.assertTrue(lm_studio["available"])
+        self.assertIsNone(lm_studio["binary_path"])
+        # Literal, not `probe_models.LM_STUDIO_MODELS_ENDPOINT`: that
+        # constant is exactly what `probe_all`'s default `endpoint=` reaches
+        # this field through, so comparing against it would be a tautology.
+        self.assertEqual(lm_studio["endpoint"], "http://127.0.0.1:1234/v1/models")
+        self.assertIsNone(lm_studio["error"])
+        self.assertEqual(lm_studio["model_ids"], ["qwen3.8-27b-mlx"])
 
 
 class ConfigDriftTests(unittest.TestCase):
@@ -1243,6 +1502,119 @@ class ConfigDriftTests(unittest.TestCase):
         )
         self.assertEqual(
             [finding for finding in findings if finding.subject == "providers.codex_sol"], []
+        )
+
+    def test_a_provider_with_a_mismatched_adapter_is_reported(self) -> None:
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider(
+                "wrong_adapter", "gpt-5.6-sol", "high", adapter="claude_code_cli"
+            )
+        )
+
+        matches = [
+            finding
+            for finding in findings
+            if finding.kind == "mismatched_provider" and finding.subject == "providers.wrong_adapter"
+        ]
+        self.assertEqual(len(matches), 1)
+        self.assertIn("'codex_cli'", matches[0].detail)
+        self.assertIn("'claude_code_cli'", matches[0].detail)
+
+    def test_an_unknown_provider_adapter_does_not_crash_the_audit(self) -> None:
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider(
+                "unknown_adapter", "gpt-5.6-sol", "high", adapter="unknown_adapter"
+            )
+        )
+
+        self.assertEqual(
+            [
+                (finding.kind, finding.subject)
+                for finding in findings
+                if finding.subject == "providers.unknown_adapter"
+            ],
+            [("mismatched_provider", "providers.unknown_adapter")],
+        )
+
+    def test_cross_provider_model_with_matching_override_produces_no_mismatched_provider(self) -> None:
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider(
+                "claude_sonnet_4_6", "claude-sonnet-4-6", "max", adapter="claude_code_cli"
+            )
+        )
+
+        self.assertEqual(
+            [
+                finding
+                for finding in findings
+                if finding.subject == "providers.claude_sonnet_4_6"
+            ],
+            [],
+        )
+
+    def test_live_snapshot_models_reconcile_without_unknown_model_finding(self) -> None:
+        snapshot = self._snapshot_with_live_model()
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider("live_model", "live-model", "high", adapter="codex_cli"),
+            snapshot=snapshot,
+        )
+
+        self.assertNotIn("unknown_model", [finding.kind for finding in findings])
+
+    def test_live_snapshot_replaces_audited_catalog_for_live_probed_provider(self) -> None:
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider("codex_sol", "gpt-5.6-sol", "high", adapter="codex_cli"),
+            snapshot=self._snapshot_with_live_model(),
+        )
+
+        self.assertEqual(
+            [
+                (finding.kind, finding.subject)
+                for finding in findings
+                if finding.subject == "providers.codex_sol"
+            ],
+            [("unknown_model", "providers.codex_sol")],
+        )
+
+    def test_authoritative_live_omission_is_unknown_not_stale_provider_mismatch(self) -> None:
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider(
+                "omitted_model", "gpt-5.6-sol", "high", adapter="claude_code_cli"
+            ),
+            snapshot=self._snapshot_with_live_model(),
+        )
+
+        self.assertEqual(
+            [
+                (finding.kind, finding.subject)
+                for finding in findings
+                if finding.subject == "providers.omitted_model"
+            ],
+            [("unknown_model", "providers.omitted_model")],
+        )
+
+    def test_live_snapshot_resolves_display_labels_in_supported_models_and_fallbacks(self) -> None:
+        base = routing_config.get_default_routing_config().to_dict()
+        base["providers"] = {}
+        base["supported_models"] = ["Live Model"]
+        base["roster_topology"] = {"role_fallback_chains": {"planner": ["live model"]}}
+        config = routing_config.parse_routing_config(base)
+
+        findings = probe_models.audit_config_drift(config, snapshot=self._snapshot_with_live_model())
+
+        self.assertEqual([finding for finding in findings if finding.kind == "unmapped_label"], [])
+
+    def test_live_snapshot_checks_provider_ownership_and_effort_ladders(self) -> None:
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider(
+                "live_model", "Live Model", "ultra", adapter="claude_code_cli"
+            ),
+            snapshot=self._snapshot_with_live_model(),
+        )
+
+        self.assertEqual(
+            {finding.kind for finding in findings if finding.subject == "providers.live_model"},
+            {"mismatched_provider"},
         )
 
     def test_a_supported_models_label_with_no_wire_identifier_is_reported(self) -> None:
@@ -1335,13 +1707,44 @@ class ConfigDriftTests(unittest.TestCase):
         )
 
     @staticmethod
-    def _config_with_provider(provider_id: str, model: str, effort: str) -> routing_config.RoutingConfig:
+    def _config_with_provider(
+        provider_id: str, model: str, effort: str, *, adapter: str | None = None
+    ) -> routing_config.RoutingConfig:
+        if adapter is None:
+            audited = probe_models.AUDITED_MODEL_CATALOG.get(model)
+            adapter = audited.provider_id if audited is not None else "claude_code_cli"
         base = routing_config.get_default_routing_config().to_dict()
         base["providers"] = {
-            provider_id: {"adapter": "x", "model": model, "default_reasoning_effort": effort}
+            provider_id: {"adapter": adapter, "model": model, "default_reasoning_effort": effort}
         }
         base["supported_models"] = []
         return routing_config.parse_routing_config(base)
+
+    @staticmethod
+    def _snapshot_with_live_model() -> probe_models.CatalogSnapshot:
+        return probe_models.CatalogSnapshot(
+            providers=(
+                probe_models.ProviderProbe(
+                    provider_id="codex_cli",
+                    available=True,
+                    binary_path="/bin/codex",
+                    endpoint=None,
+                    models=(
+                        probe_models.ProbedModel(
+                            model_id="live-model",
+                            display_label="Live Model",
+                            provider_id="codex_cli",
+                            supported_efforts=("low", "high"),
+                            default_effort="high",
+                            context_window=None,
+                            local_only=False,
+                            source="live",
+                        ),
+                    ),
+                    error=None,
+                ),
+            )
+        )
 
 
 class TextReportRenderingTests(unittest.TestCase):

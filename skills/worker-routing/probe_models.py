@@ -103,7 +103,7 @@ LM_STUDIO_MODELS_ENDPOINT = "http://127.0.0.1:1234/v1/models"
 # dashboard renders it.
 ProviderId = Literal["claude_code_cli", "codex_cli", "antigravity_cli", "lm_studio_local"]
 ModelSource = Literal["live", "audited"]
-DriftKind = Literal["unknown_model", "unsupported_effort", "unmapped_label"]
+DriftKind = Literal["unknown_model", "unsupported_effort", "unmapped_label", "mismatched_provider"]
 
 PROVIDER_IDS: tuple[ProviderId, ...] = (
     "claude_code_cli",
@@ -153,9 +153,13 @@ class UnsupportedEffortError(ModelCatalogError):
     """Raised when a reasoning effort is outside the ladder that was checked.
 
     ``ladder`` names which enum was violated — a specific model's
-    ``supported_efforts`` when the model is audited, or the provider's whole
-    CLI enum when it is not — so the message tells a caller which table to
-    go fix rather than just repeating the rejected value.
+    ``supported_efforts`` when the model is audited under *this* provider,
+    the ``_CROSS_PROVIDER_EFFORT_LADDERS`` override when the model is
+    audited under a *different* provider that publishes a narrower ladder
+    for this exact ``(provider_id, model_id)`` pairing, or the provider's
+    whole CLI enum otherwise (unaudited entirely, or audited elsewhere with
+    no override on file) — so the message tells a caller which table to go
+    fix rather than just repeating the rejected value.
     """
 
     def __init__(self, provider_id: str, effort: str, accepted: tuple[str, ...], *, ladder: str) -> None:
@@ -214,8 +218,13 @@ class CliContract:
         would otherwise have the *other* provider's narrower ladder wrongly
         applied to it. A model unaudited for this provider — either not in
         the catalog at all, or audited only under a different provider's
-        contract — falls back to this provider's whole CLI enum, since no
-        per-model ladder for *this* provider exists for it yet.
+        contract — falls back to this provider's whole CLI enum, *unless*
+        `_CROSS_PROVIDER_EFFORT_LADDERS` names a narrower one for this exact
+        ``(provider_id, model_id)`` pair: `claude_code_cli`'s own enum
+        contains `xhigh`, but the `claude` binary's `xhigh` availability list
+        names "Sonnet 5", not "Sonnet 4.6", so the whole-enum fallback alone
+        would wave a `claude-sonnet-4-6` + `xhigh` pairing through as if it
+        were real.
         """
         if self.model_argv_template is None:
             raise ModelCatalogError(
@@ -229,8 +238,13 @@ class CliContract:
             ladder = audited.supported_efforts
             ladder_name = f"model {model_id!r}"
         else:
-            ladder = self.accepted_efforts
-            ladder_name = f"provider {self.provider_id}"
+            override = _CROSS_PROVIDER_EFFORT_LADDERS.get((self.provider_id, model_id))
+            if override is not None:
+                ladder = override
+                ladder_name = f"_CROSS_PROVIDER_EFFORT_LADDERS[{(self.provider_id, model_id)!r}]"
+            else:
+                ladder = self.accepted_efforts
+                ladder_name = f"provider {self.provider_id}"
         if effort not in ladder:
             raise UnsupportedEffortError(self.provider_id, effort, ladder, ladder=ladder_name)
         effort_argv = self.effort_argv_template or ()
@@ -539,6 +553,20 @@ AUDITED_MODEL_CATALOG: Mapping[str, AuditedModel] = MappingProxyType(
     {model.model_id: model for model in _AUDITED_MODELS}
 )
 
+# Ticket 45 F7 / live-model-catalog-audit.md §3: a narrow, explicit
+# correction for the one case where a model's ladder on an *unaudited*
+# provider is known to be narrower than that provider's whole CLI enum.
+# `claude-sonnet-4-6` is audited only under `antigravity_cli`, so
+# `format_argv`'s fallback branch would otherwise trust `claude_code_cli`'s
+# entire `accepted_efforts` union — which includes `xhigh` — even though the
+# `claude` binary's own `xhigh` availability list names "Sonnet 5", not
+# "Sonnet 4.6". This is a data-level patch, not a re-keying of
+# `AUDITED_MODEL_CATALOG` to `(provider_id, model_id)`: that schema decision
+# belongs to ticket 46's capability registry.
+_CROSS_PROVIDER_EFFORT_LADDERS: Mapping[tuple[ProviderId, str], tuple[str, ...]] = MappingProxyType(
+    {("claude_code_cli", "claude-sonnet-4-6"): ("low", "medium", "high", "max")}
+)
+
 
 def _build_label_index(models: Iterable[AuditedModel]) -> Mapping[str, str]:
     """Every accepted spelling → wire identifier, over ``models``.
@@ -570,7 +598,7 @@ _CASEFOLDED_LABEL_INDEX: Mapping[str, str] = MappingProxyType(
 )
 
 
-def resolve_model_id(label_or_id: str) -> str:
+def resolve_model_id(label_or_id: str, *, snapshot: CatalogSnapshot | None = None) -> str:
     """Resolve a human label, vendor alias, or wire identifier to the exact
     identifier a provider CLI accepts. Raises `UnknownModelError` rather than
     passing an unrecognized string through to a ``--model`` flag."""
@@ -580,6 +608,15 @@ def resolve_model_id(label_or_id: str) -> str:
     folded = _CASEFOLDED_LABEL_INDEX.get(label_or_id.strip().casefold())
     if folded is not None:
         return folded
+    if snapshot is not None:
+        live_models = snapshot.models()
+        for model in live_models:
+            if label_or_id in (model.model_id, model.display_label):
+                return model.model_id
+        folded_input = label_or_id.strip().casefold()
+        for model in live_models:
+            if folded_input in (model.model_id.casefold(), model.display_label.casefold()):
+                return model.model_id
     raise UnknownModelError(label_or_id)
 
 
@@ -1080,11 +1117,14 @@ class DriftFinding:
     detail: str
 
 
-def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFinding, ...]:
+def audit_config_drift(
+    config: routing_config.RoutingConfig, snapshot: CatalogSnapshot | None = None
+) -> tuple[DriftFinding, ...]:
     """Compare a routing config against the audited catalog.
 
-    Three kinds of drift are reported: ``unknown_model`` (a configured
+    Four kinds of drift are reported: ``unknown_model`` (a configured
     provider names an identifier no installed CLI publishes),
+    ``mismatched_provider`` (a model belongs to a different provider adapter),
     ``unsupported_effort`` (its default effort is outside that model's ladder),
     and ``unmapped_label`` (a label that resolves to no wire identifier — both
     in `supported_models` and in `roster_topology.role_fallback_chains`, since
@@ -1093,11 +1133,13 @@ def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFindi
     guard — a config edit that reintroduces a stale identifier fails the test
     that pins them.
     """
+    active_catalogs = _active_model_catalogs(snapshot)
+
     findings: list[DriftFinding] = []
     for provider_id, provider in config.providers.items():
         subject = f"providers.{provider_id}"
         try:
-            model_id = resolve_model_id(provider.model)
+            model_id = resolve_model_id(provider.model, snapshot=snapshot)
         except UnknownModelError:
             findings.append(
                 DriftFinding(
@@ -1107,10 +1149,35 @@ def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFindi
                 )
             )
             continue
-        audited = AUDITED_MODEL_CATALOG[model_id]
+        adapter_catalog = active_catalogs.get(provider.adapter)
+        model_entry = adapter_catalog.get(model_id) if adapter_catalog is not None else None
+        if model_entry is None:
+            other_provider_id = _other_publishing_provider(
+                model_id, provider.adapter, active_catalogs
+            )
+            if other_provider_id is None:
+                findings.append(
+                    DriftFinding(
+                        kind="unknown_model",
+                        subject=subject,
+                        detail=f"model {provider.model!r} is not published by any installed provider",
+                    )
+                )
+            else:
+                findings.append(
+                    DriftFinding(
+                        kind="mismatched_provider",
+                        subject=subject,
+                        detail=(
+                            f"model {model_id!r} belongs to provider {other_provider_id!r}, "
+                            f"not {provider.adapter!r}"
+                        ),
+                    )
+                )
+            continue
         effort = provider.default_reasoning_effort
-        if effort not in audited.supported_efforts:
-            supported = list(audited.supported_efforts) or "none (this model has no effort ladder)"
+        if effort not in model_entry.supported_efforts:
+            supported = list(model_entry.supported_efforts) or "none (this model has no effort ladder)"
             findings.append(
                 DriftFinding(
                     kind="unsupported_effort",
@@ -1120,7 +1187,7 @@ def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFindi
             )
     for label in config.supported_models:
         try:
-            resolve_model_id(label)
+            resolve_model_id(label, snapshot=snapshot)
         except UnknownModelError:
             findings.append(
                 DriftFinding(
@@ -1132,7 +1199,7 @@ def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFindi
     for role, chain in config.roster_topology.role_fallback_chains.items():
         for label in chain:
             try:
-                resolve_model_id(label)
+                resolve_model_id(label, snapshot=snapshot)
             except UnknownModelError:
                 findings.append(
                     DriftFinding(
@@ -1143,6 +1210,66 @@ def audit_config_drift(config: routing_config.RoutingConfig) -> tuple[DriftFindi
                 )
     deduplicated = tuple(dict.fromkeys(findings))
     return tuple(sorted(deduplicated, key=lambda finding: (finding.kind, finding.subject)))
+
+
+def _active_model_catalogs(
+    snapshot: CatalogSnapshot | None,
+) -> dict[ProviderId, dict[str, AuditedModel | ProbedModel]]:
+    """Build each adapter's current catalog without retaining stale models.
+
+    A probe with at least one live model is authoritative for that provider:
+    its listing replaces, rather than extends, the audited snapshot. Providers
+    without such a listing retain their audited fallback. Explicit cross-
+    provider ladders are published under their target adapter too, since they
+    describe real model/provider pairings absent from the one-key audited map.
+    """
+    live_probes = (
+        {
+            probe.provider_id: probe
+            for probe in snapshot.providers
+            if any(model.source == "live" for model in probe.models)
+        }
+        if snapshot is not None
+        else {}
+    )
+    catalogs: dict[ProviderId, dict[str, AuditedModel | ProbedModel]] = {}
+    for provider_id in PROVIDER_IDS:
+        probe = live_probes.get(provider_id)
+        if probe is None:
+            models: Iterable[AuditedModel | ProbedModel] = (
+                model for model in _AUDITED_MODELS if model.provider_id == provider_id
+            )
+        else:
+            models = probe.models
+        catalogs[provider_id] = {model.model_id: model for model in models}
+
+    for (provider_id, model_id), ladder in _CROSS_PROVIDER_EFFORT_LADDERS.items():
+        audited = AUDITED_MODEL_CATALOG.get(model_id)
+        if audited is None:
+            continue
+        catalogs[provider_id][model_id] = ProbedModel(
+            model_id=model_id,
+            display_label=audited.display_label,
+            provider_id=provider_id,
+            supported_efforts=ladder,
+            default_effort=audited.default_effort if audited.default_effort in ladder else None,
+            context_window=audited.context_window,
+            local_only=audited.local_only,
+            source="audited",
+        )
+    return catalogs
+
+
+def _other_publishing_provider(
+    model_id: str,
+    provider_id: ProviderId,
+    active_catalogs: Mapping[ProviderId, Mapping[str, AuditedModel | ProbedModel]],
+) -> ProviderId | None:
+    """Find another adapter publishing ``model_id`` in the active catalogs."""
+    for other_provider_id in PROVIDER_IDS:
+        if other_provider_id != provider_id and model_id in active_catalogs[other_provider_id]:
+            return other_provider_id
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1228,7 +1355,7 @@ def main(
         cli_timeout=args.cli_timeout,
         list_models=not args.fast,
     )
-    findings = audit_config_drift(config_loader()) if args.audit else ()
+    findings = audit_config_drift(config_loader(), snapshot=snapshot) if args.audit else ()
 
     if args.json:
         payload = snapshot.to_dict()
