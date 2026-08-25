@@ -1187,7 +1187,7 @@ def audit_config_drift(
             )
     for label in config.supported_models:
         try:
-            resolve_model_id(label, snapshot=snapshot)
+            model_id = resolve_model_id(label, snapshot=snapshot)
         except UnknownModelError:
             findings.append(
                 DriftFinding(
@@ -1196,10 +1196,19 @@ def audit_config_drift(
                     detail=f"label {label!r} maps to no wire identifier in the audited catalog",
                 )
             )
+        else:
+            if not any(model_id in catalog for catalog in active_catalogs.values()):
+                findings.append(
+                    DriftFinding(
+                        kind="unmapped_label",
+                        subject=f"supported_models[{label}]",
+                        detail=f"label {label!r} maps to no active wire identifier",
+                    )
+                )
     for role, chain in config.roster_topology.role_fallback_chains.items():
         for label in chain:
             try:
-                resolve_model_id(label, snapshot=snapshot)
+                model_id = resolve_model_id(label, snapshot=snapshot)
             except UnknownModelError:
                 findings.append(
                     DriftFinding(
@@ -1208,6 +1217,15 @@ def audit_config_drift(
                         detail=f"label {label!r} maps to no wire identifier in the audited catalog",
                     )
                 )
+            else:
+                if not any(model_id in catalog for catalog in active_catalogs.values()):
+                    findings.append(
+                        DriftFinding(
+                            kind="unmapped_label",
+                            subject=f"roster_topology.{role}[{label}]",
+                            detail=f"label {label!r} maps to no active wire identifier",
+                        )
+                    )
     deduplicated = tuple(dict.fromkeys(findings))
     return tuple(sorted(deduplicated, key=lambda finding: (finding.kind, finding.subject)))
 
@@ -1244,6 +1262,8 @@ def _active_model_catalogs(
         catalogs[provider_id] = {model.model_id: model for model in models}
 
     for (provider_id, model_id), ladder in _CROSS_PROVIDER_EFFORT_LADDERS.items():
+        if provider_id in live_probes:
+            continue
         audited = AUDITED_MODEL_CATALOG.get(model_id)
         if audited is None:
             continue

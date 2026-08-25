@@ -1604,6 +1604,47 @@ class ConfigDriftTests(unittest.TestCase):
 
         self.assertEqual([finding for finding in findings if finding.kind == "unmapped_label"], [])
 
+    def test_live_omission_reports_resolved_supported_and_fallback_labels_as_unmapped(self) -> None:
+        """Resolution through the audited index is insufficient when the
+        corresponding provider was live-probed and no longer publishes it."""
+        base = routing_config.get_default_routing_config().to_dict()
+        base["providers"] = {}
+        base["supported_models"] = ["Claude Opus 5 (Thinking)"]
+        base["roster_topology"] = {
+            "role_fallback_chains": {"planner": ["Claude Opus 5 (Thinking)"]}
+        }
+        config = routing_config.parse_routing_config(base)
+        snapshot = self._snapshot_with_live_claude_model()
+
+        findings = probe_models.audit_config_drift(config, snapshot=snapshot)
+
+        unmapped = [finding for finding in findings if finding.kind == "unmapped_label"]
+        self.assertEqual(
+            [(finding.subject, finding.detail) for finding in unmapped],
+            [
+                (
+                    "roster_topology.planner[Claude Opus 5 (Thinking)]",
+                    "label 'Claude Opus 5 (Thinking)' maps to no active wire identifier",
+                ),
+                (
+                    "supported_models[Claude Opus 5 (Thinking)]",
+                    "label 'Claude Opus 5 (Thinking)' maps to no active wire identifier",
+                ),
+            ],
+        )
+
+    def test_live_claude_catalog_is_not_changed_by_cross_provider_ladders(self) -> None:
+        """A live listing is authoritative: overlays neither replace its
+        ladder nor restore cross-provider models that it omitted."""
+        snapshot = self._snapshot_with_live_claude_model(
+            model_id="claude-sonnet-4-6", supported_efforts=("high",)
+        )
+
+        catalog = probe_models._active_model_catalogs(snapshot)["claude_code_cli"]
+
+        self.assertEqual(catalog["claude-sonnet-4-6"].supported_efforts, ("high",))
+        self.assertNotIn("claude-opus-5", catalog)
+
     def test_live_snapshot_checks_provider_ownership_and_effort_ladders(self) -> None:
         findings = probe_models.audit_config_drift(
             self._config_with_provider(
@@ -1735,6 +1776,34 @@ class ConfigDriftTests(unittest.TestCase):
                             display_label="Live Model",
                             provider_id="codex_cli",
                             supported_efforts=("low", "high"),
+                            default_effort="high",
+                            context_window=None,
+                            local_only=False,
+                            source="live",
+                        ),
+                    ),
+                    error=None,
+                ),
+            )
+        )
+
+    @staticmethod
+    def _snapshot_with_live_claude_model(
+        *, model_id: str = "live-claude-model", supported_efforts: tuple[str, ...] = ("low", "high")
+    ) -> probe_models.CatalogSnapshot:
+        return probe_models.CatalogSnapshot(
+            providers=(
+                probe_models.ProviderProbe(
+                    provider_id="claude_code_cli",
+                    available=True,
+                    binary_path="/bin/claude",
+                    endpoint=None,
+                    models=(
+                        probe_models.ProbedModel(
+                            model_id=model_id,
+                            display_label="Live Claude Model",
+                            provider_id="claude_code_cli",
+                            supported_efforts=supported_efforts,
                             default_effort="high",
                             context_window=None,
                             local_only=False,
@@ -2006,12 +2075,15 @@ class CliEntryPointTests(unittest.TestCase):
                 "default_reasoning_effort": "high",
             }
         }
-        base["supported_models"] = ["Codex 5.6 Sol", "Gemini 3.1 Pro (Low)"]
+        # `_agy_listing` is a live, authoritative antigravity catalog, so
+        # this fixture must use its published model rather than the stale
+        # audited Gemini 3.1 Pro entry.
+        base["supported_models"] = ["Codex 5.6 Sol", "Gemini 3.7 Flash (Low)"]
         # The checked-in default `roster_topology.critic_b` chain names the
         # unmapped bare "Gemini 3.6 Flash" (see ConfigDriftTests), which would
         # make this "matches the catalog" fixture carry drift of its own.
         base["roster_topology"] = {
-            "role_fallback_chains": {"planner": ["Codex 5.6 Sol", "Gemini 3.1 Pro (Low)"]}
+            "role_fallback_chains": {"planner": ["Codex 5.6 Sol", "Gemini 3.7 Flash (Low)"]}
         }
         return routing_config.parse_routing_config(base)
 
