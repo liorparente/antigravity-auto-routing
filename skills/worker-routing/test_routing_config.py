@@ -15,8 +15,9 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import routing_config
+    from . import probe_models, routing_config
 else:
+    import probe_models  # type: ignore[no-redef]
     import routing_config  # type: ignore[no-redef]
 
 
@@ -437,10 +438,13 @@ class ModelCapabilityRegistryTests(unittest.TestCase):
                 ("claude_code_cli", "claude-opus-5")
             ]
 
-    def test_f7_cross_provider_model_gets_its_own_narrower_entry(self) -> None:
+    def test_f7_cross_provider_model_gets_its_own_distinct_entry(self) -> None:
         """`claude-sonnet-4-6` is audited under `antigravity_cli` but is
-        also accepted by the `claude` binary with a narrower ladder
-        (`probe_models._CROSS_PROVIDER_EFFORT_LADDERS`). Before ticket 46,
+        also accepted by the `claude` binary with a *different* ladder
+        (`probe_models._CROSS_PROVIDER_EFFORT_LADDERS`) — corrected down
+        from that provider's own full CLI enum by dropping `xhigh`, which
+        leaves it one rung wider than the native entry, not narrower.
+        Before ticket 46,
         `AUDITED_MODEL_CATALOG`'s bare-`model_id` keying meant only one of
         these two providers' ladders could ever be looked up for this
         model id at all; the registry must carry both, distinctly."""
@@ -450,6 +454,71 @@ class ModelCapabilityRegistryTests(unittest.TestCase):
         self.assertNotEqual(native.supported_efforts, overlaid.supported_efforts)
         self.assertEqual(overlaid.supported_efforts, ("low", "medium", "high", "max"))
         self.assertNotIn("xhigh", overlaid.supported_efforts)
+        # The overlay's own primary entry (antigravity_cli claude-sonnet-4-6)
+        # is audited with default_effort=None, which is not a member of any
+        # ladder, so the overlay's default_effort is None too; its tier is
+        # the ceiling of the overlay's own four-rung ladder, "max" — not the
+        # native entry's "high" ceiling.
+        self.assertIsNone(overlaid.default_effort)
+        self.assertEqual(overlaid.tier, "max")
+        self.assertEqual(overlaid.provider, "claude_code_cli")
+        self.assertEqual(overlaid.model_id, "claude-sonnet-4-6")
+
+    def test_overlay_drops_a_default_effort_outside_its_own_ladder(self) -> None:
+        """`claude-sonnet-4-6`'s live `default_effort` is `None`, which
+        trivially satisfies "not in the overlay's ladder" and never
+        exercises the branch that actually *drops* a present default — see
+        `build_model_capabilities_registry`'s
+        ``primary.default_effort if primary is not None and
+        primary.default_effort in ladder else None`` filter. A synthetic
+        primary entry whose real default_effort sits outside a synthetic,
+        narrower overlay ladder exercises the drop directly."""
+        fake_primary = probe_models.AuditedModel(
+            model_id="fixture-model-drop",
+            display_label="Fixture Model Drop",
+            provider_id="antigravity_cli",
+            supported_efforts=("low", "medium", "high"),
+            default_effort="high",
+            context_window=32_000,
+            local_only=False,
+            evidence="test fixture — not a real audited model",
+        )
+        fake_catalog = {"fixture-model-drop": fake_primary}
+        fake_ladders = {("claude_code_cli", "fixture-model-drop"): ("low", "medium")}
+        with (
+            mock.patch.object(probe_models, "AUDITED_MODEL_CATALOG", fake_catalog),
+            mock.patch.object(probe_models, "_CROSS_PROVIDER_EFFORT_LADDERS", fake_ladders),
+        ):
+            registry = routing_config.build_model_capabilities_registry()
+        overlaid = registry[("claude_code_cli", "fixture-model-drop")]
+        # "high" is the primary's real default_effort, but it is outside
+        # the overlay's own ("low", "medium") ladder, so it must be
+        # dropped to None rather than carried over unchecked.
+        self.assertIsNone(overlaid.default_effort)
+
+    def test_overlay_keeps_a_default_effort_inside_its_own_ladder(self) -> None:
+        """Complement of the drop case above: when the primary's real
+        `default_effort` *is* a member of the overlay's own ladder, it
+        must be carried over, not dropped."""
+        fake_primary = probe_models.AuditedModel(
+            model_id="fixture-model-keep",
+            display_label="Fixture Model Keep",
+            provider_id="antigravity_cli",
+            supported_efforts=("low", "medium", "high"),
+            default_effort="medium",
+            context_window=32_000,
+            local_only=False,
+            evidence="test fixture — not a real audited model",
+        )
+        fake_catalog = {"fixture-model-keep": fake_primary}
+        fake_ladders = {("claude_code_cli", "fixture-model-keep"): ("low", "medium")}
+        with (
+            mock.patch.object(probe_models, "AUDITED_MODEL_CATALOG", fake_catalog),
+            mock.patch.object(probe_models, "_CROSS_PROVIDER_EFFORT_LADDERS", fake_ladders),
+        ):
+            registry = routing_config.build_model_capabilities_registry()
+        overlaid = registry[("claude_code_cli", "fixture-model-keep")]
+        self.assertEqual(overlaid.default_effort, "medium")
 
     def test_a_model_with_no_effort_ladder_gets_tier_none_not_a_crash(self) -> None:
         """`claude-3-7-sonnet` predates reasoning efforts entirely
@@ -468,18 +537,36 @@ class ModelCapabilityRegistryTests(unittest.TestCase):
         self.assertEqual(registry[("codex_cli", "gpt-5.6-sol")].tier, "ultra")
         self.assertEqual(registry[("codex_cli", "gpt-5.6-luna")].tier, "max")
 
-    def test_importing_probe_models_before_routing_config_does_not_deadlock(self) -> None:
-        """`probe_models` imports `routing_config` at its own top level
-        (Ticket 45). `build_model_capabilities_registry` imports
-        `probe_models` back, so it must do so lazily, inside the function
-        body — an eager module-level statement would read `probe_models`
-        mid-initialization whenever `probe_models` is the entry point of
-        the import chain, before `AUDITED_MODEL_CATALOG` exists yet. A
-        same-process test cannot exercise this: both modules are already
-        fully imported by the rest of the suite by the time this test
-        runs, so re-importing either is a cached no-op regardless of
-        ordering. A fresh subprocess is the only way to genuinely control
-        which module starts the chain.
+    def test_importing_probe_models_before_routing_config_does_not_raise(self) -> None:
+        """Guards against reintroducing the shape a prior review round
+        rejected: reading `probe_models.AUDITED_MODEL_CATALOG` at this
+        module's own top level (e.g. a bare `MODEL_CAPABILITIES_REGISTRY =
+        build_model_capabilities_registry()` statement), rather than
+        inside `build_model_capabilities_registry`'s function body.
+        `probe_models` already imports `routing_config` eagerly at its own
+        top level (Ticket 45); if `routing_config` also read
+        `AUDITED_MODEL_CATALOG` at ITS OWN top level, then whenever
+        `probe_models` is the module that starts the import chain,
+        `probe_models`'s own `import routing_config` would, on its way to
+        finishing, run `routing_config`'s body — including that read —
+        while `probe_models` itself is still mid-initialization, paused at
+        its own import statement, long before `AUDITED_MODEL_CATALOG` is
+        defined: `AttributeError`, not a deadlock — Python does not block
+        on a circular import, it proceeds with whatever partial module
+        state exists and raises the moment something reaches for an
+        attribute that isn't there yet. A same-process test cannot
+        exercise this: both modules are already fully imported by the
+        rest of the suite by the time this test runs, so re-importing
+        either is a cached no-op regardless of ordering. A fresh
+        subprocess is the only way to genuinely control which module
+        starts the chain.
+
+        This test alone does not prove the bare *statement*
+        `import probe_models` is safe to hoist to `routing_config`'s own
+        top level — only that reading `AUDITED_MODEL_CATALOG` there is
+        unsafe in this order. See the companion test below for the hazard
+        a hoisted-but-unused import statement creates in the other import
+        order.
         """
         script = (
             "import sys; sys.path.insert(0, sys.argv[1]); "
@@ -496,7 +583,25 @@ class ModelCapabilityRegistryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_importing_routing_config_before_probe_models_does_not_deadlock(self) -> None:
+    def test_importing_routing_config_before_probe_models_does_not_raise(self) -> None:
+        """Guards the opposite hazard: a bare, *unused* top-level
+        `import probe_models` statement in `routing_config.py` (no
+        attribute read at import time at all). `probe_models.main`'s own
+        `config_loader` parameter default is `routing_config.load_routing_config`
+        (`probe_models.py`), evaluated when that `def` statement executes
+        as part of loading `probe_models`'s module body. If
+        `routing_config` imported `probe_models` at its own top level,
+        then whenever `routing_config` is the module that starts the
+        chain, that statement would run `probe_models`'s module body
+        while `routing_config` itself is still mid-initialization — paused
+        at its own `import probe_models` statement, before
+        `load_routing_config` is defined — so `probe_models.main`'s
+        default-argument evaluation would raise `AttributeError: module
+        'routing_config' has no attribute 'load_routing_config'`: the
+        failure lands on `routing_config`, not on anything in
+        `probe_models`, and it is a plain `AttributeError`, not a
+        deadlock.
+        """
         script = (
             "import sys; sys.path.insert(0, sys.argv[1]); "
             "import routing_config; "
@@ -511,6 +616,96 @@ class ModelCapabilityRegistryTests(unittest.TestCase):
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class EffortCeilingTierTests(unittest.TestCase):
+    """`_effort_ceiling_tier` is `ModelCapability.tier`'s sole source,
+    mechanically derived from `supported_efforts` so it can never drift
+    from it. Exercised directly (rather than only through
+    `build_model_capabilities_registry`) so its two distinct edge cases —
+    an empty ladder, and a ladder naming an unrecognized rung — are each
+    pinned by name."""
+
+    def test_empty_ladder_is_tier_none(self) -> None:
+        self.assertEqual(routing_config._effort_ceiling_tier((), source="fixture.source.path"), "none")
+
+    def test_highest_rung_wins_regardless_of_input_order(self) -> None:
+        self.assertEqual(routing_config._effort_ceiling_tier(("medium", "low"), source="fixture.source.path"), "medium")
+        self.assertEqual(routing_config._effort_ceiling_tier(("max", "low", "high"), source="fixture.source.path"), "max")
+        # Highest rung last (and mid-sequence) too — not just first — so a
+        # `supported_efforts[0]`-style regression that ignores rank can't
+        # slip past this test by coincidence of fixture ordering.
+        self.assertEqual(routing_config._effort_ceiling_tier(("low", "medium"), source="fixture.source.path"), "medium")
+        self.assertEqual(routing_config._effort_ceiling_tier(("low", "high", "max"), source="fixture.source.path"), "max")
+
+    def test_unrecognized_rung_fails_closed_instead_of_degrading_to_none(self) -> None:
+        """A non-empty ladder naming an effort outside `_EFFORT_RANK` is a
+        probe_models.py data-entry mistake, not a case to silently rank
+        around — see `_effort_ceiling_tier`'s docstring. Before this test,
+        such a ladder was silently ranked around: `("turbo",)` returned
+        "none", indistinguishable from a model with no effort ladder at
+        all, while `("low", "turbo")` returned "low", quietly dropping
+        the rung it did not recognize.
+
+        Asserts `ConfigValidationError` specifically, not a bare
+        `ValueError`: `max(..., key=_EFFORT_RANK.index)` raises
+        `ValueError` incidentally for these same inputs, so asserting
+        the builtin would leave this test green with the deliberate
+        guard deleted outright — pinning nothing. Also asserts `key_path`
+        is exactly the `source` passed in, not a value `_effort_ceiling_tier`
+        invents on its own — its two real call sites read two different
+        tables (`build_model_capabilities_registry`, below), and a
+        hardcoded key_path would silently name the wrong one for whichever
+        call site isn't the one it was copied from."""
+        for ladder in (("turbo",), ("low", "turbo")):
+            with self.assertRaises(routing_config.ConfigValidationError) as ctx:
+                routing_config._effort_ceiling_tier(ladder, source="fixture.source.path")
+            self.assertEqual(ctx.exception.key_path, "fixture.source.path")
+            self.assertIn("turbo", ctx.exception.reason)
+            self.assertEqual(ctx.exception.received_value, ladder)
+
+    def test_native_and_overlay_call_sites_each_name_their_own_table_on_failure(self) -> None:
+        """`_effort_ceiling_tier` is called from two places in
+        `build_model_capabilities_registry` — one reading
+        `AUDITED_MODEL_CATALOG`, the other `_CROSS_PROVIDER_EFFORT_LADDERS`
+        — and each must report ITS OWN table, not the other one, when its
+        own data is what's actually broken. A single hardcoded `source`
+        shared between both call sites would pass every existing test
+        (neither the native nor the overlay live data contains an
+        unrecognized rung) while still sending a maintainer to the wrong
+        table for whichever call site doesn't match the hardcoded guess."""
+        bad_native = probe_models.AuditedModel(
+            model_id="fixture-model-bad-native",
+            display_label="Fixture Model Bad Native",
+            provider_id="antigravity_cli",
+            supported_efforts=("low", "turbo"),
+            default_effort=None,
+            context_window=None,
+            local_only=False,
+            evidence="test fixture — not a real audited model",
+        )
+        with (
+            mock.patch.object(
+                probe_models, "AUDITED_MODEL_CATALOG", {"fixture-model-bad-native": bad_native}
+            ),
+            self.assertRaises(routing_config.ConfigValidationError) as ctx,
+        ):
+            routing_config.build_model_capabilities_registry()
+        self.assertEqual(
+            ctx.exception.key_path,
+            "probe_models.AUDITED_MODEL_CATALOG['fixture-model-bad-native'].supported_efforts",
+        )
+
+        bad_ladders = {("claude_code_cli", "claude-sonnet-4-6"): ("low", "turbo")}
+        with (
+            mock.patch.object(probe_models, "_CROSS_PROVIDER_EFFORT_LADDERS", bad_ladders),
+            self.assertRaises(routing_config.ConfigValidationError) as ctx,
+        ):
+            routing_config.build_model_capabilities_registry()
+        self.assertEqual(
+            ctx.exception.key_path,
+            "probe_models._CROSS_PROVIDER_EFFORT_LADDERS[('claude_code_cli', 'claude-sonnet-4-6')]",
+        )
 
 
 class RoleMatrixViewDataTests(unittest.TestCase):
@@ -531,9 +726,10 @@ class RoleMatrixViewDataTests(unittest.TestCase):
         """A role naming a `preferred_providers` id absent from
         `config.providers` is a structural authoring error — distinct from
         a provider/model pair simply missing from the audited capability
-        registry, which the checked-in config currently has six known
-        instances of (ticket 45's `--audit` drift findings) and which this
-        view must render, not raise on."""
+        registry, which the checked-in config currently has three known
+        instances of (the `unknown_model` kind among ticket 45's six
+        `--audit` drift findings) and which this view must render, not
+        raise on."""
         config = routing_config.parse_routing_config(
             {
                 "roles": {
@@ -636,6 +832,17 @@ class RoleMatrixViewDataTests(unittest.TestCase):
             entry.role_id = "other"  # type: ignore[misc]
         with self.assertRaises(dataclasses.FrozenInstanceError):
             entry.bindings[0].reasoning_effort = "low"  # type: ignore[misc]
+
+    def test_view_data_mapping_itself_is_immutable(self) -> None:
+        """The individual entries are frozen dataclasses (tested above),
+        but the top-level `role_id -> RoleMatrixEntry` mapping
+        `get_role_matrix_view_data` returns must itself reject mutation
+        too — mirroring `build_model_capabilities_registry`'s own
+        `test_registry_is_an_immutable_mapping`."""
+        config = routing_config.load_routing_config()
+        matrix = routing_config.get_role_matrix_view_data(config)
+        with self.assertRaises(TypeError):
+            matrix["extra_role"] = matrix["planner"]  # type: ignore[index]
 
 
 if __name__ == "__main__":

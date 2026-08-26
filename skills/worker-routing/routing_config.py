@@ -221,8 +221,11 @@ class RoleModelBinding:
 
     ``capability`` is ``None`` when the configured provider/model pair is
     not in the audited registry — a known, non-fatal live-catalog drift
-    state (see ``probe_models.audit_config_drift``, and
-    ``routing-config.json``'s six currently pinned drift findings), not a
+    state: three of ``routing-config.json``'s six currently pinned drift
+    findings are exactly this (``probe_models.audit_config_drift``'s
+    ``unknown_model`` kind; its other three, ``unmapped_label`` findings
+    in ``roster_topology`` and ``supported_models``, live outside
+    ``roles``/``providers`` and so never reach a binding at all), not a
     structural config error. Ticket 46 / Spec 0013.
     """
 
@@ -1186,23 +1189,56 @@ def validate_default_config() -> RoutingConfig:
 # order across every provider this project probes. Codex's `ultra` (Sol,
 # Terra) sits above `max` (Luna's ceiling); Claude's ladder never reaches
 # `ultra` at all. A model whose `supported_efforts` contains a value outside
-# this tuple is not expected today — see `_effort_ceiling_tier`.
+# this tuple is a data-entry mistake in probe_models.py's audited catalog,
+# not a case this module ranks around — see `_effort_ceiling_tier`, which
+# raises rather than silently ranking around it.
 _EFFORT_RANK: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max", "ultra")
 
 
-def _effort_ceiling_tier(supported_efforts: tuple[str, ...]) -> str:
+def _effort_ceiling_tier(supported_efforts: tuple[str, ...], *, source: str) -> str:
     """The model's own highest supported reasoning-effort rung, used as its
     capability tier — mechanical, not a separately curated classification,
     so it can never drift from `supported_efforts` itself.
 
+    `source` is the dotted path of whichever table's entry `supported_efforts`
+    came from — this function has two call sites, one reading
+    `probe_models.AUDITED_MODEL_CATALOG`, the other
+    `probe_models._CROSS_PROVIDER_EFFORT_LADDERS`, and a caller debugging a
+    bad rung needs to be pointed at the table that actually contains it,
+    not a hardcoded guess (`ConfigValidationError`'s own contract, below).
+
     `"none"` for a model with no effort ladder to rank at all (e.g.
     `claude-3-7-sonnet`, `supported_efforts=()` — it predates reasoning
-    efforts), rather than raising on `max()` over an empty sequence.
+    efforts), rather than raising on `max()` over an empty sequence. That
+    is the only case that degrades to `"none"`: a *non-empty* ladder
+    naming a rung outside `_EFFORT_RANK` raises `ConfigValidationError`
+    instead of silently ranking around the unrecognized value, so a model like
+    `supported_efforts=("turbo",)` fails loudly rather than being
+    misrendered by the dashboard as pre-effort (tier `"none"` means
+    exactly "no effort ladder to rank at all" elsewhere in this module
+    (see above — that covers both a model that predates the ladder and
+    a provider whose contract offers no effort parameter at all), and
+    must not also mean "has efforts this module doesn't recognize").
+    Same fail-closed precedent as `probe_models._build_label_index`
+    raising on a labeling mistake in the same audited data, rather than
+    letting it through — and, like that precedent, it raises a *distinct*
+    error type rather than a bare `ValueError`. That is not stylistic:
+    `max(..., key=_EFFORT_RANK.index)` on the line below already raises
+    `ValueError` incidentally (`tuple.index(x): x not in tuple`) for the
+    very same input, so a test asserting only `ValueError` would pass
+    with this guard deleted entirely, pinning nothing and losing the
+    diagnostic that names the offending rung and its source table.
     """
-    ranked = [effort for effort in supported_efforts if effort in _EFFORT_RANK]
-    if not ranked:
+    if not supported_efforts:
         return "none"
-    return max(ranked, key=_EFFORT_RANK.index)
+    unranked = [effort for effort in supported_efforts if effort not in _EFFORT_RANK]
+    if unranked:
+        raise ConfigValidationError(
+            source,
+            f"contains rung(s) outside _EFFORT_RANK: {unranked!r}",
+            supported_efforts,
+        )
+    return max(supported_efforts, key=_EFFORT_RANK.index)
 
 
 def build_model_capabilities_registry() -> Mapping[tuple[str, str], ModelCapability]:
@@ -1211,18 +1247,42 @@ def build_model_capabilities_registry() -> Mapping[tuple[str, str], ModelCapabil
     plus its `_CROSS_PROVIDER_EFFORT_LADDERS` overlay), resolving finding
     F7 by keying each provider's acceptance of a model separately.
 
-    The `probe_models` import is local to this function rather than a
-    module-level statement, deliberately: `probe_models` imports this
-    module at its own top level (ticket 45), so an eager top-level
-    `import probe_models` here would, whenever `probe_models` is the
-    module that started the import chain, read `probe_models` while it is
-    still mid-initialization — before its `AUDITED_MODEL_CATALOG` constant
-    exists yet — regardless of which module a caller imports first. A
-    local import runs only when a caller actually asks for the registry,
-    by which point both modules have finished loading either way. Same
-    precedent as `validate_default_config` (ticket 42 iteration 3):
-    defer cross-cutting work behind an explicit call rather than paying
-    for it — or, here, risking it — as a bare import-time statement.
+    Both the `import probe_models` statement and the `AUDITED_MODEL_CATALOG`
+    read it guards are local to this function, deliberately — not because
+    hoisting either one deadlocks, but because `probe_models` already
+    imports this module eagerly at its own top level (ticket 45), so
+    hoisting either half to this module's own top level breaks one of the
+    two possible import-chain orderings, proven by two subprocess-isolated
+    tests (`test_importing_probe_models_before_routing_config_does_not_raise`,
+    `test_importing_routing_config_before_probe_models_does_not_raise`):
+
+    - Reading `probe_models.AUDITED_MODEL_CATALOG` at this module's own
+      top level (e.g. a bare `MODEL_CAPABILITIES_REGISTRY =
+      build_model_capabilities_registry()` statement here) breaks whenever
+      `probe_models` is the module that starts the chain: `probe_models`'s
+      own eager `import routing_config` would, on its way to finishing,
+      run this module's body — including that read — while `probe_models`
+      itself is still mid-initialization, paused at its own import
+      statement, long before `AUDITED_MODEL_CATALOG` is defined. Raises
+      `AttributeError` on `probe_models.AUDITED_MODEL_CATALOG`.
+    - A bare, *unused* `import probe_models` statement at this module's
+      own top level breaks the opposite order: whenever `routing_config`
+      is the module that starts the chain, that statement runs
+      `probe_models`'s module body while `routing_config` itself is still
+      mid-initialization — and `probe_models.main`'s `config_loader`
+      parameter default (`routing_config.load_routing_config`,
+      evaluated when that `def` executes) needs `load_routing_config` to
+      already exist on this module, which it doesn't yet. Raises
+      `AttributeError` on `routing_config.load_routing_config`, not on
+      anything in `probe_models` at all.
+
+    Deferring both the statement and the read into this function body —
+    invoked only once a caller actually wants the registry, by which
+    point ordinary use has already finished loading both modules
+    regardless of which one a caller reached first — avoids both failure
+    directions at once. Same precedent as `validate_default_config`
+    (ticket 42 iteration 3): defer cross-cutting work behind an explicit
+    call rather than risking it as a bare import-time statement.
     """
     if __package__:
         from . import probe_models
@@ -1236,7 +1296,10 @@ def build_model_capabilities_registry() -> Mapping[tuple[str, str], ModelCapabil
             model_id=model.model_id,
             supported_efforts=model.supported_efforts,
             default_effort=model.default_effort,
-            tier=_effort_ceiling_tier(model.supported_efforts),
+            tier=_effort_ceiling_tier(
+                model.supported_efforts,
+                source=f"probe_models.AUDITED_MODEL_CATALOG[{model.model_id!r}].supported_efforts",
+            ),
             context=model.context_window,
             local_only=model.local_only,
         )
@@ -1250,7 +1313,10 @@ def build_model_capabilities_registry() -> Mapping[tuple[str, str], ModelCapabil
             model_id=model_id,
             supported_efforts=ladder,
             default_effort=default_effort,
-            tier=_effort_ceiling_tier(ladder),
+            tier=_effort_ceiling_tier(
+                ladder,
+                source=f"probe_models._CROSS_PROVIDER_EFFORT_LADDERS[{(provider_id, model_id)!r}]",
+            ),
             context=primary.context_window if primary is not None else None,
             local_only=primary.local_only if primary is not None else False,
         )
@@ -1269,12 +1335,15 @@ def get_role_matrix_view_data(
     Raises `ConfigValidationError` when a role's `preferred_providers`
     names a provider id absent from `config.providers` — a structural
     authoring error. A provider/model pair simply missing from the audited
-    capability registry is a different, non-fatal thing (`routing-
-    config.json` is known to carry six such live-catalog drift findings
-    right now — see `probe_models.audit_config_drift`) and is instead
-    surfaced as `capability=None` on that binding, never a raise: this
-    view exists in part so an operator can see and fix that drift, so it
-    cannot itself refuse to render a role that has it.
+    capability registry is a different, non-fatal thing — three of
+    `routing-config.json`'s six currently pinned drift findings are
+    exactly this (`probe_models.audit_config_drift`'s `unknown_model`
+    kind; its other three are `unmapped_label` findings in
+    `roster_topology` and `supported_models`, sections this view never
+    reads, so it cannot surface those) — and is instead surfaced as
+    `capability=None` on that binding, never a raise: this view exists in
+    part so an operator can see and fix the `unknown_model` half of that
+    drift, so it cannot itself refuse to render a role that has it.
 
     `capabilities` defaults to `build_model_capabilities_registry()`.
     Accepting it as a parameter — mirroring `RoleResolver`'s own
