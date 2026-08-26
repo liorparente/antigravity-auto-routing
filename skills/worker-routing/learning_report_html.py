@@ -656,8 +656,8 @@ _ROLE_DISPLAY_ORDER: tuple[str, ...] = (
     "planner",
     "builder_heavy",
     "builder_light",
-    "reviewer_risk",
     "reviewer_architecture",
+    "reviewer_risk",
     "reviewer_maintainability",
     "reviewer_security",
     "adjudicator",
@@ -678,28 +678,37 @@ _ROLE_DISPLAY_NAMES: dict[str, str] = {
     "planner": "Planner — מתכנן",
     "builder_heavy": "Heavy Builder — בנאי כבד",
     "builder_light": "Light Builder — בנאי קל",
-    "reviewer_risk": "Critic — מבקר",
     "reviewer_architecture": "Architecture Reviewer — מבקר ארכיטקטורה",
+    "reviewer_risk": "Critic — מבקר",
     "reviewer_maintainability": "Maintainability Reviewer — מבקר תחזוקתיות",
     "reviewer_security": "Security Reviewer — מבקר אבטחה",
     "adjudicator": "Adjudicator — פוסק",
     "sensitive_executor": "Sensitive Executor — מבצע רגיש",
 }
 
-# The Bento Grid's colored accent sidebar — one hex per role, from the
-# spec's Ethos Analytics palette (Implementation Decisions §2). Grouped by
-# function rather than assigned arbitrarily: blue for planning, green for
+# The Bento Grid's colored accent sidebar — one hex per role. Only the
+# planner's blue (`#2563eb`) is the spec's own named color (Implementation
+# Decisions §2: "#2563eb interactive blues"); §2 otherwise only names the
+# theme's shared surfaces (`#0f172a` headers, slate-50 canvas) and never
+# defines a role-by-function scheme, so every other hex below is this
+# module's own extension of that theme, not a spec-cited value: green for
 # building, purple for the three review roles, amber for the adjudicator,
-# red for the two roles this codebase already treats as highest-risk
-# (`reviewer_security`, `sensitive_executor` — see `routing-config.json`'s
-# `sensitivity_gate`). A role id absent here falls back to `--neutral` in
-# `_role_accent_color`, so a future role never renders with a broken style.
+# red for `reviewer_security` and `sensitive_executor` — an editorial
+# choice, not one mechanically derived from `routing-config.json`: there is
+# no `sensitivity_gate` key or other single flag that picks out exactly
+# these two and no others (`sensitive_executor`'s own
+# `capability_requirements.local_only` is `True`, but so is
+# `adjudicator`'s, and `adjudicator` is colored amber above, not red — so
+# `local_only` cannot be the rule actually being followed here; treat this
+# mapping as a curated visual choice, not a derived one). A role id absent
+# here falls back to `--neutral` in `_role_accent_color`, so a future role
+# never renders with a broken style.
 _ROLE_ACCENT_COLORS: dict[str, str] = {
     "planner": "#2563eb",
     "builder_heavy": "#059669",
     "builder_light": "#10b981",
-    "reviewer_risk": "#7c3aed",
     "reviewer_architecture": "#7c3aed",
+    "reviewer_risk": "#7c3aed",
     "reviewer_maintainability": "#7c3aed",
     "reviewer_security": "#dc2626",
     "adjudicator": "#d97706",
