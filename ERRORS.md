@@ -1,5 +1,50 @@
 # Worker Routing Fallbacks
 
+## 2026-08-26 — `claude --effort ultra` Silently Downgrades Instead of Erroring
+
+- Mission: audit CLI provider effort-flag error handling for `docs/research/live-model-catalog-audit.md` (Ticket 45, finding F1).
+- Issue: the audit doc and `probe_models.py` claimed an unsupported `--effort` value on the `claude` CLI path is "a CLI error at dispatch time, not a slower run" — mirroring the genuine behavior of `agy`, which does hard-error (`invalid --effort %q`).
+- Root Cause: the claim was written without extracting the actual `claude` binary's argument parser. The installed binary's `--effort` `argParser` (`wsi()`) writes a warning to stderr and returns `undefined` on an unrecognized value such as `ultra` — no throw, no `process.exit`. The session then runs once at the model's `default_effort`.
+- Detection: caught in round 4 of Ticket 45's fix-review loop by an agent instructed to re-derive the claim from the installed binary rather than trust the existing text; proven by extracting the `argParser`/`wsi`/`vop`/`Top` functions via `strings -a` on the binary.
+- Resolution: corrected all three sites (`live-model-catalog-audit.md`, `probe_models.py:11`, `probe_models.py:206`) to state the real mechanism: warn-and-run-at-default, not error.
+- Lesson: a role configured at `ultra` (which `CLAUDE.md` invites and `learning_journal.VALID_EFFORTS` blesses) does not fail loudly on the `claude` path — it silently dispatches at a different effort than configured. Any claim about a CLI's argument-validation behavior must be checked against that binary's own parser, never assumed from a sibling provider's behavior. See [[SilentEffortDowngrade]] in `CONTEXT.md`.
+
+## 2026-08-26 — Written Baseline Claimed Green While `mypy` Was Red for 9 Hours
+
+- Mission: resume Ticket 45's iterative fix-review loop from a handoff document specifying a verification baseline (ruff clean, mypy clean, 1531 tests).
+- Issue: the actual HEAD (`03884a9`) had advanced two commits past the handoff's stated commit. The newest commit's provider-ownership work passed a bare `str` (`provider.adapter`) into a `dict[ProviderId, ...]` lookup, leaving `mypy` red with 2 errors for 9 hours before anyone re-ran the gate.
+- Root Cause: the handoff's verification *commands* were correct, but its stated *expected results* were a point-in-time snapshot invalidated by a later commit. The session's own first `git log`/`git status` calls also read a stale directory view before its working directory had switched to the target repo, compounding the risk.
+- Detection: re-running the exact verification commands from the handoff before touching any code, rather than trusting its stated baseline.
+- Resolution: fixed the type by narrowing the free-form adapter string with a real `in PROVIDER_IDS` membership check — no `# type: ignore`, no unverified `cast`.
+- Lesson: a written baseline is a claim about the state at the time it was written, not a fact about now. Always re-run the verification gate yourself before accepting any handoff's "current state is green" — including handoffs and institutional memory written earlier in the same project.
+
+## 2026-08-26 — Correcting a False Factual Claim Introduced a Second False Claim
+
+- Mission: fix two Spec-axis findings in Ticket 45's audit doc — both factual claims about installed CLI behavior that live tooling contradicted.
+- Issue: happened twice in one session. (1) Rewriting `claude-3-7-sonnet`'s `evidence` string to admit its context window was inferred, not read, left the document's own opening claim ("everything below was read off the installed toolchain") standing uncontradicted, and therefore self-contradictory. (2) Rewriting the `--effort` failure-mode text introduced "reruns at the model's default effort" — but nothing reruns; the value is discarded during argv parsing, before any turn starts, and the session simply runs once.
+- Root Cause: verification checked that the old error was gone (the cheap half) but not that the replacement text was itself accurate (the expensive half, requiring re-deriving from ground truth).
+- Detection: the next review round was instructed explicitly to treat each rewritten sentence as a brand-new claim requiring its own proof, not to "confirm the fix" — this surfaced both defects immediately.
+- Resolution: qualified the document's blanket provenance claim with the one known exception; changed "reruns" to "runs" at both code sites.
+- Lesson: when a review finding is "this statement is false" and a fix rewrites the statement, review the *rewrite* as a new claim on its own terms. "The old error is gone" is never sufficient proof that the new text is correct.
+
+## 2026-08-26 — Test Fixture Named the Discrimination It Was Meant to Prove, But Didn't Perform It
+
+- Mission: verify a Spec-axis finding that `main()` actually passes a live provider snapshot into `audit_config_drift` (Ticket 45, round 4).
+- Issue: the existing fixture `_clean_config`'s in-code comment explicitly named the discrimination it needed to make ("this fixture must use its published model rather than the stale audited Gemini 3.1 Pro entry"), then picked "Gemini 3.7 Flash (Low)" — a model published by *both* the live listing and the audited catalog. Dropping `snapshot=snapshot` at the call site left every `--audit` test, and the full 1551-test suite, green.
+- Root Cause: a comment asserting intent was trusted as evidence the fixture achieved that intent; nobody checked whether the chosen fixture value was actually present in both branches of the condition it claimed to distinguish.
+- Detection: mutation testing — dropping the disputed argument and re-running the named tests, per the loop's mandatory-proof rule.
+- Resolution: added a fixture naming a model that is audited but *not* live (`gemini-3.1-pro-high`), which genuinely disappears from the active catalog only when the snapshot wires correctly, plus a dedicated test asserting that.
+- Lesson: a comment describing what a fixture is *for* is not evidence it does that. When a fixture must discriminate between two code paths, verify its value satisfies only one of them — do not take the author's stated intent, even your own, at face value. Same shape as the repo's "green assertion over an unexercised path" defect class, one level up (in the fixture, not the assertion).
+
+## 2026-08-26 — Closed-Looking Local Ticket Had Zero Commits on the Remote the Tracked Issue Points To
+
+- Mission: close GitHub issue #21 (Ticket 45) after its local backlog file was marked `Status: done` and all fixes were committed locally.
+- Issue: the local backlog file said `done` and all five commits existed on disk, but `git log origin/main..HEAD` showed all five were local-only — the `ticket-45-hardening` branch had never been pushed, and `origin/main` was still at the pre-feature commit. Closing the GitHub issue at that point would have marked the public tracker complete with zero corresponding code on the server.
+- Root Cause: local "done" status (backlog markdown, commit history) was treated as sufficient to close a tracked issue, without checking whether the branch existed on the remote the issue lives in.
+- Detection: `git fetch` + `git log origin/main..HEAD` + `git ls-remote --heads origin <branch>` checked before running `gh issue close`.
+- Resolution: pushed the branch, confirmed remote HEAD matched local HEAD, then closed the issue with a comment naming the branch explicitly as not yet merged to `main`.
+- Lesson: before closing any tracked issue, verify the code is not just committed but present on the remote the tracker points to, and state in the closing comment whether it has been merged to the default branch or only pushed to a feature branch.
+
 ## 2026-08-25 — TLS Certificate Verification & Network Failure for `gh` CLI in Standard Sandbox
 
 - Mission: Synchronize local backlog tickets and query GitHub issues via `gh issue list`.

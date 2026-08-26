@@ -15,6 +15,9 @@ A structured deliberation loop between Planner and Critic models triggered when 
 ### CouncilDebateRound
 One pass of the council's deterministic decision plan — safety, then constraints, then adjudication when the first two disagree. No model and no network are involved, which is what allows a decision to be cached and signed. Not to be confused with an [[AdvisoryConsultation]].
 
+### SilentEffortDowngrade
+A CLI failure mode where an unsupported `--effort` value is not rejected but silently discarded: the invoking CLI (`claude`) writes a warning to stderr and dispatches the session at the model's `default_effort` instead, with no throw and no non-zero exit. Distinct from `agy`, which hard-errors on an invalid effort. Code that assumes a bad effort flag surfaces as a failed subprocess must special-case providers exhibiting this behavior rather than relying on exit-code detection.
+
 ### WorkerModeToken
 The marker carried inside a worker's prompt that identifies its holder as a nested worker rather than the orchestrator. It exempts the holder from the routing gate. The exemption is deliberately observable to a model — it lives in the prompt, not in the environment — because an exemption a model cannot perceive always resolves to "not exempt".
 
