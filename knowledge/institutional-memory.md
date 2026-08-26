@@ -1,7 +1,7 @@
 # Institutional Memory — 25 Golden Rules
 
 ## Metadata
-- **Last updated:** 2026-08-24
+- **Last updated:** 2026-08-26
 - **Format:** distilled from 111 historical entries; full history in
   [`knowledge/archive/institutional-memory-legacy.md`](archive/institutional-memory-legacy.md).
 - **Retrieval:** `skills/worker-routing/prompt_assembler.extract_scoped_memory`
@@ -35,6 +35,13 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
     Unify overlapping consultation scripts into a single state machine supporting `Dyad`
     (1-on-1 pairs for Medium tasks) and `CouncilPanel` (weighted quorum for Complex tasks),
     preserving legacy wrappers as sub-25-line delegators.
+28. **Prefer CSS-only interactivity (checked-radio + sibling selectors) over
+    inline `<script>` in static HTML reports.** A tab bar or segmented
+    toggle can switch visible sections with radio inputs and `~`/`+`
+    sibling CSS rules, keeping a "ships zero script tags" invariant intact
+    (`learning_report_html.py`'s two-tab dashboard, ticket 47) until a
+    ticket's scope genuinely requires real client-side state (model/effort
+    binding, undo, floating action bars) to justify breaking it.
 
 ## Testing & TDD Seams
 
@@ -61,6 +68,26 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
     Keep report rendering (`render_html_report`) strictly pure, deterministic, and clock-free by injecting an aware `now: datetime`, and delegate disk writes to an atomic tempfile-replace helper (`write_html_report`). All dynamic HTML values must pass through `html.escape`.
 25. **Enforce injected-now CLI arguments to preserve clock-free AST test invariants.**
     When exposing CLI entry points on clock-free modules, require an ISO-8601 `--now` argument rather than reading live system clocks in `main()`, preserving reproducible historical replay and passing AST clock guards.
+26. **`pipx run mypy` needs a symlink workaround for `skills/worker-routing/`.**
+    A hyphenated directory name is not a valid Python package name, so mypy
+    refuses outright (`... is not a valid Python package name`) rather than
+    type-checking anything — CI dodges this by `sed`-rewriting the module
+    list to `worker_routing/` first; reproduce locally with
+    `ln -sfn worker-routing skills/worker_routing` before invoking
+    `pipx run mypy --config-file pyproject.toml skills/worker_routing/<file>.py`.
+30. **This repo's HTML-report tests assert substrings, never full-document
+    equality.** `test_learning_report_html.py`'s convention is
+    `assertIn`/`assertNotIn` against fragments — verify this holds before
+    extending a rendered template, since it means new sections/tabs can be
+    added without rewriting dozens of pre-existing tests, as long as their
+    asserted substrings still appear somewhere in the larger document.
+31. **A first-pass zero-findings `/code-review` is a signal the change was
+    well-scoped, not that review was skipped.** Ticket 47 (backward-compatible
+    optional params, additive markup, substring-safe tests) converged with
+    0 Standards/Spec findings on iteration 1, unlike ticket 46's 8 rounds /
+    25 findings — treat a fast convergence as confirmation the smaller,
+    additive-only shape of a change is worth repeating, not as grounds to
+    skip the review step itself.
 
 
 ## Subprocess & CLI Process Safety
@@ -131,4 +158,18 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
     Downstream consumers should read typed models and public structural keys
     (`STRUCTURAL_KEYS`), and section parsers must support per-key fallbacks for partial
     configurations to prevent false-positive validation crashes during progressive migrations.
+27. **Re-read the ticket's own backlog file before trusting a memory
+    summary of it.** Cross-session project memory can carry a stale or
+    outright wrong ticket description (e.g. describing ticket 47 as a
+    `GET /api/model-capabilities` endpoint when
+    `.scratch/routing-backlog/issues/47-*.md` actually specified two-tab
+    navigation and a Bento Grid) — always open the actual `issues/<N>-*.md`
+    file at the start of a ticket, even when a memory note seems to already
+    know what it says.
+29. **`install.sh`'s mirrored copies (`.agents/`, `.codex/`, `.agent/`) are
+    gitignored — edit only the canonical `skills/worker-routing/` file, then
+    run `./install.sh` to sync.** `git status`/commits never need the
+    mirrors touched directly, but other harnesses (Codex, Gemini) only see
+    a change after `install.sh` re-copies it; verify with
+    `git check-ignore -v` before assuming a mirrored path needs staging.
 

@@ -1,5 +1,57 @@
 # Worker Routing Fallbacks
 
+## 2026-08-26 — `pipx run mypy` Refuses to Run on `skills/worker-routing/` Directly
+
+- Mission: type-check `learning_report_html.py` and its test file after
+  adding ticket 47's role-matrix rendering, per this repo's own memory note
+  to always re-run `ruff`/`mypy` via `pipx run` rather than trust a worker's
+  claimed-green report.
+- Issue: `pipx run mypy learning_report_html.py` (run from inside
+  `skills/worker-routing/`) and `pipx run mypy skills/worker-routing/learning_report_html.py`
+  (run from the repo root) both fail immediately with `worker-routing
+  contains __init__.py but is not a valid Python package name` — mypy
+  refuses to treat a hyphenated directory as an importable package, so it
+  never even reaches type-checking.
+- Detection: the error is not a type error at all, just an import-name
+  rejection; naively reading it as "0 files checked, nothing wrong" would
+  have produced a false-clean gate for the entire module.
+- Resolution: `.github/workflows/test.yml` already works around this by
+  `sed`-renaming every path in its module list from `skills/worker-routing/`
+  to `worker_routing/` before invoking mypy (`TARGETS=$(echo "$PYTHON_MODULES"
+  | sed 's|skills/worker-routing/|worker_routing/|g')`). Reproduced locally
+  with a symlink instead: `cd skills && ln -sfn worker-routing worker_routing`,
+  then `pipx run mypy --config-file pyproject.toml skills/worker_routing/<file>.py`
+  from the repo root, then `rm skills/worker_routing` afterward — the
+  symlink is gitignored-equivalent scratch, never a tracked path.
+- Lesson: a bare `pipx run mypy <file>` on this repo is not a reliable
+  gate by itself when the file lives under `skills/worker-routing/` — it
+  either needs the symlink workaround or must go through CI's own
+  `sed`-rewritten invocation to actually type-check anything.
+
+## 2026-08-26 — A `<script` Substring Inside a CSS Comment Still Trips the "No Script Tag" Invariant Test
+
+- Mission: add a CSS-only (radio-input + sibling-selector) tab bar to
+  `learning_report_html.py` for ticket 47, explicitly to avoid tripping the
+  existing `test_rendered_report_never_leaks_an_unescaped_script_tag` test,
+  which asserts `assertNotIn("<script", report)` against the full rendered
+  document.
+- Issue: a new CSS comment inside the embedded `<style>` block explained the
+  design as "CSS-only... No `<script>` anywhere in this document" — and
+  that comment's own literal text contains the substring `<script`, so the
+  full-document `assertNotIn` check failed even though no real `<script>`
+  tag was ever emitted.
+- Detection: `python3 -m unittest test_learning_report_html` immediately
+  failed on that one pre-existing test with the offending substring visible
+  in the assertion's printed document dump — not a new test written for
+  this change, an old one catching an unrelated new hunk.
+- Resolution: reworded the comment to "This document ships no script tags
+  at all" — same meaning, no literal `<` immediately followed by `script`.
+- Lesson: `assertNotIn("<script", ...)`-style invariant tests do a raw
+  substring search with no HTML-context awareness; prose describing
+  generated HTML (docstrings, code comments compiled into the output, even
+  comments meant only for a human reading the CSS) must avoid the literal
+  trigger substring, not just avoid emitting real markup.
+
 ## 2026-08-26 — `claude --effort ultra` Silently Downgrades Instead of Erroring
 
 - Mission: audit CLI provider effort-flag error handling for `docs/research/live-model-catalog-audit.md` (Ticket 45, finding F1).
