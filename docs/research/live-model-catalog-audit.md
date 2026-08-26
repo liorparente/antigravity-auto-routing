@@ -16,8 +16,8 @@ top of that: an effort dropdown is only safe if the effort ladders it renders
 are the ones the providers actually parse.
 
 Everything below was read off the installed toolchain, not from documentation
-or memory. Each catalog entry in `probe_models.py` carries its provenance in an
-`evidence` field.
+or memory, with one exception, flagged in §2's footnote. Each catalog entry in
+`probe_models.py` carries its provenance in an `evidence` field.
 
 ## Environment audited
 
@@ -89,15 +89,15 @@ no `medium` rung** — exactly the heterogeneity spec 0013 was written for.
 
 **Claude Code** publishes no list command, but the installed binary
 (`~/.local/share/claude/versions/2.1.241`) carries its own model catalog, and
-`default_effort` and `context.window` are read directly from it rather than
-inferred:
+`default_effort` and `context.window` are read directly from it for the three
+Claude 5 models. `claude-3-7-sonnet` is the exception — see the footnote:
 
 | Model | Default effort | Context window |
 |---|---|---|
 | `claude-opus-5` | `high` | 1,000,000 |
 | `claude-sonnet-5` | `high` | 1,000,000 |
 | `claude-fable-5` | `high` | 1,000,000 |
-| `claude-3-7-sonnet` | *(none published)* | 200,000 |
+| `claude-3-7-sonnet` | *(none published)* | 200,000* |
 
 The audited entries therefore cover the models this project routes —
 `claude-opus-5`, `claude-sonnet-5`, `claude-fable-5`, and the pre-effort
@@ -110,6 +110,16 @@ is a value the catalog states literally per model, not the CLI's own
 catalog entry omits a default, but it never fires for these three —
 `claude-3-7-sonnet` is the entry that actually omits one, and it is recorded
 as `None` rather than defaulted to `"high"`.
+
+\* Unlike the three Claude 5 rows, `claude-3-7-sonnet`'s catalog entry in the
+installed binary carries no `context` key at all (its full entry is
+`{id:"claude-3-7-sonnet",family:"sonnet",display_name:"Sonnet 3.7",
+provider_ids:{...},vertex_region_env_var:"VERTEX_REGION_CLAUDE_3_7_SONNET",
+max_output_tokens:{default:32000,upper:64000},
+pricing:"tier_3_15",capabilities:[]}`). 200,000 is Claude 3.7 Sonnet's
+publicly documented context window, carried over here as inferred rather
+than confirmed provenance — it was not read from this binary. See
+`probe_models.py`'s `evidence` field for this entry.
 
 `agy models` is a **network** call (it prints "Fetching available models…"
 first). Spec 0013 asks for a non-blocking launch probe, so
@@ -126,8 +136,15 @@ render; `probe_lm_studio()` is the authority at runtime.
 **F1 — `ultra` is not a universal effort level.** The project's canonical
 vocabulary (`learning_journal.VALID_EFFORTS`) is `low|medium|high|ultra`, and
 `CLAUDE.md` invites `effort: ultra` in any routing declaration. But `ultra` is
-accepted **only** by `codex` with Sol or Terra. `claude --effort ultra` and
-`agy --effort ultra` are both CLI errors, and `gpt-5.6-luna` tops out at `max`.
+accepted **only** by `codex` with Sol or Terra. `agy --effort ultra` is a
+genuine CLI error at dispatch time (`invalid --effort %q (valid: %s)` /
+`--effort is not supported for model %q`). `claude --effort ultra` is not: the
+installed binary's `--effort` option parser writes a warning to stderr for an
+effort it does not recognize and silently falls back to the model's
+`default_effort` (`high` for the three Claude 5 models) — no throw, no
+non-zero exit. That is a worse failure mode than a rejected flag: a role
+configured at `ultra` on the `claude` path does not fail loudly, it silently
+runs at a different effort than configured. `gpt-5.6-luna` tops out at `max`.
 Conversely the project vocabulary has no name for `xhigh` or `max`, which three
 of the four providers do accept.
 

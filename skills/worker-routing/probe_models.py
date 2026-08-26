@@ -8,7 +8,12 @@ labels in ``routing-config.json``'s ``supported_models``, the
 ``production_invoker``, and the prose matrix in ``CLAUDE.md``. None of them
 were derived from the installed CLIs, so a routed worker could be handed a
 model identifier no provider accepts, or a reasoning effort the provider's
-flag rejects outright — a CLI error at dispatch time, not a slower run.
+own flag does not recognize. On ``agy`` that is a CLI error at dispatch
+time; on ``claude`` it is not even that — the installed binary's ``--effort``
+parser warns on stderr for a value it does not recognize and silently
+runs at the model's default effort, no throw, no non-zero exit, so a role
+configured at an effort ``claude`` rejects does not fail loudly, it silently
+runs at a different effort than configured.
 
 This module is the authoritative answer, in three parts:
 
@@ -201,9 +206,15 @@ class CliContract:
         """The argv fragment selecting ``model_id`` at ``effort``.
 
         Raises `ModelCatalogError` for a provider that has no CLI at all, and
-        `UnsupportedEffortError` for an effort the provider's flag cannot
-        parse — the two failures the routing protocol used to discover only
-        when the subprocess exited non-zero.
+        `UnsupportedEffortError` for an effort the provider's flag does not
+        accept. Before this check existed, the routing protocol only ever
+        found the first failure by trying to launch a nonexistent binary, and
+        the second was worse than silent on `claude`: an unrecognized
+        `--effort` value there does not exit non-zero at all — the CLI warns
+        on stderr and runs at the model's default effort — so a raised
+        subprocess exit code would never have surfaced it. `agy` does exit
+        non-zero on an unsupported effort, but relying on that per provider
+        is exactly the inconsistency this check removes.
 
         The effort is checked against ``model_id``'s own ladder in
         `AUDITED_MODEL_CATALOG` when the model is known **and** its audited
@@ -405,8 +416,11 @@ _AUDITED_MODELS: tuple[AuditedModel, ...] = (
         local_only=False,
         evidence=(
             "accepted model identifier in claude 2.1.241's own model catalog; predates the "
-            "reasoning-effort ladder (no default_effort published), but the catalog entry still "
-            "states context.window:200_000 literally"
+            "reasoning-effort ladder (no default_effort published, matching the None recorded "
+            "above). That catalog entry carries no `context` key at all — unlike the models "
+            "above whose context.window is stated literally — so 200_000 is not read from the "
+            "installed binary; it is Claude 3.7 Sonnet's publicly documented context window, "
+            "carried over as inferred rather than confirmed provenance"
         ),
     ),
     # --- Codex CLI ------------------------------------------------------
@@ -1149,12 +1163,16 @@ def audit_config_drift(
                 )
             )
             continue
-        adapter_catalog = active_catalogs.get(provider.adapter)
+        # `provider.adapter` is a bare `str` read from routing-config.json, not
+        # a verified `ProviderId` — a typo'd adapter (see
+        # `test_an_unknown_provider_adapter_does_not_crash_the_audit`) must
+        # still flow through this comparison rather than being coerced into
+        # the Literal type it may not actually belong to.
+        adapter = provider.adapter
+        adapter_catalog = active_catalogs.get(adapter) if adapter in PROVIDER_IDS else None
         model_entry = adapter_catalog.get(model_id) if adapter_catalog is not None else None
         if model_entry is None:
-            other_provider_id = _other_publishing_provider(
-                model_id, provider.adapter, active_catalogs
-            )
+            other_provider_id = _other_publishing_provider(model_id, adapter, active_catalogs)
             if other_provider_id is None:
                 findings.append(
                     DriftFinding(
@@ -1170,7 +1188,7 @@ def audit_config_drift(
                         subject=subject,
                         detail=(
                             f"model {model_id!r} belongs to provider {other_provider_id!r}, "
-                            f"not {provider.adapter!r}"
+                            f"not {adapter!r}"
                         ),
                     )
                 )
@@ -1282,10 +1300,17 @@ def _active_model_catalogs(
 
 def _other_publishing_provider(
     model_id: str,
-    provider_id: ProviderId,
+    provider_id: str,
     active_catalogs: Mapping[ProviderId, Mapping[str, AuditedModel | ProbedModel]],
 ) -> ProviderId | None:
-    """Find another adapter publishing ``model_id`` in the active catalogs."""
+    """Find another adapter publishing ``model_id`` in the active catalogs.
+
+    ``provider_id`` is the adapter string named in the config being audited —
+    only ever used here for a ``!=`` exclusion, never as a lookup key — so it
+    is typed as the bare, unverified ``str`` it actually is. A typo'd adapter
+    (outside `PROVIDER_IDS`) legitimately reaches this function and must
+    still be excluded by value, not rejected as a type mismatch.
+    """
     for other_provider_id in PROVIDER_IDS:
         if other_provider_id != provider_id and model_id in active_catalogs[other_provider_id]:
             return other_provider_id

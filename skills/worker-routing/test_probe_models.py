@@ -304,14 +304,16 @@ class AuditedCatalogTests(unittest.TestCase):
         }
         self.assertEqual(codex_windows, {272000})
 
-    def test_claude_context_windows_match_the_installed_binarys_catalog(self) -> None:
+    def test_claude_context_windows_three_read_from_the_binary_one_inferred(self) -> None:
         """Ground truth extracted from the installed binary at
         ~/.local/share/claude/versions/2.1.241: the three Claude 5 models
-        publish context.window:1_000_000 literally, and the pre-effort
-        claude-3-7-sonnet publishes context.window:200_000. Pinned because
-        `roles.*.capability_requirements.min_context` in routing-config.json
-        (200000 / 128000 / 32000) cannot be gated against a `None` window by
-        ticket 46's consumer."""
+        publish context.window:1_000_000 literally. The pre-effort
+        claude-3-7-sonnet's catalog entry carries no `context` key at all —
+        its 200_000 is inferred (Claude 3.7 Sonnet's publicly documented
+        context window), not read from the binary; see its `evidence` field.
+        Pinned because `roles.*.capability_requirements.min_context` in
+        routing-config.json (200000 / 128000 / 32000) cannot be gated
+        against a `None` window by ticket 46's consumer."""
         windows = {
             model_id: probe_models.AUDITED_MODEL_CATALOG[model_id].context_window
             for model_id in ("claude-opus-5", "claude-sonnet-5", "claude-fable-5", "claude-3-7-sonnet")
@@ -381,7 +383,7 @@ class AuditedCatalogTests(unittest.TestCase):
         the five-rung ladder (low, medium, high, xhigh, max) read directly
         from the installed `claude` 2.1.241 binary's catalog — this
         project's own T3 workers. Only `context_window` was pinned before
-        (`test_claude_context_windows_match_the_installed_binarys_catalog`
+        (`test_claude_context_windows_three_read_from_the_binary_one_inferred`
         above); narrowing `_CLAUDE_EFFORTS` to `("low", "medium", "high")`
         left the whole suite green until this test."""
         for model_id in ("claude-opus-5", "claude-sonnet-5", "claude-fable-5"):
@@ -1552,6 +1554,34 @@ class ConfigDriftTests(unittest.TestCase):
             [],
         )
 
+    def test_a_fallback_only_probe_does_not_count_as_a_live_replacement(self) -> None:
+        """`_active_model_catalogs`' `source == "live"` check is what decides
+        whether a probe is authoritative. Every fixture elsewhere in this
+        file that exercises the live-replacement path uses an all-`"live"`
+        probe, so that check has only ever been proven in its True direction.
+
+        `claude_code_cli` publishes no list command, so `probe_cli_provider`
+        degrades to `_cli_fallback` on *every* real run and returns the
+        audited catalog with `source="audited"` throughout — never `"live"`.
+        That fallback-shaped probe must be treated exactly like "no snapshot
+        for this provider": it must not suppress the
+        `_CROSS_PROVIDER_EFFORT_LADDERS` overlay that lets `claude_code_cli`
+        accept `claude-sonnet-4-6` at `max` even though the model is audited
+        under `antigravity_cli`. Mutating `source == "live"` to `True` makes
+        this fallback probe look authoritative, which drops the overlay and
+        turns this into a `mismatched_provider` finding instead."""
+        findings = probe_models.audit_config_drift(
+            self._config_with_provider(
+                "claude_sonnet_4_6", "claude-sonnet-4-6", "max", adapter="claude_code_cli"
+            ),
+            snapshot=self._snapshot_with_claude_fallback_probe(),
+        )
+
+        self.assertEqual(
+            [finding for finding in findings if finding.subject == "providers.claude_sonnet_4_6"],
+            [],
+        )
+
     def test_live_snapshot_models_reconcile_without_unknown_model_finding(self) -> None:
         snapshot = self._snapshot_with_live_model()
         findings = probe_models.audit_config_drift(
@@ -1815,6 +1845,25 @@ class ConfigDriftTests(unittest.TestCase):
             )
         )
 
+    @staticmethod
+    def _snapshot_with_claude_fallback_probe() -> probe_models.CatalogSnapshot:
+        """The exact shape `probe_cli_provider` returns for `claude_code_cli`
+        on every real run: it has no list command, so it always degrades to
+        `_cli_fallback`, whose models are the audited catalog with
+        `source="audited"` — never `"live"`."""
+        return probe_models.CatalogSnapshot(
+            providers=(
+                probe_models.ProviderProbe(
+                    provider_id="claude_code_cli",
+                    available=True,
+                    binary_path="/bin/claude",
+                    endpoint=None,
+                    models=probe_models._audited_models_for("claude_code_cli"),
+                    error=None,
+                ),
+            )
+        )
+
 
 class TextReportRenderingTests(unittest.TestCase):
     """`_render_text_report`'s own defensive fallbacks — exercised directly
@@ -2064,6 +2113,60 @@ class CliEntryPointTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("none —", stream.getvalue())
+
+    def test_main_passes_the_live_snapshot_to_audit_config_drift(self) -> None:
+        """`main()`'s whole `--audit` payoff is that it hands `audit_config_drift`
+        the *same* snapshot it just probed, not a fresh `snapshot=None` — that is
+        what lets a config be checked against what providers publish *right now*
+        rather than only the frozen audited catalog. No existing `--audit` test
+        can tell the two apart: `_clean_config` names "Gemini 3.7 Flash (Low)",
+        which `_agy_listing` also publishes live, so it resolves identically
+        whether or not the snapshot reaches `audit_config_drift`.
+
+        This config instead names "Gemini 3.1 Pro (High)" — audited under
+        `antigravity_cli`, but *not* part of `_agy_listing`'s live output.
+        `_active_model_catalogs` treats a provider's live listing as
+        authoritative once one exists (see `_snapshot_with_live_model` and
+        `_active_model_catalogs`'s docstring), so wiring the snapshot through
+        correctly makes this model disappear from the active catalog and
+        report `unknown_model`. Dropping `snapshot=snapshot` at the
+        `audit_config_drift` call site inside `main()` instead leaves
+        `audit_config_drift` building its catalogs from `snapshot=None`, which
+        falls back to the full *audited* antigravity roster — where "Gemini
+        3.1 Pro (High)" still resolves — and the finding silently disappears."""
+        stream = io.StringIO()
+
+        exit_code = probe_models.main(
+            ["--json", "--audit"],
+            stdout=stream,
+            config_loader=self._stale_antigravity_provider_config,
+            opener=self._online_opener,
+            which=self._installed,
+            runner=self._agy_listing,
+            cache_reader=self._unused_cache_reader,
+        )
+
+        self.assertEqual(exit_code, 1)
+        payload = json.loads(stream.getvalue())
+        provider_findings = [
+            (finding["kind"], finding["subject"])
+            for finding in payload["drift"]
+            if finding["subject"] == "providers.gemini_pro"
+        ]
+        self.assertEqual(provider_findings, [("unknown_model", "providers.gemini_pro")])
+
+    @staticmethod
+    def _stale_antigravity_provider_config() -> routing_config.RoutingConfig:
+        base = routing_config.get_default_routing_config().to_dict()
+        base["providers"] = {
+            "gemini_pro": {
+                "adapter": "antigravity_cli",
+                "model": "Gemini 3.1 Pro (High)",
+                "default_reasoning_effort": "high",
+            }
+        }
+        base["supported_models"] = []
+        return routing_config.parse_routing_config(base)
 
     @staticmethod
     def _clean_config() -> routing_config.RoutingConfig:
