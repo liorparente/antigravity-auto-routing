@@ -21,12 +21,13 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import learning_journal, learning_report_html, learning_scoreboard
+    from . import learning_journal, learning_report_html, learning_scoreboard, routing_config
     from .test_learning_scoreboard import _find_forbidden_clock_reads
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_report_html  # type: ignore[no-redef]
     import learning_scoreboard  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
     from test_learning_scoreboard import _find_forbidden_clock_reads  # type: ignore[no-redef]
 
 LEARNING_REPORT_HTML_PATH = Path(__file__).with_name("learning_report_html.py")
@@ -587,6 +588,239 @@ class EscapingTests(unittest.TestCase):
         report = learning_report_html.render_html_report(journal, board, baseline_board, now=_NOW)
 
         self.assertNotIn("<script", report)
+
+
+# --- Role matrix (ticket 47) ---
+
+
+def _capability(
+    *,
+    provider: str = "anthropic",
+    model_id: str = "claude-sonnet-5",
+    supported_efforts: tuple[str, ...] = ("low", "medium", "high"),
+    default_effort: str | None = "medium",
+    tier: str = "high",
+    context: int | None = 200000,
+    local_only: bool = False,
+) -> Any:
+    return routing_config.ModelCapability(
+        provider=provider,
+        model_id=model_id,
+        supported_efforts=supported_efforts,
+        default_effort=default_effort,
+        tier=tier,
+        context=context,
+        local_only=local_only,
+    )
+
+
+def _binding(
+    *,
+    provider_id: str = "anthropic-sonnet",
+    adapter: str = "anthropic",
+    model_id: str = "claude-sonnet-5",
+    reasoning_effort: str = "medium",
+    capability: Any | None = None,
+) -> Any:
+    return routing_config.RoleModelBinding(
+        provider_id=provider_id,
+        adapter=adapter,
+        model_id=model_id,
+        reasoning_effort=reasoning_effort,
+        capability=capability if capability is not None else _capability(),
+    )
+
+
+def _role_entry(
+    role_id: str,
+    *,
+    reasoning_tier: str = "high",
+    tool_access: str = "full",
+    min_context: int = 100000,
+    local_only: bool = False,
+    bindings: tuple[Any, ...] = (),
+) -> Any:
+    return routing_config.RoleMatrixEntry(
+        role_id=role_id,
+        capability_requirements=routing_config.CapabilityRequirements(
+            reasoning_tier=reasoning_tier,
+            tool_access=tool_access,
+            min_context=min_context,
+            local_only=local_only,
+        ),
+        bindings=bindings,
+    )
+
+
+class RoleMatrixSectionTests(unittest.TestCase):
+    def test_empty_role_matrix_renders_an_empty_state_in_both_grids(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+
+        report = learning_report_html.render_html_report(journal, board, baseline_board, now=_NOW)
+
+        self.assertIn('id="role-grid-simple"', report)
+        self.assertIn('id="role-grid-all"', report)
+        self.assertIn("No roles configured.", report)
+
+    def test_tab_bar_and_role_matrix_heading_are_present(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+
+        report = learning_report_html.render_html_report(journal, board, baseline_board, now=_NOW)
+
+        self.assertIn('id="tab-metrics"', report)
+        self.assertIn('id="tab-roles"', report)
+        self.assertIn("מדדי ביצוע ולמידה", report)
+        self.assertIn("הגדרת תפקידים ומודלים", report)
+        self.assertIn("Role &amp; Model Configuration Matrix", report)
+
+    def test_segmented_toggle_labels_are_present(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+
+        report = learning_report_html.render_html_report(journal, board, baseline_board, now=_NOW)
+
+        self.assertIn("תפקידי מפתח (ראשי)", report)
+        self.assertIn("פירוט מלא (מתקדם)", report)
+
+    def test_a_primary_role_appears_in_both_the_simple_and_all_grids(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        role_matrix = {"planner": _role_entry("planner", bindings=(_binding(),))}
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
+        )
+
+        simple_grid = report.split('id="role-grid-simple"')[1].split('id="role-grid-all"')[0]
+        all_grid = report.split('id="role-grid-all"')[1]
+        self.assertIn("planner", simple_grid)
+        self.assertIn("planner", all_grid)
+
+    def test_a_non_primary_role_appears_only_in_the_all_grid(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        role_matrix = {
+            "reviewer_security": _role_entry("reviewer_security", bindings=(_binding(),))
+        }
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
+        )
+
+        simple_grid = report.split('id="role-grid-simple"')[1].split('id="role-grid-all"')[0]
+        all_grid = report.split('id="role-grid-all"')[1]
+        self.assertNotIn("reviewer_security", simple_grid)
+        self.assertIn("reviewer_security", all_grid)
+
+    def test_role_card_shows_capability_requirements_and_binding_details(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        role_matrix = {
+            "planner": _role_entry(
+                "planner",
+                reasoning_tier="high",
+                tool_access="full",
+                min_context=128000,
+                bindings=(
+                    _binding(
+                        provider_id="anthropic-sonnet",
+                        model_id="claude-sonnet-5",
+                        reasoning_effort="high",
+                        capability=_capability(tier="high", supported_efforts=("low", "high")),
+                    ),
+                ),
+            )
+        }
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
+        )
+
+        self.assertIn("Reasoning Tier: high", report)
+        self.assertIn("Tool Access: full", report)
+        self.assertIn("Min Context: 128000", report)
+        self.assertIn("Provider: anthropic-sonnet", report)
+        self.assertIn("Model: claude-sonnet-5", report)
+        self.assertIn("Effort: high", report)
+        self.assertIn("Supported Efforts: low, high", report)
+
+    def test_a_binding_with_no_capability_shows_an_unknown_capability_pill(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        role_matrix = {
+            "planner": _role_entry(
+                "planner",
+                bindings=(
+                    routing_config.RoleModelBinding(
+                        provider_id="anthropic-sonnet",
+                        adapter="anthropic",
+                        model_id="claude-sonnet-5",
+                        reasoning_effort="medium",
+                        capability=None,
+                    ),
+                ),
+            )
+        }
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
+        )
+
+        self.assertIn("Capability: unknown (drift)", report)
+
+    def test_local_only_capability_requirement_renders_a_local_only_pill(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        role_matrix = {"sensitive_executor": _role_entry("sensitive_executor", local_only=True)}
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
+        )
+
+        self.assertIn("Local Only: yes", report)
+
+    def test_an_unrecognized_role_id_still_renders_instead_of_being_dropped(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        role_matrix = {"future_role": _role_entry("future_role")}
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
+        )
+
+        all_grid = report.split('id="role-grid-all"')[1]
+        self.assertIn("future_role", all_grid)
+
+    def test_role_matrix_values_are_escaped(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        role_matrix = {
+            "planner": _role_entry(
+                "planner",
+                reasoning_tier="<script>alert(1)</script>",
+                bindings=(),
+            )
+        }
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
+        )
+
+        self.assertNotIn("<script", report)
+        self.assertIn("&lt;script&gt;", report)
+
+    def test_write_html_report_wires_in_the_real_routing_config_role_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            path = learning_report_html.write_html_report(root, now=_NOW)
+
+            content = path.read_text(encoding="utf-8")
+            self.assertIn('id="role-grid-simple"', content)
+            self.assertIn("planner", content)
+            self.assertNotIn("No roles configured.", content)
 
 
 # --- The write door ---

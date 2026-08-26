@@ -69,6 +69,24 @@ or a closed `Literal` vocabulary — none of which admit `<`, `>`, `&`, or
 boundary" principle the rest of this codebase applies at its own
 untrusted-input boundaries: a future field or a future caller must not be
 able to reach this template with an unescaped value.
+
+**The Role & Model Configuration Matrix (Spec 0013, ticket 47) is a second
+tab, not a second document.** `render_html_report` grows one optional
+parameter, `role_matrix` — `routing_config.get_role_matrix_view_data`'s
+output — and renders it as a Bento Grid of role cards behind a second tab
+alongside the existing metrics tab. Ticket 47's scope is layout only: the
+tab bar and the "primary roles / all roles" segmented toggle are both
+pure CSS (checked-radio sibling selectors), matching the rendered
+report's standing "no inline `<script>`" invariant
+(`test_rendered_report_never_leaks_an_unescaped_script_tag`) that ticket 48
+(reactive model/effort binding) and ticket 49 (the client state machine and
+floating action pill) will be the first to actually need to break. Passing
+`role_matrix=None` (the default) renders an empty grid rather than reading
+`routing-config.json` itself — `render_html_report` stays clock-free and
+disk-free exactly as documented above; `write_html_report` is the caller
+that loads `routing_config.load_routing_config()` and computes the view
+data, mirroring how it already owns computing `board`/`baseline_board`
+from the journal it reads.
 """
 from __future__ import annotations
 
@@ -76,16 +94,18 @@ import html
 import math
 import os
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 if __package__:
-    from . import learning_journal, learning_report, learning_scoreboard
+    from . import learning_journal, learning_report, learning_scoreboard, routing_config
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_report  # type: ignore[no-redef]
     import learning_scoreboard  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
 
 # Re-exported from `learning_scoreboard` — one source, never a second
 # literal, matching `learning_report.DEFAULT_WINDOW_DAYS`'s own re-export.
@@ -624,6 +644,188 @@ def _consensus_section_html(
     </div>"""
 
 
+# --- role matrix (ticket 47) ---
+
+# Declared JSON order of `routing-config.json`'s `roles` map, restated here
+# only for display ordering — `get_role_matrix_view_data` already preserves
+# `config.roles`' own insertion order, so this exists purely so a future
+# role added out of that order still renders in a stable, reviewed spot
+# rather than wherever dict iteration happens to put it. Any role id not
+# listed here (a future addition) still renders — see `_ordered_role_ids`.
+_ROLE_DISPLAY_ORDER: tuple[str, ...] = (
+    "planner",
+    "builder_heavy",
+    "builder_light",
+    "reviewer_risk",
+    "reviewer_architecture",
+    "reviewer_maintainability",
+    "reviewer_security",
+    "adjudicator",
+    "sensitive_executor",
+)
+
+# The five roles user story 2 names as the Bento Grid's "primary" set
+# (Planner, Heavy Builder, Light Builder, Critic, Adjudicator) — every role
+# in `_ROLE_DISPLAY_ORDER` *not* in this set is exactly the "security,
+# architecture, maintainability reviewers, and sensitive executor" group
+# the spec's `all` mode adds (Implementation Decisions §2). `reviewer_risk`
+# is the "Critic" of the two user-facing names — see `_ROLE_DISPLAY_NAMES`.
+_PRIMARY_ROLE_IDS: frozenset[str] = frozenset(
+    {"planner", "builder_heavy", "builder_light", "reviewer_risk", "adjudicator"}
+)
+
+_ROLE_DISPLAY_NAMES: dict[str, str] = {
+    "planner": "Planner — מתכנן",
+    "builder_heavy": "Heavy Builder — בנאי כבד",
+    "builder_light": "Light Builder — בנאי קל",
+    "reviewer_risk": "Critic — מבקר",
+    "reviewer_architecture": "Architecture Reviewer — מבקר ארכיטקטורה",
+    "reviewer_maintainability": "Maintainability Reviewer — מבקר תחזוקתיות",
+    "reviewer_security": "Security Reviewer — מבקר אבטחה",
+    "adjudicator": "Adjudicator — פוסק",
+    "sensitive_executor": "Sensitive Executor — מבצע רגיש",
+}
+
+# The Bento Grid's colored accent sidebar — one hex per role, from the
+# spec's Ethos Analytics palette (Implementation Decisions §2). Grouped by
+# function rather than assigned arbitrarily: blue for planning, green for
+# building, purple for the three review roles, amber for the adjudicator,
+# red for the two roles this codebase already treats as highest-risk
+# (`reviewer_security`, `sensitive_executor` — see `routing-config.json`'s
+# `sensitivity_gate`). A role id absent here falls back to `--neutral` in
+# `_role_accent_color`, so a future role never renders with a broken style.
+_ROLE_ACCENT_COLORS: dict[str, str] = {
+    "planner": "#2563eb",
+    "builder_heavy": "#059669",
+    "builder_light": "#10b981",
+    "reviewer_risk": "#7c3aed",
+    "reviewer_architecture": "#7c3aed",
+    "reviewer_maintainability": "#7c3aed",
+    "reviewer_security": "#dc2626",
+    "adjudicator": "#d97706",
+    "sensitive_executor": "#dc2626",
+}
+
+# Reasoning-effort badge colors, exactly as user story 7 specifies: "Green
+# for Low, Blue for Medium, Purple for High, Amber for Ultra". A rung
+# absent here (there is none today — `_EFFORT_RANK` in `routing_config.py`
+# is the closed vocabulary) falls back to `--neutral`.
+_EFFORT_BADGE_COLORS: dict[str, str] = {
+    "low": "#1a7a4c",
+    "medium": "#2563eb",
+    "high": "#7c3aed",
+    "ultra": "#d97706",
+}
+
+
+def _role_accent_color(role_id: str) -> str:
+    return _ROLE_ACCENT_COLORS.get(role_id, "#8a8377")
+
+
+def _ordered_role_ids(entries: Mapping[str, Any]) -> tuple[str, ...]:
+    """`_ROLE_DISPLAY_ORDER`'s roles that are actually present in `entries`,
+    followed by any present role id `_ROLE_DISPLAY_ORDER` does not name (an
+    addition to `routing-config.json` this module has not been taught yet)
+    in sorted order — every entry renders, never silently dropped for want
+    of a display-order slot.
+    """
+    known = tuple(role_id for role_id in _ROLE_DISPLAY_ORDER if role_id in entries)
+    unknown = tuple(sorted(role_id for role_id in entries if role_id not in _ROLE_DISPLAY_ORDER))
+    return known + unknown
+
+
+def _pill_html(label: str, value: str, *, color: str | None = None) -> str:
+    style = f' style="background:{_escape(color)}1a;color:{_escape(color)};"' if color else ""
+    return (
+        f'<span class="capability-pill"{style}>'
+        f"{_escape(label)}: {_escape(value)}</span>"
+    )
+
+
+def _capability_requirements_pills(requirements: Any) -> str:
+    pills = [
+        _pill_html("Reasoning Tier", requirements.reasoning_tier),
+        _pill_html("Tool Access", requirements.tool_access),
+        _pill_html("Min Context", str(requirements.min_context)),
+    ]
+    if requirements.local_only:
+        pills.append(_pill_html("Local Only", "yes", color="#b3261e"))
+    return "".join(pills)
+
+
+def _binding_html(binding: Any) -> str:
+    capability = binding.capability
+    effort_color = _EFFORT_BADGE_COLORS.get(binding.reasoning_effort, "#8a8377")
+    pills = [
+        _pill_html("Provider", binding.provider_id),
+        _pill_html("Model", binding.model_id),
+        _pill_html("Effort", binding.reasoning_effort, color=effort_color),
+    ]
+    if capability is None:
+        pills.append(_pill_html("Capability", "unknown (drift)", color="#b3261e"))
+    else:
+        pills.append(_pill_html("Tier", capability.tier))
+        pills.append(
+            _pill_html(
+                "Supported Efforts",
+                ", ".join(capability.supported_efforts) if capability.supported_efforts else "none",
+            )
+        )
+        pills.append(
+            _pill_html("Context", str(capability.context) if capability.context is not None else "unknown")
+        )
+    return f"""
+        <div class="role-binding">
+          <div class="role-binding-pills">{"".join(pills)}</div>
+        </div>"""
+
+
+def _role_card_html(entry: Any) -> str:
+    display_name = _ROLE_DISPLAY_NAMES.get(entry.role_id, entry.role_id)
+    accent = _role_accent_color(entry.role_id)
+    bindings_html = "".join(_binding_html(binding) for binding in entry.bindings)
+    if not bindings_html:
+        bindings_html = '<p class="empty-state">No preferred providers configured.</p>'
+    return f"""
+      <div class="role-card" style="border-inline-start-color:{_escape(accent)};">
+        <div class="role-card-header">
+          <div class="role-name">{_escape(display_name)}</div>
+          <div class="role-id" dir="ltr">{_escape(entry.role_id)}</div>
+        </div>
+        <div class="role-card-requirements">{_capability_requirements_pills(entry.capability_requirements)}</div>
+        <div class="role-card-bindings">{bindings_html}</div>
+      </div>"""
+
+
+def _role_matrix_grid_html(entries: Mapping[str, Any], role_ids: tuple[str, ...]) -> str:
+    cards = "".join(_role_card_html(entries[role_id]) for role_id in role_ids)
+    if not cards:
+        return '<p class="empty-state">No roles configured.</p>'
+    return cards
+
+
+def _role_matrix_section_html(role_matrix: Mapping[str, Any]) -> str:
+    """The Bento Grid plus its CSS-only "primary roles / all roles"
+    segmented toggle — see this module's docstring for why no `<script>`
+    is involved. An empty `role_matrix` (the `render_html_report` default)
+    renders the same empty state both grids fall back to, rather than a
+    blank tab.
+    """
+    ordered = _ordered_role_ids(role_matrix)
+    primary_ids = tuple(role_id for role_id in ordered if role_id in _PRIMARY_ROLE_IDS)
+    return f"""
+    <input type="radio" id="role-mode-simple" name="role-mode" class="sr-only-toggle" checked>
+    <input type="radio" id="role-mode-all" name="role-mode" class="sr-only-toggle">
+    <div class="segmented-toggle">
+      <label for="role-mode-simple">תפקידי מפתח (ראשי)</label>
+      <label for="role-mode-all">פירוט מלא (מתקדם)</label>
+    </div>
+    <div class="role-grid" id="role-grid-simple">{_role_matrix_grid_html(role_matrix, primary_ids)}
+    </div>
+    <div class="role-grid" id="role-grid-all">{_role_matrix_grid_html(role_matrix, ordered)}
+    </div>"""
+
+
 # --- document assembly ---
 
 _CSS = """
@@ -711,6 +913,75 @@ section h2 {
 .consensus-summary { display: flex; flex-wrap: wrap; gap: 1rem; }
 .consensus-summary div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .75rem 1rem; }
 footer { padding: 1rem 2rem; color: var(--muted); font-size: 0.8rem; }
+
+/* Two-tab navigation & role-mode toggle (ticket 47) — CSS-only, driven by
+   checked radio inputs and general-sibling selectors. This document ships
+   no script tags at all; see this module's docstring for why. */
+.sr-only-toggle { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.tab-bar { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.tab-bar label {
+  cursor: pointer;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+#tab-metrics:checked ~ header label[for="tab-metrics"],
+#tab-roles:checked ~ header label[for="tab-roles"] {
+  background: var(--slate);
+  color: #fff;
+  border-color: var(--slate);
+}
+#tab-content-metrics, #tab-content-roles { display: none; }
+#tab-metrics:checked ~ #tab-content-metrics { display: block; }
+#tab-roles:checked ~ #tab-content-roles { display: block; }
+
+.role-matrix-main { padding: 1.5rem 2rem; max-width: 1200px; margin: 0 auto; }
+.segmented-toggle { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.segmented-toggle label {
+  cursor: pointer;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+#role-mode-simple:checked ~ .segmented-toggle label[for="role-mode-simple"],
+#role-mode-all:checked ~ .segmented-toggle label[for="role-mode-all"] {
+  background: var(--slate);
+  color: #fff;
+  border-color: var(--slate);
+}
+.role-grid { display: none; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+#role-mode-simple:checked ~ #role-grid-simple { display: grid; }
+#role-mode-all:checked ~ #role-grid-all { display: grid; }
+.role-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-inline-start: 4px solid var(--neutral);
+  border-radius: 10px;
+  padding: 1rem;
+}
+.role-card-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.5rem; }
+.role-name { font-weight: 700; font-size: 1rem; }
+.role-id { color: var(--neutral); font-size: 0.75rem; }
+.role-card-requirements, .role-binding-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.5rem; }
+.role-binding { border-top: 1px dashed var(--border); padding-top: 0.5rem; margin-top: 0.5rem; }
+.capability-pill {
+  display: inline-block;
+  background: #eeece6;
+  color: var(--ink);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  direction: ltr;
+}
 """
 
 
@@ -721,6 +992,7 @@ def render_html_report(
     *,
     now: datetime,
     window_days: int = DEFAULT_WINDOW_DAYS,
+    role_matrix: Mapping[str, Any] | None = None,
 ) -> str:
     """The pure contract door: a journal and its two already-computed
     boards in, a standalone HTML document out. Reads no clock, touches no
@@ -731,6 +1003,13 @@ def render_html_report(
     `window_days` passed here — mirroring exactly what
     `render_weekly_report` builds internally from one journal. A mismatch on
     any of the three is a loud `ValueError`, not a silently wrong table.
+
+    `role_matrix` is `routing_config.get_role_matrix_view_data`'s output —
+    a `Mapping[str, RoleMatrixEntry]` — rendered as the second tab's Bento
+    Grid (ticket 47). Defaults to an empty mapping (an empty grid, not a
+    crash) rather than this function computing it itself: see this
+    module's docstring for why loading `routing-config.json` belongs to
+    `write_html_report`, not here.
     """
     _require_aware_now(now)
     _validate_window_days(window_days)
@@ -785,6 +1064,7 @@ def render_html_report(
         f"{journal.unreadable_lines} unreadable line(s), "
         f"{journal.unknown_kind_lines} unknown-kind line(s)."
     )
+    role_matrix_html = _role_matrix_section_html(role_matrix if role_matrix is not None else {})
 
     return f"""<!DOCTYPE html>
 <html lang="he" dir="rtl">
@@ -795,10 +1075,17 @@ def render_html_report(
 <style>{_CSS}</style>
 </head>
 <body>
+<input type="radio" id="tab-metrics" name="dashboard-tab" class="sr-only-toggle" checked>
+<input type="radio" id="tab-roles" name="dashboard-tab" class="sr-only-toggle">
 <header>
   <h1>Learning Dashboard <span style="color: var(--muted);">לוח בקרה למידה</span></h1>
   <div class="subtitle" dir="ltr">Light Mode · Window: {_escape(window_line)}</div>
+  <div class="tab-bar">
+    <label for="tab-metrics">מדדי ביצוע ולמידה</label>
+    <label for="tab-roles">הגדרת תפקידים ומודלים</label>
+  </div>
 </header>
+<div id="tab-content-metrics">
 <main>
   <section>
     <h2>Key Performance Indicators — מדדים מרכזיים</h2>
@@ -822,6 +1109,15 @@ def render_html_report(
     {degradation_html}
   </section>
 </main>
+</div>
+<div id="tab-content-roles">
+<main class="role-matrix-main">
+  <section>
+    <h2>Role &amp; Model Configuration Matrix — מטריצת תפקידים ומודלים</h2>
+    {role_matrix_html}
+  </section>
+</main>
+</div>
 <footer dir="ltr">Journal health: {_escape(journal_health)}</footer>
 </body>
 </html>
@@ -871,6 +1167,13 @@ def write_html_report(
     the report writer derives its root from that conventional location. For
     parity with ``write_weekly_report``, callers may also pass the project
     root directly. ``output_path`` defaults to ``html_report_path``.
+
+    The role matrix rendered on the second tab always comes from this
+    package's own ``routing-config.json`` (``routing_config.
+    load_routing_config()``'s default path) — unrelated to ``root_dir``,
+    the same way ``routing_config.ROUTING_CONFIG_PATH`` is a fixed sibling
+    file every other consumer in this package reads regardless of which
+    project root it is otherwise operating on.
     """
     _require_aware_now(now)
     _validate_window_days(window_days)
@@ -885,8 +1188,9 @@ def write_html_report(
     baseline_board = learning_scoreboard.compute_scoreboard(
         journal, now=now - timedelta(days=window_days), window_days=window_days
     )
+    role_matrix = routing_config.get_role_matrix_view_data(routing_config.load_routing_config())
     content = render_html_report(
-        journal, board, baseline_board, now=now, window_days=window_days
+        journal, board, baseline_board, now=now, window_days=window_days, role_matrix=role_matrix
     )
     path = output_path if output_path is not None else html_report_path(root_dir, now=now)
     _atomic_text_write(path, content)
