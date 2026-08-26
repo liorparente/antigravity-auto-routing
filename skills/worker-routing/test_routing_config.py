@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -409,6 +410,232 @@ class ValidateDefaultConfigTests(unittest.TestCase):
                 self.assertRaises(routing_config.ConfigFileNotFoundError),
             ):
                 routing_config.validate_default_config()
+
+
+class ModelCapabilityRegistryTests(unittest.TestCase):
+    """Ticket 46 AC: "Implement `MODEL_CAPABILITIES_REGISTRY` containing
+    audited model entries" — built from ticket 45's
+    `probe_models.AUDITED_MODEL_CATALOG`, keyed by `(provider, model_id)`
+    so a model published by more than one provider (F7) gets one entry per
+    provider instead of losing all but the last."""
+
+    def test_registry_is_keyed_by_provider_and_model_id(self) -> None:
+        registry = routing_config.build_model_capabilities_registry()
+        capability = registry[("claude_code_cli", "claude-opus-5")]
+        self.assertIsInstance(capability, routing_config.ModelCapability)
+        self.assertEqual(capability.provider, "claude_code_cli")
+        self.assertEqual(capability.model_id, "claude-opus-5")
+        self.assertEqual(capability.supported_efforts, ("low", "medium", "high", "xhigh", "max"))
+        self.assertEqual(capability.default_effort, "high")
+        self.assertEqual(capability.context, 1_000_000)
+        self.assertFalse(capability.local_only)
+
+    def test_registry_is_an_immutable_mapping(self) -> None:
+        registry = routing_config.build_model_capabilities_registry()
+        with self.assertRaises(TypeError):
+            registry[("claude_code_cli", "new-model")] = registry[  # type: ignore[index]
+                ("claude_code_cli", "claude-opus-5")
+            ]
+
+    def test_f7_cross_provider_model_gets_its_own_narrower_entry(self) -> None:
+        """`claude-sonnet-4-6` is audited under `antigravity_cli` but is
+        also accepted by the `claude` binary with a narrower ladder
+        (`probe_models._CROSS_PROVIDER_EFFORT_LADDERS`). Before ticket 46,
+        `AUDITED_MODEL_CATALOG`'s bare-`model_id` keying meant only one of
+        these two providers' ladders could ever be looked up for this
+        model id at all; the registry must carry both, distinctly."""
+        registry = routing_config.build_model_capabilities_registry()
+        native = registry[("antigravity_cli", "claude-sonnet-4-6")]
+        overlaid = registry[("claude_code_cli", "claude-sonnet-4-6")]
+        self.assertNotEqual(native.supported_efforts, overlaid.supported_efforts)
+        self.assertEqual(overlaid.supported_efforts, ("low", "medium", "high", "max"))
+        self.assertNotIn("xhigh", overlaid.supported_efforts)
+
+    def test_a_model_with_no_effort_ladder_gets_tier_none_not_a_crash(self) -> None:
+        """`claude-3-7-sonnet` predates reasoning efforts entirely
+        (`supported_efforts=()`) — deriving a tier from an empty ladder
+        must degrade to an explicit sentinel, not raise."""
+        registry = routing_config.build_model_capabilities_registry()
+        capability = registry[("claude_code_cli", "claude-3-7-sonnet")]
+        self.assertEqual(capability.supported_efforts, ())
+        self.assertIsNone(capability.default_effort)
+        self.assertEqual(capability.tier, "none")
+
+    def test_tier_is_the_models_own_highest_supported_effort_rung(self) -> None:
+        registry = routing_config.build_model_capabilities_registry()
+        # gpt-5.6-sol reaches "ultra" per the audit doc; gpt-5.6-luna tops
+        # out at "max" and never reaches "ultra".
+        self.assertEqual(registry[("codex_cli", "gpt-5.6-sol")].tier, "ultra")
+        self.assertEqual(registry[("codex_cli", "gpt-5.6-luna")].tier, "max")
+
+    def test_importing_probe_models_before_routing_config_does_not_deadlock(self) -> None:
+        """`probe_models` imports `routing_config` at its own top level
+        (Ticket 45). `build_model_capabilities_registry` imports
+        `probe_models` back, so it must do so lazily, inside the function
+        body — an eager module-level statement would read `probe_models`
+        mid-initialization whenever `probe_models` is the entry point of
+        the import chain, before `AUDITED_MODEL_CATALOG` exists yet. A
+        same-process test cannot exercise this: both modules are already
+        fully imported by the rest of the suite by the time this test
+        runs, so re-importing either is a cached no-op regardless of
+        ordering. A fresh subprocess is the only way to genuinely control
+        which module starts the chain.
+        """
+        script = (
+            "import sys; sys.path.insert(0, sys.argv[1]); "
+            "import probe_models; "
+            "assert probe_models.AUDITED_MODEL_CATALOG; "
+            "import routing_config; "
+            "assert routing_config.build_model_capabilities_registry()"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_importing_routing_config_before_probe_models_does_not_deadlock(self) -> None:
+        script = (
+            "import sys; sys.path.insert(0, sys.argv[1]); "
+            "import routing_config; "
+            "assert routing_config.build_model_capabilities_registry(); "
+            "import probe_models; "
+            "assert probe_models.AUDITED_MODEL_CATALOG"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class RoleMatrixViewDataTests(unittest.TestCase):
+    """Ticket 46 AC: "Expose `get_role_matrix_view_data(config)` returning
+    validated role records with model defaults" and "unit tests verifying
+    schema validation and fail-closed contracts"."""
+
+    def test_checked_in_config_resolves_every_role_without_raising(self) -> None:
+        config = routing_config.load_routing_config()
+        matrix = routing_config.get_role_matrix_view_data(config)
+        self.assertEqual(set(matrix.keys()), set(config.roles.keys()))
+        planner = matrix["planner"]
+        self.assertIsInstance(planner, routing_config.RoleMatrixEntry)
+        self.assertEqual(len(planner.bindings), len(config.roles["planner"].preferred_providers))
+        self.assertIsInstance(planner.bindings[0], routing_config.RoleModelBinding)
+
+    def test_unknown_preferred_provider_reference_fails_closed(self) -> None:
+        """A role naming a `preferred_providers` id absent from
+        `config.providers` is a structural authoring error — distinct from
+        a provider/model pair simply missing from the audited capability
+        registry, which the checked-in config currently has six known
+        instances of (ticket 45's `--audit` drift findings) and which this
+        view must render, not raise on."""
+        config = routing_config.parse_routing_config(
+            {
+                "roles": {
+                    "planner": {
+                        "capability_requirements": {
+                            "reasoning_tier": "high",
+                            "tool_access": "read",
+                            "min_context": 0,
+                        },
+                        "preferred_providers": ["does_not_exist"],
+                    }
+                },
+                "providers": {},
+            }
+        )
+        with self.assertRaises(routing_config.ConfigValidationError) as ctx:
+            routing_config.get_role_matrix_view_data(config)
+        self.assertEqual(ctx.exception.key_path, "roles.planner.preferred_providers")
+
+    def test_model_missing_from_capability_registry_is_reported_not_raised(self) -> None:
+        """Known live-catalog drift (a configured model the audited
+        registry does not recognize for that provider) must surface as
+        `capability=None` on the binding, not an exception — ticket 45
+        deliberately audited `routing-config.json`'s drift without
+        rewiring it, and this view is what a future ticket uses to let an
+        operator see and fix that drift, so it cannot itself refuse to
+        render a drifted role."""
+        config = routing_config.parse_routing_config(
+            {
+                "roles": {
+                    "planner": {
+                        "capability_requirements": {
+                            "reasoning_tier": "high",
+                            "tool_access": "read",
+                            "min_context": 0,
+                        },
+                        "preferred_providers": ["ghost"],
+                    }
+                },
+                "providers": {
+                    "ghost": {
+                        "adapter": "claude_code_cli",
+                        "model": "model-that-does-not-exist",
+                        "default_reasoning_effort": "high",
+                    }
+                },
+            }
+        )
+        matrix = routing_config.get_role_matrix_view_data(config)
+        binding = matrix["planner"].bindings[0]
+        self.assertIsNone(binding.capability)
+        self.assertEqual(binding.model_id, "model-that-does-not-exist")
+
+    def test_capabilities_parameter_overrides_the_live_registry(self) -> None:
+        """Dependency injection (mirroring `RoleResolver`'s own
+        `availability_checker` parameter and `probe_models.main`'s
+        `config_loader` parameter) so a test can hand this a small,
+        deliberate fixture instead of the real, live-probe-shaped
+        registry."""
+        config = routing_config.parse_routing_config(
+            {
+                "roles": {
+                    "planner": {
+                        "capability_requirements": {
+                            "reasoning_tier": "high",
+                            "tool_access": "read",
+                            "min_context": 0,
+                        },
+                        "preferred_providers": ["fixture_provider"],
+                    }
+                },
+                "providers": {
+                    "fixture_provider": {
+                        "adapter": "claude_code_cli",
+                        "model": "fixture-model",
+                        "default_reasoning_effort": "medium",
+                    }
+                },
+            }
+        )
+        fixture_capability = routing_config.ModelCapability(
+            provider="claude_code_cli",
+            model_id="fixture-model",
+            supported_efforts=("low", "medium"),
+            default_effort="low",
+            tier="medium",
+            context=8_000,
+            local_only=False,
+        )
+        matrix = routing_config.get_role_matrix_view_data(
+            config, capabilities={("claude_code_cli", "fixture-model"): fixture_capability}
+        )
+        self.assertIs(matrix["planner"].bindings[0].capability, fixture_capability)
+
+    def test_role_matrix_entries_and_bindings_are_frozen(self) -> None:
+        config = routing_config.load_routing_config()
+        matrix = routing_config.get_role_matrix_view_data(config)
+        entry = matrix["planner"]
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            entry.role_id = "other"  # type: ignore[misc]
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            entry.bindings[0].reasoning_effort = "low"  # type: ignore[misc]
 
 
 if __name__ == "__main__":

@@ -52,12 +52,17 @@ __all__ = [
     "CriticalDialogueConfig",
     "DialogueBudgetConfig",
     "LegacyRoleConfig",
+    "ModelCapability",
     "ProviderConfig",
     "RoleConfig",
+    "RoleMatrixEntry",
+    "RoleModelBinding",
     "RosterTopologyConfig",
     "RoutingConfig",
     "SecurityVetoConfig",
+    "build_model_capabilities_registry",
     "get_default_routing_config",
+    "get_role_matrix_view_data",
     "load_routing_config",
     "parse_routing_config",
     "validate_default_config",
@@ -171,6 +176,72 @@ class RoleConfig:
     role_id: str
     capability_requirements: CapabilityRequirements
     preferred_providers: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ModelCapability:
+    """What one ``(provider, model)`` pairing can actually be asked to do,
+    sourced from ticket 45's ``probe_models.AUDITED_MODEL_CATALOG`` so the
+    Role & Model Configuration Matrix dashboard (Spec 0013) never offers a
+    reasoning effort or model no installed CLI accepts.
+
+    Keyed by ``(provider, model_id)`` rather than ``model_id`` alone in the
+    registry ``build_model_capabilities_registry()`` returns —
+    ``AUDITED_MODEL_CATALOG``'s bare-id keying is exactly the limitation
+    docs/research/live-model-catalog-audit.md §3 finding F7 names, and
+    ticket 45's own code marks the ``(provider_id, model_id)`` re-keying as
+    "ticket 46's capability registry" to decide
+    (``probe_models._CROSS_PROVIDER_EFFORT_LADDERS``).
+    ``provider``/``model_id`` are carried on the value too, mirroring
+    ``AuditedModel.model_id``, so a consumer iterating ``.values()`` still
+    knows what each entry describes without the key alongside it.
+
+    ``tier`` is the model's own highest supported reasoning-effort rung
+    (see ``_effort_ceiling_tier``) — mechanically derived from audited
+    data, not a separately curated classification, so it can never drift
+    from ``supported_efforts``. ``"none"`` for a model with no effort
+    ladder at all (e.g. ``claude-3-7-sonnet``, which predates reasoning
+    efforts).
+    """
+
+    provider: str
+    model_id: str
+    supported_efforts: tuple[str, ...]
+    default_effort: str | None
+    tier: str
+    context: int | None
+    local_only: bool
+
+
+@dataclass(frozen=True)
+class RoleModelBinding:
+    """One of a role's ``preferred_providers``, resolved to its currently
+    configured model and reasoning effort and cross-referenced against
+    ``build_model_capabilities_registry()``'s output.
+
+    ``capability`` is ``None`` when the configured provider/model pair is
+    not in the audited registry — a known, non-fatal live-catalog drift
+    state (see ``probe_models.audit_config_drift``, and
+    ``routing-config.json``'s six currently pinned drift findings), not a
+    structural config error. Ticket 46 / Spec 0013.
+    """
+
+    provider_id: str
+    adapter: str
+    model_id: str
+    reasoning_effort: str
+    capability: ModelCapability | None
+
+
+@dataclass(frozen=True)
+class RoleMatrixEntry:
+    """One role's full configuration-matrix row for the dashboard: its
+    declared requirements and every preferred provider resolved into a
+    ``RoleModelBinding``, in preference order. Ticket 46 / Spec 0013."""
+
+    role_id: str
+    capability_requirements: CapabilityRequirements
+    bindings: tuple[RoleModelBinding, ...]
 
 
 @dataclass(frozen=True)
@@ -1105,3 +1176,139 @@ def validate_default_config() -> RoutingConfig:
     for it explicitly by calling this function.
     """
     return load_routing_config(ROUTING_CONFIG_PATH, fallback_on_missing=True)
+
+
+# ---------------------------------------------------------------------------
+# Model capability registry (ticket 46 / Spec 0013)
+# ---------------------------------------------------------------------------
+
+# The model's own highest supported reasoning-effort rung, in ascending
+# order across every provider this project probes. Codex's `ultra` (Sol,
+# Terra) sits above `max` (Luna's ceiling); Claude's ladder never reaches
+# `ultra` at all. A model whose `supported_efforts` contains a value outside
+# this tuple is not expected today — see `_effort_ceiling_tier`.
+_EFFORT_RANK: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max", "ultra")
+
+
+def _effort_ceiling_tier(supported_efforts: tuple[str, ...]) -> str:
+    """The model's own highest supported reasoning-effort rung, used as its
+    capability tier — mechanical, not a separately curated classification,
+    so it can never drift from `supported_efforts` itself.
+
+    `"none"` for a model with no effort ladder to rank at all (e.g.
+    `claude-3-7-sonnet`, `supported_efforts=()` — it predates reasoning
+    efforts), rather than raising on `max()` over an empty sequence.
+    """
+    ranked = [effort for effort in supported_efforts if effort in _EFFORT_RANK]
+    if not ranked:
+        return "none"
+    return max(ranked, key=_EFFORT_RANK.index)
+
+
+def build_model_capabilities_registry() -> Mapping[tuple[str, str], ModelCapability]:
+    """Build the `(provider, model_id) -> ModelCapability` registry from
+    ticket 45's audited CLI catalog (`probe_models.AUDITED_MODEL_CATALOG`
+    plus its `_CROSS_PROVIDER_EFFORT_LADDERS` overlay), resolving finding
+    F7 by keying each provider's acceptance of a model separately.
+
+    The `probe_models` import is local to this function rather than a
+    module-level statement, deliberately: `probe_models` imports this
+    module at its own top level (ticket 45), so an eager top-level
+    `import probe_models` here would, whenever `probe_models` is the
+    module that started the import chain, read `probe_models` while it is
+    still mid-initialization — before its `AUDITED_MODEL_CATALOG` constant
+    exists yet — regardless of which module a caller imports first. A
+    local import runs only when a caller actually asks for the registry,
+    by which point both modules have finished loading either way. Same
+    precedent as `validate_default_config` (ticket 42 iteration 3):
+    defer cross-cutting work behind an explicit call rather than paying
+    for it — or, here, risking it — as a bare import-time statement.
+    """
+    if __package__:
+        from . import probe_models
+    else:
+        import probe_models  # type: ignore[no-redef]
+
+    registry: dict[tuple[str, str], ModelCapability] = {}
+    for model in probe_models.AUDITED_MODEL_CATALOG.values():
+        registry[(model.provider_id, model.model_id)] = ModelCapability(
+            provider=model.provider_id,
+            model_id=model.model_id,
+            supported_efforts=model.supported_efforts,
+            default_effort=model.default_effort,
+            tier=_effort_ceiling_tier(model.supported_efforts),
+            context=model.context_window,
+            local_only=model.local_only,
+        )
+    for (provider_id, model_id), ladder in probe_models._CROSS_PROVIDER_EFFORT_LADDERS.items():
+        primary = probe_models.AUDITED_MODEL_CATALOG.get(model_id)
+        default_effort = (
+            primary.default_effort if primary is not None and primary.default_effort in ladder else None
+        )
+        registry[(provider_id, model_id)] = ModelCapability(
+            provider=provider_id,
+            model_id=model_id,
+            supported_efforts=ladder,
+            default_effort=default_effort,
+            tier=_effort_ceiling_tier(ladder),
+            context=primary.context_window if primary is not None else None,
+            local_only=primary.local_only if primary is not None else False,
+        )
+    return MappingProxyType(registry)
+
+
+def get_role_matrix_view_data(
+    config: RoutingConfig,
+    *,
+    capabilities: Mapping[tuple[str, str], ModelCapability] | None = None,
+) -> Mapping[str, RoleMatrixEntry]:
+    """Every role in `config`, with its preferred providers resolved into
+    model-capability-annotated bindings, for the Role & Model Configuration
+    Matrix dashboard (Spec 0013). Ticket 46.
+
+    Raises `ConfigValidationError` when a role's `preferred_providers`
+    names a provider id absent from `config.providers` — a structural
+    authoring error. A provider/model pair simply missing from the audited
+    capability registry is a different, non-fatal thing (`routing-
+    config.json` is known to carry six such live-catalog drift findings
+    right now — see `probe_models.audit_config_drift`) and is instead
+    surfaced as `capability=None` on that binding, never a raise: this
+    view exists in part so an operator can see and fix that drift, so it
+    cannot itself refuse to render a role that has it.
+
+    `capabilities` defaults to `build_model_capabilities_registry()`.
+    Accepting it as a parameter — mirroring `RoleResolver`'s own
+    `availability_checker` and `probe_models.main`'s `config_loader` —
+    lets a test substitute a small deliberate fixture instead of the real,
+    live-probe-shaped registry.
+    """
+    resolved_capabilities = (
+        capabilities if capabilities is not None else build_model_capabilities_registry()
+    )
+    entries: dict[str, RoleMatrixEntry] = {}
+    for role_id, role in config.roles.items():
+        bindings: list[RoleModelBinding] = []
+        for provider_id in role.preferred_providers:
+            try:
+                provider = config.providers[provider_id]
+            except KeyError:
+                raise ConfigValidationError(
+                    f"roles.{role_id}.preferred_providers",
+                    f"references unknown provider {provider_id!r}",
+                    provider_id,
+                ) from None
+            bindings.append(
+                RoleModelBinding(
+                    provider_id=provider_id,
+                    adapter=provider.adapter,
+                    model_id=provider.model,
+                    reasoning_effort=provider.default_reasoning_effort,
+                    capability=resolved_capabilities.get((provider.adapter, provider.model)),
+                )
+            )
+        entries[role_id] = RoleMatrixEntry(
+            role_id=role_id,
+            capability_requirements=role.capability_requirements,
+            bindings=tuple(bindings),
+        )
+    return MappingProxyType(entries)
