@@ -70,7 +70,7 @@ boundary" principle the rest of this codebase applies at its own
 untrusted-input boundaries: a future field or a future caller must not be
 able to reach this template with an unescaped value.
 
-**The Role & Model Configuration Matrix (Spec 0013, tickets 47–48) is a
+**The Role & Model Configuration Matrix (Spec 0013, tickets 47–49) is a
 second tab, not a second document.** `render_html_report` grows two
 optional parameters — `role_matrix`
 (`routing_config.get_role_matrix_view_data`'s output) and
@@ -82,6 +82,16 @@ renders an empty grid rather than reading `routing-config.json` itself:
 above, and `write_html_report` is the caller that loads both, mirroring how
 it already owns computing `board`/`baseline_board` from the journal it
 reads.
+
+**Ticket 49's dirty-state pill has no server-side half.** Unlike the role
+matrix itself, `currentRoles`/`savedSnapshot`/`undoHistory` and the
+floating action pill they drive exist only in `_SCRIPT` and
+`_ACTION_PILL_HTML` — there is no Python-side render of "what is currently
+dirty" the way `_resolve_effort_state` mirrors `resolveEffortState`,
+because dirtiness is inherently a property of in-page edits a
+scripting-disabled load can never produce. `_ACTION_PILL_HTML` is static
+markup with no dynamic value, so it needs no `_escape` call anywhere it
+appears.
 
 **The document ships exactly two script tags, and only one of them is
 executable.** Ticket 47's tab bar and "primary roles / all roles" toggle
@@ -1159,6 +1169,35 @@ def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
 # seam: it rebuilds the effort options from the newly selected model's
 # ladder, snaps the effort, and repaints the badge — on every card carrying
 # that role id, since a primary role has a card in each of the two grids.
+#
+# Ticket 49 adds the client-side state machine `currentRoles` /
+# `savedSnapshot` / `undoHistory` names ask for, plus the floating action
+# pill it drives. `paintRoleValue` is the DOM-painting half of
+# `onModelSelect` pulled out into its own seam (`commitRoleEdit` is the
+# other half both `onModelSelect` and `onEffortSelect` share), because
+# `undoChange` and `resetDefaults` need to repaint a role from an arbitrary
+# past `{model, effort}` pair the exact same way a fresh selection does —
+# including re-resolving the effort ladder, since the model a role is
+# reverted to is not necessarily the one currently on screen.
+#
+# `SYSTEM_DEFAULTS` and `CLIENT_STATE.savedSnapshot` look like the same
+# thing at load — both are `cloneRoleState(buildRoleState())` at that
+# instant — but they answer different questions and only one of them ever
+# changes again. `savedSnapshot` is the dirty-check baseline `saveChanges`
+# is explicitly allowed to move. `SYSTEM_DEFAULTS` is the page's own
+# rendered values, captured once and never reassigned: nothing in this
+# codebase's config model represents a role's assignment as independent
+# from `routing-config.json` itself, so the only "system preset" this page
+# can ever know about is the state it was rendered from. Spec 0013 US12
+# asks to "restore factory routing presets at any time" — "at any time"
+# is why `resetDefaults` reads `SYSTEM_DEFAULTS`, not `savedSnapshot`: after
+# even one `saveChanges`, the two have diverged, and reading the mutable one
+# would make "Reset to Default" only reach back as far as the last save,
+# not to what actually shipped. `undoHistory` is a LIFO stack of one
+# `{roleId, previous}` entry per edit that actually changed something (a
+# re-selection of the already-current value pushes nothing), so `undoChange`
+# always reverts the
+# single most recent edit, to whichever role made it.
 _SCRIPT = """
 var DASHBOARD_CONFIG = JSON.parse(
   document.getElementById("dashboard-config").textContent
@@ -1232,33 +1271,54 @@ function roleCards(roleId) {
   return matching;
 }
 
-function onModelSelect(roleId, newModel) {
+function paintRoleValue(roleId, assignment) {
   var cards = roleCards(roleId);
   if (!cards.length) {
     return null;
   }
-  var state = resolveEffortState(
-    newModel,
-    cards[0].querySelector(".effort-select").value
-  );
+  var state = resolveEffortState(assignment.model, assignment.effort);
   for (var i = 0; i < cards.length; i++) {
     var card = cards[i];
-    card.querySelector(".model-select").value = newModel;
+    card.querySelector(".model-select").value = assignment.model;
     setEffortOptions(card.querySelector(".effort-select"), state);
     paintBadge(card.querySelector(".effort-badge"), state);
   }
   return state;
 }
 
+// Shared by `onModelSelect` and `onEffortSelect`, which differ only in
+// which half of the pair the user just changed: paint the role from the
+// candidate `{model, effort}` (snapping effort through `resolveEffortState`
+// exactly as a fresh model pick would), then record whatever the paint
+// actually landed on — not the raw candidate — as this edit's new value,
+// since an unsupported effort snaps to something other than what was asked
+// for. Only ever called with a `roleId` its caller already confirmed has
+// cards, so `paintRoleValue` here never returns its "no such role" `null`.
+function commitRoleEdit(roleId, model, effort) {
+  var state = paintRoleValue(roleId, { model: model, effort: effort });
+  recordStateChange(roleId, {
+    model: model,
+    effort: state.status === "ok" ? state.effort : (state.effort || "")
+  });
+  return state;
+}
+
+function onModelSelect(roleId, newModel) {
+  var cards = roleCards(roleId);
+  if (!cards.length) {
+    return null;
+  }
+  var currentEffort = cards[0].querySelector(".effort-select").value;
+  return commitRoleEdit(roleId, newModel, currentEffort);
+}
+
 function onEffortSelect(roleId, newEffort) {
   var cards = roleCards(roleId);
-  var state = { status: "ok", effort: newEffort, efforts: [] };
-  for (var i = 0; i < cards.length; i++) {
-    var card = cards[i];
-    card.querySelector(".effort-select").value = newEffort;
-    paintBadge(card.querySelector(".effort-badge"), state);
+  if (!cards.length) {
+    return { status: "ok", effort: newEffort, efforts: [] };
   }
-  return state;
+  var currentModel = cards[0].querySelector(".model-select").value;
+  return commitRoleEdit(roleId, currentModel, newEffort);
 }
 
 function bindSelect(select, roleId, handler) {
@@ -1280,7 +1340,214 @@ function bindRoleControls() {
   }
 }
 
+// --- client state machine & floating action pill (ticket 49) ---
+
+function cloneValue(assignment) {
+  return assignment ? { model: assignment.model, effort: assignment.effort } : null;
+}
+
+function cloneRoleState(state) {
+  var clone = {};
+  for (var roleId in state) {
+    if (Object.prototype.hasOwnProperty.call(state, roleId)) {
+      clone[roleId] = cloneValue(state[roleId]);
+    }
+  }
+  return clone;
+}
+
+function buildRoleState() {
+  var state = {};
+  var cards = document.querySelectorAll(".role-card");
+  for (var i = 0; i < cards.length; i++) {
+    var roleId = cards[i].getAttribute("data-role-id");
+    if (Object.prototype.hasOwnProperty.call(state, roleId)) {
+      continue;
+    }
+    var modelSelect = cards[i].querySelector(".model-select");
+    var effortSelect = cards[i].querySelector(".effort-select");
+    if (!modelSelect || !effortSelect) {
+      continue;
+    }
+    state[roleId] = { model: modelSelect.value, effort: effortSelect.value };
+  }
+  return state;
+}
+
+function roleIsDirty(roleId) {
+  var current = CLIENT_STATE.currentRoles[roleId];
+  var saved = CLIENT_STATE.savedSnapshot[roleId];
+  if (!current || !saved) {
+    return false;
+  }
+  return current.model !== saved.model || current.effort !== saved.effort;
+}
+
+function dirtyRoleCount() {
+  var count = 0;
+  for (var roleId in CLIENT_STATE.currentRoles) {
+    if (
+      Object.prototype.hasOwnProperty.call(CLIENT_STATE.currentRoles, roleId) &&
+      roleIsDirty(roleId)
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function recordStateChange(roleId, nextAssignment) {
+  var previous = cloneValue(CLIENT_STATE.currentRoles[roleId]);
+  CLIENT_STATE.currentRoles[roleId] = cloneValue(nextAssignment);
+  if (
+    previous &&
+    (previous.model !== nextAssignment.model || previous.effort !== nextAssignment.effort)
+  ) {
+    CLIENT_STATE.undoHistory.push({ roleId: roleId, previous: previous });
+  }
+  updateActionPill();
+}
+
+function updateActionPill() {
+  var pill = document.getElementById("action-pill");
+  if (!pill) {
+    return;
+  }
+  var count = dirtyRoleCount();
+  var label = document.getElementById("action-pill-label");
+  if (label) {
+    if (count === 0) {
+      label.textContent = "אין שינויים לא שמורים";
+    } else if (count === 1) {
+      label.textContent = "שינוי אחד לא שמור";
+    } else {
+      label.textContent = count + " שינויים לא שמורים";
+    }
+  }
+  if (count > 0) {
+    pill.classList.add("is-visible");
+  } else {
+    pill.classList.remove("is-visible");
+  }
+}
+
+function showToast(message, kind) {
+  var container = document.getElementById("toast-container");
+  if (!container) {
+    return null;
+  }
+  var toast = document.createElement("div");
+  toast.className = "toast toast-" + (kind || "info");
+  toast.textContent = message;
+  container.appendChild(toast);
+  var timer = setTimeout(function () {
+    container.removeChild(toast);
+  }, TOAST_DURATION_MS);
+  // `setTimeout` in Node returns a `Timeout` with `.unref()`, which lets the
+  // process exit immediately instead of waiting out the toast's lifetime; a
+  // browser's numeric return has no such method, and probing for it first
+  // keeps this line a no-op there instead of a `TypeError`.
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  return toast;
+}
+
+function undoChange() {
+  if (!CLIENT_STATE.undoHistory.length) {
+    return false;
+  }
+  var entry = CLIENT_STATE.undoHistory.pop();
+  paintRoleValue(entry.roleId, entry.previous);
+  CLIENT_STATE.currentRoles[entry.roleId] = cloneValue(entry.previous);
+  updateActionPill();
+  showToast("הפעולה האחרונה בוטלה", "info");
+  return true;
+}
+
+function isRoleStateAtSystemDefaults() {
+  for (var roleId in SYSTEM_DEFAULTS) {
+    if (Object.prototype.hasOwnProperty.call(SYSTEM_DEFAULTS, roleId)) {
+      var current = CLIENT_STATE.currentRoles[roleId];
+      var reference = SYSTEM_DEFAULTS[roleId];
+      if (!current || current.model !== reference.model || current.effort !== reference.effort) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Restores `SYSTEM_DEFAULTS` — the values this page was rendered with, an
+// immutable snapshot `saveChanges` never touches — never `savedSnapshot`,
+// which does move on every save. "Restore factory routing presets at any
+// time" (spec 0013 US12) means always, including after a save already
+// moved the dirty-check baseline away from what shipped in
+// `routing-config.json`; resetting `savedSnapshot` here too is what makes a
+// post-reset edit register as dirty again against the same factory values,
+// instead of against whatever was most recently saved.
+function resetDefaults() {
+  if (isRoleStateAtSystemDefaults()) {
+    return false;
+  }
+  if (!confirm("לאפס את כל השינויים ולחזור לברירת המחדל של המערכת?")) {
+    return false;
+  }
+  for (var roleId in SYSTEM_DEFAULTS) {
+    if (Object.prototype.hasOwnProperty.call(SYSTEM_DEFAULTS, roleId)) {
+      paintRoleValue(roleId, SYSTEM_DEFAULTS[roleId]);
+      CLIENT_STATE.currentRoles[roleId] = cloneValue(SYSTEM_DEFAULTS[roleId]);
+    }
+  }
+  CLIENT_STATE.savedSnapshot = cloneRoleState(SYSTEM_DEFAULTS);
+  CLIENT_STATE.undoHistory = [];
+  updateActionPill();
+  showToast("התפקידים אופסו לברירת המחדל", "success");
+  return true;
+}
+
+function saveChanges() {
+  if (!dirtyRoleCount()) {
+    return false;
+  }
+  CLIENT_STATE.savedSnapshot = cloneRoleState(CLIENT_STATE.currentRoles);
+  CLIENT_STATE.undoHistory = [];
+  updateActionPill();
+  showToast("השינויים נשמרו", "success");
+  return true;
+}
+
+function bindActionPill() {
+  var undoButton = document.getElementById("action-undo");
+  var resetButton = document.getElementById("action-reset");
+  var saveButton = document.getElementById("action-save");
+  if (undoButton) {
+    undoButton.addEventListener("click", undoChange);
+  }
+  if (resetButton) {
+    resetButton.addEventListener("click", resetDefaults);
+  }
+  if (saveButton) {
+    saveButton.addEventListener("click", saveChanges);
+  }
+}
+
+var TOAST_DURATION_MS = 3200;
+
+// The page's own rendered values — the only "system defaults" this
+// document can know about (see `resetDefaults`) — captured once and never
+// reassigned afterward, unlike `CLIENT_STATE.savedSnapshot`.
+var SYSTEM_DEFAULTS = cloneRoleState(buildRoleState());
+
+var CLIENT_STATE = {
+  currentRoles: buildRoleState(),
+  savedSnapshot: cloneRoleState(SYSTEM_DEFAULTS),
+  undoHistory: []
+};
+
 bindRoleControls();
+bindActionPill();
+updateActionPill();
 """
 
 
@@ -1477,7 +1744,112 @@ footer { padding: 1rem 2rem; color: var(--muted); font-size: 0.8rem; }
   background: #eeece6;
   color: var(--neutral);
 }
+
+/* Floating action pill & toast notifications (ticket 49). Both live inside
+   `#tab-content-roles` (see `render_html_report`) rather than at the
+   document's top level: that div is exactly what the tab-bar's CSS-only
+   toggle already hides while the metrics tab is active, which keeps a
+   dirty-state pill from ever floating over unrelated content on the other
+   tab — no extra rule needed here to replicate that. */
+.action-pill {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translate(-50%, 150%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(230, 221, 208, 0.85);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 40;
+}
+.action-pill.is-visible {
+  transform: translate(-50%, 0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.action-pill-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--bad);
+  flex: none;
+  animation: action-pill-pulse 1.6s ease-in-out infinite;
+}
+@keyframes action-pill-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(179, 38, 30, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(179, 38, 30, 0); }
+}
+.action-pill-label { font-size: 0.85rem; font-weight: 600; white-space: nowrap; }
+.action-pill-buttons { display: flex; gap: 0.4rem; }
+.pill-btn {
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+.pill-btn-primary { background: var(--slate); color: #fff; border-color: var(--slate); }
+.pill-btn-danger { color: var(--bad); border-color: var(--bad); }
+
+.toast-stack {
+  position: fixed;
+  left: 50%;
+  bottom: 5rem;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  z-index: 50;
+  pointer-events: none;
+}
+.toast {
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--slate);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.2);
+  animation: toast-in 0.2s ease;
+}
+.toast-success { background: var(--good); }
+.toast-info { background: var(--slate); }
+.toast-error { background: var(--bad); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 """
+
+# The floating action pill and its toast stack (ticket 49) — static markup,
+# no dynamic value, so unlike every `*_html` function above this needs no
+# `_escape` call anywhere. Its three buttons are `bindActionPill`'s named
+# ids; the label starts on the "nothing is dirty" copy `updateActionPill`
+# would otherwise have to paint on first load.
+_ACTION_PILL_HTML = """
+    <div class="action-pill" id="action-pill">
+      <span class="action-pill-dot" aria-hidden="true"></span>
+      <span class="action-pill-label" id="action-pill-label">אין שינויים לא שמורים</span>
+      <div class="action-pill-buttons">
+        <button type="button" class="pill-btn" id="action-undo">↩ בטל פעולה</button>
+        <button type="button" class="pill-btn pill-btn-danger" id="action-reset">אפס לברירת מחדל</button>
+        <button type="button" class="pill-btn pill-btn-primary" id="action-save">שמור שינויים</button>
+      </div>
+    </div>
+    <div class="toast-stack" id="toast-container" aria-live="polite"></div>"""
 
 
 def render_html_report(
@@ -1627,7 +1999,7 @@ def render_html_report(
     <h2>Role &amp; Model Configuration Matrix — מטריצת תפקידים ומודלים</h2>
     {role_matrix_html}
   </section>
-</main>
+</main>{_ACTION_PILL_HTML}
 </div>
 <footer dir="ltr">Journal health: {_escape(journal_health)}</footer>
 <script type="application/json" id="dashboard-config">{dashboard_config_json}</script>

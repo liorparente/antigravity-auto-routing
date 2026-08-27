@@ -305,12 +305,80 @@ function makeCard(spec) {
 
 var CARD_NODES = CARD_SPECS.map(makeCard);
 
+// A generic stand-in for the floating action pill and toast elements
+// (ticket 49) — none of these are selects, so `makeSelect` does not fit,
+// but all of them need `classList`, `children`, and `addEventListener` the
+// same narrow way `makeSelect` needs `value` and `disabled`.
+function makeElement() {
+  var classes = [];
+  return {
+    className: "",
+    textContent: "",
+    style: {},
+    children: [],
+    listeners: [],
+    classList: {
+      add: function (name) {
+        if (classes.indexOf(name) === -1) {
+          classes.push(name);
+        }
+      },
+      remove: function (name) {
+        classes = classes.filter(function (each) {
+          return each !== name;
+        });
+      },
+      contains: function (name) {
+        return classes.indexOf(name) !== -1;
+      }
+    },
+    appendChild: function (child) {
+      this.children.push(child);
+    },
+    removeChild: function (child) {
+      this.children = this.children.filter(function (each) {
+        return each !== child;
+      });
+    },
+    addEventListener: function (name, handler) {
+      this.listeners.push([name, handler]);
+    }
+  };
+}
+
+var ACTION_PILL = makeElement();
+var ACTION_PILL_LABEL = makeElement();
+var ACTION_UNDO_BUTTON = makeElement();
+var ACTION_RESET_BUTTON = makeElement();
+var ACTION_SAVE_BUTTON = makeElement();
+var TOAST_CONTAINER = makeElement();
+
+var ELEMENTS_BY_ID = {
+  "dashboard-config": { textContent: DASHBOARD_CONFIG_JSON },
+  "action-pill": ACTION_PILL,
+  "action-pill-label": ACTION_PILL_LABEL,
+  "action-undo": ACTION_UNDO_BUTTON,
+  "action-reset": ACTION_RESET_BUTTON,
+  "action-save": ACTION_SAVE_BUTTON,
+  "toast-container": TOAST_CONTAINER
+};
+
+// Controllable from a test harness by assigning `CONFIRM_RESULT` before
+// calling `resetDefaults()`; `CONFIRM_MESSAGES` records every prompt shown,
+// so a test can assert the pill actually asked before acting.
+var CONFIRM_RESULT = true;
+var CONFIRM_MESSAGES = [];
+function confirm(message) {
+  CONFIRM_MESSAGES.push(message);
+  return CONFIRM_RESULT;
+}
+
 var document = {
   getElementById: function (id) {
-    if (id !== "dashboard-config") {
+    if (!Object.prototype.hasOwnProperty.call(ELEMENTS_BY_ID, id)) {
       throw new Error("unsupported id " + id);
     }
-    return { textContent: DASHBOARD_CONFIG_JSON };
+    return ELEMENTS_BY_ID[id];
   },
   querySelectorAll: function (selector) {
     if (selector !== ".role-card") {
@@ -319,10 +387,13 @@ var document = {
     return CARD_NODES;
   },
   createElement: function (tag) {
-    if (tag !== "option") {
-      throw new Error("unsupported tag " + tag);
+    if (tag === "option") {
+      return makeOption();
     }
-    return makeOption();
+    if (tag === "div") {
+      return makeElement();
+    }
+    throw new Error("unsupported tag " + tag);
   }
 };
 
@@ -354,6 +425,14 @@ function fireChange(roleId, which, value) {
   select.value = value;
   select.listeners.forEach(function (entry) {
     entry[1]();
+  });
+}
+
+function fireClick(elementId) {
+  ELEMENTS_BY_ID[elementId].listeners.forEach(function (entry) {
+    if (entry[0] === "click") {
+      entry[1]();
+    }
   });
 }
 """
@@ -1640,6 +1719,43 @@ def _reactive_report(*, effort: str = "high", model_id: str = "claude-opus-5") -
     )
 
 
+def _two_role_reactive_report() -> str:
+    """Two primary roles (`planner`, `builder_heavy`), each bound to a
+    distinct model — the fixture `ClientStateMachineTests` needs to tell
+    "this role is dirty" apart from "every role is dirty", and to prove an
+    edit to one role's undo history never touches the other's.
+    """
+    journal = learning_journal.JournalRead()
+    board, baseline_board = _boards(journal, now=_NOW)
+    capabilities = _capability_fixture()
+    planner_binding = routing_config.RoleModelBinding(
+        provider_id="provider",
+        adapter="provider",
+        model_id="claude-opus-5",
+        reasoning_effort="high",
+        capability=capabilities.get(("provider", "claude-opus-5")),
+    )
+    builder_binding = routing_config.RoleModelBinding(
+        provider_id="provider",
+        adapter="provider",
+        model_id="claude-sonnet-4-6",
+        reasoning_effort="medium",
+        capability=capabilities.get(("provider", "claude-sonnet-4-6")),
+    )
+    role_matrix = {
+        "planner": _role_entry("planner", bindings=(planner_binding,)),
+        "builder_heavy": _role_entry("builder_heavy", bindings=(builder_binding,)),
+    }
+    return learning_report_html.render_html_report(
+        journal,
+        board,
+        baseline_board,
+        now=_NOW,
+        role_matrix=role_matrix,
+        model_capabilities=capabilities,
+    )
+
+
 class EmbeddedScriptBehaviorTests(unittest.TestCase):
     """The embedded JavaScript, executed. Every assertion here runs the
     report's own `<script>` body under node against a DOM stub built from
@@ -1869,6 +1985,307 @@ class JsEffortSnapParityTests(unittest.TestCase):
         # A table where every case landed on the same status would agree
         # trivially; these are the three the rule actually distinguishes.
         self.assertEqual({case[0] for case in expected}, {"ok", "none", "unknown"})
+
+
+# --- floating action pill markup (ticket 49) ---
+
+
+class ActionPillMarkupTests(unittest.TestCase):
+    """Static presence checks for the pill and toast markup — the spec's own
+    Testing Decisions call for "dirty bar, undo button, reset button ...
+    elements exist" alongside the behavioral assertions below, and unlike
+    those this needs no node subprocess: nothing here is reactive yet.
+    """
+
+    def _report(self) -> str:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        return learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW
+        )
+
+    def test_the_pill_and_its_three_buttons_are_present(self) -> None:
+        report = self._report()
+
+        self.assertIn('<div class="action-pill" id="action-pill">', report)
+        self.assertIn('id="action-pill-label"', report)
+        self.assertIn('id="action-undo"', report)
+        self.assertIn('id="action-reset"', report)
+        self.assertIn('id="action-save"', report)
+
+    def test_the_toast_container_is_present(self) -> None:
+        report = self._report()
+
+        self.assertIn('<div class="toast-stack" id="toast-container"', report)
+
+    def test_the_pill_and_toast_container_render_inside_the_roles_tab(self) -> None:
+        # Nesting inside `#tab-content-roles` is what makes the pill vanish
+        # along with the rest of that tab when the metrics tab is active —
+        # see the CSS comment in `learning_report_html._CSS`.
+        report = self._report()
+        roles_tab = report.split('<div id="tab-content-roles">', 1)[1]
+
+        self.assertIn('id="action-pill"', roles_tab)
+        self.assertIn('id="toast-container"', roles_tab)
+
+    def test_adding_the_pill_introduces_no_new_script_tag(self) -> None:
+        self.assertEqual(
+            _script_openers(self._report()),
+            ['<script type="application/json" id="dashboard-config">', "<script>"],
+        )
+
+
+# --- client state machine & floating action pill behavior (ticket 49) ---
+
+
+class ClientStateMachineTests(unittest.TestCase):
+    """`currentRoles`/`savedSnapshot`/`undoHistory` and the pill they drive,
+    executed under node the same way `EmbeddedScriptBehaviorTests` executes
+    `onModelSelect` — against a stubbed DOM built from a real rendered
+    report, never asserted over the script's source text.
+    """
+
+    def test_the_pill_starts_hidden_with_a_zero_dirty_count(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "console.log(JSON.stringify({"
+            "  dirty: dirtyRoleCount(),"
+            "  visible: ACTION_PILL.classList.contains('is-visible')"
+            "}));",
+        )
+
+        self.assertEqual(result, {"dirty": 0, "visible": False})
+
+    def test_reactive_update_keeps_the_zero_dirty_label_wording(self) -> None:
+        # `updateActionPill()` runs once on load even though nothing is
+        # dirty yet; it must not clobber `_ACTION_PILL_HTML`'s "no changes"
+        # copy with a bare "0 ..." count.
+        result = _run_embedded_script(
+            _two_role_reactive_report(), "console.log(JSON.stringify(ACTION_PILL_LABEL.textContent));"
+        )
+
+        self.assertEqual(result, "אין שינויים לא שמורים")
+
+    def test_changing_a_model_marks_its_role_dirty_and_reveals_the_pill(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "console.log(JSON.stringify({"
+            "  dirty: dirtyRoleCount(),"
+            "  visible: ACTION_PILL.classList.contains('is-visible'),"
+            "  label: ACTION_PILL_LABEL.textContent"
+            "}));",
+        )
+
+        self.assertEqual(result["dirty"], 1)
+        self.assertTrue(result["visible"])
+        self.assertEqual(result["label"], "שינוי אחד לא שמור")
+
+    def test_editing_a_second_role_increments_the_dirty_count(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            'onModelSelect("builder_heavy", "provider::claude-opus-5");'
+            "console.log(JSON.stringify(dirtyRoleCount()));",
+        )
+
+        self.assertEqual(result, 2)
+
+    def test_reselecting_the_already_current_model_is_not_a_dirtying_edit(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::claude-opus-5");'
+            "console.log(JSON.stringify(dirtyRoleCount()));",
+        )
+
+        self.assertEqual(result, 0)
+
+    def test_undo_reverts_only_the_most_recently_edited_role(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            'onModelSelect("builder_heavy", "provider::claude-opus-5");'
+            "undoChange();"
+            "console.log(JSON.stringify({"
+            "  dirty: dirtyRoleCount(),"
+            "  planner: snapshot('planner')[0].model,"
+            "  builder: snapshot('builder_heavy')[0].model"
+            "}));",
+        )
+
+        self.assertEqual(result["dirty"], 1)
+        self.assertEqual(result["planner"], "provider::gpt-5.6-sol")
+        self.assertEqual(result["builder"], "provider::claude-sonnet-4-6")
+
+    def test_undo_with_empty_history_is_a_silent_no_op(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "var undone = undoChange();"
+            "console.log(JSON.stringify({ undone: undone, dirty: dirtyRoleCount() }));",
+        )
+
+        self.assertEqual(result, {"undone": False, "dirty": 0})
+
+    def test_undoing_every_edit_hides_the_pill_again(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "undoChange();"
+            "console.log(JSON.stringify({"
+            "  dirty: dirtyRoleCount(),"
+            "  visible: ACTION_PILL.classList.contains('is-visible')"
+            "}));",
+        )
+
+        self.assertEqual(result, {"dirty": 0, "visible": False})
+
+    def test_reset_declined_by_the_confirmation_prompt_changes_nothing(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "CONFIRM_RESULT = false;"
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "var reset = resetDefaults();"
+            "console.log(JSON.stringify({"
+            "  reset: reset,"
+            "  dirty: dirtyRoleCount(),"
+            "  prompted: CONFIRM_MESSAGES.length,"
+            "  planner: snapshot('planner')[0].model"
+            "}));",
+        )
+
+        self.assertEqual(result["reset"], False)
+        self.assertEqual(result["dirty"], 1)
+        self.assertEqual(result["prompted"], 1)
+        self.assertEqual(result["planner"], "provider::gpt-5.6-sol")
+
+    def test_reset_accepted_restores_every_dirty_role_to_the_pages_rendered_defaults(
+        self,
+    ) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "CONFIRM_RESULT = true;"
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            'onModelSelect("builder_heavy", "provider::claude-opus-5");'
+            "var reset = resetDefaults();"
+            "console.log(JSON.stringify({"
+            "  reset: reset,"
+            "  dirty: dirtyRoleCount(),"
+            "  visible: ACTION_PILL.classList.contains('is-visible'),"
+            "  planner: snapshot('planner')[0].model,"
+            "  builder: snapshot('builder_heavy')[0].model"
+            "}));",
+        )
+
+        self.assertEqual(result["reset"], True)
+        self.assertEqual(result["dirty"], 0)
+        self.assertFalse(result["visible"])
+        self.assertEqual(result["planner"], "provider::claude-opus-5")
+        self.assertEqual(result["builder"], "provider::claude-sonnet-4-6")
+
+    def test_reset_reaches_the_pages_defaults_even_past_an_intervening_save(self) -> None:
+        # Spec 0013 US12: "restore factory routing presets at any time."
+        # `savedSnapshot` moves on every `saveChanges`, so a reset that read
+        # *that* instead of the page's own immutable rendered values would
+        # only reach back as far as the last save — this pins that it does
+        # not: the save below is deliberately never undone.
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            'onModelSelect("planner", "provider::gemini-3.6-flash-medium");'
+            "CONFIRM_RESULT = true;"
+            "var reset = resetDefaults();"
+            "console.log(JSON.stringify({"
+            "  reset: reset,"
+            "  dirty: dirtyRoleCount(),"
+            "  planner: snapshot('planner')[0].model"
+            "}));",
+        )
+
+        self.assertEqual(result["reset"], True)
+        self.assertEqual(result["dirty"], 0)
+        self.assertEqual(result["planner"], "provider::claude-opus-5")
+
+    def test_reset_is_a_no_op_and_never_prompts_when_already_at_system_defaults(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "var reset = resetDefaults();"
+            "console.log(JSON.stringify({ reset: reset, prompted: CONFIRM_MESSAGES.length }));",
+        )
+
+        self.assertEqual(result, {"reset": False, "prompted": 0})
+
+    def test_reset_is_still_available_after_a_save_leaves_nothing_dirty(self) -> None:
+        # A save alone must not make `resetDefaults` believe there is
+        # nothing left to reset — only actually being back at the page's
+        # rendered defaults should.
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "CONFIRM_RESULT = true;"
+            "var reset = resetDefaults();"
+            "console.log(JSON.stringify({ reset: reset, planner: snapshot('planner')[0].model }));",
+        )
+
+        self.assertEqual(result["reset"], True)
+        self.assertEqual(result["planner"], "provider::claude-opus-5")
+
+    def test_save_commits_current_state_as_the_new_baseline_and_clears_undo(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "var saved = saveChanges();"
+            "var undone = undoChange();"
+            "console.log(JSON.stringify({"
+            "  saved: saved,"
+            "  dirty: dirtyRoleCount(),"
+            "  undone: undone,"
+            "  planner: snapshot('planner')[0].model"
+            "}));",
+        )
+
+        self.assertEqual(result["saved"], True)
+        self.assertEqual(result["dirty"], 0)
+        self.assertFalse(result["undone"])
+        self.assertEqual(result["planner"], "provider::gpt-5.6-sol")
+
+    def test_save_is_a_no_op_when_nothing_is_dirty(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(), "console.log(JSON.stringify(saveChanges()));"
+        )
+
+        self.assertEqual(result, False)
+
+    def test_undo_reset_and_save_each_show_a_toast(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "undoChange();"
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "CONFIRM_RESULT = true;"
+            "resetDefaults();"
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "console.log(JSON.stringify(TOAST_CONTAINER.children.map(function (t) {"
+            "  return t.textContent;"
+            "})));",
+        )
+
+        self.assertEqual(len(result), 3)
+        self.assertTrue(all(result))
+
+    def test_clicking_the_pill_buttons_invokes_the_same_actions_as_calling_them(
+        self,
+    ) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "fireClick('action-undo');"
+            "console.log(JSON.stringify(dirtyRoleCount()));",
+        )
+
+        self.assertEqual(result, 0)
 
 
 if __name__ == "__main__":
