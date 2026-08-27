@@ -70,34 +70,52 @@ boundary" principle the rest of this codebase applies at its own
 untrusted-input boundaries: a future field or a future caller must not be
 able to reach this template with an unescaped value.
 
-**The Role & Model Configuration Matrix (Spec 0013, ticket 47) is a second
-tab, not a second document.** `render_html_report` grows one optional
-parameter, `role_matrix` — `routing_config.get_role_matrix_view_data`'s
-output — and renders it as a Bento Grid of role cards behind a second tab
-alongside the existing metrics tab. Ticket 47's scope is layout only: the
-tab bar and the "primary roles / all roles" segmented toggle are both
-pure CSS (checked-radio sibling selectors), matching the rendered
-report's standing "no inline `<script>`" invariant
-(`test_rendered_report_never_leaks_an_unescaped_script_tag`) that ticket 48
-(reactive model/effort binding) and ticket 49 (the client state machine and
-floating action pill) will be the first to actually need to break. Passing
-`role_matrix=None` (the default) renders an empty grid rather than reading
-`routing-config.json` itself — `render_html_report` stays clock-free and
-disk-free exactly as documented above; `write_html_report` is the caller
-that loads `routing_config.load_routing_config()` and computes the view
-data, mirroring how it already owns computing `board`/`baseline_board`
-from the journal it reads.
+**The Role & Model Configuration Matrix (Spec 0013, tickets 47–48) is a
+second tab, not a second document.** `render_html_report` grows two
+optional parameters — `role_matrix`
+(`routing_config.get_role_matrix_view_data`'s output) and
+`model_capabilities` (`routing_config.build_model_capabilities_registry`'s)
+— and renders them as a Bento Grid of role cards behind a second tab
+alongside the existing metrics tab. Passing either as `None` (the default)
+renders an empty grid rather than reading `routing-config.json` itself:
+`render_html_report` stays clock-free and disk-free exactly as documented
+above, and `write_html_report` is the caller that loads both, mirroring how
+it already owns computing `board`/`baseline_board` from the journal it
+reads.
+
+**The document ships exactly two script tags, and only one of them is
+executable.** Ticket 47's tab bar and "primary roles / all roles" toggle
+are still pure CSS (checked-radio sibling selectors), but ticket 48's
+reactive model/effort binding genuinely needs JavaScript, so the standing
+"no inline script" invariant that held through ticket 47 is now retired.
+What replaces it is narrower and stronger, pinned by `ScriptInjectionTests`:
+the only tags are one `application/json` island carrying every dynamic
+value and one executable block that is a *static literal* — no dynamic
+value is ever interpolated into source the browser compiles, so the
+escaping burden collapses to the JSON island alone, where three characters
+(`<`, `>`, `&`) are `\\uXXXX`-escaped so nothing inside can close the block.
+
+**The auto-snap rule is written twice, and pinned to stay one rule.**
+`_resolve_effort_state` (Python, for the initial server-side render, so a
+document opened with scripting disabled still never shows an effort its
+model rejects) and `resolveEffortState` (JavaScript, for the reactive case)
+are the same Spec 0013 §3 decision in two languages. `JsEffortSnapParityTests`
+runs one shared table of cases through both and asserts they agree, and the
+JavaScript's behavior is tested by executing it under node against a stubbed
+DOM built from this module's own rendered output — never by asserting over
+the script's source text.
 """
 from __future__ import annotations
 
 import html
+import json
 import math
 import os
 import tempfile
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 if __package__:
     from . import learning_journal, learning_report, learning_scoreboard, routing_config
@@ -715,20 +733,208 @@ _ROLE_ACCENT_COLORS: dict[str, str] = {
     "sensitive_executor": "#dc2626",
 }
 
-# Reasoning-effort badge colors, exactly as user story 7 specifies: "Green
-# for Low, Blue for Medium, Purple for High, Amber for Ultra". A rung
-# absent here (there is none today — `_EFFORT_RANK` in `routing_config.py`
-# is the closed vocabulary) falls back to `--neutral`.
+# Reasoning-effort badge colors. Four of the six rungs are exactly what user
+# story 7 specifies: "Green for Low, Blue for Medium, Purple for High, Amber
+# for Ultra". `xhigh` and `max` are this module's own extension of that
+# scale, not spec-named values — but they are not optional: the closed
+# vocabulary is `routing_config._EFFORT_RANK`, which has *six* rungs, and
+# both of the unnamed two are genuinely selectable. Counted off
+# `build_model_capabilities_registry()`'s 28 entries: `xhigh` is offered by
+# 10 of them (every `codex_cli` model, plus the three Claude 5-family
+# models) and `max` by 7 (those same three, plus `claude-sonnet-4-6` under
+# `claude_code_cli`, plus the three `gpt-5.6-*` Codex models). Leaving them
+# out — as this table did through ticket 47, whose comment here claimed "a
+# rung absent here (there is none today)" while both of these were in fact
+# absent — rendered two valid, expensive rungs in the same neutral grey the
+# badge otherwise reserves for "unrecognized", the opposite of the instant
+# cost signal user story 7 asks for. They continue the ramp between purple
+# `high` and amber `ultra`:
+# `test_every_effort_rung_in_the_closed_vocabulary_has_its_own_badge_color`
+# pins the table to `_EFFORT_RANK` so a seventh rung can never be added
+# without a color again.
 _EFFORT_BADGE_COLORS: dict[str, str] = {
     "low": "#1a7a4c",
     "medium": "#2563eb",
     "high": "#7c3aed",
+    "xhigh": "#6d28d9",
+    "max": "#b45309",
     "ultra": "#d97706",
 }
 
 
+_NEUTRAL_COLOR = "#8a8377"
+
+
 def _role_accent_color(role_id: str) -> str:
-    return _ROLE_ACCENT_COLORS.get(role_id, "#8a8377")
+    return _ROLE_ACCENT_COLORS.get(role_id, _NEUTRAL_COLOR)
+
+
+# --- reactive model/effort binding (ticket 48) ---
+
+
+class EffortState(NamedTuple):
+    """Which reasoning effort a role should display for a given model, and
+    why. `status` separates the two ways an effort dropdown can be empty,
+    which the dashboard must not conflate:
+
+    * `"ok"` — the model has a ladder; `effort` is a rung on it and `efforts`
+      is the full ladder to offer.
+    * `"none"` — the model genuinely has no reasoning-effort parameter
+      (`supported_efforts=()`: `claude-3-7-sonnet` predates the ladder, and
+      LM Studio is reached over an HTTP API that exposes no such parameter).
+      There is nothing to choose, so `effort` is `None`.
+    * `"unknown"` — no audited capability for this `(provider, model)` pair
+      at all: the live-catalog drift `RoleModelBinding.capability=None`
+      already carries. `effort` is whatever `routing-config.json` configures,
+      passed through untouched — this view exists partly so an operator can
+      *see* that drift, so it must not overwrite the configured value on the
+      strength of not recognizing the model.
+    """
+
+    status: str
+    effort: str | None
+    efforts: tuple[str, ...]
+
+
+def _resolve_effort_state(capability: Any | None, current_effort: str) -> EffortState:
+    """Spec 0013 §3's auto-snap rule, as one pure function: keep
+    `current_effort` when the model supports it, otherwise snap to the
+    model's own `default_effort`, otherwise to the first rung it offers
+    (the lowest, for every ladder in the audited catalog today — each is
+    written in ascending order — though nothing enforces that ordering, so
+    this describes the position taken, not a guaranteed ranking).
+
+    Both consumers of this rule go through here. The initial server-side
+    render calls it directly, so a document opened with scripting disabled
+    still never displays an effort its bound model cannot accept; the
+    embedded JavaScript re-implements exactly this for the reactive case,
+    and `JsEffortSnapParityTests` runs one shared table of cases through
+    both and asserts they agree, so the two cannot drift apart silently.
+
+    The final fallback is `efforts[0]` rather than a raise: `default_effort`
+    is legitimately `None` for a model whose provider publishes no per-model
+    default (`agy models` does not, so every `antigravity_cli` entry with a
+    multi-rung ladder lands here), and an unsupported configured effort is
+    exactly the misconfiguration this dashboard exists to surface and let an
+    operator correct — not one it should refuse to render.
+    """
+    if capability is None:
+        return EffortState("unknown", current_effort, ())
+    supported = tuple(capability.supported_efforts)
+    if not supported:
+        return EffortState("none", None, ())
+    if current_effort in supported:
+        return EffortState("ok", current_effort, supported)
+    if capability.default_effort in supported:
+        return EffortState("ok", capability.default_effort, supported)
+    return EffortState("ok", supported[0], supported)
+
+
+def _model_key(provider: str, model_id: str) -> str:
+    """The `(provider, model_id)` capability-registry key, flattened for use
+    as an `<option>` value and a JSON object key.
+
+    Flattened rather than keyed on `model_id` alone because bare-model-id
+    keying is precisely finding F7 that ticket 46's registry exists to fix,
+    and the collision it warns about is live, not hypothetical:
+    `claude-sonnet-4-6` is in the registry twice, with a different ladder
+    each time (`antigravity_cli` offers low/medium/high; `claude_code_cli`
+    adds `max` — `probe_models._CROSS_PROVIDER_EFFORT_LADDERS`). Keyed by
+    model id, one of those two entries would silently overwrite the other,
+    and whichever lost would be rendered with the winner's ladder — either
+    offering `max` to `agy`, which rejects it, or hiding it from the
+    `claude` path, which accepts it.
+    """
+    return f"{provider}::{model_id}"
+
+
+def _effort_badge_color(effort: str | None) -> str:
+    return _EFFORT_BADGE_COLORS.get(effort or "", _NEUTRAL_COLOR)
+
+
+_EFFORT_STATUS_LABELS: dict[str, str] = {"none": "none", "unknown": "unknown"}
+
+
+def _option_html(value: str, label: str, *, selected: bool) -> str:
+    marker = " selected" if selected else ""
+    return f'<option value="{_escape(value)}"{marker}>{_escape(label)}</option>'
+
+
+def _model_option_label(key: str) -> str:
+    return key.replace("::", " · ")
+
+
+def _model_options_html(capabilities: Mapping[tuple[str, str], Any], selected_key: str) -> str:
+    """Every audited `(provider, model)` pair as an option, plus the role's
+    currently bound pair when the registry has never seen it — a drift
+    binding must still be displayable as the selected value rather than
+    silently reading as some other model.
+    """
+    options = []
+    keys = sorted(_model_key(provider, model_id) for provider, model_id in capabilities)
+    if selected_key not in keys:
+        options.append(
+            _option_html(selected_key, f"{_model_option_label(selected_key)} (drift)", selected=True)
+        )
+    for key in keys:
+        options.append(_option_html(key, _model_option_label(key), selected=key == selected_key))
+    return "".join(options)
+
+
+def _effort_options_html(state: EffortState) -> str:
+    """Mirrors the script's `effortOptionPairs`. A non-`ok` state still gets
+    exactly one option so the control is never an empty box: the configured
+    effort for `unknown` (drift — the value is real, only unvalidatable),
+    and a bare `none` label for a model with no ladder at all.
+    """
+    if state.status == "ok":
+        return "".join(
+            _option_html(effort, effort, selected=effort == state.effort)
+            for effort in state.efforts
+        )
+    # Falsy rather than `is None`: a `"none"` state carries `None`, but an
+    # `unknown` state reached *from* a `"none"` one carries the empty string
+    # it inherited from that empty select, and an option labelled with the
+    # empty string renders as a blank row that reads as a broken control.
+    if not state.effort:
+        return _option_html("", _EFFORT_STATUS_LABELS["none"], selected=True)
+    return _option_html(state.effort, state.effort, selected=True)
+
+
+def _role_controls_html(
+    role_id: str, binding: Any, capabilities: Mapping[tuple[str, str], Any]
+) -> str:
+    """The role's active model and effort, as the two bound dropdowns and the
+    color-coded badge ticket 48 makes reactive.
+
+    Only the *first* preferred provider gets controls: that is the role's
+    active binding, and the rest of `entry.bindings` is its fallback chain,
+    which stays the read-only pill list ticket 47 renders. Configuring the
+    chain itself is user story 9, not this ticket.
+    """
+    state = _resolve_effort_state(binding.capability, binding.reasoning_effort)
+    selected_key = _model_key(binding.adapter, binding.model_id)
+    color = _effort_badge_color(state.effort if state.status == "ok" else None)
+    badge_text = (
+        state.effort if state.status == "ok" else _EFFORT_STATUS_LABELS[state.status]
+    )
+    disabled = "" if state.status == "ok" else " disabled"
+    return f"""
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="{_escape(role_id)}" dir="ltr">{
+                _model_options_html(capabilities, selected_key)
+            }</select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="{_escape(role_id)}"{disabled} dir="ltr">{
+                _effort_options_html(state)
+            }</select>
+          </label>
+          <span class="effort-badge" data-role-id="{_escape(role_id)}" dir="ltr" style="background:{
+            _escape(color)
+          }1a;color:{_escape(color)};">{_escape(badge_text)}</span>
+        </div>"""
 
 
 def _ordered_role_ids(entries: Mapping[str, Any]) -> tuple[str, ...]:
@@ -789,36 +995,54 @@ def _binding_html(binding: Any) -> str:
         </div>"""
 
 
-def _role_card_html(entry: Any) -> str:
+def _role_card_html(entry: Any, capabilities: Mapping[tuple[str, str], Any]) -> str:
     display_name = _ROLE_DISPLAY_NAMES.get(entry.role_id, entry.role_id)
     accent = _role_accent_color(entry.role_id)
     bindings_html = "".join(_binding_html(binding) for binding in entry.bindings)
     if not bindings_html:
         bindings_html = '<p class="empty-state">No preferred providers configured.</p>'
+    controls_html = (
+        _role_controls_html(entry.role_id, entry.bindings[0], capabilities)
+        if entry.bindings
+        else ""
+    )
     return f"""
-      <div class="role-card" style="border-inline-start-color:{_escape(accent)};">
+      <div class="role-card" data-role-id="{_escape(entry.role_id)}" style="border-inline-start-color:{_escape(accent)};">
         <div class="role-card-header">
           <div class="role-name">{_escape(display_name)}</div>
           <div class="role-id" dir="ltr">{_escape(entry.role_id)}</div>
         </div>
-        <div class="role-card-requirements">{_capability_requirements_pills(entry.capability_requirements)}</div>
+        <div class="role-card-requirements">{_capability_requirements_pills(entry.capability_requirements)}</div>{controls_html}
         <div class="role-card-bindings">{bindings_html}</div>
       </div>"""
 
 
-def _role_matrix_grid_html(entries: Mapping[str, Any], role_ids: tuple[str, ...]) -> str:
-    cards = "".join(_role_card_html(entries[role_id]) for role_id in role_ids)
+def _role_matrix_grid_html(
+    entries: Mapping[str, Any],
+    role_ids: tuple[str, ...],
+    capabilities: Mapping[tuple[str, str], Any],
+) -> str:
+    cards = "".join(_role_card_html(entries[role_id], capabilities) for role_id in role_ids)
     if not cards:
         return '<p class="empty-state">No roles configured.</p>'
     return cards
 
 
-def _role_matrix_section_html(role_matrix: Mapping[str, Any]) -> str:
+def _role_matrix_section_html(
+    role_matrix: Mapping[str, Any], capabilities: Mapping[tuple[str, str], Any]
+) -> str:
     """The Bento Grid plus its CSS-only "primary roles / all roles"
-    segmented toggle — see this module's docstring for why no `<script>`
-    is involved. An empty `role_matrix` (the `render_html_report` default)
-    renders the same empty state both grids fall back to, rather than a
-    blank tab.
+    segmented toggle. An empty `role_matrix` (the `render_html_report`
+    default) renders the same empty state both grids fall back to, rather
+    than a blank tab.
+
+    A role in `_PRIMARY_ROLE_IDS` renders *twice* — once in each grid —
+    since the advanced grid is the full list, not the complement of the
+    primary one. So a role id is not unique in the document, and the
+    controls are addressed by `data-role-id`, never by `id`.
+    `onModelSelect` updates *every* card carrying the id for that reason:
+    change a model in the primary grid and the advanced grid's copy of the
+    same role must not still show the old one after the toggle flips.
     """
     ordered = _ordered_role_ids(role_matrix)
     primary_ids = tuple(role_id for role_id in ordered if role_id in _PRIMARY_ROLE_IDS)
@@ -829,10 +1053,194 @@ def _role_matrix_section_html(role_matrix: Mapping[str, Any]) -> str:
       <label for="role-mode-simple">תפקידי מפתח (ראשי)</label>
       <label for="role-mode-all">פירוט מלא (מתקדם)</label>
     </div>
-    <div class="role-grid" id="role-grid-simple">{_role_matrix_grid_html(role_matrix, primary_ids)}
+    <div class="role-grid" id="role-grid-simple">{
+        _role_matrix_grid_html(role_matrix, primary_ids, capabilities)
+    }
     </div>
-    <div class="role-grid" id="role-grid-all">{_role_matrix_grid_html(role_matrix, ordered)}
+    <div class="role-grid" id="role-grid-all">{
+        _role_matrix_grid_html(role_matrix, ordered, capabilities)
+    }
     </div>"""
+
+
+# --- embedded capability payload and reactive script (ticket 48) ---
+
+# `json.dumps` escapes `"` and `\\`, which is enough for a JSON *string* but
+# not for JSON embedded in HTML: `</script>` inside any value would close the
+# block early and the rest would be parsed as markup. Escaping these three
+# characters to their `\\uXXXX` forms — still valid JSON, decoding back to the
+# identical string — removes every character an HTML tokenizer reacts to, so
+# no value can end the block or open a new element. Escaping `<` alone would
+# be enough to stop `</script`, which is the only sequence that actually
+# terminates the block; `>` and `&` go with it so the payload carries no
+# character a tokenizer treats specially at all, rather than relying on that
+# one rule staying the only one that matters.
+_JSON_HTML_ESCAPES: dict[str, str] = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026"}
+
+
+def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
+    """Everything the embedded script needs, as one JSON island.
+
+    One block rather than several because each additional `<script>` is
+    another tag `ScriptInjectionTests` has to bless, and because the effort
+    palette travelling as data here — rather than as a JavaScript literal —
+    is what keeps `_EFFORT_BADGE_COLORS` the single source of those colors
+    for the server-rendered badge and the reactive one alike.
+    """
+    payload = {
+        "capabilities": {
+            _model_key(provider, model_id): {
+                "supportedEfforts": list(capability.supported_efforts),
+                "defaultEffort": capability.default_effort,
+                "tier": capability.tier,
+                "context": capability.context,
+                "localOnly": capability.local_only,
+            }
+            for (provider, model_id), capability in sorted(capabilities.items())
+        },
+        "effortColors": dict(_EFFORT_BADGE_COLORS),
+        "neutralColor": _NEUTRAL_COLOR,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    for character, replacement in _JSON_HTML_ESCAPES.items():
+        encoded = encoded.replace(character, replacement)
+    return encoded
+
+
+# The document's only executable block, and a literal one: every dynamic
+# value reaches it through the `application/json` block above, as data it
+# parses rather than as source the browser compiles.
+# `test_the_embedded_script_interpolates_no_dynamic_value` pins that.
+#
+# `resolveEffortState` mirrors `_resolve_effort_state` rung for rung, and
+# `JsEffortSnapParityTests` runs one shared table through both to keep them
+# from drifting. `onModelSelect(roleId, newModel)` is ticket 48's named
+# seam: it rebuilds the effort options from the newly selected model's
+# ladder, snaps the effort, and repaints the badge — on every card carrying
+# that role id, since a primary role has a card in each of the two grids.
+_SCRIPT = """
+var DASHBOARD_CONFIG = JSON.parse(
+  document.getElementById("dashboard-config").textContent
+);
+var MODEL_CAPABILITIES = DASHBOARD_CONFIG.capabilities;
+var EFFORT_COLORS = DASHBOARD_CONFIG.effortColors;
+var NEUTRAL_COLOR = DASHBOARD_CONFIG.neutralColor;
+
+function resolveEffortState(modelKey, currentEffort) {
+  var capability = MODEL_CAPABILITIES[modelKey];
+  if (!capability) {
+    return { status: "unknown", effort: currentEffort, efforts: [] };
+  }
+  var supported = capability.supportedEfforts;
+  if (supported.length === 0) {
+    return { status: "none", effort: null, efforts: [] };
+  }
+  if (supported.indexOf(currentEffort) !== -1) {
+    return { status: "ok", effort: currentEffort, efforts: supported };
+  }
+  if (supported.indexOf(capability.defaultEffort) !== -1) {
+    return { status: "ok", effort: capability.defaultEffort, efforts: supported };
+  }
+  return { status: "ok", effort: supported[0], efforts: supported };
+}
+
+function effortOptionPairs(state) {
+  if (state.status === "ok") {
+    return state.efforts.map(function (effort) {
+      return [effort, effort];
+    });
+  }
+  if (!state.effort) {
+    return [["", "none"]];
+  }
+  return [[state.effort, state.effort]];
+}
+
+function setEffortOptions(select, state) {
+  while (select.firstChild) {
+    select.removeChild(select.firstChild);
+  }
+  var pairs = effortOptionPairs(state);
+  for (var i = 0; i < pairs.length; i++) {
+    var option = document.createElement("option");
+    option.value = pairs[i][0];
+    option.textContent = pairs[i][1];
+    select.appendChild(option);
+  }
+  select.value = state.status === "ok" ? state.effort : pairs[0][0];
+  select.disabled = state.status !== "ok";
+}
+
+function paintBadge(badge, state) {
+  var color = state.status === "ok" && EFFORT_COLORS[state.effort]
+    ? EFFORT_COLORS[state.effort]
+    : NEUTRAL_COLOR;
+  badge.textContent = state.status === "ok" ? state.effort : state.status;
+  badge.style.background = color + "1a";
+  badge.style.color = color;
+}
+
+function roleCards(roleId) {
+  var matching = [];
+  var cards = document.querySelectorAll(".role-card");
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].getAttribute("data-role-id") === roleId) {
+      matching.push(cards[i]);
+    }
+  }
+  return matching;
+}
+
+function onModelSelect(roleId, newModel) {
+  var cards = roleCards(roleId);
+  if (!cards.length) {
+    return null;
+  }
+  var state = resolveEffortState(
+    newModel,
+    cards[0].querySelector(".effort-select").value
+  );
+  for (var i = 0; i < cards.length; i++) {
+    var card = cards[i];
+    card.querySelector(".model-select").value = newModel;
+    setEffortOptions(card.querySelector(".effort-select"), state);
+    paintBadge(card.querySelector(".effort-badge"), state);
+  }
+  return state;
+}
+
+function onEffortSelect(roleId, newEffort) {
+  var cards = roleCards(roleId);
+  var state = { status: "ok", effort: newEffort, efforts: [] };
+  for (var i = 0; i < cards.length; i++) {
+    var card = cards[i];
+    card.querySelector(".effort-select").value = newEffort;
+    paintBadge(card.querySelector(".effort-badge"), state);
+  }
+  return state;
+}
+
+function bindSelect(select, roleId, handler) {
+  if (!select) {
+    return;
+  }
+  select.addEventListener("change", function () {
+    handler(roleId, select.value);
+  });
+}
+
+function bindRoleControls() {
+  var cards = document.querySelectorAll(".role-card");
+  for (var i = 0; i < cards.length; i++) {
+    var card = cards[i];
+    var roleId = card.getAttribute("data-role-id");
+    bindSelect(card.querySelector(".model-select"), roleId, onModelSelect);
+    bindSelect(card.querySelector(".effort-select"), roleId, onEffortSelect);
+  }
+}
+
+bindRoleControls();
+"""
 
 
 # --- document assembly ---
@@ -991,6 +1399,43 @@ footer { padding: 1rem 2rem; color: var(--muted); font-size: 0.8rem; }
   border-radius: 999px;
   direction: ltr;
 }
+
+/* Reactive model & effort controls (ticket 48). */
+.role-card-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.control-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted);
+  flex: 1 1 8rem;
+}
+.control-label select {
+  font-family: inherit;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  max-width: 100%;
+}
+.control-label select:disabled { color: var(--neutral); background: #f4f1ea; }
+.effort-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: #eeece6;
+  color: var(--neutral);
+}
 """
 
 
@@ -1002,6 +1447,7 @@ def render_html_report(
     now: datetime,
     window_days: int = DEFAULT_WINDOW_DAYS,
     role_matrix: Mapping[str, Any] | None = None,
+    model_capabilities: Mapping[tuple[str, str], Any] | None = None,
 ) -> str:
     """The pure contract door: a journal and its two already-computed
     boards in, a standalone HTML document out. Reads no clock, touches no
@@ -1019,6 +1465,17 @@ def render_html_report(
     crash) rather than this function computing it itself: see this
     module's docstring for why loading `routing-config.json` belongs to
     `write_html_report`, not here.
+
+    `model_capabilities` is `routing_config.build_model_capabilities_registry()`'s
+    output, populating the model dropdowns and the reactive script's effort
+    ladders (ticket 48). It is a separate parameter rather than something
+    derived from `role_matrix` because the two answer different questions:
+    `role_matrix` carries only the capabilities of models a role is
+    *already* bound to, while the dropdown must offer every model an
+    operator could switch *to* (user story 4). Defaults to empty for the
+    same reason `role_matrix` does — a document whose dropdowns offer only
+    the current binding, never a crash and never a disk read from this
+    door.
     """
     _require_aware_now(now)
     _validate_window_days(window_days)
@@ -1073,7 +1530,11 @@ def render_html_report(
         f"{journal.unreadable_lines} unreadable line(s), "
         f"{journal.unknown_kind_lines} unknown-kind line(s)."
     )
-    role_matrix_html = _role_matrix_section_html(role_matrix if role_matrix is not None else {})
+    capabilities = model_capabilities if model_capabilities is not None else {}
+    role_matrix_html = _role_matrix_section_html(
+        role_matrix if role_matrix is not None else {}, capabilities
+    )
+    dashboard_config_json = _dashboard_config_json(capabilities)
 
     return f"""<!DOCTYPE html>
 <html lang="he" dir="rtl">
@@ -1128,6 +1589,8 @@ def render_html_report(
 </main>
 </div>
 <footer dir="ltr">Journal health: {_escape(journal_health)}</footer>
+<script type="application/json" id="dashboard-config">{dashboard_config_json}</script>
+<script>{_SCRIPT}</script>
 </body>
 </html>
 """
@@ -1197,9 +1660,18 @@ def write_html_report(
     baseline_board = learning_scoreboard.compute_scoreboard(
         journal, now=now - timedelta(days=window_days), window_days=window_days
     )
-    role_matrix = routing_config.get_role_matrix_view_data(routing_config.load_routing_config())
+    capabilities = routing_config.build_model_capabilities_registry()
+    role_matrix = routing_config.get_role_matrix_view_data(
+        routing_config.load_routing_config(), capabilities=capabilities
+    )
     content = render_html_report(
-        journal, board, baseline_board, now=now, window_days=window_days, role_matrix=role_matrix
+        journal,
+        board,
+        baseline_board,
+        now=now,
+        window_days=window_days,
+        role_matrix=role_matrix,
+        model_capabilities=capabilities,
     )
     path = output_path if output_path is not None else html_report_path(root_dir, now=now)
     _atomic_text_write(path, content)

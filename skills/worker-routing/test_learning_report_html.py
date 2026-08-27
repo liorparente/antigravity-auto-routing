@@ -9,6 +9,10 @@ out) and touches neither `learning_journal` nor `learning_scoreboard`.
 from __future__ import annotations
 
 import ast
+import json
+import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -127,6 +131,236 @@ def _compliance_record(
         session_last_activity=session_last_activity,
         timestamp=timestamp,
     )
+
+
+_SCRIPT_OPENER_RE = re.compile(r"<script[^>]*>")
+_JSON_BLOCK_RE = re.compile(
+    r'<script type="application/json" id="dashboard-config">(.*?)</script>', re.DOTALL
+)
+_EXECUTABLE_SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.DOTALL)
+_EFFORT_SELECT_RE = re.compile(
+    r'<select class="effort-select"[^>]*>(.*?)</select>', re.DOTALL
+)
+_OPTION_VALUE_RE = re.compile(r'<option value="([^"]*)"')
+
+
+def _script_openers(report: str) -> list[str]:
+    return _SCRIPT_OPENER_RE.findall(report)
+
+
+def _dashboard_config(report: str) -> Any:
+    match = _JSON_BLOCK_RE.search(report)
+    assert match is not None, "no dashboard-config JSON block in the rendered report"
+    return json.loads(match.group(1))
+
+
+def _capabilities_payload(report: str) -> Any:
+    return _dashboard_config(report)["capabilities"]
+
+
+def _executable_script(report: str) -> str:
+    match = _EXECUTABLE_SCRIPT_RE.search(report)
+    assert match is not None, "no executable script block in the rendered report"
+    return match.group(1)
+
+
+def _effort_option_values(report: str) -> list[str]:
+    match = _EFFORT_SELECT_RE.search(report)
+    assert match is not None, "no effort select in the rendered report"
+    return _OPTION_VALUE_RE.findall(match.group(1))
+
+
+# --- running the embedded JavaScript for real (ticket 48) ---
+
+_ROLE_CARD_RE = re.compile(
+    r'<div class="role-card" data-role-id="([^"]+)".*?'
+    r'<div class="role-card-bindings">',
+    re.DOTALL,
+)
+_MODEL_SELECT_RE = re.compile(r'<select class="model-select"[^>]*>(.*?)</select>', re.DOTALL)
+_SELECTED_OPTION_RE = re.compile(r'<option value="([^"]*)" selected>')
+_BADGE_RE = re.compile(r'<span class="effort-badge"[^>]*>([^<]*)</span>')
+
+# The DOM surface the embedded script actually touches, and nothing else —
+# narrow enough to stub honestly in a few dozen lines, which is why the
+# script is written against exactly these calls. A selector or tag the stub
+# does not know about raises rather than returning a permissive `null`, so
+# widening the script's DOM usage fails these tests loudly instead of
+# silently exercising a stub that no longer resembles a browser.
+_DOM_STUB_JS = """
+function makeOption() {
+  return { value: "", textContent: "", selected: false };
+}
+
+function makeSelect(value) {
+  return {
+    value: value,
+    disabled: false,
+    children: [],
+    listeners: [],
+    get firstChild() {
+      return this.children.length ? this.children[0] : null;
+    },
+    removeChild: function (child) {
+      this.children = this.children.filter(function (each) {
+        return each !== child;
+      });
+    },
+    appendChild: function (child) {
+      this.children.push(child);
+    },
+    addEventListener: function (name, handler) {
+      this.listeners.push([name, handler]);
+    }
+  };
+}
+
+function makeCard(spec) {
+  var modelSelect = makeSelect(spec.model);
+  var effortSelect = makeSelect(spec.effort);
+  effortSelect.disabled = spec.disabled;
+  var badge = { textContent: spec.badge, style: { background: "", color: "" } };
+  return {
+    getAttribute: function (name) {
+      if (name !== "data-role-id") {
+        throw new Error("unsupported attribute " + name);
+      }
+      return spec.roleId;
+    },
+    querySelector: function (selector) {
+      if (selector === ".model-select") return modelSelect;
+      if (selector === ".effort-select") return effortSelect;
+      if (selector === ".effort-badge") return badge;
+      throw new Error("unsupported selector " + selector);
+    }
+  };
+}
+
+var CARD_NODES = CARD_SPECS.map(makeCard);
+
+var document = {
+  getElementById: function (id) {
+    if (id !== "dashboard-config") {
+      throw new Error("unsupported id " + id);
+    }
+    return { textContent: DASHBOARD_CONFIG_JSON };
+  },
+  querySelectorAll: function (selector) {
+    if (selector !== ".role-card") {
+      throw new Error("unsupported selector " + selector);
+    }
+    return CARD_NODES;
+  },
+  createElement: function (tag) {
+    if (tag !== "option") {
+      throw new Error("unsupported tag " + tag);
+    }
+    return makeOption();
+  }
+};
+
+function snapshot(roleId) {
+  return CARD_NODES.filter(function (card) {
+    return card.getAttribute("data-role-id") === roleId;
+  }).map(function (card) {
+    var effortSelect = card.querySelector(".effort-select");
+    var badge = card.querySelector(".effort-badge");
+    return {
+      model: card.querySelector(".model-select").value,
+      effort: effortSelect.value,
+      options: effortSelect.children.map(function (option) {
+        return option.value;
+      }),
+      disabled: effortSelect.disabled,
+      badgeText: badge.textContent,
+      badgeColor: badge.style.color,
+      badgeBackground: badge.style.background
+    };
+  });
+}
+
+function fireChange(roleId, which, value) {
+  var card = CARD_NODES.filter(function (each) {
+    return each.getAttribute("data-role-id") === roleId;
+  })[0];
+  var select = card.querySelector(which);
+  select.value = value;
+  select.listeners.forEach(function (entry) {
+    entry[1]();
+  });
+}
+"""
+
+
+def _node_binary() -> str:
+    """Locate `node`, failing loudly when it is absent.
+
+    Deliberately not a `skipUnless`: the assertions below are the only ones
+    in this file that execute the embedded JavaScript at all, so quietly
+    skipping them would leave the report's entire reactive layer covered by
+    nothing but substring checks over its source text — a suite that stays
+    green while the behavior it names is never run once.
+    """
+    node = shutil.which("node")
+    if node is None:
+        raise RuntimeError(
+            "node is required to execute the dashboard's embedded JavaScript; "
+            "these tests verify behavior, not source text, and must not be skipped"
+        )
+    return node
+
+
+def _role_card_specs(report: str) -> list[dict[str, Any]]:
+    """The rendered initial state of every role card, as the fixture the DOM
+    stub is built from — so the JavaScript runs against what the renderer
+    actually emitted, not against a hand-written approximation of it.
+    """
+    specs = []
+    for chunk in report.split('<div class="role-card" data-role-id="')[1:]:
+        role_id = chunk.split('"', 1)[0]
+        model_block = _MODEL_SELECT_RE.search(chunk)
+        effort_block = _EFFORT_SELECT_RE.search(chunk)
+        badge = _BADGE_RE.search(chunk)
+        assert model_block and effort_block and badge, f"incomplete controls for {role_id!r}"
+        model_selected = _SELECTED_OPTION_RE.search(model_block.group(1))
+        effort_selected = _SELECTED_OPTION_RE.search(effort_block.group(1))
+        specs.append(
+            {
+                "roleId": role_id,
+                "model": model_selected.group(1) if model_selected else "",
+                "effort": effort_selected.group(1) if effort_selected else "",
+                "disabled": "disabled" in effort_block.group(0).split(">", 1)[0],
+                "badge": badge.group(1),
+            }
+        )
+    return specs
+
+
+def _run_embedded_script(report: str, harness: str) -> Any:
+    """Run the report's own `<script>` body under node against a stubbed DOM
+    built from that same report's rendered cards, then run `harness` and
+    parse whatever it prints as JSON.
+    """
+    source = "\n".join(
+        [
+            f"var DASHBOARD_CONFIG_JSON = {json.dumps(json.dumps(_dashboard_config(report)))};",
+            f"var CARD_SPECS = {json.dumps(_role_card_specs(report))};",
+            _DOM_STUB_JS,
+            _executable_script(report),
+            harness,
+        ]
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        script_path = Path(tmp) / "harness.js"
+        script_path.write_text(source, encoding="utf-8")
+        completed = subprocess.run(
+            [_node_binary(), str(script_path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    assert completed.returncode == 0, f"node failed:\n{completed.stderr}"
+    return json.loads(completed.stdout)
 
 
 def _boards(journal: learning_journal.JournalRead, *, now: datetime, window_days: int = 7) -> Any:
@@ -576,18 +810,13 @@ class EscapingTests(unittest.TestCase):
         self.assertEqual(learning_report_html._escape(3.14), "3.14")
         self.assertEqual(learning_report_html._escape(True), "True")
 
-    def test_rendered_report_never_leaks_an_unescaped_script_tag(self) -> None:
-        # Journal identifiers cannot carry `<script>` (TASK_ID_RE forbids it),
-        # so this exercises the renderer's own literal content instead: no
-        # section of the document may contain a bare, unescaped `<script>`
-        # tag anywhere outside a `<script>`-less document — this report ships
-        # no inline JS at all, so the substring must not appear anywhere.
-        journal = learning_journal.JournalRead()
-        board, baseline_board = _boards(journal, now=_NOW)
-
-        report = learning_report_html.render_html_report(journal, board, baseline_board, now=_NOW)
-
-        self.assertNotIn("<script", report)
+    # The document-wide "no `<`+`script` substring anywhere" assertion that
+    # used to live here described a report with no inline JavaScript. Ticket
+    # 48 gives it two script blocks by design, so the invariant moved to
+    # `ScriptInjectionTests` below, restated as the property that survives
+    # that change: the document's script tags are exactly the two this module
+    # emits, and no dynamic value can add a third or break out of the JSON
+    # payload.
 
 
 # --- Role matrix (ticket 47) ---
@@ -808,8 +1037,8 @@ class RoleMatrixSectionTests(unittest.TestCase):
             journal, board, baseline_board, now=_NOW, role_matrix=role_matrix
         )
 
-        self.assertNotIn("<script", report)
-        self.assertIn("&lt;script&gt;", report)
+        self.assertNotIn("<script>alert(1)", report)
+        self.assertIn("&lt;script&gt;alert(1)", report)
 
     def test_write_html_report_wires_in_the_real_routing_config_role_matrix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -941,6 +1170,564 @@ class HtmlReportPathTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             learning_report_html.html_report_path(root, now=datetime(2026, 1, 8))  # noqa: DTZ001
+
+
+# --- Reactive model/effort binding (ticket 48) ---
+
+
+class EffortSnapRuleTests(unittest.TestCase):
+    """`_resolve_effort_state` is the whole of Spec 0013 §3's auto-snap rule,
+    in one pure function, so both the server-side initial render and the
+    embedded JavaScript decide identically. `JsEffortSnapParityTests` below
+    runs this same table through the JavaScript and asserts the two agree.
+    """
+
+    def test_a_supported_configured_effort_is_kept(self) -> None:
+        capability = _capability(supported_efforts=("low", "medium", "high"), default_effort="high")
+
+        state = learning_report_html._resolve_effort_state(capability, "low")
+
+        self.assertEqual(state, learning_report_html.EffortState("ok", "low", ("low", "medium", "high")))
+
+    def test_an_unsupported_configured_effort_snaps_to_the_models_default(self) -> None:
+        capability = _capability(supported_efforts=("low", "medium"), default_effort="medium")
+
+        state = learning_report_html._resolve_effort_state(capability, "ultra")
+
+        self.assertEqual(state.effort, "medium")
+        self.assertEqual(state.status, "ok")
+
+    def test_an_unsupported_effort_falls_back_to_the_first_rung_when_the_default_is_also_unsupported(
+        self,
+    ) -> None:
+        # `claude-sonnet-4-6` under `antigravity_cli` is exactly this shape:
+        # a real ladder with `default_effort=None`, because `agy models`
+        # publishes no per-model default.
+        capability = _capability(supported_efforts=("low", "medium", "high"), default_effort=None)
+
+        state = learning_report_html._resolve_effort_state(capability, "ultra")
+
+        self.assertEqual(state.effort, "low")
+        self.assertEqual(state.status, "ok")
+
+    def test_a_model_with_no_effort_ladder_reports_none_not_a_snapped_effort(self) -> None:
+        # `claude-3-7-sonnet` and every LM Studio entry: `supported_efforts=()`
+        # means "this model has no reasoning-effort parameter at all", which
+        # is a different answer from "we do not know its ladder".
+        capability = _capability(supported_efforts=(), default_effort=None)
+
+        state = learning_report_html._resolve_effort_state(capability, "high")
+
+        self.assertEqual(state, learning_report_html.EffortState("none", None, ()))
+
+    def test_an_unknown_capability_reports_unknown_and_preserves_the_configured_effort(self) -> None:
+        # A drift binding (`capability=None`): the configured effort is still
+        # what `routing-config.json` says, and this view must not silently
+        # rewrite it just because the audited catalog has never seen the model.
+        state = learning_report_html._resolve_effort_state(None, "medium")
+
+        self.assertEqual(state, learning_report_html.EffortState("unknown", "medium", ()))
+
+
+class RoleCardControlsTests(unittest.TestCase):
+    def _report(self, role_matrix: Any, capabilities: Any = None) -> str:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        return learning_report_html.render_html_report(
+            journal,
+            board,
+            baseline_board,
+            now=_NOW,
+            role_matrix=role_matrix,
+            model_capabilities=capabilities,
+        )
+
+    def test_a_role_card_carries_a_model_select_an_effort_select_and_a_badge(self) -> None:
+        report = self._report({"planner": _role_entry("planner", bindings=(_binding(),))})
+
+        self.assertIn('data-role-id="planner"', report)
+        self.assertIn('class="model-select"', report)
+        self.assertIn('class="effort-select"', report)
+        self.assertIn('class="effort-badge"', report)
+
+    def test_the_effort_select_offers_only_the_bound_models_supported_efforts(self) -> None:
+        report = self._report(
+            {
+                "planner": _role_entry(
+                    "planner",
+                    bindings=(
+                        _binding(
+                            reasoning_effort="low",
+                            capability=_capability(supported_efforts=("low", "high")),
+                        ),
+                    ),
+                )
+            }
+        )
+
+        options = _effort_option_values(report)
+        self.assertEqual(options, ["low", "high"])
+
+    def test_the_initial_render_already_snaps_an_unsupported_configured_effort(self) -> None:
+        # The snap is not a JavaScript-only behavior: a document opened with
+        # scripting disabled must still never display an effort the bound
+        # model cannot accept.
+        report = self._report(
+            {
+                "planner": _role_entry(
+                    "planner",
+                    bindings=(
+                        _binding(
+                            reasoning_effort="ultra",
+                            capability=_capability(
+                                supported_efforts=("low", "medium"), default_effort="medium"
+                            ),
+                        ),
+                    ),
+                )
+            }
+        )
+
+        self.assertEqual(_effort_option_values(report), ["low", "medium"])
+        self.assertIn('<option value="medium" selected>medium</option>', report)
+        self.assertNotIn(">ultra<", report)
+
+    def test_the_model_select_lists_every_registry_entry(self) -> None:
+        capabilities = {
+            ("claude_code_cli", "claude-opus-5"): _capability(
+                provider="claude_code_cli", model_id="claude-opus-5"
+            ),
+            ("codex_cli", "gpt-5.6-sol"): _capability(provider="codex_cli", model_id="gpt-5.6-sol"),
+        }
+        report = self._report(
+            {"planner": _role_entry("planner", bindings=(_binding(),))}, capabilities
+        )
+
+        self.assertIn('value="claude_code_cli::claude-opus-5"', report)
+        self.assertIn('value="codex_cli::gpt-5.6-sol"', report)
+
+    def test_a_drift_binding_still_appears_as_the_selected_model_option(self) -> None:
+        # `lm_studio_local::qwen3-coder-30b` is a real, currently-configured
+        # binding absent from the audited registry. The select must be able to
+        # show what the config actually says, not silently fall back to some
+        # other model's option.
+        capabilities = {
+            ("claude_code_cli", "claude-opus-5"): _capability(
+                provider="claude_code_cli", model_id="claude-opus-5"
+            )
+        }
+        report = self._report(
+            {
+                "adjudicator": _role_entry(
+                    "adjudicator",
+                    bindings=(
+                        _binding(
+                            provider_id="lm_studio_local",
+                            adapter="lm_studio_local",
+                            model_id="qwen3-coder-30b",
+                            capability=None,
+                        ),
+                    ),
+                )
+            },
+            capabilities,
+        )
+
+        self.assertIn('value="lm_studio_local::qwen3-coder-30b" selected', report)
+
+    def test_a_model_with_no_effort_ladder_renders_a_disabled_effort_select(self) -> None:
+        report = self._report(
+            {
+                "adjudicator": _role_entry(
+                    "adjudicator",
+                    bindings=(_binding(capability=_capability(supported_efforts=())),),
+                )
+            }
+        )
+
+        self.assertIn('class="effort-select" data-role-id="adjudicator" disabled', report)
+
+    def test_every_effort_rung_in_the_closed_vocabulary_has_its_own_badge_color(self) -> None:
+        # `_EFFORT_RANK` is the closed vocabulary; a rung missing from the
+        # badge palette would render neutral grey, reading as "unknown"
+        # rather than as the valid, expensive rung it actually is.
+        self.assertEqual(
+            sorted(learning_report_html._EFFORT_BADGE_COLORS),
+            sorted(routing_config._EFFORT_RANK),
+        )
+
+    def test_the_badge_is_painted_with_the_selected_efforts_color(self) -> None:
+        report = self._report(
+            {
+                "planner": _role_entry(
+                    "planner",
+                    bindings=(
+                        _binding(
+                            reasoning_effort="high",
+                            capability=_capability(supported_efforts=("high",)),
+                        ),
+                    ),
+                )
+            }
+        )
+
+        purple = learning_report_html._EFFORT_BADGE_COLORS["high"]
+        self.assertIn(f"color:{purple}", report)
+
+
+class ModelCapabilitiesPayloadTests(unittest.TestCase):
+    def test_the_embedded_payload_is_valid_json_keyed_by_provider_and_model(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        capabilities = {
+            ("codex_cli", "gpt-5.6-sol"): _capability(
+                provider="codex_cli",
+                model_id="gpt-5.6-sol",
+                supported_efforts=("low", "ultra"),
+                default_effort="low",
+                tier="ultra",
+                context=272000,
+            )
+        }
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, model_capabilities=capabilities
+        )
+
+        payload = _capabilities_payload(report)
+        self.assertEqual(
+            payload["codex_cli::gpt-5.6-sol"],
+            {
+                "supportedEfforts": ["low", "ultra"],
+                "defaultEffort": "low",
+                "tier": "ultra",
+                "context": 272000,
+                "localOnly": False,
+            },
+        )
+
+    def test_write_html_report_embeds_the_real_audited_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = learning_report_html.write_html_report(Path(tmp), now=_NOW)
+
+            payload = _capabilities_payload(path.read_text(encoding="utf-8"))
+            self.assertIn("claude_code_cli::claude-opus-5", payload)
+            self.assertEqual(
+                payload["claude_code_cli::claude-opus-5"]["supportedEfforts"],
+                ["low", "medium", "high", "xhigh", "max"],
+            )
+
+
+class ScriptInjectionTests(unittest.TestCase):
+    """The report ships inline JavaScript as of ticket 48, so the old
+    "no `<`+`script` substring anywhere" invariant no longer describes it.
+    These replace it with the property that actually matters: the document's
+    script tags are only the two this module itself emits, and no dynamic
+    value can add a third or break out of the JSON payload.
+    """
+
+    def _report(self, **kwargs: Any) -> str:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        return learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW, **kwargs
+        )
+
+    def test_the_only_script_tags_are_the_two_the_module_emits(self) -> None:
+        openers = _script_openers(self._report())
+
+        self.assertEqual(
+            openers,
+            ['<script type="application/json" id="dashboard-config">', "<script>"],
+        )
+
+    def test_a_role_value_carrying_a_script_tag_adds_no_script_tag_to_the_document(self) -> None:
+        role_matrix = {
+            "planner": _role_entry("planner", reasoning_tier="</script><script>alert(1)</script>")
+        }
+
+        report = self._report(role_matrix=role_matrix)
+
+        self.assertEqual(len(_script_openers(report)), 2)
+        self.assertNotIn("<script>alert(1)", report)
+        self.assertIn("&lt;script&gt;alert(1)", report)
+
+    def test_a_capability_model_id_cannot_break_out_of_the_json_payload(self) -> None:
+        capabilities = {
+            ("codex_cli", "</script><script>alert(1)</script>"): _capability(
+                provider="codex_cli", model_id="</script><script>alert(1)</script>"
+            )
+        }
+
+        report = self._report(model_capabilities=capabilities)
+
+        self.assertEqual(len(_script_openers(report)), 2)
+        self.assertNotIn("<script>alert(1)", report)
+        # Still round-trips as data: neutralized, not mangled or dropped.
+        payload = _capabilities_payload(report)
+        self.assertIn("codex_cli::</script><script>alert(1)</script>", payload)
+
+    def test_the_embedded_script_interpolates_no_dynamic_value(self) -> None:
+        # The executable block is a single static literal. Everything dynamic
+        # travels through the `application/json` block instead, where it is
+        # data the script parses rather than source the browser compiles.
+        first = self._report()
+        second = self._report(
+            role_matrix={"planner": _role_entry("planner", bindings=(_binding(),))},
+            model_capabilities={("codex_cli", "gpt-5.6-sol"): _capability()},
+        )
+
+        self.assertEqual(_executable_script(first), _executable_script(second))
+
+
+_LADDERS: dict[str, tuple[tuple[str, ...], str | None]] = {
+    "claude-opus-5": (("low", "medium", "high", "xhigh", "max"), "high"),
+    "gpt-5.6-sol": (("low", "medium", "high", "xhigh", "max", "ultra"), "low"),
+    "gemini-3.6-flash-medium": (("medium",), "medium"),
+    "claude-sonnet-4-6": (("low", "medium", "high"), None),
+    "claude-3-7-sonnet": ((), None),
+}
+
+
+def _capability_fixture() -> dict[tuple[str, str], Any]:
+    return {
+        ("provider", model_id): _capability(
+            provider="provider",
+            model_id=model_id,
+            supported_efforts=supported,
+            default_effort=default,
+        )
+        for model_id, (supported, default) in _LADDERS.items()
+    }
+
+
+def _reactive_report(*, effort: str = "high", model_id: str = "claude-opus-5") -> str:
+    """A two-grid report whose one role is bound to `model_id` at `effort`.
+    `planner` is a primary role, so it renders in both grids — which is what
+    makes the "every copy of the card updates" assertions meaningful.
+    """
+    journal = learning_journal.JournalRead()
+    board, baseline_board = _boards(journal, now=_NOW)
+    role_matrix = {
+        "planner": _role_entry(
+            "planner",
+            bindings=(
+                _binding(
+                    adapter="provider",
+                    model_id=model_id,
+                    reasoning_effort=effort,
+                    capability=_capability_fixture().get(("provider", model_id)),
+                ),
+            ),
+        )
+    }
+    return learning_report_html.render_html_report(
+        journal,
+        board,
+        baseline_board,
+        now=_NOW,
+        role_matrix=role_matrix,
+        model_capabilities=_capability_fixture(),
+    )
+
+
+class EmbeddedScriptBehaviorTests(unittest.TestCase):
+    """The embedded JavaScript, executed. Every assertion here runs the
+    report's own `<script>` body under node against a DOM stub built from
+    that same report's rendered cards — nothing asserts over the script's
+    source text, which would pass just as happily if the logic inside were
+    wrong.
+    """
+
+    def test_selecting_a_model_rebuilds_the_effort_options_from_its_own_ladder(self) -> None:
+        result = _run_embedded_script(
+            _reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(
+            result[0]["options"], ["low", "medium", "high", "xhigh", "max", "ultra"]
+        )
+
+    def test_a_still_supported_effort_survives_a_model_change(self) -> None:
+        # `high` is on both ladders, so nothing should be snapped away.
+        result = _run_embedded_script(
+            _reactive_report(effort="high"),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(result[0]["effort"], "high")
+
+    def test_an_unsupported_effort_snaps_to_the_new_models_default(self) -> None:
+        # `ultra` exists only on `gpt-5.6-sol`; moving to `claude-opus-5`,
+        # whose ladder stops at `max`, must snap to that model's own default.
+        report = _reactive_report(effort="ultra", model_id="gpt-5.6-sol")
+        result = _run_embedded_script(
+            report,
+            'onModelSelect("planner", "provider::claude-opus-5");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(result[0]["effort"], "high")
+        self.assertNotIn("ultra", result[0]["options"])
+
+    def test_an_unsupported_effort_falls_back_to_the_lowest_rung_without_a_default(self) -> None:
+        report = _reactive_report(effort="max", model_id="claude-opus-5")
+        result = _run_embedded_script(
+            report,
+            'onModelSelect("planner", "provider::claude-sonnet-4-6");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(result[0]["effort"], "low")
+
+    def test_selecting_a_model_with_no_ladder_disables_the_effort_select(self) -> None:
+        result = _run_embedded_script(
+            _reactive_report(),
+            'onModelSelect("planner", "provider::claude-3-7-sonnet");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertTrue(result[0]["disabled"])
+        self.assertEqual(result[0]["badgeText"], "none")
+        self.assertEqual(result[0]["options"], [""])
+
+    def test_selecting_an_unaudited_model_reports_drift_and_keeps_the_configured_effort(
+        self,
+    ) -> None:
+        result = _run_embedded_script(
+            _reactive_report(effort="high"),
+            'onModelSelect("planner", "provider::not-in-the-registry");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(result[0]["badgeText"], "unknown")
+        self.assertEqual(result[0]["effort"], "high")
+        self.assertTrue(result[0]["disabled"])
+
+    def test_the_badge_is_repainted_in_the_new_efforts_color(self) -> None:
+        report = _reactive_report(effort="ultra", model_id="gpt-5.6-sol")
+        result = _run_embedded_script(
+            report,
+            'onModelSelect("planner", "provider::gemini-3.6-flash-medium");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(result[0]["badgeText"], "medium")
+        self.assertEqual(
+            result[0]["badgeColor"], learning_report_html._EFFORT_BADGE_COLORS["medium"]
+        )
+
+    def test_every_grids_copy_of_the_role_updates_not_only_the_one_touched(self) -> None:
+        # `planner` renders in both the primary and the advanced grid. If only
+        # the touched card updated, flipping the segmented toggle would show
+        # the other copy still on the old model.
+        report = _reactive_report()
+        specs = _role_card_specs(report)
+        self.assertEqual(len(specs), 2, "planner should render once per grid")
+
+        result = _run_embedded_script(
+            report,
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0], result[1])
+        self.assertEqual(result[0]["model"], "provider::gpt-5.6-sol")
+
+    def test_a_change_event_on_the_rendered_select_drives_the_same_update(self) -> None:
+        # The handler is not merely defined: the renderer's own markup is
+        # wired to it, so a user changing the dropdown triggers the snap.
+        result = _run_embedded_script(
+            _reactive_report(effort="ultra", model_id="gpt-5.6-sol"),
+            'fireChange("planner", ".model-select", "provider::claude-opus-5");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual(result[0]["effort"], "high")
+        self.assertEqual(result[0]["model"], "provider::claude-opus-5")
+
+    def test_moving_from_a_ladderless_model_to_an_unknown_one_keeps_a_labelled_option(
+        self,
+    ) -> None:
+        # Reachable in the browser: the ladderless model empties the select,
+        # so the unknown state inherits `""` as the current effort. The
+        # option must still be labelled, not a blank row.
+        result = _run_embedded_script(
+            _reactive_report(),
+            'onModelSelect("planner", "provider::claude-3-7-sonnet");'
+            'onModelSelect("planner", "provider::not-in-the-registry");'
+            "console.log(JSON.stringify(snapshot(\"planner\").concat("
+            "  [{labels: CARD_NODES[0].querySelector('.effort-select')"
+            "      .children.map(function (o) { return o.textContent; })}]"
+            ")));",
+        )
+
+        self.assertEqual(result[0]["badgeText"], "unknown")
+        self.assertEqual(result[-1]["labels"], ["none"])
+
+    def test_choosing_an_effort_directly_repaints_every_copy_of_the_badge(self) -> None:
+        result = _run_embedded_script(
+            _reactive_report(effort="high"),
+            'fireChange("planner", ".effort-select", "low");'
+            "console.log(JSON.stringify(snapshot(\"planner\")));",
+        )
+
+        self.assertEqual([card["badgeText"] for card in result], ["low", "low"])
+        self.assertEqual(
+            result[1]["badgeColor"], learning_report_html._EFFORT_BADGE_COLORS["low"]
+        )
+
+
+class JsEffortSnapParityTests(unittest.TestCase):
+    """`_resolve_effort_state` and the script's `resolveEffortState` are the
+    same rule written twice, once per language. This runs one table of cases
+    through both and asserts they agree — the guard that keeps a change to
+    either side from silently teaching the server-rendered badge and the
+    reactive one different answers.
+    """
+
+    _CASES: tuple[tuple[str, str], ...] = (
+        ("claude-opus-5", "low"),
+        ("claude-opus-5", "ultra"),
+        ("claude-opus-5", "max"),
+        ("gpt-5.6-sol", "ultra"),
+        ("gpt-5.6-sol", ""),
+        ("gemini-3.6-flash-medium", "high"),
+        ("claude-sonnet-4-6", "ultra"),
+        ("claude-sonnet-4-6", "medium"),
+        ("claude-3-7-sonnet", "high"),
+        ("not-in-the-registry", "medium"),
+    )
+
+    def test_both_implementations_agree_on_every_case(self) -> None:
+        capabilities = _capability_fixture()
+        expected = []
+        for model_id, effort in self._CASES:
+            state = learning_report_html._resolve_effort_state(
+                capabilities.get(("provider", model_id)), effort
+            )
+            expected.append([state.status, state.effort, list(state.efforts)])
+
+        cases = json.dumps(
+            [[f"provider::{model_id}", effort] for model_id, effort in self._CASES]
+        )
+        actual = _run_embedded_script(
+            _reactive_report(),
+            f"var CASES = {cases};"
+            "console.log(JSON.stringify(CASES.map(function (case_) {"
+            "  var state = resolveEffortState(case_[0], case_[1]);"
+            "  return [state.status, state.effort, state.efforts];"
+            "})));",
+        )
+
+        self.assertEqual(actual, expected)
+        # A table where every case landed on the same status would agree
+        # trivially; these are the three the rule actually distinguishes.
+        self.assertEqual({case[0] for case in expected}, {"ok", "none", "unknown"})
 
 
 if __name__ == "__main__":
