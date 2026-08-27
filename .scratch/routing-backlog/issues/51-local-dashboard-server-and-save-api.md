@@ -57,14 +57,23 @@ ticket's own checklist never lists `GET /api/model-capabilities`, but Spec
 with `--serve` explicitly — "Test `--serve` argument parsing and API
 endpoint validation (`POST /api/config` and `GET /api/model-capabilities`)"
 — and `learning_report_html._dashboard_config_json`'s docstring already
-points at "the local-server work" (this ticket) as where it belongs. Added
-it scoped conservatively: it serves `routing_config.
-build_model_capabilities_registry()`'s current in-process registry, keyed
-`{provider}::{model_id}` like the dashboard's own `<option>` values, with
-all five `ModelCapability` fields the spec names. It does not re-probe LM
-Studio or any CLI provider live on each request — Spec §1's "Live
-Capability Probing on Launch" and user story 8's "🔄 רענן מודלים חיים"
-button both describe a live re-probe as something a page action triggers,
-and no such action exists in the dashboard yet, so wiring `probe_models.
-probe_all` through this endpoint would be speculative work nothing today
-would exercise.
+points at "the local-server work" (this ticket) as where it belongs.
+
+**Revised after a second review pass.** The first cut of this endpoint
+served the static `build_model_capabilities_registry()` and deliberately
+skipped live re-probing as out of scope. A second Spec review caught that
+this was wrong, not merely conservative: `probe_models.probe_all` and
+`probe_models.CatalogSnapshot.to_dict` were built by ticket 45 *for this
+exact endpoint* — their own docstrings say so verbatim ("Pass
+`list_models=False` for spec 0013's launch probe"; "Shaped by `to_dict`
+into the capability payload spec 0013's dashboard reads — but it is a
+plain value object, not an HTTP concern"). `GET /api/model-capabilities`
+now calls `probe_models.probe_all(list_models=False)` and returns
+`CatalogSnapshot.to_dict()` verbatim — `_ConfigApiServer` takes an
+injectable `capability_snapshot` callable (mirroring the existing
+injectable `config_path`) so tests exercise this without depending on
+which CLIs happen to be installed on the machine running them.
+`list_models=False` keeps every provider probe local and fast (a 200ms
+socket probe to LM Studio, a `PATH` lookup plus a local cache read per CLI
+provider, no subprocess ever run) — the same non-blocking launch probe
+spec §1 describes, not a slow one merely relabeled for this route.

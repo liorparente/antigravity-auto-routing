@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -28,11 +29,12 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import learning_journal, learning_report, routing_config
+    from . import learning_journal, learning_report, probe_models, routing_config
     from .test_learning_scoreboard import _find_forbidden_clock_reads
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_report  # type: ignore[no-redef]
+    import probe_models  # type: ignore[no-redef]
     import routing_config  # type: ignore[no-redef]
     from test_learning_scoreboard import _find_forbidden_clock_reads  # type: ignore[no-redef]
 
@@ -950,8 +952,15 @@ class ConfigApiServerTests(unittest.TestCase):
     read as passing here.
     """
 
-    def _start_server(self, config_path: Path) -> tuple[learning_report._ConfigApiServer, int]:
-        server = learning_report.create_dashboard_server(port=0, config_path=config_path)
+    def _start_server(
+        self,
+        config_path: Path,
+        *,
+        capability_snapshot: Callable[[], probe_models.CatalogSnapshot] | None = None,
+    ) -> tuple[learning_report._ConfigApiServer, int]:
+        server = learning_report.create_dashboard_server(
+            port=0, config_path=config_path, capability_snapshot=capability_snapshot
+        )
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join, timeout=5)
@@ -959,11 +968,13 @@ class ConfigApiServerTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return server, server.server_address[1]
 
-    def _post_config(self, port: int, body: bytes) -> tuple[int, dict[str, Any]]:
+    def _post_config(
+        self, port: int, body: bytes, *, path: str = "/api/config"
+    ) -> tuple[int, dict[str, Any]]:
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         try:
             connection.request(
-                "POST", "/api/config", body=body, headers={"Content-Type": "application/json"}
+                "POST", path, body=body, headers={"Content-Type": "application/json"}
             )
             response = connection.getresponse()
             parsed = json.loads(response.read().decode("utf-8"))
@@ -1033,16 +1044,11 @@ class ConfigApiServerTests(unittest.TestCase):
             config_path = Path(tmp) / "routing-config.json"
             _, port = self._start_server(config_path)
             payload = json.dumps(routing_config.DEFAULT_ROUTING_CONFIG.to_dict()).encode("utf-8")
-            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-            try:
-                connection.request("POST", "/api/other", body=payload)
-                response = connection.getresponse()
-                status = response.status
-                response.read()
-            finally:
-                connection.close()
+
+            status, body = self._post_config(port, payload, path="/api/other")
 
             self.assertEqual(status, 404)
+            self.assertIn("error", body)
             self.assertFalse(config_path.exists())
 
     def test_config_path_defaults_to_the_package_routing_config_json(self) -> None:
@@ -1060,34 +1066,58 @@ class ConfigApiServerTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_model_capabilities_returns_the_full_registry_keyed_like_the_dashboard(
-        self,
-    ) -> None:
+    @staticmethod
+    def _fake_capability_snapshot() -> probe_models.CatalogSnapshot:
+        model = probe_models.ProbedModel(
+            model_id="fake-model",
+            display_label="Fake Model",
+            provider_id="lm_studio_local",
+            supported_efforts=("low", "medium"),
+            default_effort="low",
+            context_window=8192,
+            local_only=True,
+            source="live",
+        )
+        probe = probe_models.ProviderProbe(
+            provider_id="lm_studio_local",
+            available=True,
+            binary_path=None,
+            endpoint="http://127.0.0.1:1234/v1/models",
+            models=(model,),
+            error=None,
+        )
+        return probe_models.CatalogSnapshot(providers=(probe,))
+
+    def test_model_capabilities_serves_the_injected_snapshot_verbatim(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "routing-config.json"
-            _, port = self._start_server(config_path)
-            registry = routing_config.build_model_capabilities_registry()
+            snapshot = self._fake_capability_snapshot()
+            _, port = self._start_server(config_path, capability_snapshot=lambda: snapshot)
 
             status, body = self._get(port, "/api/model-capabilities")
 
             self.assertEqual(status, 200)
-            capabilities = body["capabilities"]
-            self.assertEqual(len(capabilities), len(registry))
-            provider, model_id = next(iter(registry))
-            capability = registry[(provider, model_id)]
-            entry = capabilities[f"{provider}::{model_id}"]
-            self.assertEqual(entry["provider"], provider)
-            self.assertEqual(entry["modelId"], model_id)
-            self.assertEqual(entry["supportedEfforts"], list(capability.supported_efforts))
-            self.assertEqual(entry["defaultEffort"], capability.default_effort)
-            self.assertEqual(entry["tier"], capability.tier)
-            self.assertEqual(entry["context"], capability.context)
-            self.assertEqual(entry["localOnly"], capability.local_only)
+            self.assertEqual(body, snapshot.to_dict())
+
+    def test_model_capabilities_defaults_to_the_non_blocking_launch_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            sentinel = self._fake_capability_snapshot()
+            with mock.patch.object(
+                probe_models, "probe_all", return_value=sentinel
+            ) as probe_all:
+                _, port = self._start_server(config_path)
+                status, body = self._get(port, "/api/model-capabilities")
+
+            probe_all.assert_called_once_with(list_models=False)
+            self.assertEqual(status, 200)
+            self.assertEqual(body, sentinel.to_dict())
 
     def test_model_capabilities_get_does_not_touch_the_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "routing-config.json"
-            _, port = self._start_server(config_path)
+            snapshot = self._fake_capability_snapshot()
+            _, port = self._start_server(config_path, capability_snapshot=lambda: snapshot)
 
             self._get(port, "/api/model-capabilities")
 

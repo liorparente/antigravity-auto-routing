@@ -64,10 +64,11 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 if __package__:
-    from . import learning_journal, learning_scoreboard, routing_config
+    from . import learning_journal, learning_scoreboard, probe_models, routing_config
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_scoreboard  # type: ignore[no-redef]
+    import probe_models  # type: ignore[no-redef]
     import routing_config  # type: ignore[no-redef]
 
 # Re-exported from `learning_scoreboard` — one source, never a second
@@ -450,18 +451,17 @@ def write_weekly_report(
 
 DEFAULT_SERVE_PORT = 8080
 
+# `probe_all`'s own docstring: "Pass `list_models=False` for spec 0013's
+# launch probe: it keeps every provider local, at the cost of `agy`'s live
+# listing." And `CatalogSnapshot.to_dict`'s: "Shaped by `to_dict` into the
+# capability payload spec 0013's dashboard reads — but it is a plain value
+# object, not an HTTP concern." Ticket 45 built both specifically for this
+# endpoint; this is that HTTP concern.
+CapabilitySnapshotFn = Callable[[], probe_models.CatalogSnapshot]
 
-def _model_key(provider: str, model_id: str) -> str:
-    """The `(provider, model_id)` capability-registry key, flattened for use
-    as a JSON object key — the same ``{provider}::{model_id}`` shape
-    `learning_report_html._model_key` renders into the dashboard's `<option>`
-    values, kept as a second one-line literal rather than an import across
-    modules (that helper is private, and this package's modules never import
-    each other's private names). See that function's own docstring for why
-    a flattened key, not bare `model_id`, is what a capability consumer
-    needs.
-    """
-    return f"{provider}::{model_id}"
+
+def _probe_capability_snapshot() -> probe_models.CatalogSnapshot:
+    return probe_models.probe_all(list_models=False)
 
 
 class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
@@ -469,8 +469,9 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
 
     ``self.server`` is this handler's owning `_ConfigApiServer` — the
     `http.server` machinery re-instantiates a `BaseHTTPRequestHandler` per
-    request, so any per-request state (here, the save path) has to live on
-    the shared server object instead of on the handler itself.
+    request, so any per-request state (here, the save path and the
+    capability-snapshot source) has to live on the shared server object
+    instead of on the handler itself.
 
     **POST /api/config.** The request body is validated exactly as
     `routing_config.parse_routing_config` already validates a config loaded
@@ -483,17 +484,16 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
     separate work this ticket does not include.
 
     **GET /api/model-capabilities.** Spec 0013 §1 names this endpoint and
-    groups its Testing Decisions with `--serve` (not with the HTML
-    renderer, which instead embeds the same registry as a static JSON
-    island at render time — see `learning_report_html._dashboard_config_json`).
-    This returns `routing_config.build_model_capabilities_registry()`'s
-    current in-process registry — the audited catalog ticket 45/46 already
-    build, not a fresh live re-probe of LM Studio or any CLI provider on
-    every request. Spec §1's "Live Capability Probing on Launch" and user
-    story 8's "🔄 רענן מודלים חיים" button both describe re-probing
-    (`probe_models.probe_all`) as something a page action triggers; no such
-    action exists in the dashboard yet, so wiring a live re-probe through
-    this endpoint would be speculative work this ticket does not include.
+    groups its Testing Decisions with `--serve`. It calls
+    `self.server.capability_snapshot()` — `_probe_capability_snapshot` by
+    default, `probe_models.probe_all(list_models=False)` — and returns the
+    resulting `CatalogSnapshot.to_dict()` verbatim: both are built for
+    exactly this (see the module comment above `CapabilitySnapshotFn`).
+    `list_models=False` keeps every provider probe local and fast (a socket
+    probe to LM Studio under its own 200ms timeout, a `PATH` lookup and a
+    local cache read per CLI provider — no CLI subprocess is ever run), so
+    this is the same non-blocking probe spec §1's "Live Capability Probing
+    on Launch" describes, not a slow one merely relabeled for this route.
     """
 
     server: _ConfigApiServer
@@ -523,20 +523,8 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
         if self.path != "/api/model-capabilities":
             self._respond_json(404, {"error": f"no such endpoint: {self.path}"})
             return
-        registry = routing_config.build_model_capabilities_registry()
-        capabilities = {
-            _model_key(capability.provider, capability.model_id): {
-                "provider": capability.provider,
-                "modelId": capability.model_id,
-                "supportedEfforts": list(capability.supported_efforts),
-                "defaultEffort": capability.default_effort,
-                "tier": capability.tier,
-                "context": capability.context,
-                "localOnly": capability.local_only,
-            }
-            for capability in registry.values()
-        }
-        self._respond_json(200, {"capabilities": capabilities})
+        snapshot = self.server.capability_snapshot()
+        self._respond_json(200, snapshot.to_dict())
 
     def _respond_json(self, status: int, body: dict[str, Any]) -> None:
         data = json.dumps(body).encode("utf-8")
@@ -552,16 +540,29 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
 
 
 class _ConfigApiServer(http.server.HTTPServer):
-    """Binds `_ConfigApiHandler` to an injectable save path, so a test never
-    touches this package's real `routing-config.json`.
+    """Binds `_ConfigApiHandler` to an injectable save path and capability
+    snapshot source, so a test never touches this package's real
+    `routing-config.json` and never depends on which CLIs happen to be
+    installed on the machine running the test.
     """
 
-    def __init__(self, server_address: tuple[str, int], config_path: Path) -> None:
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        config_path: Path,
+        capability_snapshot: CapabilitySnapshotFn,
+    ) -> None:
         self.config_path = config_path
+        self.capability_snapshot = capability_snapshot
         super().__init__(server_address, _ConfigApiHandler)
 
 
-def create_dashboard_server(*, port: int, config_path: Path | None = None) -> _ConfigApiServer:
+def create_dashboard_server(
+    *,
+    port: int,
+    config_path: Path | None = None,
+    capability_snapshot: CapabilitySnapshotFn | None = None,
+) -> _ConfigApiServer:
     """Construct, but do not start, the local dashboard save server.
 
     Starting is the caller's job via `.serve_forever()` — kept separate so a
@@ -572,12 +573,20 @@ def create_dashboard_server(*, port: int, config_path: Path | None = None) -> _C
     a fixed sibling file, unrelated to any `--root-dir` this CLI is otherwise
     given, the same way every other consumer in this package reads and
     writes it (see `learning_report_html.write_html_report`'s own note on
-    the same fixed path).
+    the same fixed path). `capability_snapshot` defaults to
+    `_probe_capability_snapshot`; a test overrides it with a fixed
+    `CatalogSnapshot` so `GET /api/model-capabilities` reads the same
+    deterministic fixture on every machine, real CLIs installed or not.
     """
     resolved_config_path = (
         config_path if config_path is not None else routing_config.ROUTING_CONFIG_PATH
     )
-    return _ConfigApiServer(("127.0.0.1", port), resolved_config_path)
+    resolved_capability_snapshot = (
+        capability_snapshot if capability_snapshot is not None else _probe_capability_snapshot
+    )
+    return _ConfigApiServer(
+        ("127.0.0.1", port), resolved_config_path, resolved_capability_snapshot
+    )
 
 
 def serve_dashboard(*, port: int, config_path: Path | None = None) -> None:
