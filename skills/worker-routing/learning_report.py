@@ -514,8 +514,7 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
     server: _ConfigApiServer
 
     def do_POST(self) -> None:
-        if self.path != "/api/config":
-            self._respond_json(404, {"error": f"no such endpoint: {self.path}"})
+        if not self._require_path("/api/config"):
             return
         content_length = int(self.headers.get("Content-Length") or 0)
         raw_body = self.rfile.read(content_length) if content_length > 0 else b""
@@ -535,8 +534,7 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
         self._respond_json(200, {"status": "ok"})
 
     def do_GET(self) -> None:
-        if self.path != "/api/model-capabilities":
-            self._respond_json(404, {"error": f"no such endpoint: {self.path}"})
+        if not self._require_path("/api/model-capabilities"):
             return
         snapshot = self.server.capability_snapshot()
         registry = routing_config.build_model_capabilities_registry()
@@ -560,6 +558,16 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
             for probe in snapshot.providers
         ]
         self._respond_json(200, {"capabilities": capabilities, "providers": providers})
+
+    def _require_path(self, expected: str) -> bool:
+        """The 404 guard both routes open with — shared so the "wrong path"
+        shape lives in one place rather than twice, verbatim, at the top of
+        `do_POST` and `do_GET`.
+        """
+        if self.path != expected:
+            self._respond_json(404, {"error": f"no such endpoint: {self.path}"})
+            return False
+        return True
 
     def _respond_json(self, status: int, body: dict[str, Any]) -> None:
         data = json.dumps(body).encode("utf-8")

@@ -1185,6 +1185,34 @@ class ConfigApiServerTests(unittest.TestCase):
             entry = body["capabilities"]["lm_studio_local::fake-model"]
             self.assertEqual(entry["supportedEfforts"], ["low", "medium"])
 
+    def test_model_capabilities_entry_carries_every_field_and_a_provider_status(self) -> None:
+        model = self._probed_model(
+            model_id="fake-model",
+            provider_id="lm_studio_local",
+            supported_efforts=("low", "medium"),
+        )
+        probe = self._provider_probe(provider_id="lm_studio_local", models=(model,))
+        snapshot = probe_models.CatalogSnapshot(providers=(probe,))
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path, capability_snapshot=lambda: snapshot)
+
+            status, body = self._get(port, "/api/model-capabilities")
+
+            self.assertEqual(status, 200)
+            entry = body["capabilities"]["lm_studio_local::fake-model"]
+            self.assertEqual(entry["provider"], "lm_studio_local")
+            self.assertEqual(entry["modelId"], "fake-model")
+            self.assertEqual(entry["supportedEfforts"], ["low", "medium"])
+            self.assertEqual(entry["defaultEffort"], "low")
+            self.assertEqual(entry["context"], model.context_window)
+            self.assertEqual(entry["localOnly"], model.local_only)
+            self.assertEqual(entry["source"], "live")
+            self.assertEqual(
+                body["providers"],
+                [{"providerId": "lm_studio_local", "available": True, "error": None}],
+            )
+
     def test_model_capabilities_get_does_not_touch_the_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "routing-config.json"
