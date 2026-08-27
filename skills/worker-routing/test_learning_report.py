@@ -13,8 +13,11 @@ package/standalone singleton bindings.
 from __future__ import annotations
 
 import ast
+import http.client
+import json
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -25,11 +28,12 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import learning_journal, learning_report
+    from . import learning_journal, learning_report, routing_config
     from .test_learning_scoreboard import _find_forbidden_clock_reads
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_report  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
     from test_learning_scoreboard import _find_forbidden_clock_reads  # type: ignore[no-redef]
 
 LEARNING_REPORT_PATH = Path(__file__).with_name("learning_report.py")
@@ -903,6 +907,201 @@ class WriteWeeklyReportTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 learning_report.write_weekly_report(root, now=_NOW, window_days=-1)
+
+
+# --- local dashboard server & atomic save API (ticket 51) ---
+
+
+class ServeCliTests(unittest.TestCase):
+    """`--serve` dispatch, mocked at `serve_dashboard` itself — the server's
+    real HTTP behavior is exercised end to end by `ConfigApiServerTests`
+    below; these only check that `main` wires the flag to that door
+    correctly and never blocks the test process.
+    """
+
+    def test_serve_flag_dispatches_with_the_given_port(self) -> None:
+        with mock.patch.object(learning_report, "serve_dashboard") as served:
+            exit_code = learning_report.main(["--serve", "9321"])
+
+        self.assertEqual(exit_code, 0)
+        served.assert_called_once_with(port=9321)
+
+    def test_bare_serve_flag_defaults_to_the_documented_port(self) -> None:
+        with mock.patch.object(learning_report, "serve_dashboard") as served:
+            learning_report.main(["--serve"])
+
+        served.assert_called_once_with(port=learning_report.DEFAULT_SERVE_PORT)
+
+    def test_serve_needs_no_now_unlike_every_other_mode(self) -> None:
+        with mock.patch.object(learning_report, "serve_dashboard"):
+            exit_code = learning_report.main(["--serve"])
+
+        self.assertEqual(exit_code, 0)
+
+    def test_now_is_still_required_without_serve(self) -> None:
+        with self.assertRaises(SystemExit):
+            learning_report.main([])
+
+
+class ConfigApiServerTests(unittest.TestCase):
+    """Real HTTP round trips against `create_dashboard_server` — a socket,
+    an actual request, an actual response — never a direct call into the
+    handler's internals, so a save the wire protocol would reject can never
+    read as passing here.
+    """
+
+    def _start_server(self, config_path: Path) -> tuple[learning_report._ConfigApiServer, int]:
+        server = learning_report.create_dashboard_server(port=0, config_path=config_path)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, timeout=5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server, server.server_address[1]
+
+    def _post_config(self, port: int, body: bytes) -> tuple[int, dict[str, Any]]:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request(
+                "POST", "/api/config", body=body, headers={"Content-Type": "application/json"}
+            )
+            response = connection.getresponse()
+            parsed = json.loads(response.read().decode("utf-8"))
+            return response.status, parsed
+        finally:
+            connection.close()
+
+    def test_a_valid_full_config_payload_is_saved_atomically_and_returns_200(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+            payload = json.dumps(routing_config.DEFAULT_ROUTING_CONFIG.to_dict()).encode("utf-8")
+
+            status, body = self._post_config(port, payload)
+
+            self.assertEqual(status, 200)
+            self.assertEqual(body, {"status": "ok"})
+            written = json.loads(config_path.read_text(encoding="utf-8"))
+            reparsed = routing_config.parse_routing_config(written, fallback_on_missing=False)
+            self.assertEqual(
+                set(reparsed.roles), set(routing_config.DEFAULT_ROUTING_CONFIG.roles)
+            )
+
+    def test_a_successful_save_leaves_no_stray_temp_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+            payload = json.dumps(routing_config.DEFAULT_ROUTING_CONFIG.to_dict()).encode("utf-8")
+
+            self._post_config(port, payload)
+
+            self.assertEqual(list(Path(tmp).iterdir()), [config_path])
+
+    def test_malformed_json_body_returns_400_and_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+
+            status, body = self._post_config(port, b"{not-json")
+
+            self.assertEqual(status, 400)
+            self.assertIn("error", body)
+            self.assertFalse(config_path.exists())
+
+    def test_schema_invalid_payload_returns_400_with_error_detail_and_writes_nothing(
+        self,
+    ) -> None:
+        # The reduced `{roles: {role_id: {model, effort}}}` shape the role
+        # cards preview client-side (tickets 48/50) — not this validator's
+        # `RoleConfig` shape, and rejected for exactly that reason. See the
+        # module docstring on `_ConfigApiHandler`.
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+            payload = json.dumps(
+                {"roles": {"planner": {"model": "claude::claude-opus-5", "effort": "high"}}}
+            ).encode("utf-8")
+
+            status, body = self._post_config(port, payload)
+
+            self.assertEqual(status, 400)
+            self.assertIn("error", body)
+            self.assertFalse(config_path.exists())
+
+    def test_unknown_path_returns_404_and_writes_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+            payload = json.dumps(routing_config.DEFAULT_ROUTING_CONFIG.to_dict()).encode("utf-8")
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                connection.request("POST", "/api/other", body=payload)
+                response = connection.getresponse()
+                status = response.status
+                response.read()
+            finally:
+                connection.close()
+
+            self.assertEqual(status, 404)
+            self.assertFalse(config_path.exists())
+
+    def test_config_path_defaults_to_the_package_routing_config_json(self) -> None:
+        server = learning_report.create_dashboard_server(port=0)
+        self.addCleanup(server.server_close)
+
+        self.assertEqual(server.config_path, routing_config.ROUTING_CONFIG_PATH)
+
+    def _get(self, port: int, path: str) -> tuple[int, dict[str, Any]]:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request("GET", path)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read().decode("utf-8"))
+        finally:
+            connection.close()
+
+    def test_model_capabilities_returns_the_full_registry_keyed_like_the_dashboard(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+            registry = routing_config.build_model_capabilities_registry()
+
+            status, body = self._get(port, "/api/model-capabilities")
+
+            self.assertEqual(status, 200)
+            capabilities = body["capabilities"]
+            self.assertEqual(len(capabilities), len(registry))
+            provider, model_id = next(iter(registry))
+            capability = registry[(provider, model_id)]
+            entry = capabilities[f"{provider}::{model_id}"]
+            self.assertEqual(entry["provider"], provider)
+            self.assertEqual(entry["modelId"], model_id)
+            self.assertEqual(entry["supportedEfforts"], list(capability.supported_efforts))
+            self.assertEqual(entry["defaultEffort"], capability.default_effort)
+            self.assertEqual(entry["tier"], capability.tier)
+            self.assertEqual(entry["context"], capability.context)
+            self.assertEqual(entry["localOnly"], capability.local_only)
+
+    def test_model_capabilities_get_does_not_touch_the_config_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+
+            self._get(port, "/api/model-capabilities")
+
+            self.assertFalse(config_path.exists())
+
+    def test_unknown_get_path_returns_404(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path)
+
+            status, body = self._get(port, "/api/other")
+
+            self.assertEqual(status, 404)
+            self.assertIn("error", body)
 
 
 if __name__ == "__main__":

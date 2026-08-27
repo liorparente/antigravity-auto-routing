@@ -20,11 +20,20 @@ since the previous report" is answered by computing a second board at
 `now - window_days`, over the same journal — never by reading a stored board
 or a previous report file. See implementation_plan.md Section 3.
 
-**Two doors and a path — nothing else public.** `report_path` computes where
-a report belongs; `render_weekly_report` is the pure contract (journal in,
+**Two doors and a path — for the report.** `report_path` computes where a
+report belongs; `render_weekly_report` is the pure contract (journal in,
 Markdown out, no clock, no disk); `write_weekly_report` is the three-line
 convenience door that reads the journal, renders, and writes atomically. See
 implementation_plan.md Section 2.
+
+**A third, unrelated door: the local dashboard save server.** Ticket 51 (Spec
+0013) added `create_dashboard_server`/`serve_dashboard` and
+`DEFAULT_SERVE_PORT` — the `--serve` CLI mode that answers `POST
+/api/config` and `GET /api/model-capabilities`. It shares this module only
+because the ticket named `learning_report.py` as where `--serve` belongs, not
+because it renders a report: it reads no journal and writes no Markdown, and
+`main` treats it as a fully separate mode that returns before any of the
+report-writing code below runs.
 
 **This module owns no clock.** `now` is always injected on all three public
 entry points, and there is no `datetime.now`, `datetime.utcnow`, `time.time`,
@@ -45,18 +54,21 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import http.server
+import json
 import os
 import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 if __package__:
-    from . import learning_journal, learning_scoreboard
+    from . import learning_journal, learning_scoreboard, routing_config
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_scoreboard  # type: ignore[no-redef]
+    import routing_config  # type: ignore[no-redef]
 
 # Re-exported from `learning_scoreboard` — one source, never a second
 # literal. See implementation_plan.md Section 2.
@@ -432,6 +444,151 @@ def write_weekly_report(
     return path
 
 
+# ---------------------------------------------------------------------------
+# Local dashboard server & atomic save API (ticket 51 / Spec 0013)
+# ---------------------------------------------------------------------------
+
+DEFAULT_SERVE_PORT = 8080
+
+
+def _model_key(provider: str, model_id: str) -> str:
+    """The `(provider, model_id)` capability-registry key, flattened for use
+    as a JSON object key — the same ``{provider}::{model_id}`` shape
+    `learning_report_html._model_key` renders into the dashboard's `<option>`
+    values, kept as a second one-line literal rather than an import across
+    modules (that helper is private, and this package's modules never import
+    each other's private names). See that function's own docstring for why
+    a flattened key, not bare `model_id`, is what a capability consumer
+    needs.
+    """
+    return f"{provider}::{model_id}"
+
+
+class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
+    """Two routes: ``POST /api/config`` and ``GET /api/model-capabilities``.
+
+    ``self.server`` is this handler's owning `_ConfigApiServer` — the
+    `http.server` machinery re-instantiates a `BaseHTTPRequestHandler` per
+    request, so any per-request state (here, the save path) has to live on
+    the shared server object instead of on the handler itself.
+
+    **POST /api/config.** The request body is validated exactly as
+    `routing_config.parse_routing_config` already validates a config loaded
+    from disk — this handler adds no schema knowledge of its own, so a
+    payload that would fail `load_routing_config` fails here too, for the
+    same reason. Today's role cards (ticket 48/50) preview a reduced
+    ``{roles: {role_id: {model, effort}}}`` shape, not this validator's full
+    `RoleConfig`/`ProviderConfig` shape — wiring the "save" button to POST
+    here, and reconciling that reduced shape into a valid config, is
+    separate work this ticket does not include.
+
+    **GET /api/model-capabilities.** Spec 0013 §1 names this endpoint and
+    groups its Testing Decisions with `--serve` (not with the HTML
+    renderer, which instead embeds the same registry as a static JSON
+    island at render time — see `learning_report_html._dashboard_config_json`).
+    This returns `routing_config.build_model_capabilities_registry()`'s
+    current in-process registry — the audited catalog ticket 45/46 already
+    build, not a fresh live re-probe of LM Studio or any CLI provider on
+    every request. Spec §1's "Live Capability Probing on Launch" and user
+    story 8's "🔄 רענן מודלים חיים" button both describe re-probing
+    (`probe_models.probe_all`) as something a page action triggers; no such
+    action exists in the dashboard yet, so wiring a live re-probe through
+    this endpoint would be speculative work this ticket does not include.
+    """
+
+    server: _ConfigApiServer
+
+    def do_POST(self) -> None:
+        if self.path != "/api/config":
+            self._respond_json(404, {"error": f"no such endpoint: {self.path}"})
+            return
+        content_length = int(self.headers.get("Content-Length") or 0)
+        raw_body = self.rfile.read(content_length) if content_length > 0 else b""
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            self._respond_json(400, {"error": f"invalid JSON body: {error}"})
+            return
+        try:
+            config = routing_config.parse_routing_config(payload, fallback_on_missing=True)
+        except routing_config.ConfigError as error:
+            self._respond_json(400, {"error": str(error)})
+            return
+        _atomic_text_write(
+            self.server.config_path, json.dumps(config.to_dict(), indent=2) + "\n"
+        )
+        self._respond_json(200, {"status": "ok"})
+
+    def do_GET(self) -> None:
+        if self.path != "/api/model-capabilities":
+            self._respond_json(404, {"error": f"no such endpoint: {self.path}"})
+            return
+        registry = routing_config.build_model_capabilities_registry()
+        capabilities = {
+            _model_key(capability.provider, capability.model_id): {
+                "provider": capability.provider,
+                "modelId": capability.model_id,
+                "supportedEfforts": list(capability.supported_efforts),
+                "defaultEffort": capability.default_effort,
+                "tier": capability.tier,
+                "context": capability.context,
+                "localOnly": capability.local_only,
+            }
+            for capability in registry.values()
+        }
+        self._respond_json(200, {"capabilities": capabilities})
+
+    def _respond_json(self, status: int, body: dict[str, Any]) -> None:
+        data = json.dumps(body).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, format: str, *args: Any) -> None:
+        """Silence the default stderr access log — a failed request already
+        surfaces its reason to the caller as an HTTP status and JSON body."""
+
+
+class _ConfigApiServer(http.server.HTTPServer):
+    """Binds `_ConfigApiHandler` to an injectable save path, so a test never
+    touches this package's real `routing-config.json`.
+    """
+
+    def __init__(self, server_address: tuple[str, int], config_path: Path) -> None:
+        self.config_path = config_path
+        super().__init__(server_address, _ConfigApiHandler)
+
+
+def create_dashboard_server(*, port: int, config_path: Path | None = None) -> _ConfigApiServer:
+    """Construct, but do not start, the local dashboard save server.
+
+    Starting is the caller's job via `.serve_forever()` — kept separate so a
+    test can bind an OS-assigned port (``port=0``), read the port it was
+    actually given off `server.server_address`, issue real HTTP requests
+    against it, and shut it down again without ever blocking the test
+    process. `config_path` defaults to `routing_config.ROUTING_CONFIG_PATH` —
+    a fixed sibling file, unrelated to any `--root-dir` this CLI is otherwise
+    given, the same way every other consumer in this package reads and
+    writes it (see `learning_report_html.write_html_report`'s own note on
+    the same fixed path).
+    """
+    resolved_config_path = (
+        config_path if config_path is not None else routing_config.ROUTING_CONFIG_PATH
+    )
+    return _ConfigApiServer(("127.0.0.1", port), resolved_config_path)
+
+
+def serve_dashboard(*, port: int, config_path: Path | None = None) -> None:
+    """The CLI door: bind and serve ``POST /api/config`` until interrupted."""
+    server = create_dashboard_server(port=port, config_path=config_path)
+    try:
+        server.serve_forever()
+    finally:
+        server.server_close()
+
+
 def _parse_injected_now(value: str) -> datetime:
     """Parse an aware ISO-8601 instant supplied by the CLI caller."""
     try:
@@ -451,14 +608,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     ``--html`` writes the default dashboard, ``--html PATH`` selects a path,
     and ``--html -`` prints the document. ``--no-markdown`` makes HTML the
     only output. The timestamp is explicit so this module remains clock-free.
+
+    ``--serve [PORT]`` (default port `DEFAULT_SERVE_PORT`) instead starts the
+    local dashboard save server and blocks until interrupted — it never
+    writes a report and, alone among these flags, needs no ``--now``.
     """
     parser = argparse.ArgumentParser(description="Write learning-loop reports")
     parser.add_argument("--root-dir", type=Path, default=Path("."))
-    parser.add_argument("--now", type=_parse_injected_now, required=True)
+    parser.add_argument("--now", type=_parse_injected_now, default=None)
     parser.add_argument("--window-days", type=int, default=DEFAULT_WINDOW_DAYS)
     parser.add_argument("--html", nargs="?", const="", metavar="PATH")
     parser.add_argument("--no-markdown", action="store_true")
+    parser.add_argument(
+        "--serve", type=int, nargs="?", const=DEFAULT_SERVE_PORT, metavar="PORT"
+    )
     args = parser.parse_args(argv)
+
+    if args.serve is not None:
+        serve_dashboard(port=args.serve)
+        return 0
+
+    if args.now is None:
+        parser.error("--now is required")
     if args.no_markdown and args.html is None:
         parser.error("--no-markdown requires --html")
 
