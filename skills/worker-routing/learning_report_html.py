@@ -90,10 +90,12 @@ reactive model/effort binding genuinely needs JavaScript, so the standing
 "no inline script" invariant that held through ticket 47 is now retired.
 What replaces it is narrower and stronger, pinned by `ScriptInjectionTests`:
 the only tags are one `application/json` island carrying every dynamic
-value and one executable block that is a *static literal* — no dynamic
-value is ever interpolated into source the browser compiles, so the
-escaping burden collapses to the JSON island alone, where three characters
-(`<`, `>`, `&`) are `\\uXXXX`-escaped so nothing inside can close the block.
+value *the script reads*, and one executable block that is a *static
+literal* — no dynamic value is ever interpolated into source the browser
+compiles, so the escaping burden collapses to the JSON island alone, where
+three characters (`<`, `>`, `&`) are `\\uXXXX`-escaped so nothing inside
+can close the block. (Everything else dynamic on the page is ordinary
+server-rendered markup, escaped by `_escape` as it always was.)
 
 **The auto-snap rule is written twice, and pinned to stay one rule.**
 `_resolve_effort_state` (Python, for the initial server-side render, so a
@@ -852,9 +854,6 @@ def _effort_badge_color(effort: str | None) -> str:
     return _EFFORT_BADGE_COLORS.get(effort or "", _NEUTRAL_COLOR)
 
 
-_EFFORT_STATUS_LABELS: dict[str, str] = {"none": "none", "unknown": "unknown"}
-
-
 def _option_html(value: str, label: str, *, selected: bool) -> str:
     marker = " selected" if selected else ""
     return f'<option value="{_escape(value)}"{marker}>{_escape(label)}</option>'
@@ -897,7 +896,7 @@ def _effort_options_html(state: EffortState) -> str:
     # it inherited from that empty select, and an option labelled with the
     # empty string renders as a blank row that reads as a broken control.
     if not state.effort:
-        return _option_html("", _EFFORT_STATUS_LABELS["none"], selected=True)
+        return _option_html("", "none", selected=True)
     return _option_html(state.effort, state.effort, selected=True)
 
 
@@ -915,9 +914,10 @@ def _role_controls_html(
     state = _resolve_effort_state(binding.capability, binding.reasoning_effort)
     selected_key = _model_key(binding.adapter, binding.model_id)
     color = _effort_badge_color(state.effort if state.status == "ok" else None)
-    badge_text = (
-        state.effort if state.status == "ok" else _EFFORT_STATUS_LABELS[state.status]
-    )
+    # A non-`ok` badge reads as its status word — "none" or "unknown" — which
+    # is why `EffortState.status` uses exactly the two strings the badge
+    # should show. Mirrors the script's `paintBadge`, which does the same.
+    badge_text = state.effort if state.status == "ok" else state.status
     disabled = "" if state.status == "ok" else " disabled"
     return f"""
         <div class="role-card-controls">
@@ -1079,28 +1079,45 @@ _JSON_HTML_ESCAPES: dict[str, str] = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0
 
 
 def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
-    """Everything the embedded script needs, as one JSON island.
+    """Everything the embedded script needs, and nothing it does not, as one
+    JSON island.
 
     One block rather than several because each additional `<script>` is
     another tag `ScriptInjectionTests` has to bless, and because the effort
     palette travelling as data here — rather than as a JavaScript literal —
     is what keeps `_EFFORT_BADGE_COLORS` the single source of those colors
     for the server-rendered badge and the reactive one alike.
+
+    Only the two fields the script reads are serialized. Of
+    `ModelCapability`'s seven, `provider` and `model_id` are already the
+    key, and `tier`, `context`, and `local_only` are deliberately omitted:
+    the script reads none of them, and carrying them made this island 32%
+    larger (4677 bytes against 3165, over the live registry) with nothing
+    to show for it — dead payload a reader cannot tell apart from data the
+    page depends on. Two of the three are not even lost from the page:
+    `_binding_html` renders `tier` and `context` server-side as pills.
+    (`local_only` is genuinely not shown for a capability — the "Local
+    Only" pill on a card reports the *role's*
+    `capability_requirements.local_only`, a different field about a
+    different thing.) Spec §1 does define the registry schema with all
+    five, and names a `GET /api/model-capabilities` that would serve them,
+    but the spec's own Testing Decisions group that endpoint with
+    `--serve` — the local-server work, not this renderer — so it can
+    serialize the whole record once something consumes it.
     """
     payload = {
         "capabilities": {
             _model_key(provider, model_id): {
                 "supportedEfforts": list(capability.supported_efforts),
                 "defaultEffort": capability.default_effort,
-                "tier": capability.tier,
-                "context": capability.context,
-                "localOnly": capability.local_only,
             }
-            for (provider, model_id), capability in sorted(capabilities.items())
+            for (provider, model_id), capability in capabilities.items()
         },
         "effortColors": dict(_EFFORT_BADGE_COLORS),
         "neutralColor": _NEUTRAL_COLOR,
     }
+    # `sort_keys` alone makes the output deterministic — sorting the input
+    # too would be a second mechanism for one guarantee.
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     for character, replacement in _JSON_HTML_ESCAPES.items():
         encoded = encoded.replace(character, replacement)

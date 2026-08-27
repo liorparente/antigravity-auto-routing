@@ -851,6 +851,12 @@ def _binding(
     reasoning_effort: str = "medium",
     capability: Any | None = None,
 ) -> Any:
+    """NOTE: `capability=None` means "give me the default capability", not
+    "this binding has none" — see the substitution below. To build a
+    capability-less (drift) binding, construct `RoleModelBinding` directly,
+    as `test_a_binding_with_no_capability_shows_an_unknown_capability_pill`
+    and `_reactive_report` both do.
+    """
     return routing_config.RoleModelBinding(
         provider_id=provider_id,
         adapter=adapter,
@@ -1178,8 +1184,9 @@ class HtmlReportPathTests(unittest.TestCase):
 class EffortSnapRuleTests(unittest.TestCase):
     """`_resolve_effort_state` is the whole of Spec 0013 §3's auto-snap rule,
     in one pure function, so both the server-side initial render and the
-    embedded JavaScript decide identically. `JsEffortSnapParityTests` below
-    runs this same table through the JavaScript and asserts the two agree.
+    embedded JavaScript decide identically. These cases pin the rule itself;
+    `JsEffortSnapParityTests` separately runs its own case table through
+    both implementations and asserts they answer alike.
     """
 
     def test_a_supported_configured_effort_is_kept(self) -> None:
@@ -1395,15 +1402,12 @@ class ModelCapabilitiesPayloadTests(unittest.TestCase):
         )
 
         payload = _capabilities_payload(report)
+        # Exactly the two fields the script reads — an equality assertion,
+        # so re-adding `tier`/`context`/`localOnly`, none of which the
+        # script reads, fails here rather than quietly growing the document.
         self.assertEqual(
             payload["codex_cli::gpt-5.6-sol"],
-            {
-                "supportedEfforts": ["low", "ultra"],
-                "defaultEffort": "low",
-                "tier": "ultra",
-                "context": 272000,
-                "localOnly": False,
-            },
+            {"supportedEfforts": ["low", "ultra"], "defaultEffort": "low"},
         )
 
     def test_write_html_report_embeds_the_real_audited_registry(self) -> None:
@@ -1508,19 +1512,20 @@ def _reactive_report(*, effort: str = "high", model_id: str = "claude-opus-5") -
     """
     journal = learning_journal.JournalRead()
     board, baseline_board = _boards(journal, now=_NOW)
-    role_matrix = {
-        "planner": _role_entry(
-            "planner",
-            bindings=(
-                _binding(
-                    adapter="provider",
-                    model_id=model_id,
-                    reasoning_effort=effort,
-                    capability=_capability_fixture().get(("provider", model_id)),
-                ),
-            ),
-        )
-    }
+    # Built directly rather than through `_binding`, which substitutes a
+    # default capability for `None` — that would render a card claiming a
+    # capability the embedded registry does not carry, a state
+    # `get_role_matrix_view_data` can never produce (it resolves both from
+    # the same registry) and one that would make the server and the script
+    # legitimately disagree.
+    binding = routing_config.RoleModelBinding(
+        provider_id="provider",
+        adapter="provider",
+        model_id=model_id,
+        reasoning_effort=effort,
+        capability=_capability_fixture().get(("provider", model_id)),
+    )
+    role_matrix = {"planner": _role_entry("planner", bindings=(binding,))}
     return learning_report_html.render_html_report(
         journal,
         board,
@@ -1649,6 +1654,38 @@ class EmbeddedScriptBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result[0]["effort"], "high")
         self.assertEqual(result[0]["model"], "provider::claude-opus-5")
+
+    def test_reselecting_the_rendered_model_reproduces_the_rendered_card(self) -> None:
+        """Server and client agree on the initial state, not merely on
+        transitions. Re-selecting the model a card was *already* rendered
+        with must leave its model, effort, disabled flag and badge exactly
+        as rendered: the Python renderer and the JavaScript are then
+        demonstrably deciding the same way about the same input, which is
+        the one thing `JsEffortSnapParityTests` cannot see — that compares
+        the two snap functions, not the two bodies of code that paint a
+        card from a snap result.
+        """
+        for effort, model_id in (
+            ("high", "claude-opus-5"),
+            ("ultra", "gpt-5.6-sol"),
+            ("high", "claude-3-7-sonnet"),
+            ("high", "not-in-the-registry"),
+        ):
+            with self.subTest(effort=effort, model=model_id):
+                report = _reactive_report(effort=effort, model_id=model_id)
+                rendered = _role_card_specs(report)[0]
+                key = f"provider::{model_id}"
+
+                after = _run_embedded_script(
+                    report,
+                    f'onModelSelect("planner", {json.dumps(key)});'
+                    "console.log(JSON.stringify(snapshot(\"planner\")[0]));",
+                )
+
+                self.assertEqual(after["model"], rendered["model"])
+                self.assertEqual(after["effort"], rendered["effort"])
+                self.assertEqual(after["disabled"], rendered["disabled"])
+                self.assertEqual(after["badgeText"], rendered["badge"])
 
     def test_moving_from_a_ladderless_model_to_an_unknown_one_keeps_a_labelled_option(
         self,
