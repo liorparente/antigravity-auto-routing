@@ -968,19 +968,22 @@ class ConfigApiServerTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return server, server.server_address[1]
 
-    def _post_config(
-        self, port: int, body: bytes, *, path: str = "/api/config"
+    def _request(
+        self, method: str, port: int, path: str, *, body: bytes | None = None
     ) -> tuple[int, dict[str, Any]]:
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
         try:
-            connection.request(
-                "POST", path, body=body, headers={"Content-Type": "application/json"}
-            )
+            headers = {"Content-Type": "application/json"} if body is not None else {}
+            connection.request(method, path, body=body, headers=headers)
             response = connection.getresponse()
-            parsed = json.loads(response.read().decode("utf-8"))
-            return response.status, parsed
+            return response.status, json.loads(response.read().decode("utf-8"))
         finally:
             connection.close()
+
+    def _post_config(
+        self, port: int, body: bytes, *, path: str = "/api/config"
+    ) -> tuple[int, dict[str, Any]]:
+        return self._request("POST", port, path, body=body)
 
     def test_a_valid_full_config_payload_is_saved_atomically_and_returns_200(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1058,37 +1061,104 @@ class ConfigApiServerTests(unittest.TestCase):
         self.assertEqual(server.config_path, routing_config.ROUTING_CONFIG_PATH)
 
     def _get(self, port: int, path: str) -> tuple[int, dict[str, Any]]:
-        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
-        try:
-            connection.request("GET", path)
-            response = connection.getresponse()
-            return response.status, json.loads(response.read().decode("utf-8"))
-        finally:
-            connection.close()
+        return self._request("GET", port, path)
 
-    @staticmethod
-    def _fake_capability_snapshot() -> probe_models.CatalogSnapshot:
-        model = probe_models.ProbedModel(
-            model_id="fake-model",
-            display_label="Fake Model",
-            provider_id="lm_studio_local",
-            supported_efforts=("low", "medium"),
-            default_effort="low",
+    def _probed_model(
+        self,
+        *,
+        model_id: str,
+        provider_id: str,
+        supported_efforts: tuple[str, ...] = ("low", "medium"),
+        source: str = "live",
+    ) -> probe_models.ProbedModel:
+        return probe_models.ProbedModel(
+            model_id=model_id,
+            display_label=model_id,
+            provider_id=provider_id,  # type: ignore[arg-type]
+            supported_efforts=supported_efforts,
+            default_effort=supported_efforts[0] if supported_efforts else None,
             context_window=8192,
             local_only=True,
-            source="live",
+            source=source,  # type: ignore[arg-type]
         )
-        probe = probe_models.ProviderProbe(
-            provider_id="lm_studio_local",
+
+    def _provider_probe(
+        self, *, provider_id: str, models: tuple[probe_models.ProbedModel, ...]
+    ) -> probe_models.ProviderProbe:
+        return probe_models.ProviderProbe(
+            provider_id=provider_id,  # type: ignore[arg-type]
             available=True,
             binary_path=None,
-            endpoint="http://127.0.0.1:1234/v1/models",
-            models=(model,),
+            endpoint=None,
+            models=models,
             error=None,
         )
+
+    def _fake_capability_snapshot(self) -> probe_models.CatalogSnapshot:
+        model = self._probed_model(model_id="fake-model", provider_id="lm_studio_local")
+        probe = self._provider_probe(provider_id="lm_studio_local", models=(model,))
         return probe_models.CatalogSnapshot(providers=(probe,))
 
-    def test_model_capabilities_serves_the_injected_snapshot_verbatim(self) -> None:
+    def test_model_capabilities_keys_by_provider_and_model_avoiding_collisions(self) -> None:
+        # The exact finding F7 shape `routing_config.ModelCapability`'s own
+        # docstring names: the same bare model_id under two providers, with
+        # two genuinely different effort ladders — a bare-id merge would
+        # silently drop one.
+        shared_id = "shared-model-id"
+        low_medium = self._probed_model(
+            model_id=shared_id, provider_id="antigravity_cli", supported_efforts=("low", "medium")
+        )
+        low_medium_high_max = self._probed_model(
+            model_id=shared_id,
+            provider_id="claude_code_cli",
+            supported_efforts=("low", "medium", "high", "max"),
+        )
+        snapshot = probe_models.CatalogSnapshot(
+            providers=(
+                self._provider_probe(provider_id="antigravity_cli", models=(low_medium,)),
+                self._provider_probe(
+                    provider_id="claude_code_cli", models=(low_medium_high_max,)
+                ),
+            )
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path, capability_snapshot=lambda: snapshot)
+
+            status, body = self._get(port, "/api/model-capabilities")
+
+            self.assertEqual(status, 200)
+            capabilities = body["capabilities"]
+            self.assertEqual(
+                capabilities[f"antigravity_cli::{shared_id}"]["supportedEfforts"],
+                ["low", "medium"],
+            )
+            self.assertEqual(
+                capabilities[f"claude_code_cli::{shared_id}"]["supportedEfforts"],
+                ["low", "medium", "high", "max"],
+            )
+
+    def test_model_capabilities_fills_tier_from_the_audited_registry(self) -> None:
+        registry = routing_config.build_model_capabilities_registry()
+        provider, model_id = next(iter(registry))
+        audited = registry[(provider, model_id)]
+        model = self._probed_model(
+            model_id=model_id, provider_id=provider, supported_efforts=audited.supported_efforts
+        )
+        snapshot = probe_models.CatalogSnapshot(
+            providers=(self._provider_probe(provider_id=provider, models=(model,)),)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "routing-config.json"
+            _, port = self._start_server(config_path, capability_snapshot=lambda: snapshot)
+
+            status, body = self._get(port, "/api/model-capabilities")
+
+            self.assertEqual(status, 200)
+            entry = body["capabilities"][f"{provider}::{model_id}"]
+            self.assertEqual(entry["tier"], audited.tier)
+
+    def test_model_capabilities_reports_null_tier_when_not_in_the_audited_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "routing-config.json"
             snapshot = self._fake_capability_snapshot()
@@ -1097,7 +1167,8 @@ class ConfigApiServerTests(unittest.TestCase):
             status, body = self._get(port, "/api/model-capabilities")
 
             self.assertEqual(status, 200)
-            self.assertEqual(body, snapshot.to_dict())
+            entry = body["capabilities"]["lm_studio_local::fake-model"]
+            self.assertIsNone(entry["tier"])
 
     def test_model_capabilities_defaults_to_the_non_blocking_launch_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1111,7 +1182,8 @@ class ConfigApiServerTests(unittest.TestCase):
 
             probe_all.assert_called_once_with(list_models=False)
             self.assertEqual(status, 200)
-            self.assertEqual(body, sentinel.to_dict())
+            entry = body["capabilities"]["lm_studio_local::fake-model"]
+            self.assertEqual(entry["supportedEfforts"], ["low", "medium"])
 
     def test_model_capabilities_get_does_not_touch_the_config_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

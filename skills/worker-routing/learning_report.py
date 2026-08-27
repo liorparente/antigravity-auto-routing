@@ -486,9 +486,24 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
     **GET /api/model-capabilities.** Spec 0013 §1 names this endpoint and
     groups its Testing Decisions with `--serve`. It calls
     `self.server.capability_snapshot()` — `_probe_capability_snapshot` by
-    default, `probe_models.probe_all(list_models=False)` — and returns the
-    resulting `CatalogSnapshot.to_dict()` verbatim: both are built for
-    exactly this (see the module comment above `CapabilitySnapshotFn`).
+    default, `probe_models.probe_all(list_models=False)`, built for exactly
+    this (see the module comment above `CapabilitySnapshotFn`) — but does
+    not return `CatalogSnapshot.to_dict()` verbatim: that method's `"models"`
+    map is keyed by bare `model_id`, deduplicated across providers, which is
+    precisely finding F7 (`routing_config.ModelCapability`'s own docstring)
+    — the same model id can carry a different effort ladder under two CLI
+    adapters (`probe_models._CROSS_PROVIDER_EFFORT_LADDERS` records this for
+    real, not hypothetically), and that merge silently drops one. `do_GET`
+    instead walks `snapshot.providers` directly, keying each entry
+    `{provider_id}::{model_id}` — the same flattened shape
+    `learning_report_html._model_key` uses for the dashboard's own
+    `<option>` values — and looks each pair up in `routing_config.
+    build_model_capabilities_registry()` for its audited `tier` (spec §1's
+    Registry Schema names `tier` as part of this data; `ProbedModel` itself
+    doesn't carry one). A live-probed pair absent from the audited registry
+    — a newly loaded local model the catalog hasn't caught up to yet —
+    reports `tier: null` rather than raising, mirroring `RoleModelBinding.
+    capability`'s own "``None`` is a known, non-fatal drift state" contract.
     `list_models=False` keeps every provider probe local and fast (a socket
     probe to LM Studio under its own 200ms timeout, a `PATH` lookup and a
     local cache read per CLI provider — no CLI subprocess is ever run), so
@@ -511,7 +526,7 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
             return
         try:
             config = routing_config.parse_routing_config(payload, fallback_on_missing=True)
-        except routing_config.ConfigError as error:
+        except routing_config.ConfigValidationError as error:
             self._respond_json(400, {"error": str(error)})
             return
         _atomic_text_write(
@@ -524,7 +539,27 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
             self._respond_json(404, {"error": f"no such endpoint: {self.path}"})
             return
         snapshot = self.server.capability_snapshot()
-        self._respond_json(200, snapshot.to_dict())
+        registry = routing_config.build_model_capabilities_registry()
+        capabilities: dict[str, dict[str, Any]] = {}
+        for probe in snapshot.providers:
+            for model in probe.models:
+                audited = registry.get((probe.provider_id, model.model_id))
+                key = f"{probe.provider_id}::{model.model_id}"
+                capabilities[key] = {
+                    "provider": probe.provider_id,
+                    "modelId": model.model_id,
+                    "supportedEfforts": list(model.supported_efforts),
+                    "defaultEffort": model.default_effort,
+                    "tier": audited.tier if audited is not None else None,
+                    "context": model.context_window,
+                    "localOnly": model.local_only,
+                    "source": model.source,
+                }
+        providers = [
+            {"providerId": probe.provider_id, "available": probe.available, "error": probe.error}
+            for probe in snapshot.providers
+        ]
+        self._respond_json(200, {"capabilities": capabilities, "providers": providers})
 
     def _respond_json(self, status: int, body: dict[str, Any]) -> None:
         data = json.dumps(body).encode("utf-8")
@@ -589,9 +624,19 @@ def create_dashboard_server(
     )
 
 
-def serve_dashboard(*, port: int, config_path: Path | None = None) -> None:
-    """The CLI door: bind and serve ``POST /api/config`` until interrupted."""
-    server = create_dashboard_server(port=port, config_path=config_path)
+def serve_dashboard(*, port: int) -> None:
+    """The CLI door: bind and serve until interrupted.
+
+    No `config_path` parameter, unlike `create_dashboard_server`: nothing
+    calls this with an override — no CLI flag selects one, and every test
+    that needs a non-default path calls `create_dashboard_server` directly
+    to get a server it can bind and stop itself without ever blocking on
+    `.serve_forever()`. A prior revision carried the parameter through
+    anyway; a Standards review flagged it as dead surface with no caller,
+    so it was removed rather than justified with a test that would only
+    exist to justify it.
+    """
+    server = create_dashboard_server(port=port)
     try:
         server.serve_forever()
     finally:

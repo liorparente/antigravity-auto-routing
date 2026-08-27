@@ -68,12 +68,27 @@ exact endpoint* — their own docstrings say so verbatim ("Pass
 `list_models=False` for spec 0013's launch probe"; "Shaped by `to_dict`
 into the capability payload spec 0013's dashboard reads — but it is a
 plain value object, not an HTTP concern"). `GET /api/model-capabilities`
-now calls `probe_models.probe_all(list_models=False)` and returns
-`CatalogSnapshot.to_dict()` verbatim — `_ConfigApiServer` takes an
-injectable `capability_snapshot` callable (mirroring the existing
+now calls `probe_models.probe_all(list_models=False)` — `_ConfigApiServer`
+takes an injectable `capability_snapshot` callable (mirroring the existing
 injectable `config_path`) so tests exercise this without depending on
 which CLIs happen to be installed on the machine running them.
 `list_models=False` keeps every provider probe local and fast (a 200ms
 socket probe to LM Studio, a `PATH` lookup plus a local cache read per CLI
 provider, no subprocess ever run) — the same non-blocking launch probe
 spec §1 describes, not a slow one merely relabeled for this route.
+
+**Revised again, a third review pass.** Returning `CatalogSnapshot.
+to_dict()` verbatim turned out to reintroduce finding F7 itself: its
+`"models"` map is deduplicated by bare `model_id` across providers, so two
+CLI adapters offering the same model id with genuinely different effort
+ladders (`probe_models._CROSS_PROVIDER_EFFORT_LADDERS` records a real one:
+`claude-sonnet-4-6` is `low/medium/high` under `antigravity_cli` but adds
+`max` under `claude_code_cli`) would silently collapse to one entry, and
+the payload carried no `tier` field at all despite spec §1's Registry
+Schema naming it. `do_GET` now walks `snapshot.providers` itself, keys
+each entry `{provider_id}::{model_id}` (the dashboard's own key shape,
+never collapsing across providers), and cross-references
+`routing_config.build_model_capabilities_registry()` for `tier` — `null`
+for a live-probed pair the audited catalog doesn't know yet, mirroring
+`RoleModelBinding.capability`'s existing "`None` is a known drift state,
+not an error" contract rather than inventing a new one.
