@@ -1,5 +1,60 @@
 # Worker Routing Fallbacks
 
+## 2026-08-27 — Simplifying a Function's Body Left Two Stale Comments Elsewhere Describing the Old Behavior
+
+- Mission: `/iterative-fix-review` on ticket 50's live JSON drawer (`learning_report_html.py` /
+  `test_learning_report_html.py`), across three independent review rounds.
+- Issue: a first draft's `toggleConfigDrawer()` read `classList.contains(...)` and branched between
+  `add`/`remove`; a review round simplified it to a one-line `classList.toggle("is-open")`. The
+  simplification landed correctly in the function itself, but two *other* comments elsewhere in the
+  same diff kept describing the old mechanism: a test-file comment above `CONFIG_DRAWER`'s
+  declaration explicitly narrating the removed `classList.contains` branch, and (a separate, unrelated
+  drift of the same shape) a CSS comment claiming a JSON key's trailing colon renders in the ambient
+  ink color, when the regex that decided that boundary actually includes the colon in the key's own
+  colored span.
+- Detection: two separate fresh review passes — each told to verify claims against the actual code
+  rather than trust a prior description, run cold on the committed diff rather than continuing the
+  same review thread — each caught one of the two stale comments. Neither would have been caught by
+  a round re-reading its own prior conclusions, since neither comment was itself the thing that round
+  had just changed.
+- Resolution: both comments rewritten to describe what the code does now, each re-verified directly
+  against the live function/regex (not just against the reviewer's report) before being marked fixed.
+- Lesson: after simplifying or refactoring a function's internal logic, grep the surrounding file(s)
+  for comments that reference that function's *old* mechanism by name (a branch it no longer has, a
+  boundary a changed regex no longer draws where a comment says it does) — a comment several lines or
+  files away from the changed code is exactly the kind of drift a diff review of the changed lines
+  alone will not surface, and a review pass scoped to "re-verify what was already flagged" will not
+  catch a stale comment nobody flagged yet either. See `AGENTS.md`'s "Convergence-loop comment-drift
+  discipline" for the durable rule this became.
+
+## 2026-08-27 — A JS Regex Embedded in a Non-Raw Python String Silently Corrupts `\b`
+
+- Mission: add a hand-rolled JSON syntax highlighter to `learning_report_html.py`'s embedded
+  dashboard JavaScript (ticket 50), including a token regex using `\b`/`\d`/`\s` word-boundary and
+  character-class escapes.
+- Issue: `_SCRIPT` (the Python string constant carrying the dashboard's client-side JS) was a plain
+  `"""..."""` literal, not raw. Python's own string parser treats `\b` as a *valid* escape sequence —
+  an actual backspace byte (0x08) — not the two characters backslash-then-b a JS regex needs. `\s`
+  and `\d` are merely *invalid* escapes (Python keeps them as literal backslash+letter today, only
+  emitting a `SyntaxWarning`), but `\b` silently substitutes a control byte with no error and no
+  warning at all.
+- Detection: neither `ast.parse` nor `python3 -m py_compile` flag this — both succeed on a Python
+  string that secretly contains a stray backspace byte in place of an intended `\b`. It only surfaced
+  because this file's own test convention runs the embedded JavaScript under `node` against a DOM
+  stub rather than ever asserting on its source text (`test_learning_report_html.py`'s
+  `_run_embedded_script`) — a corrupted regex source there is a genuine JS `SyntaxError`, not a
+  false-green Python test.
+- Resolution: converted `_SCRIPT`'s declaration to `_SCRIPT = r"""..."""`. Checked safety first:
+  `re.finditer(r'\\.', script)` over the ~13,000-character string confirmed nothing else in it relied
+  on Python's own escape processing (no `\n`, `\t`, `\"` elsewhere) before converting — a string with
+  other genuine backslash-escape content would need every one of those re-examined too, since raw
+  mode stops interpreting *all* backslashes in the string, not just the newly-added ones.
+- Lesson: before writing a regex-like literal (`\b`, `\s`, `\d`, `\w`, etc.) into a non-raw Python
+  string, either declare that string raw or double every backslash by hand — then actually execute
+  the embedded code (not just parse the Python file) to confirm the regex still behaves as intended.
+  `ast.parse` succeeding is not evidence that a regex embedded inside a string literal survived
+  intact.
+
 ## 2026-08-27 — Third Recurrence of Institutional Memory / Golden Rules Drift, and Why the Second Fix Didn't Hold
 
 - Mission: Diagnose why `test_institutional_memory_matches_golden_rules` was red at HEAD of
