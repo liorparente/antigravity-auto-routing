@@ -314,6 +314,7 @@ function makeElement() {
   return {
     className: "",
     textContent: "",
+    innerHTML: "",
     style: {},
     children: [],
     listeners: [],
@@ -330,6 +331,18 @@ function makeElement() {
       },
       contains: function (name) {
         return classes.indexOf(name) !== -1;
+      },
+      // Mirrors real `DOMTokenList.toggle`: adds and returns `true` when
+      // absent, removes and returns `false` when present.
+      toggle: function (name) {
+        if (classes.indexOf(name) === -1) {
+          classes.push(name);
+          return true;
+        }
+        classes = classes.filter(function (each) {
+          return each !== name;
+        });
+        return false;
       }
     },
     appendChild: function (child) {
@@ -353,6 +366,16 @@ var ACTION_RESET_BUTTON = makeElement();
 var ACTION_SAVE_BUTTON = makeElement();
 var TOAST_CONTAINER = makeElement();
 
+// The live JSON drawer's markup (ticket 50) — `CONFIG_DRAWER` is the only
+// one of these `updateConfigDrawer`/`toggleConfigDrawer` address by
+// `classList`/`textContent` rather than `addEventListener`, but it still
+// needs `makeElement`'s full shape since `toggleConfigDrawer` reads
+// `classList.contains` before deciding which of `add`/`remove` to call.
+var CONFIG_DRAWER = makeElement();
+var CONFIG_DRAWER_TOGGLE = makeElement();
+var CONFIG_DRAWER_COPY = makeElement();
+var CONFIG_DRAWER_JSON = makeElement();
+
 var ELEMENTS_BY_ID = {
   "dashboard-config": { textContent: DASHBOARD_CONFIG_JSON },
   "action-pill": ACTION_PILL,
@@ -360,7 +383,44 @@ var ELEMENTS_BY_ID = {
   "action-undo": ACTION_UNDO_BUTTON,
   "action-reset": ACTION_RESET_BUTTON,
   "action-save": ACTION_SAVE_BUTTON,
-  "toast-container": TOAST_CONTAINER
+  "toast-container": TOAST_CONTAINER,
+  "config-drawer": CONFIG_DRAWER,
+  "config-drawer-toggle": CONFIG_DRAWER_TOGGLE,
+  "config-drawer-copy": CONFIG_DRAWER_COPY,
+  "config-drawer-json": CONFIG_DRAWER_JSON
+};
+
+// Controllable from a test harness the same way `CONFIRM_RESULT` controls
+// `confirm()`: `CLIPBOARD_SHOULD_FAIL` flips which callback
+// `copyConfigToClipboard`'s `.then(...)` reaches, and `CLIPBOARD_WRITES`
+// records every string actually handed to `writeText`, so a test can
+// assert on the exact payload copied, not just that copying happened.
+// `navigator.clipboard.writeText` genuinely returns a `Promise` in a
+// browser, but this stub's `.then` calls its callback synchronously —
+// deliberately not a real `Promise` — so a harness snippet can call
+// `copyConfigToClipboard()` and immediately assert the resulting toast
+// without needing to flush a microtask queue first. Production code only
+// ever calls `.then(onFulfilled, onRejected)` once and never chains
+// further, so this narrower shape is enough.
+var CLIPBOARD_WRITES = [];
+var CLIPBOARD_SHOULD_FAIL = false;
+var navigator = {
+  clipboard: {
+    writeText: function (text) {
+      CLIPBOARD_WRITES.push(text);
+      var failed = CLIPBOARD_SHOULD_FAIL;
+      return {
+        then: function (onFulfilled, onRejected) {
+          if (failed) {
+            if (onRejected) onRejected(new Error("denied"));
+          } else if (onFulfilled) {
+            onFulfilled();
+          }
+          return this;
+        }
+      };
+    }
+  }
 };
 
 // Controllable from a test harness by assigning `CONFIRM_RESULT` before
@@ -434,6 +494,16 @@ function fireClick(elementId) {
       entry[1]();
     }
   });
+}
+
+// `updateConfigDrawer` writes highlighted `innerHTML`, not `textContent`
+// (ticket 50) — every fixture value under test here is a plain role id,
+// model key, or effort word, none of which ever contains `<`/`>`, so
+// stripping tags back out of the highlighted markup recovers exactly the
+// JSON text `syntaxHighlightJson` started from, with no HTML-entity
+// unescaping needed.
+function drawerPlainText() {
+  return CONFIG_DRAWER_JSON.innerHTML.replace(/<[^>]+>/g, "");
 }
 """
 
@@ -2286,6 +2356,302 @@ class ClientStateMachineTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 0)
+
+
+# --- live JSON drawer markup (ticket 50) ---
+
+
+class ConfigDrawerMarkupTests(unittest.TestCase):
+    """Static presence checks for the drawer and its controls — mirrors
+    `ActionPillMarkupTests`: nothing here is reactive yet, so this needs no
+    node subprocess.
+    """
+
+    def _report(self) -> str:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        return learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW
+        )
+
+    def test_the_drawer_and_its_controls_are_present(self) -> None:
+        report = self._report()
+
+        self.assertIn('<div class="config-drawer" id="config-drawer">', report)
+        self.assertIn('id="config-drawer-toggle"', report)
+        self.assertIn('id="config-drawer-copy"', report)
+        self.assertIn('id="config-drawer-json"', report)
+
+    def test_the_drawer_starts_collapsed(self) -> None:
+        # No `is-open` class in the rendered markup — `toggleConfigDrawer`
+        # is the only thing that ever adds it, never the initial render.
+        report = self._report()
+
+        self.assertIn('<div class="config-drawer" id="config-drawer">', report)
+        self.assertNotIn("config-drawer is-open", report)
+
+    def test_the_copy_button_carries_the_tickets_hebrew_label(self) -> None:
+        report = self._report()
+
+        self.assertIn(
+            '<button type="button" class="pill-btn" id="config-drawer-copy">'
+            "📋 העתק קונפיגורציה</button>",
+            report,
+        )
+
+    def test_the_drawer_renders_inside_the_roles_tab(self) -> None:
+        # Same rationale as the action pill (see the CSS comment in
+        # `learning_report_html._CSS`): nesting inside `#tab-content-roles`
+        # hides the drawer along with the rest of that tab when the metrics
+        # tab is active.
+        report = self._report()
+        roles_tab = report.split('<div id="tab-content-roles">', 1)[1]
+
+        self.assertIn('id="config-drawer"', roles_tab)
+
+    def test_adding_the_drawer_introduces_no_new_script_tag(self) -> None:
+        self.assertEqual(
+            _script_openers(self._report()),
+            ['<script type="application/json" id="dashboard-config">', "<script>"],
+        )
+
+
+# --- live JSON drawer & clipboard export behavior (ticket 50) ---
+
+
+class ConfigDrawerBehaviorTests(unittest.TestCase):
+    """`buildConfigPreview`/`updateConfigDrawer`/`copyConfigToClipboard` and
+    the drawer they drive, executed under node the same way
+    `ClientStateMachineTests` executes the action pill's own reactive
+    functions — against a stubbed DOM built from a real rendered report,
+    never asserted over the script's source text.
+    """
+
+    def test_the_drawer_starts_closed(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "console.log(JSON.stringify(CONFIG_DRAWER.classList.contains('is-open')));",
+        )
+
+        self.assertFalse(result)
+
+    def test_toggling_opens_then_closes_the_drawer(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "toggleConfigDrawer();"
+            "var afterFirst = CONFIG_DRAWER.classList.contains('is-open');"
+            "toggleConfigDrawer();"
+            "var afterSecond = CONFIG_DRAWER.classList.contains('is-open');"
+            "console.log(JSON.stringify({ afterFirst: afterFirst, afterSecond: afterSecond }));",
+        )
+
+        self.assertEqual(result, {"afterFirst": True, "afterSecond": False})
+
+    def test_the_json_preview_reflects_the_pages_initial_role_state(self) -> None:
+        # `updateConfigDrawer()` runs once on load (mirrors
+        # `updateActionPill()`'s own initial call), so the drawer already
+        # carries the page's rendered defaults before any edit.
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "console.log(JSON.stringify(JSON.parse(drawerPlainText())));",
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "roles": {
+                    "planner": {"model": "provider::claude-opus-5", "effort": "high"},
+                    "builder_heavy": {
+                        "model": "provider::claude-sonnet-4-6",
+                        "effort": "medium",
+                    },
+                }
+            },
+        )
+
+    def test_the_json_preview_is_syntax_highlighted_not_plain_text(self) -> None:
+        # Ticket 50's own "What to build" line asks for "a real-time
+        # syntax-highlighted preview of `routing-config.json`" — this pins
+        # that `updateConfigDrawer` actually wraps tokens in `<span
+        # class="json-...">` markup, not just plain escaped text a reader
+        # could mistake for highlighting because it merely *looks* like
+        # JSON.
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "console.log(JSON.stringify({"
+            "  html: CONFIG_DRAWER_JSON.innerHTML,"
+            "  plain: drawerPlainText()"
+            "}));",
+        )
+
+        self.assertIn('<span class="json-key">"planner"', result["html"])
+        self.assertIn('<span class="json-string">"provider::claude-opus-5"', result["html"])
+        self.assertEqual(json.loads(result["plain"])["roles"]["planner"]["effort"], "high")
+
+    def test_the_syntax_highlighter_neutralizes_markup_characters(self) -> None:
+        # `escapeHtmlText` runs before `syntaxHighlightJson` ever wraps a
+        # span around anything — a role/model value carrying `<`, `>`, or
+        # `&` must not reach the drawer's `innerHTML` as live markup, the
+        # same invariant `ScriptInjectionTests` holds the rest of this
+        # document to.
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "<img src=x onerror=alert(1)>&sol;");'
+            "console.log(JSON.stringify(CONFIG_DRAWER_JSON.innerHTML));",
+        )
+
+        self.assertNotIn("<img", result)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;&amp;sol;", result)
+
+    def test_the_json_preview_updates_on_every_model_change(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "console.log(JSON.stringify("
+            "  JSON.parse(drawerPlainText()).roles.planner"
+            "));",
+        )
+
+        self.assertEqual(result, {"model": "provider::gpt-5.6-sol", "effort": "high"})
+
+    def test_the_json_preview_updates_after_undo(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "undoChange();"
+            "console.log(JSON.stringify("
+            "  JSON.parse(drawerPlainText()).roles.planner"
+            "));",
+        )
+
+        self.assertEqual(result, {"model": "provider::claude-opus-5", "effort": "high"})
+
+    def test_the_json_preview_updates_after_reset(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "CONFIRM_RESULT = true;"
+            "resetDefaults();"
+            "console.log(JSON.stringify("
+            "  JSON.parse(drawerPlainText()).roles.planner"
+            "));",
+        )
+
+        self.assertEqual(result, {"model": "provider::claude-opus-5", "effort": "high"})
+
+    def test_the_json_preview_stays_current_after_save(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "console.log(JSON.stringify("
+            "  JSON.parse(drawerPlainText()).roles.planner"
+            "));",
+        )
+
+        self.assertEqual(result, {"model": "provider::gpt-5.6-sol", "effort": "high"})
+
+    def test_copying_writes_the_exact_preview_json_to_the_clipboard(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "var copied = copyConfigToClipboard();"
+            "console.log(JSON.stringify({"
+            "  copied: copied,"
+            "  writes: CLIPBOARD_WRITES.length,"
+            "  matchesDrawer: CLIPBOARD_WRITES[0] === drawerPlainText(),"
+            "  payload: JSON.parse(CLIPBOARD_WRITES[0]).roles.planner"
+            "}));",
+        )
+
+        self.assertEqual(result["copied"], True)
+        self.assertEqual(result["writes"], 1)
+        self.assertTrue(result["matchesDrawer"])
+        self.assertEqual(
+            result["payload"], {"model": "provider::gpt-5.6-sol", "effort": "high"}
+        )
+
+    def test_a_successful_copy_shows_a_success_toast(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "copyConfigToClipboard();"
+            "console.log(JSON.stringify(TOAST_CONTAINER.children.map(function (t) {"
+            "  return { text: t.textContent, className: t.className };"
+            "})));",
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["text"], "הקונפיגורציה הועתקה ללוח")
+        self.assertEqual(result[0]["className"], "toast toast-success")
+
+    def test_a_rejected_copy_shows_an_error_toast_but_still_records_the_attempt(
+        self,
+    ) -> None:
+        # The attempt is recorded (`CLIPBOARD_WRITES` gains an entry) before
+        # the stubbed `.then` decides which callback to invoke — a real
+        # `writeText` call is committed the instant it is made; only its
+        # outcome is asynchronous.
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "CLIPBOARD_SHOULD_FAIL = true;"
+            "var copied = copyConfigToClipboard();"
+            "console.log(JSON.stringify({"
+            "  copied: copied,"
+            "  writes: CLIPBOARD_WRITES.length,"
+            "  toasts: TOAST_CONTAINER.children.map(function (t) {"
+            "    return { text: t.textContent, className: t.className };"
+            "  })"
+            "}));",
+        )
+
+        self.assertEqual(result["copied"], True)
+        self.assertEqual(result["writes"], 1)
+        self.assertEqual(len(result["toasts"]), 1)
+        self.assertEqual(result["toasts"][0]["text"], "העתקת הקונפיגורציה נכשלה")
+        self.assertEqual(result["toasts"][0]["className"], "toast toast-error")
+
+    def test_missing_clipboard_support_fails_gracefully_without_writing_anything(
+        self,
+    ) -> None:
+        # A dashboard opened over `file://` (Implementation Decisions §4's
+        # zero-friction default) has no `navigator.clipboard` at all in most
+        # browsers — this must degrade to an error toast, not throw out of
+        # the click handler.
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "navigator.clipboard = undefined;"
+            "var copied = copyConfigToClipboard();"
+            "console.log(JSON.stringify({"
+            "  copied: copied,"
+            "  writes: CLIPBOARD_WRITES.length,"
+            "  toasts: TOAST_CONTAINER.children.map(function (t) {"
+            "    return { text: t.textContent, className: t.className };"
+            "  })"
+            "}));",
+        )
+
+        self.assertEqual(result["copied"], False)
+        self.assertEqual(result["writes"], 0)
+        self.assertEqual(len(result["toasts"]), 1)
+        self.assertEqual(
+            result["toasts"][0]["text"], "ההעתקה ללוח אינה נתמכת בדפדפן זה"
+        )
+        self.assertEqual(result["toasts"][0]["className"], "toast toast-error")
+
+    def test_clicking_the_toggle_and_copy_buttons_invokes_the_same_actions_as_calling_them(
+        self,
+    ) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            "fireClick('config-drawer-toggle');"
+            "fireClick('config-drawer-copy');"
+            "console.log(JSON.stringify({"
+            "  open: CONFIG_DRAWER.classList.contains('is-open'),"
+            "  writes: CLIPBOARD_WRITES.length"
+            "}));",
+        )
+
+        self.assertEqual(result, {"open": True, "writes": 1})
 
 
 if __name__ == "__main__":

@@ -1198,7 +1198,7 @@ def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
 # re-selection of the already-current value pushes nothing), so `undoChange`
 # always reverts the
 # single most recent edit, to whichever role made it.
-_SCRIPT = """
+_SCRIPT = r"""
 var DASHBOARD_CONFIG = JSON.parse(
   document.getElementById("dashboard-config").textContent
 );
@@ -1405,7 +1405,7 @@ function recordStateChange(roleId, nextAssignment) {
   ) {
     CLIENT_STATE.undoHistory.push({ roleId: roleId, previous: previous });
   }
-  updateActionPill();
+  refreshStateViews();
 }
 
 function updateActionPill() {
@@ -1460,7 +1460,7 @@ function undoChange() {
   var entry = CLIENT_STATE.undoHistory.pop();
   paintRoleValue(entry.roleId, entry.previous);
   CLIENT_STATE.currentRoles[entry.roleId] = cloneValue(entry.previous);
-  updateActionPill();
+  refreshStateViews();
   showToast("הפעולה האחרונה בוטלה", "info");
   return true;
 }
@@ -1501,7 +1501,7 @@ function resetDefaults() {
   }
   CLIENT_STATE.savedSnapshot = cloneRoleState(SYSTEM_DEFAULTS);
   CLIENT_STATE.undoHistory = [];
-  updateActionPill();
+  refreshStateViews();
   showToast("התפקידים אופסו לברירת המחדל", "success");
   return true;
 }
@@ -1512,7 +1512,7 @@ function saveChanges() {
   }
   CLIENT_STATE.savedSnapshot = cloneRoleState(CLIENT_STATE.currentRoles);
   CLIENT_STATE.undoHistory = [];
-  updateActionPill();
+  refreshStateViews();
   showToast("השינויים נשמרו", "success");
   return true;
 }
@@ -1532,6 +1532,132 @@ function bindActionPill() {
   }
 }
 
+// --- live JSON drawer & clipboard export (ticket 50) ---
+
+// The drawer previews `CLIENT_STATE.currentRoles` — every role's pending
+// model/effort selection, live, before Save — not a full reconstruction of
+// `routing-config.json`. A role's dropdown offers any audited
+// `{adapter}::{model_id}` pair (ticket 48, user story 4), which carries no
+// guaranteed id in the file's own `providers` section until a save
+// actually resolves one; synthesizing a `RoleConfig`/`ProviderConfig` shape
+// here, client-side, would mean either fabricating a provider id or reading
+// it off the role card's own binding pill, which ticket 48 never repaints
+// and so goes stale the instant a role's model changes. `buildConfigPreview`
+// sticks to what this page knows for certain: the pending `{model, effort}`
+// per role.
+function buildConfigPreview() {
+  return { roles: cloneRoleState(CLIENT_STATE.currentRoles) };
+}
+
+function configPreviewJson() {
+  return JSON.stringify(buildConfigPreview(), null, 2);
+}
+
+// Escapes text for safe insertion as HTML *markup* rather than as a text
+// node — needed the moment `updateConfigDrawer` stops writing
+// `textContent` (which never interprets its argument) and starts building
+// highlighted `innerHTML` instead. `syntaxHighlightJson` below wraps
+// substrings of this escaped text in `<span>` tags, so every `&`/`<`/`>`
+// the original JSON could carry must already be neutralized before that
+// wrapping happens, the same concern `ScriptInjectionTests` holds every
+// other interpolation in this document to.
+function escapeHtmlText(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// A minimal hand-rolled JSON syntax highlighter for the drawer's preview —
+// no runtime dependency pulled in for it, matching this module's own
+// "zero build step, zero external runtime dependencies" rule
+// (Implementation Decisions §2), the same way this repo's own WCAG/ΔE
+// color math is written out by hand rather than imported. Runs over
+// `json` only after `escapeHtmlText` has already neutralized it, so the
+// token regex below only ever recognizes shapes within already-safe text
+// and never reintroduces a raw `<`/`>`/`&`. A matched string is a key
+// exactly when it is immediately followed by `:` (`JSON.stringify`'s own
+// two-space indent never puts whitespace before that colon, but `\s*`
+// tolerates it if that ever changes).
+function syntaxHighlightJson(json) {
+  var tokenPattern =
+    /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+  return escapeHtmlText(json).replace(tokenPattern, function (match) {
+    var cssClass = "json-number";
+    if (match.charAt(0) === '"') {
+      cssClass = /:$/.test(match) ? "json-key" : "json-string";
+    } else if (match === "true" || match === "false") {
+      cssClass = "json-boolean";
+    } else if (match === "null") {
+      cssClass = "json-null";
+    }
+    return '<span class="' + cssClass + '">' + match + "</span>";
+  });
+}
+
+function updateConfigDrawer() {
+  var output = document.getElementById("config-drawer-json");
+  if (!output) {
+    return;
+  }
+  output.innerHTML = syntaxHighlightJson(configPreviewJson());
+}
+
+function toggleConfigDrawer() {
+  var drawer = document.getElementById("config-drawer");
+  if (!drawer) {
+    return;
+  }
+  drawer.classList.toggle("is-open");
+}
+
+// `navigator.clipboard` is undefined outside a secure context — including
+// a dashboard opened straight from disk over `file://`, the zero-friction
+// default Implementation Decisions §4 names for this page — so this checks
+// for it rather than letting a missing global throw a `TypeError` out of a
+// click handler.
+function copyConfigToClipboard() {
+  if (
+    typeof navigator === "undefined" ||
+    !navigator.clipboard ||
+    !navigator.clipboard.writeText
+  ) {
+    showToast("ההעתקה ללוח אינה נתמכת בדפדפן זה", "error");
+    return false;
+  }
+  navigator.clipboard.writeText(configPreviewJson()).then(
+    function () {
+      showToast("הקונפיגורציה הועתקה ללוח", "success");
+    },
+    function () {
+      showToast("העתקת הקונפיגורציה נכשלה", "error");
+    }
+  );
+  return true;
+}
+
+function bindConfigDrawer() {
+  var toggleButton = document.getElementById("config-drawer-toggle");
+  var copyButton = document.getElementById("config-drawer-copy");
+  if (toggleButton) {
+    toggleButton.addEventListener("click", toggleConfigDrawer);
+  }
+  if (copyButton) {
+    copyButton.addEventListener("click", copyConfigToClipboard);
+  }
+}
+
+// Every mutation to `CLIENT_STATE` has exactly two views that must repaint
+// from it — the action pill's dirty count and the drawer's JSON preview —
+// so this is the one seam `recordStateChange`/`undoChange`/
+// `resetDefaults`/`saveChanges` (and the initial render, below) call,
+// mirroring why `commitRoleEdit` exists: a shape shared by more than one
+// call site belongs in one place, not repeated at each of them.
+function refreshStateViews() {
+  updateActionPill();
+  updateConfigDrawer();
+}
+
 var TOAST_DURATION_MS = 3200;
 
 // The page's own rendered values — the only "system defaults" this
@@ -1547,7 +1673,8 @@ var CLIENT_STATE = {
 
 bindRoleControls();
 bindActionPill();
-updateActionPill();
+bindConfigDrawer();
+refreshStateViews();
 """
 
 
@@ -1832,6 +1959,76 @@ footer { padding: 1rem 2rem; color: var(--muted); font-size: 0.8rem; }
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+/* Live JSON drawer & clipboard export (ticket 50). Lives inside
+   `#tab-content-roles` for the same reason the action pill does — see the
+   comment above `.action-pill`. */
+.config-drawer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.08);
+  z-index: 30;
+}
+.config-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+}
+.config-drawer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.2rem 0;
+}
+.config-drawer-caret {
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+.config-drawer.is-open .config-drawer-caret { transform: rotate(90deg); }
+.config-drawer-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.2s ease;
+  border-top: 1px solid transparent;
+}
+.config-drawer.is-open .config-drawer-body {
+  max-height: 40vh;
+  overflow: auto;
+  border-top-color: var(--border);
+}
+.config-drawer-json {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+/* Token colors `syntaxHighlightJson` wraps the preview's spans in. A
+   key's own trailing colon is part of its matched token (`tokenPattern`'s
+   optional trailing-colon group), so it renders in `.json-key`'s color
+   too, not `--ink` — only braces, commas, and whitespace are never
+   wrapped and so stay `.config-drawer-json`'s own `--ink`. */
+.config-drawer-json .json-key { color: #1d4ed8; font-weight: 600; }
+.config-drawer-json .json-string { color: var(--good); }
+.config-drawer-json .json-number { color: #b45309; }
+.config-drawer-json .json-boolean { color: #7c3aed; }
+.config-drawer-json .json-null { color: var(--neutral); font-style: italic; }
 """
 
 # The floating action pill and its toast stack (ticket 49) — static markup,
@@ -1850,6 +2047,26 @@ _ACTION_PILL_HTML = """
       </div>
     </div>
     <div class="toast-stack" id="toast-container" aria-live="polite"></div>"""
+
+# The collapsible live JSON drawer (ticket 50) — static markup, no dynamic
+# value, so like `_ACTION_PILL_HTML` this needs no `_escape` call. Starts
+# collapsed (`config-drawer` has no `is-open` class); `config-drawer-json`
+# is empty until `updateConfigDrawer()` fills it on load. The toggle and
+# copy buttons are siblings, not nested, so a real browser's click on the
+# copy button never bubbles into the toggle's own listener.
+_CONFIG_DRAWER_HTML = """
+    <div class="config-drawer" id="config-drawer">
+      <div class="config-drawer-header">
+        <button type="button" class="config-drawer-toggle" id="config-drawer-toggle">
+          <span class="config-drawer-caret" aria-hidden="true">▸</span>
+          <span>routing-config.json</span>
+        </button>
+        <button type="button" class="pill-btn" id="config-drawer-copy">📋 העתק קונפיגורציה</button>
+      </div>
+      <div class="config-drawer-body">
+        <pre class="config-drawer-json" id="config-drawer-json" dir="ltr"></pre>
+      </div>
+    </div>"""
 
 
 def render_html_report(
@@ -1999,7 +2216,7 @@ def render_html_report(
     <h2>Role &amp; Model Configuration Matrix — מטריצת תפקידים ומודלים</h2>
     {role_matrix_html}
   </section>
-</main>{_ACTION_PILL_HTML}
+</main>{_ACTION_PILL_HTML}{_CONFIG_DRAWER_HTML}
 </div>
 <footer dir="ltr">Journal health: {_escape(journal_health)}</footer>
 <script type="application/json" id="dashboard-config">{dashboard_config_json}</script>
