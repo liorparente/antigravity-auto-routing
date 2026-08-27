@@ -368,9 +368,10 @@ var TOAST_CONTAINER = makeElement();
 
 // The live JSON drawer's markup (ticket 50) — `CONFIG_DRAWER` is the only
 // one of these `updateConfigDrawer`/`toggleConfigDrawer` address by
-// `classList`/`textContent` rather than `addEventListener`, but it still
-// needs `makeElement`'s full shape since `toggleConfigDrawer` reads
-// `classList.contains` before deciding which of `add`/`remove` to call.
+// `classList`/`innerHTML` rather than `addEventListener`, but it still
+// needs `makeElement`'s full shape since `toggleConfigDrawer` calls
+// `classList.toggle` directly, and the stub's `toggle` needs the same
+// backing `classes` array `add`/`remove`/`contains` already share.
 var CONFIG_DRAWER = makeElement();
 var CONFIG_DRAWER_TOGGLE = makeElement();
 var CONFIG_DRAWER_COPY = makeElement();
