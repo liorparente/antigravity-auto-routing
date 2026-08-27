@@ -19,7 +19,6 @@ import sys
 import tempfile
 import threading
 import unittest
-from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -956,7 +955,7 @@ class ConfigApiServerTests(unittest.TestCase):
         self,
         config_path: Path,
         *,
-        capability_snapshot: Callable[[], probe_models.CatalogSnapshot] | None = None,
+        capability_snapshot: learning_report.CapabilitySnapshotSource | None = None,
     ) -> tuple[learning_report._ConfigApiServer, int]:
         server = learning_report.create_dashboard_server(
             port=0, config_path=config_path, capability_snapshot=capability_snapshot
