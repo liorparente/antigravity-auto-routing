@@ -750,17 +750,41 @@ _ROLE_ACCENT_COLORS: dict[str, str] = {
 # absent — rendered two valid, expensive rungs in the same neutral grey the
 # badge otherwise reserves for "unrecognized", the opposite of the instant
 # cost signal user story 7 asks for. They continue the ramp between purple
-# `high` and amber `ultra`:
+# `high` and amber `ultra` as fuchsia and rose.
+#
+# Every hue user story 7 names is kept — green, blue, purple, amber — but
+# three shades are darker than the first draft of this table, because a
+# badge paints its text in the rung's color over that same color at 10%
+# (`background:{color}1a`), and two of the drafted shades were not legible
+# against their own tint: `ultra`'s #d97706 scored 2.86 where WCAG AA wants
+# 4.5 for text this size, and `max`'s #b45309 scored 4.35. `xhigh` moved for
+# a different reason — its drafted #6d28d9 sat ΔE 6.2 from `high`'s #7c3aed,
+# far below the ~10 at which two colors stop being tellable apart, so the
+# two most expensive Claude/Codex rungs were rendering as the same purple.
+# A spec review running concurrently, with no sight of these measurements,
+# independently called that same pair a weak spot in differentiation.
+#
+# `medium` is the one shade whose move costs something: #2563eb is one of
+# only two hexes Implementation Decisions §2 names at all ("#0f172a primary
+# headers, #2563eb interactive blues"), and it survives as exactly what §2
+# calls it — it is still the planner's accent in `_ROLE_ACCENT_COLORS` and
+# the theme's interactive blue, neither of which this touches. It is
+# only the *badge* that uses the darker #1d4ed8, because at 4.49 the
+# spec-named hex lands a hair under AA against its own tint, and legibility
+# of a value an operator reads decides the shade here.
+#
+# Two tests pin all of this:
 # `test_every_effort_rung_in_the_closed_vocabulary_has_its_own_badge_color`
-# pins the table to `_EFFORT_RANK` so a seventh rung can never be added
-# without a color again.
+# keeps the table matched to `_EFFORT_RANK`, and
+# `test_badge_colors_are_legible_and_mutually_distinguishable` keeps every
+# rung at AA against its own tint and every pair apart.
 _EFFORT_BADGE_COLORS: dict[str, str] = {
     "low": "#1a7a4c",
-    "medium": "#2563eb",
+    "medium": "#1d4ed8",
     "high": "#7c3aed",
-    "xhigh": "#6d28d9",
-    "max": "#b45309",
-    "ultra": "#d97706",
+    "xhigh": "#a21caf",
+    "max": "#9f1239",
+    "ultra": "#92400e",
 }
 
 
@@ -1091,10 +1115,10 @@ def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
     Only the two fields the script reads are serialized. Of
     `ModelCapability`'s seven, `provider` and `model_id` are already the
     key, and `tier`, `context`, and `local_only` are deliberately omitted:
-    the script reads none of them, and carrying them made this island 32%
-    larger (4677 bytes against 3165, over the live registry) with nothing
-    to show for it — dead payload a reader cannot tell apart from data the
-    page depends on. Two of the three are not even lost from the page:
+    the script reads none of them, and carrying them made this island 48%
+    larger — 4677 bytes against 3165 over the live registry, so dropping
+    them cut a third off it — with nothing to show for it: dead payload a
+    reader cannot tell apart from data the page depends on. Two of the three are not even lost from the page:
     `_binding_html` renders `tier` and `context` server-side as pills.
     (`local_only` is genuinely not shown for a capability — the "Local
     Only" pill on a card reports the *role's*

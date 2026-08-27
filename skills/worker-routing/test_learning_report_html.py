@@ -9,7 +9,9 @@ out) and touches neither `learning_journal` nor `learning_scoreboard`.
 from __future__ import annotations
 
 import ast
+import itertools
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -144,6 +146,61 @@ _EFFORT_SELECT_RE = re.compile(
 _OPTION_VALUE_RE = re.compile(r'<option value="([^"]*)"')
 
 
+# --- color math, for the badge legibility guard ---
+#
+# Small, standard, and local to this file: WCAG 2.x relative luminance and
+# contrast, plus a CIE76 ΔE over a D65 sRGB→Lab conversion. Written out
+# rather than pulled in, because this repo ships zero runtime dependencies
+# (`pyproject.toml`'s `dependencies = []`) and one assertion does not earn
+# the first one.
+
+
+def _channels(color: str) -> tuple[int, int, int]:
+    value = color.lstrip("#")
+    return tuple(int(value[index : index + 2], 16) for index in (0, 2, 4))  # type: ignore[return-value]
+
+
+def _linearize(channel: int) -> float:
+    ratio = channel / 255
+    return ratio / 12.92 if ratio <= 0.03928 else ((ratio + 0.055) / 1.055) ** 2.4
+
+
+def _relative_luminance(color: str) -> float:
+    red, green, blue = (_linearize(channel) for channel in _channels(color))
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+def _tint_over_white(color: str) -> str:
+    """The background a badge makes for itself: this color at 10% (the `1a`
+    alpha suffix in `_role_controls_html`) composited over the white card.
+    """
+    alpha = 0x1A / 0xFF
+    blended = (round(channel * alpha + 255 * (1 - alpha)) for channel in _channels(color))
+    return "#" + "".join(f"{channel:02x}" for channel in blended)
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    first, second = _relative_luminance(foreground), _relative_luminance(background)
+    lighter, darker = max(first, second), min(first, second)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def _to_lab(color: str) -> tuple[float, float, float]:
+    def pivot(value: float) -> float:
+        return value ** (1 / 3) if value > 0.008856 else 7.787 * value + 16 / 116
+
+    red, green, blue = (_linearize(channel) for channel in _channels(color))
+    x = pivot((0.4124 * red + 0.3576 * green + 0.1805 * blue) / 0.95047)
+    y = pivot(0.2126 * red + 0.7152 * green + 0.0722 * blue)
+    z = pivot((0.0193 * red + 0.1192 * green + 0.9505 * blue) / 1.08883)
+    return (116 * y - 16, 500 * (x - y), 200 * (y - z))
+
+
+def _color_distance(first: str, second: str) -> float:
+    """CIE76 ΔE. Below ~10 two colors stop being tellable apart at a glance."""
+    return math.dist(_to_lab(first), _to_lab(second))
+
+
 def _script_openers(report: str) -> list[str]:
     return _SCRIPT_OPENER_RE.findall(report)
 
@@ -187,6 +244,16 @@ _BADGE_RE = re.compile(r'<span class="effort-badge"[^>]*>([^<]*)</span>')
 # does not know about raises rather than returning a permissive `null`, so
 # widening the script's DOM usage fails these tests loudly instead of
 # silently exercising a stub that no longer resembles a browser.
+#
+# One known way this is laxer than a browser: `makeSelect`'s `value` is a
+# plain property, so it accepts a string matching no `<option>`, where
+# `HTMLSelectElement.value` would silently fall back to `""`. That is safe
+# only while every assignment writes a value belonging to the option set
+# written in the same call — which `resolveEffortState` guarantees in all
+# three of its statuses, and `test_reselecting_the_rendered_model_
+# reproduces_the_rendered_card` checks against the real rendered markup.
+# A future handler that sets `.value` independently of the options would
+# pass here and fail in a browser, so tighten this stub if that appears.
 _DOM_STUB_JS = """
 function makeOption() {
   return { value: "", textContent: "", selected: false };
@@ -1362,6 +1429,43 @@ class RoleCardControlsTests(unittest.TestCase):
             sorted(learning_report_html._EFFORT_BADGE_COLORS),
             sorted(routing_config._EFFORT_RANK),
         )
+
+    def test_badge_colors_are_legible_and_mutually_distinguishable(self) -> None:
+        """User story 7 wants the badge to give "instant visual feedback on
+        cognitive resource allocation". Two rungs painted the same shade, or
+        a rung whose text cannot be read against its own background, both
+        defeat that — and neither is visible in a test that only checks the
+        table has an entry per rung.
+
+        A badge paints text in the rung's color over that color at 10%
+        (`background:{color}1a` in `_role_controls_html`), so the background
+        is derived, not independent: the contrast figure below is against
+        the tint each color creates for itself over the white card.
+        """
+        for effort, color in learning_report_html._EFFORT_BADGE_COLORS.items():
+            with self.subTest(effort=effort):
+                ratio = _contrast_ratio(color, _tint_over_white(color))
+                self.assertGreaterEqual(
+                    ratio,
+                    4.5,
+                    f"{effort} badge ({color}) scores {ratio:.2f} against its own "
+                    f"tint; WCAG AA wants 4.5 for text this size",
+                )
+
+        rungs = list(learning_report_html._EFFORT_BADGE_COLORS)
+        for first, second in itertools.combinations(rungs, 2):
+            with self.subTest(pair=(first, second)):
+                distance = _color_distance(
+                    learning_report_html._EFFORT_BADGE_COLORS[first],
+                    learning_report_html._EFFORT_BADGE_COLORS[second],
+                )
+                # ~10 is where two colors stop being tellable apart at a
+                # glance; 15 leaves margin for the tint and for small text.
+                self.assertGreaterEqual(
+                    distance,
+                    15.0,
+                    f"{first} and {second} badges are only deltaE {distance:.1f} apart",
+                )
 
     def test_the_badge_is_painted_with_the_selected_efforts_color(self) -> None:
         report = self._report(
