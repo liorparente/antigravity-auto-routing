@@ -88,6 +88,32 @@ matches against target files — see `GOLDEN_RULES` in `prompt_assembler.py`.
     25 findings — treat a fast convergence as confirmation the smaller,
     additive-only shape of a change is worth repeating, not as grounds to
     skip the review step itself.
+32. **Fixing one false factual claim in a comment can produce a new false
+    claim, not convergence.** Ticket 47's `_ROLE_ACCENT_COLORS` comment
+    took four `/iterative-fix-review` rounds: a nonexistent
+    `sensitivity_gate` config key → a wrong "unique to this role" claim
+    about `local_only` (another role shared it) → an overclaimed "from the
+    spec's palette" attribution (the spec only names one of seven hex
+    values) → finally clean. Each rewrite was independently plausible and
+    independently wrong.
+33. **When a reviewer flags one wrong claim inside a multi-sentence
+    comment, re-derive the *whole* block from primary sources in one pass
+    — not just the flagged clause.** All three wrong claims in rule 32's
+    incident lived in the same ~15-line comment; each incremental patch
+    left an adjacent, equally-unverified sentence standing, which is
+    exactly what the next review round caught.
+34. **Brief a re-verification agent with the specific history of prior
+    wrong fixes, and instruct it to re-derive every claim from primary
+    sources.** A verifier told only "check this fix" tends to confirm it
+    looks plausible; a verifier told "the last two fixes for this exact
+    spot were both wrong, re-derive independently" is what actually caught
+    rounds 2 and 3 of rule 32's incident instead of rubber-stamping them.
+35. **Fix a review-flagged "cosmetic"/non-functional inconsistency in the
+    same pass, even though it changes no behavior.** Two dict literals
+    left listing roles in a stale order after a third was reordered were
+    flagged as harmless but got re-flagged in the next review round anyway
+    — closing it immediately costs less than the extra review cycle it
+    otherwise causes.
 
 
 ## Subprocess & CLI Process Safety

@@ -1,5 +1,98 @@
 # Worker Routing Fallbacks
 
+## 2026-08-27 — Third Recurrence of Institutional Memory / Golden Rules Drift, and Why the Second Fix Didn't Hold
+
+- Mission: Diagnose why `test_institutional_memory_matches_golden_rules` was red at HEAD of
+  `spec-0013-role-and-model-matrix-dashboard` (`12054a0`), independent of the ticket 48 work in
+  progress on the same branch.
+- Failure: `AssertionError: 35 != 25` — `knowledge/institutional-memory.md` parses to 35 numbered
+  rules (31 committed at `12054a0`, 4 more added by a concurrent session) against `GOLDEN_RULES`'s 25.
+  This is the *third* time this exact assertion has failed this way: `72f5abf` (20→23), `3815eea`
+  (23→25 in the doc only, fixed by `b03d510`), `d4934ac` (25→28 in the doc only, fixed by `932e748`).
+  The 2026-08-24 entry below recorded the second occurrence and stated the lesson in the imperative
+  ("must never append freeform text ... without code-level catalog updates") — the third occurrence
+  happened anyway, one session later.
+- Root Cause: the lesson was recorded as a rule for a human/agent to remember, not as something the
+  writing process is structurally incapable of violating. `/learn-session` (a skill living outside
+  this repository, at `~/.claude/skills/learn-session/SKILL.md`, and not distributed by `install.sh`)
+  instructs its own step 3 to "prepend to `institutional-memory.md`" and contains zero mentions of
+  `GOLDEN_RULES` or the sync contract. Every prior fix patched the *symptom* (re-added the missing
+  catalog entries, or deleted the extra doc entries) without touching the *process* that keeps
+  re-creating the symptom. A recorded lesson that lives beside the code but not inside the tool that
+  does the writing is not a control — it is a note a future run has no way to consult.
+- Resolution (this session): did not re-patch the symptom a third time. Instead: (1) traced full
+  history to confirm the pattern (`git log -p` + per-commit rule/id diffing across d1ff4af, 72f5abf,
+  3815eea, d4934ac, 932e748, 12054a0); (2) confirmed via grep that no production code path reads
+  `institutional-memory.md` — the sync test is its only reader — and that `learned-state/` has never
+  existed in this repo, so `get_scoped_memory` always falls back to the in-code catalog; (3) filed
+  spec 0014 (`docs/specs/0014-generated-institutional-memory-and-single-source-rule-catalog.md`,
+  tickets 54–59 = GitHub issues #30–#35) making the doc a generated build output of the catalog, so
+  the drift becomes structurally unexpressible rather than merely re-detectable; (4) added an explicit
+  moratorium guard to `/learn-session`'s own Step 3 (the tool that keeps causing this) pointing at
+  spec 0014, so this session's fix does not evaporate the moment someone runs `/learn-session` again
+  before ticket 59 lands. The test itself is still red as of this entry — ticket 54 (#30) narrows it,
+  and it has not yet been implemented.
+- Lesson: when the same invariant violation recurs after being fixed twice, stop fixing the data and
+  fix the process that produces it. A lesson recorded only as prose next to the broken invariant (an
+  `ERRORS.md` entry, a code comment, a memory note) is not a guard — it has no way to intercept the
+  next write. The actual fix is either (a) removing the second hand-maintained copy entirely (this
+  case: generate the doc from the catalog), or (b) teaching the specific tool that writes the second
+  copy about the contract it is breaking (this case: the `/learn-session` moratorium guard), ideally
+  both. See spec 0014 and the [[green-assertion-unexercised-path]] memory note for the related pattern
+  of a passing assertion that never exercised the path it names.
+
+## 2026-08-26 — Fixing a False Comment Produced Two More False Comments in a Row
+
+- Mission: re-run `/iterative-fix-review` on ticket 47's committed diff
+  (`learning_report_html.py`'s `_ROLE_ACCENT_COLORS`/`_ROLE_DISPLAY_ORDER`
+  region) to adversarially re-verify the two findings a prior review round
+  had already flagged and fixed.
+- Issue: it took four rounds, not one, because each fix introduced a *new*
+  unverified factual claim instead of converging:
+  1. **Round 1 (baseline):** found a comment claiming `routing-config.json`
+     has a `sensitivity_gate` key justifying why `reviewer_security`/
+     `sensitive_executor` render red. No such key exists.
+  2. **Round 2:** the rewrite instead claimed `sensitive_executor`'s
+     `capability_requirements.local_only=True` was unique to it "besides
+     `sensitive_doer`'s provider entry." Both halves were wrong:
+     `sensitive_doer` is an unrelated legacy top-level key with no
+     `capability_requirements` field at all, and the role that actually
+     shares `local_only=True` with `sensitive_executor` is `adjudicator`
+     (rendered amber, not red) — never mentioned.
+  3. **Round 3:** the rewrite correctly named `adjudicator` and dropped the
+     `sensitive_doer` reference, but a broader adjacent claim in the same
+     comment block — "one hex per role, from the spec's Ethos Analytics
+     palette (Implementation Decisions §2)" — turned out itself
+     unverified: the spec's §2 only ever names one color, `#2563eb`; the
+     other six hex values in `_ROLE_ACCENT_COLORS` never appear in it.
+  4. **Round 4:** rewrote the full comment block from the primary sources
+     (`routing-config.json`, the spec file) in one pass instead of patching
+     the newly flagged clause alone. An independent adversarial
+     verification agent, briefed on the exact history above and told to
+     re-derive every claim rather than trust the fix, found nothing wrong.
+- Detection: each round used a fresh sub-agent given the finding from the
+  previous round *and* instructed to re-derive every checkable claim from
+  `routing-config.json`/the spec directly, rather than a sub-agent that
+  simply confirmed the stated fix looked plausible — that is what caught
+  rounds 2 and 3 instead of rubber-stamping them.
+- Resolution: the final comment (`learning_report_html.py` lines ~689-716)
+  states plainly which single value is spec-cited and which are this
+  module's own extension, states the real shared `local_only` fact
+  (`adjudicator` too) and explicitly concludes `local_only` cannot be the
+  actual coloring rule, and no longer references any nonexistent config
+  key. Also reordered `_ROLE_DISPLAY_NAMES`/`_ROLE_ACCENT_COLORS`'s dict
+  literals to match `_ROLE_DISPLAY_ORDER`'s corrected order — a stale,
+  non-functional inconsistency a prior round had flagged but the fix
+  hadn't addressed, left for round 4 to also close in the same pass.
+- Lesson: a plausible-sounding rewrite of a wrong comment is not
+  self-evidently correct just because it fixes the specific clause a
+  reviewer named — the surrounding sentences in the same paragraph share
+  the same unverified-provenance risk and are just as likely to be wrong.
+  Re-derive the *whole* claim-bearing block from primary sources in one
+  pass, and brief the verifying agent with the specific history of prior
+  wrong fixes so it treats the new version with the same skepticism as the
+  old one, not less.
+
 ## 2026-08-26 — `pipx run mypy` Refuses to Run on `skills/worker-routing/` Directly
 
 - Mission: type-check `learning_report_html.py` and its test file after
