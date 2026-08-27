@@ -457,11 +457,25 @@ DEFAULT_SERVE_PORT = 8080
 # capability payload spec 0013's dashboard reads — but it is a plain value
 # object, not an HTTP concern." Ticket 45 built both specifically for this
 # endpoint; this is that HTTP concern.
-CapabilitySnapshotFn = Callable[[], probe_models.CatalogSnapshot]
+CapabilitySnapshotSource = Callable[[], probe_models.CatalogSnapshot]
 
 
 def _probe_capability_snapshot() -> probe_models.CatalogSnapshot:
     return probe_models.probe_all(list_models=False)
+
+
+def _model_key(provider: str, model_id: str) -> str:
+    """The flattened ``{provider}::{model_id}`` capability key — the same
+    shape `learning_report_html._model_key` renders into the dashboard's
+    `<option>` values, kept as a second one-line function rather than an
+    import across modules: that helper is private, and this package's
+    modules never import each other's private names (`_atomic_text_write`
+    is the precedent — duplicated locally in every module that needs it,
+    not imported from `advisory_consultation` or `agent_council`, for the
+    same reason). See that function's own docstring for why a flattened
+    key, not bare `model_id`, is what a capability consumer needs.
+    """
+    return f"{provider}::{model_id}"
 
 
 class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
@@ -487,7 +501,7 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
     groups its Testing Decisions with `--serve`. It calls
     `self.server.capability_snapshot()` — `_probe_capability_snapshot` by
     default, `probe_models.probe_all(list_models=False)`, built for exactly
-    this (see the module comment above `CapabilitySnapshotFn`) — but does
+    this (see the module comment above `CapabilitySnapshotSource`) — but does
     not return `CatalogSnapshot.to_dict()` verbatim: that method's `"models"`
     map is keyed by bare `model_id`, deduplicated across providers, which is
     precisely finding F7 (`routing_config.ModelCapability`'s own docstring)
@@ -542,7 +556,7 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
         for probe in snapshot.providers:
             for model in probe.models:
                 audited = registry.get((probe.provider_id, model.model_id))
-                key = f"{probe.provider_id}::{model.model_id}"
+                key = _model_key(probe.provider_id, model.model_id)
                 capabilities[key] = {
                     "provider": probe.provider_id,
                     "modelId": model.model_id,
@@ -593,7 +607,7 @@ class _ConfigApiServer(http.server.HTTPServer):
         self,
         server_address: tuple[str, int],
         config_path: Path,
-        capability_snapshot: CapabilitySnapshotFn,
+        capability_snapshot: CapabilitySnapshotSource,
     ) -> None:
         self.config_path = config_path
         self.capability_snapshot = capability_snapshot
@@ -604,7 +618,7 @@ def create_dashboard_server(
     *,
     port: int,
     config_path: Path | None = None,
-    capability_snapshot: CapabilitySnapshotFn | None = None,
+    capability_snapshot: CapabilitySnapshotSource | None = None,
 ) -> _ConfigApiServer:
     """Construct, but do not start, the local dashboard save server.
 
