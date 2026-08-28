@@ -1,5 +1,110 @@
 # Worker Routing Fallbacks
 
+## 2026-08-28 — A Sibling Module's Forward-Reference Beat a Different Ticket's Own Speculation
+
+- Mission: `/implement` ticket 51 (local dashboard server & atomic save API, spec 0013), then
+  `/iterative-fix-review` on the result.
+- Context: ticket 51's own checklist
+  (`.scratch/routing-backlog/issues/51-local-dashboard-server-and-save-api.md`) listed only
+  `POST /api/config` — no mention of `GET /api/model-capabilities`. Two candidate signals existed
+  for expanding scope beyond the literal checklist: (a) ticket 50's own "Delivered" note speculated
+  that ticket 51 would eventually "own... reconciling" the role cards' reduced `{model, effort}`
+  preview into a full config payload; (b) `learning_report_html.py`'s `_dashboard_config_json`
+  docstring stated, concretely and by name, that spec 0013 §1 names `GET /api/model-capabilities`
+  and groups its Testing Decisions with `--serve` — "the local-server work" — and
+  `probe_models.probe_all`'s own docstring said "Pass `list_models=False` for spec 0013's launch
+  probe."
+- Detection: a Spec-axis review pass, given both the ticket and the parent spec, caught (b) as a
+  real gap and quoted the exact docstring line as evidence. It never suggested (a) was missing,
+  because no comparably concrete anchor existed for it.
+- Resolution: implemented `GET /api/model-capabilities` (b); left the role/effort reconciliation (a)
+  undone and explicitly documented as "unticketed follow-up work" in the ticket file's Delivered
+  section.
+- Lesson: when a ticket's own checklist is silent about a piece of work, weight a sibling module's
+  already-shipped code carrying a specific, quotable docstring naming that exact function/endpoint
+  as built "for this" far more heavily than a different ticket's own speculative note about what a
+  later ticket "should" do. The former is falsifiable — read the code, it's a fact — and turned out
+  correct: the `GET` endpoint had two more real bugs discovered by the next two review rounds (see
+  the entry immediately below), confirming it was genuine missing work, not scope creep. The latter
+  is a guess about someone else's future intent with no code artifact backing it.
+
+## 2026-08-28 — Reusing Another Function's Output on Docstring Authority Alone Produced Two Wrong Fixes in a Row
+
+- Mission: same ticket 51 iterative-fix-review, rounds 2a and 2b (commits `c982636`, `afa8102`).
+- Issue: round 2a's fix for the missing `GET /api/model-capabilities` endpoint called
+  `probe_models.probe_all(list_models=False)` and returned `CatalogSnapshot.to_dict()` verbatim —
+  justified by that method's own docstring: "Shaped by `to_dict` into the capability payload spec
+  0013's dashboard reads — but it is a plain value object, not an HTTP concern." That docstring is
+  true, and the reasoning "this exists for exactly this consumer" felt like sufficient verification.
+  It wasn't: `to_dict()`'s `"models"` map dedupes by bare `model_id` across providers, silently
+  collapsing two providers' distinct effort ladders for the same model id — the exact "finding F7"
+  collision `routing_config.ModelCapability` was built to prevent — and the payload carried no
+  `tier` field at all despite spec §1 naming it as part of the schema.
+- Detection: the next Spec-axis review round, run independently rather than continuing the same fix
+  thread, read the actual field-by-field shape of `CatalogSnapshot.to_dict()` against
+  `ModelCapability`'s own docstring warning about bare-id collisions, and against spec §1's literal
+  five-field schema — catching both defects a "this is the documented-for-this-purpose function"
+  justification had waved through.
+- Resolution: rewrote `do_GET` to walk `snapshot.providers` directly, key each entry
+  `{provider_id}::{model_id}`, and cross-reference `build_model_capabilities_registry()` for `tier`
+  (`afa8102`).
+- Lesson: "this function/module's own docstring says it exists for exactly this consumer"
+  establishes provenance, not correctness — it tells you the author *intended* this to be the
+  answer, not that its actual current shape satisfies *your* specific requirement. Read the reused
+  output's field-by-field shape against the requirement yourself before treating a finding as
+  closed, especially when the reused function was shipped by an earlier, separately-scoped ticket
+  that may itself carry latent bugs nobody has yet needed to trip. See
+  [[fix-replaces-false-claim-with-another]] for the general pattern this is a second, sharper
+  instance of.
+
+## 2026-08-28 — `probe_models.CatalogSnapshot` Reintroduces the Bare-Model-Id Collision Its Own Sibling Registry Was Built to Fix
+
+- Mission: same as above, discovered as a byproduct of round 2b's fix (`afa8102`).
+- Issue: `probe_models.CatalogSnapshot.models()` (and thus `.to_dict()`'s `"models"` map) merges
+  every provider's models into one dict keyed by bare `model_id`:
+  `merged: dict[str, ProbedModel] = {}` ... `merged[model.model_id] = model`. This is exactly
+  "finding F7" — the same model id can carry different `supported_efforts` under two providers
+  (`probe_models._CROSS_PROVIDER_EFFORT_LADDERS` records `claude-sonnet-4-6` as low/medium/high
+  under `antigravity_cli` but adding `max` under `claude_code_cli`) — and a live probe surfacing
+  both would silently drop one. `routing_config.build_model_capabilities_registry()` (ticket 46) was
+  built specifically to key by `(provider, model_id)` and avoid this; `CatalogSnapshot` (ticket 45,
+  shipped earlier, "done") was never updated to match, and nothing in the existing test suite
+  exercises `CatalogSnapshot.to_dict()`'s output through a consumer that would notice the collision
+  — its own tests check discrete providers/models, not a genuinely colliding pair going through
+  `.to_dict()`.
+- Detection: Spec-axis review, reasoning from `routing_config.ModelCapability`'s own docstring text
+  about finding F7 forward to `CatalogSnapshot`'s actual merge logic in `probe_models.py`.
+- Resolution: not fixed in `probe_models.py` itself (out of scope for ticket 51) — worked around at
+  the new consumer instead (`learning_report.py`'s `do_GET`, which now builds its own
+  provider-scoped keying rather than calling `.to_dict()`). The underlying bug in
+  `CatalogSnapshot.models()`/`.to_dict()` itself is still live in `probe_models.py`.
+- Lesson: a structural fix landing in one module (`build_model_capabilities_registry`'s
+  `(provider, model_id)` keying, ticket 46) does not retroactively fix an earlier-shipped sibling
+  with the same shape of bug (`CatalogSnapshot`, ticket 45) unless something actually revisits it —
+  a "done" ticket can carry a latent, confirmed-real defect that only surfaces when a new consumer
+  actually exercises the exact colliding case. Worth a follow-up ticket to fix
+  `CatalogSnapshot.models()` itself rather than leaving every future consumer to route around it
+  independently.
+
+## 2026-08-28 — An Unused Injected Parameter Should Be Deleted, Not Justified With a Test Written to Give It a Caller
+
+- Mission: same ticket 51 iterative-fix-review, round 2b (`afa8102`).
+- Issue: `serve_dashboard(*, port, config_path=None)` forwarded `config_path` to
+  `create_dashboard_server`, mirroring that function's own injectable-config-path parameter for
+  symmetry. A Standards review flagged it as dead surface: no CLI flag ever set it, and every test
+  needing a non-default `config_path` called `create_dashboard_server` directly (to get a server
+  object it could bind/stop itself, since `serve_dashboard` blocks on `.serve_forever()`) rather
+  than going through `serve_dashboard`.
+- Detection: Standards-axis review, checking every caller of the flagged parameter across both
+  production code and the test suite before concluding it was genuinely unreachable.
+- Resolution: removed the parameter from `serve_dashboard` entirely, rather than adding a test that
+  called `serve_dashboard(config_path=...)` purely to give the parameter a caller.
+- Lesson: when a reviewer flags a parameter/branch/abstraction with no real caller, the correct fix
+  is deletion — inline back to what's actually used until a real need reintroduces it. Writing a
+  test (or any other caller) whose sole purpose is to exercise the flagged surface doesn't resolve a
+  Speculative Generality finding, it launders it: the code still does more than any real requirement
+  asks for, now merely disguised as "tested."
+
 ## 2026-08-27 — Simplifying a Function's Body Left Two Stale Comments Elsewhere Describing the Old Behavior
 
 - Mission: `/iterative-fix-review` on ticket 50's live JSON drawer (`learning_report_html.py` /
