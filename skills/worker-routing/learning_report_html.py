@@ -832,7 +832,9 @@ class EffortState(NamedTuple):
     efforts: tuple[str, ...]
 
 
-def _resolve_effort_state(capability: Any | None, current_effort: str) -> EffortState:
+def _resolve_effort_state(
+    capability: routing_config.ModelCapability | None, current_effort: str
+) -> EffortState:
     """Spec 0013 §3's auto-snap rule, as one pure function: keep
     `current_effort` when the model supports it, otherwise snap to the
     model's own `default_effort`, otherwise to the first rung it offers
@@ -935,7 +937,9 @@ def _effort_options_html(state: EffortState) -> str:
 
 
 def _role_controls_html(
-    role_id: str, binding: Any, capabilities: Mapping[tuple[str, str], Any]
+    role_id: str,
+    binding: routing_config.RoleModelBinding,
+    capabilities: Mapping[tuple[str, str], Any],
 ) -> str:
     """The role's active model and effort, as the two bound dropdowns and the
     color-coded badge ticket 48 makes reactive.
@@ -991,7 +995,7 @@ def _pill_html(label: str, value: str, *, color: str | None = None) -> str:
     )
 
 
-def _capability_requirements_pills(requirements: Any) -> str:
+def _capability_requirements_pills(requirements: routing_config.CapabilityRequirements) -> str:
     pills = [
         _pill_html("Reasoning Tier", requirements.reasoning_tier),
         _pill_html("Tool Access", requirements.tool_access),
@@ -1002,7 +1006,7 @@ def _capability_requirements_pills(requirements: Any) -> str:
     return "".join(pills)
 
 
-def _binding_html(binding: Any) -> str:
+def _binding_html(binding: routing_config.RoleModelBinding) -> str:
     capability = binding.capability
     effort_color = _EFFORT_BADGE_COLORS.get(binding.reasoning_effort, "#8a8377")
     pills = [
@@ -1029,7 +1033,9 @@ def _binding_html(binding: Any) -> str:
         </div>"""
 
 
-def _role_card_html(entry: Any, capabilities: Mapping[tuple[str, str], Any]) -> str:
+def _role_card_html(
+    entry: routing_config.RoleMatrixEntry, capabilities: Mapping[tuple[str, str], Any]
+) -> str:
     display_name = _ROLE_DISPLAY_NAMES.get(entry.role_id, entry.role_id)
     accent = _role_accent_color(entry.role_id)
     bindings_html = "".join(_binding_html(binding) for binding in entry.bindings)
@@ -1616,6 +1622,18 @@ function buildFullConfigPayload() {
   return config;
 }
 
+// Decision 4's standalone branch reads "updates local snapshot, triggers a
+// download/copy action, and displays a success toast" — this only does the
+// first and third. Deliberately not wired to `copyConfigToClipboard`
+// (ticket 50/US13's own button): that copies `buildConfigPreview`'s
+// reduced `{roles: {role_id: {model, effort}}}` shape, not the full
+// `RoutingConfig` `buildFullConfigPayload` produces for server mode below —
+// auto-firing it here would silently hand a standalone operator a payload
+// that cannot actually replace `routing-config.json`, which is worse than
+// the explicit, already-tested copy button they can reach themselves.
+// Which of "download" or "copy", and of which shape, Decision 4 actually
+// means is exactly the kind of undetermined design choice ticket 51 left
+// US9 for rather than guess at — same call here, not a fix this loop forces.
 function saveChanges() {
   if (!dirtyRoleCount()) {
     return false;
@@ -1849,17 +1867,30 @@ function setRefreshStatus(message) {
   }
 }
 
-function refreshLiveModels() {
+// `silent` (spec 0013 Decision 1's automatic launch probe, run once from
+// this script's own init below) suppresses the "checking…"/toast chatter a
+// manual click (spec's own on-demand US8) should still show — an operator
+// who never clicked anything should not see a toast merely because the
+// page finished loading, but the discovered models and the status line
+// still update either way.
+function refreshLiveModels(options) {
+  var silent = Boolean(options && options.silent);
   if (typeof fetch === "undefined") {
-    showToast("רענון מודלים חי אינו נתמך בדפדפן זה", "error");
+    if (!silent) {
+      showToast("רענון מודלים חי אינו נתמך בדפדפן זה", "error");
+    }
     return false;
   }
-  setRefreshStatus("בודק מודלים זמינים…");
+  if (!silent) {
+    setRefreshStatus("בודק מודלים זמינים…");
+  }
   fetch("/api/model-capabilities").then(
     function (response) {
       if (!response || !response.ok || typeof response.json !== "function") {
         setRefreshStatus("");
-        showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+        if (!silent) {
+          showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+        }
         return;
       }
       response.json().then(function (data) {
@@ -1869,12 +1900,16 @@ function refreshLiveModels() {
           ? "נמצאו " + added.length + " מודלים חדשים"
           : "אין מודלים חדשים";
         setRefreshStatus(message);
-        showToast(message, "success");
+        if (!silent) {
+          showToast(message, "success");
+        }
       });
     },
     function () {
       setRefreshStatus("");
-      showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+      if (!silent) {
+        showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+      }
     }
   );
   return true;
@@ -1883,7 +1918,9 @@ function refreshLiveModels() {
 function bindRefreshButton() {
   var button = document.getElementById("refresh-models");
   if (button) {
-    button.addEventListener("click", refreshLiveModels);
+    button.addEventListener("click", function () {
+      refreshLiveModels();
+    });
   }
 }
 
@@ -1916,6 +1953,15 @@ bindActionPill();
 bindConfigDrawer();
 bindRefreshButton();
 refreshStateViews();
+
+// Spec 0013 Solution §2 / Decision 1: "Automatic, non-blocking ... probe
+// ... on dashboard launch" — distinct from US8's on-demand button click.
+// Only in server mode: a `file://` page has no `/api/model-capabilities`
+// to reach at all, and probing it there would just be an error toast on
+// every single open with nothing an operator asked for.
+if (isServerMode()) {
+  refreshLiveModels({ silent: true });
+}
 """
 
 

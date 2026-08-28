@@ -616,16 +616,24 @@ def _role_card_specs(report: str) -> list[dict[str, Any]]:
     return specs
 
 
-def _run_embedded_script(report: str, harness: str) -> Any:
+def _run_embedded_script(report: str, harness: str, *, pre_script: str = "") -> Any:
     """Run the report's own `<script>` body under node against a stubbed DOM
     built from that same report's rendered cards, then run `harness` and
     parse whatever it prints as JSON.
+
+    `pre_script` runs *before* the report's own script — between the DOM
+    stub and the module's top-level init calls — the only place a test can
+    still influence state the module reads at load time (e.g. `location`,
+    for the auto-launch probe): `harness` always runs after the module's
+    init has already completed, so setting `location.protocol` there is too
+    late to affect anything gated on it at load.
     """
     source = "\n".join(
         [
             f"var DASHBOARD_CONFIG_JSON = {json.dumps(json.dumps(_dashboard_config(report)))};",
             f"var CARD_SPECS = {json.dumps(_role_card_specs(report))};",
             _DOM_STUB_JS,
+            pre_script,
             _executable_script(report),
             harness,
         ]
@@ -2821,6 +2829,78 @@ class RefreshLiveModelsTests(unittest.TestCase):
 
         self.assertEqual(result["dispatched"], False)
         self.assertTrue(any("toast-error" in cls for cls in result["toasts"]))
+
+
+class LaunchProbeTests(unittest.TestCase):
+    """Spec 0013 Solution §2 / Decision 1: "Automatic, non-blocking ...
+    probe ... on dashboard launch" — a silent `refreshLiveModels({silent:
+    true})` the module's own init calls when `isServerMode()`, distinct
+    from US8's on-demand button. Needs `pre_script` (not `harness`, which
+    always runs after the module's init already completed) to set
+    `location.protocol` before that init code runs.
+    """
+
+    def test_server_mode_probes_automatically_on_load(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "console.log(JSON.stringify(FETCH_CALLS.length));",
+            pre_script='location.protocol = "http:";',
+        )
+
+        self.assertEqual(result, 1)
+
+    def test_standalone_mode_never_probes_on_load(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "console.log(JSON.stringify(FETCH_CALLS.length));",
+        )
+
+        self.assertEqual(result, 0)
+
+    def test_the_automatic_probe_folds_in_new_models_without_a_toast(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "console.log(JSON.stringify({"
+            "  known: Object.prototype.hasOwnProperty.call(MODEL_CAPABILITIES, 'lm_studio_local::qwen3-coder-30b'),"
+            "  status: REFRESH_STATUS.textContent,"
+            "  toastCount: TOAST_CONTAINER.children.length"
+            "}));",
+            pre_script=(
+                'location.protocol = "http:";'
+                "FETCH_RESPONSE_BODY = { capabilities: { 'lm_studio_local::qwen3-coder-30b': {"
+                "  supportedEfforts: [], defaultEffort: null"
+                "} } };"
+            ),
+        )
+
+        self.assertTrue(result["known"])
+        self.assertEqual(result["status"], "נמצאו 1 מודלים חדשים")
+        self.assertEqual(result["toastCount"], 0)
+
+    def test_a_failed_automatic_probe_raises_no_toast_either(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "console.log(JSON.stringify(TOAST_CONTAINER.children.length));",
+            pre_script='location.protocol = "http:";' "FETCH_MODE = 'network-error';",
+        )
+
+        self.assertEqual(result, 0)
+
+    def test_a_manual_click_after_the_silent_launch_probe_still_toasts(self) -> None:
+        # The launch probe being silent must not leak into the button's own
+        # handler — a click is still an explicit action and still confirms.
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "fireClick('refresh-models');"
+            "console.log(JSON.stringify({"
+            "  calls: FETCH_CALLS.length,"
+            "  toastCount: TOAST_CONTAINER.children.length"
+            "}));",
+            pre_script='location.protocol = "http:";',
+        )
+
+        self.assertEqual(result["calls"], 2)
+        self.assertEqual(result["toastCount"], 1)
 
 
 # --- live JSON drawer markup (ticket 50) ---
