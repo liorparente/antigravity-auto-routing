@@ -1203,47 +1203,38 @@ def audit_config_drift(
                     detail=f"default_reasoning_effort {effort!r} is unsupported by {model_id} (supported: {supported})",
                 )
             )
-    for label in config.supported_models:
-        try:
-            model_id = resolve_model_id(label, snapshot=snapshot)
-        except UnknownModelError:
-            findings.append(
-                DriftFinding(
-                    kind="unmapped_label",
-                    subject=f"supported_models[{label}]",
-                    detail=f"label {label!r} maps to no wire identifier in the audited catalog",
-                )
-            )
-        else:
-            if not any(model_id in catalog for catalog in active_catalogs.values()):
-                findings.append(
-                    DriftFinding(
-                        kind="unmapped_label",
-                        subject=f"supported_models[{label}]",
-                        detail=f"label {label!r} maps to no active wire identifier",
-                    )
-                )
-    for role, chain in config.roster_topology.role_fallback_chains.items():
-        for label in chain:
+    def label_drift_findings(labels: Iterable[str], subject_for: Callable[[str], str]) -> None:
+        """Shared by both label loops below (`supported_models` and each
+        `role_fallback_chains` entry): a label is `unmapped_label` drift
+        either because it resolves to no wire identifier at all, or because
+        the identifier it resolves to is not in any active catalog. Only
+        `subject_for` differs between the two call sites.
+        """
+        for label in labels:
+            subject = subject_for(label)
             try:
                 model_id = resolve_model_id(label, snapshot=snapshot)
             except UnknownModelError:
                 findings.append(
                     DriftFinding(
                         kind="unmapped_label",
-                        subject=f"roster_topology.{role}[{label}]",
+                        subject=subject,
                         detail=f"label {label!r} maps to no wire identifier in the audited catalog",
                     )
                 )
-            else:
-                if not any(model_id in catalog for catalog in active_catalogs.values()):
-                    findings.append(
-                        DriftFinding(
-                            kind="unmapped_label",
-                            subject=f"roster_topology.{role}[{label}]",
-                            detail=f"label {label!r} maps to no active wire identifier",
-                        )
+                continue
+            if not any(model_id in catalog for catalog in active_catalogs.values()):
+                findings.append(
+                    DriftFinding(
+                        kind="unmapped_label",
+                        subject=subject,
+                        detail=f"label {label!r} maps to no active wire identifier",
                     )
+                )
+
+    label_drift_findings(config.supported_models, lambda label: f"supported_models[{label}]")
+    for role, chain in config.roster_topology.role_fallback_chains.items():
+        label_drift_findings(chain, lambda label, role=role: f"roster_topology.{role}[{label}]")
     deduplicated = tuple(dict.fromkeys(findings))
     return tuple(sorted(deduplicated, key=lambda finding: (finding.kind, finding.subject)))
 

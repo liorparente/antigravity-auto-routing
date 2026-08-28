@@ -365,6 +365,8 @@ var ACTION_UNDO_BUTTON = makeElement();
 var ACTION_RESET_BUTTON = makeElement();
 var ACTION_SAVE_BUTTON = makeElement();
 var TOAST_CONTAINER = makeElement();
+var REFRESH_BUTTON = makeElement();
+var REFRESH_STATUS = makeElement();
 
 // The live JSON drawer's markup (ticket 50) — `CONFIG_DRAWER` is the only
 // one of these `updateConfigDrawer`/`toggleConfigDrawer` address by
@@ -388,7 +390,9 @@ var ELEMENTS_BY_ID = {
   "config-drawer": CONFIG_DRAWER,
   "config-drawer-toggle": CONFIG_DRAWER_TOGGLE,
   "config-drawer-copy": CONFIG_DRAWER_COPY,
-  "config-drawer-json": CONFIG_DRAWER_JSON
+  "config-drawer-json": CONFIG_DRAWER_JSON,
+  "refresh-models": REFRESH_BUTTON,
+  "refresh-status": REFRESH_STATUS
 };
 
 // Controllable from a test harness the same way `CONFIRM_RESULT` controls
@@ -434,6 +438,60 @@ function confirm(message) {
   return CONFIRM_RESULT;
 }
 
+// Controllable the same way `CONFIRM_RESULT`/`CLIPBOARD_SHOULD_FAIL` are:
+// a test sets `location.protocol` before firing a click to choose which of
+// `saveChanges`'s two paths (standalone vs. server mode) runs. Absent by
+// default the way it is under plain node, so every pre-existing test that
+// never touches it keeps exercising the standalone path exactly as before.
+var location = { protocol: "file:" };
+
+// `FETCH_CALLS` records every request `saveChanges`/`refreshLiveModels`
+// issue, so a test can assert on the exact URL/method/body without a real
+// network. `FETCH_MODE` selects the outcome: `"success"` resolves with
+// `ok: true` and `FETCH_RESPONSE_BODY` as the parsed JSON; `"http-error"`
+// resolves with `ok: false`; `"network-error"` rejects outright — the three
+// shapes `fetch` itself can produce. Deliberately the same single-level
+// `.then(onFulfilled, onRejected)` shape `navigator.clipboard.writeText`
+// already uses above, not a chained one: production code never calls
+// `.then` more than once on the same promise either.
+var FETCH_CALLS = [];
+var FETCH_MODE = "success";
+var FETCH_RESPONSE_BODY = { capabilities: {}, providers: [] };
+function makeThenable(resolvedValue) {
+  return {
+    then: function (onFulfilled) {
+      if (onFulfilled) {
+        onFulfilled(resolvedValue);
+      }
+      return this;
+    }
+  };
+}
+function fetch(url, options) {
+  FETCH_CALLS.push({ url: url, options: options });
+  return {
+    then: function (onFulfilled, onRejected) {
+      if (FETCH_MODE === "network-error") {
+        if (onRejected) {
+          onRejected(new Error("network error"));
+        }
+        return this;
+      }
+      var response = {
+        ok: FETCH_MODE !== "http-error",
+        status: FETCH_MODE === "http-error" ? 400 : 200,
+        json: function () {
+          return makeThenable(FETCH_RESPONSE_BODY);
+        }
+      };
+      if (onFulfilled) {
+        onFulfilled(response);
+      }
+      return this;
+    }
+  };
+}
+
 var document = {
   getElementById: function (id) {
     if (!Object.prototype.hasOwnProperty.call(ELEMENTS_BY_ID, id)) {
@@ -442,10 +500,15 @@ var document = {
     return ELEMENTS_BY_ID[id];
   },
   querySelectorAll: function (selector) {
-    if (selector !== ".role-card") {
-      throw new Error("unsupported selector " + selector);
+    if (selector === ".role-card") {
+      return CARD_NODES;
     }
-    return CARD_NODES;
+    if (selector === ".model-select") {
+      return CARD_NODES.map(function (card) {
+        return card.querySelector(".model-select");
+      });
+    }
+    throw new Error("unsupported selector " + selector);
   },
   createElement: function (tag) {
     if (tag === "option") {
@@ -1136,6 +1199,18 @@ class RoleMatrixSectionTests(unittest.TestCase):
         self.assertIn("תפקידי מפתח (ראשי)", report)
         self.assertIn("פירוט מלא (מתקדם)", report)
 
+    def test_the_refresh_models_button_is_present(self) -> None:
+        # Spec 0013 US8: "a '🔄 רענן מודלים חיים' button ... probes local
+        # LM Studio ... on demand."
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+
+        report = learning_report_html.render_html_report(journal, board, baseline_board, now=_NOW)
+
+        self.assertIn('id="refresh-models"', report)
+        self.assertIn("רענן מודלים חיים", report)
+        self.assertIn('id="refresh-status"', report)
+
     def test_a_primary_role_appears_in_both_the_simple_and_all_grids(self) -> None:
         journal = learning_journal.JournalRead()
         board, baseline_board = _boards(journal, now=_NOW)
@@ -1674,6 +1749,70 @@ class ModelCapabilitiesPayloadTests(unittest.TestCase):
                 payload["claude_code_cli::claude-opus-5"]["supportedEfforts"],
                 ["low", "medium", "high", "xhigh", "max"],
             )
+
+
+class OriginalConfigPayloadTests(unittest.TestCase):
+    """`_dashboard_config_json`'s `originalConfig` field (ticket 52
+    follow-up, spec 0013 US14) — the full `RoutingConfig.to_dict()` shape
+    `saveChanges`'s `buildFullConfigPayload` reconciles a role edit onto.
+    """
+
+    def test_defaults_to_an_empty_object_when_no_config_is_passed(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+
+        report = learning_report_html.render_html_report(
+            journal, board, baseline_board, now=_NOW
+        )
+
+        self.assertEqual(_dashboard_config(report)["originalConfig"], {})
+
+    def test_a_passed_config_is_embedded_verbatim(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        routing_config_dict = {
+            "roles": {"planner": {"preferred_providers": ["claude_opus_5"]}},
+            "providers": {"claude_opus_5": {"adapter": "claude_code_cli"}},
+        }
+
+        report = learning_report_html.render_html_report(
+            journal,
+            board,
+            baseline_board,
+            now=_NOW,
+            routing_config_dict=routing_config_dict,
+        )
+
+        self.assertEqual(_dashboard_config(report)["originalConfig"], routing_config_dict)
+
+    def test_write_html_report_embeds_the_real_loaded_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = learning_report_html.write_html_report(Path(tmp), now=_NOW)
+
+            embedded = _dashboard_config(path.read_text(encoding="utf-8"))["originalConfig"]
+            on_disk = routing_config.load_routing_config().to_dict()
+            self.assertEqual(embedded, on_disk)
+
+    def test_a_role_value_carrying_html_metacharacters_is_still_valid_json(self) -> None:
+        journal = learning_journal.JournalRead()
+        board, baseline_board = _boards(journal, now=_NOW)
+        routing_config_dict = {
+            "roles": {"</script><script>alert(1)</script>": {"preferred_providers": []}}
+        }
+
+        report = learning_report_html.render_html_report(
+            journal,
+            board,
+            baseline_board,
+            now=_NOW,
+            routing_config_dict=routing_config_dict,
+        )
+
+        self.assertNotIn("<script>alert(1)", report)
+        self.assertIn(
+            "</script><script>alert(1)</script>",
+            _dashboard_config(report)["originalConfig"]["roles"],
+        )
 
 
 class ScriptInjectionTests(unittest.TestCase):
@@ -2357,6 +2496,331 @@ class ClientStateMachineTests(unittest.TestCase):
         )
 
         self.assertEqual(result, 0)
+
+
+# --- server-mode save & live model refresh (ticket 52 follow-up, spec 0013 US8/US14) ---
+
+
+def _two_role_reactive_report_with_config() -> str:
+    """`_two_role_reactive_report`'s same two roles/bindings, plus a full
+    `routing_config_dict` behind them — `codex_sol` deliberately backs both
+    `planner` and `builder_heavy`'s *fallback* slot (never their primary
+    one), the same sharing shape the shipped config has, so a test can pin
+    that editing one role's primary binding never touches the other's
+    reference to that shared provider.
+    """
+    journal = learning_journal.JournalRead()
+    board, baseline_board = _boards(journal, now=_NOW)
+    capabilities = _capability_fixture()
+    planner_binding = routing_config.RoleModelBinding(
+        provider_id="planner_primary",
+        adapter="provider",
+        model_id="claude-opus-5",
+        reasoning_effort="high",
+        capability=capabilities.get(("provider", "claude-opus-5")),
+    )
+    builder_binding = routing_config.RoleModelBinding(
+        provider_id="builder_primary",
+        adapter="provider",
+        model_id="claude-sonnet-4-6",
+        reasoning_effort="medium",
+        capability=capabilities.get(("provider", "claude-sonnet-4-6")),
+    )
+    role_matrix = {
+        "planner": _role_entry("planner", bindings=(planner_binding,)),
+        "builder_heavy": _role_entry("builder_heavy", bindings=(builder_binding,)),
+    }
+    routing_config_dict = {
+        "roles": {
+            "planner": {
+                "capability_requirements": {
+                    "reasoning_tier": "high",
+                    "tool_access": "full",
+                    "min_context": 100000,
+                    "local_only": False,
+                },
+                "preferred_providers": ["planner_primary", "codex_sol"],
+            },
+            "builder_heavy": {
+                "capability_requirements": {
+                    "reasoning_tier": "high",
+                    "tool_access": "full",
+                    "min_context": 100000,
+                    "local_only": False,
+                },
+                "preferred_providers": ["builder_primary", "codex_sol"],
+            },
+        },
+        "providers": {
+            "planner_primary": {
+                "adapter": "provider",
+                "model": "claude-opus-5",
+                "default_reasoning_effort": "high",
+            },
+            "builder_primary": {
+                "adapter": "provider",
+                "model": "claude-sonnet-4-6",
+                "default_reasoning_effort": "medium",
+            },
+            "codex_sol": {
+                "adapter": "provider",
+                "model": "gpt-5.6-sol",
+                "default_reasoning_effort": "low",
+            },
+        },
+    }
+    return learning_report_html.render_html_report(
+        journal,
+        board,
+        baseline_board,
+        now=_NOW,
+        role_matrix=role_matrix,
+        model_capabilities=capabilities,
+        routing_config_dict=routing_config_dict,
+    )
+
+
+class SaveChangesServerModeTests(unittest.TestCase):
+    """`saveChanges` in server mode (`location.protocol` is `http:`/`https:`)
+    dispatches `POST /api/config` with a full `RoutingConfig`-shaped payload
+    built by `buildFullConfigPayload`, rather than the standalone path's
+    local-only snapshot commit. Executed under node against a stubbed
+    `fetch`, never asserted over the script's source text.
+    """
+
+    def test_standalone_mode_never_calls_fetch(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "console.log(JSON.stringify({ calls: FETCH_CALLS.length, dirty: dirtyRoleCount() }));",
+        )
+
+        self.assertEqual(result, {"calls": 0, "dirty": 0})
+
+    def test_server_mode_posts_to_api_config_with_json_headers(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'location.protocol = "http:";'
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "console.log(JSON.stringify({"
+            "  url: FETCH_CALLS[0].url,"
+            "  method: FETCH_CALLS[0].options.method,"
+            "  contentType: FETCH_CALLS[0].options.headers['Content-Type']"
+            "}));",
+        )
+
+        self.assertEqual(
+            result, {"url": "/api/config", "method": "POST", "contentType": "application/json"}
+        )
+
+    def test_the_posted_payload_repoints_only_the_edited_roles_primary_provider(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'location.protocol = "http:";'
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "var payload = JSON.parse(FETCH_CALLS[0].options.body);"
+            "console.log(JSON.stringify({"
+            "  plannerChain: payload.roles.planner.preferred_providers,"
+            "  builderChain: payload.roles.builder_heavy.preferred_providers,"
+            "  newProvider: payload.providers.planner__custom,"
+            "  codexSolUntouched: payload.providers.codex_sol"
+            "}));",
+        )
+
+        self.assertEqual(result["plannerChain"], ["planner__custom", "codex_sol"])
+        # `builder_heavy` was never edited — its chain, including the same
+        # shared `codex_sol` fallback `planner` also references, is carried
+        # through from `ORIGINAL_CONFIG` untouched.
+        self.assertEqual(result["builderChain"], ["builder_primary", "codex_sol"])
+        self.assertEqual(
+            result["newProvider"],
+            {"adapter": "provider", "model": "gpt-5.6-sol", "default_reasoning_effort": "high"},
+        )
+        # `codex_sol` publishes the same model at a different effort
+        # ("low"), so it is not a match for planner's new "high" pick —
+        # `findOrCreateProviderId` must mint `planner__custom` rather than
+        # reuse it, and this pins that `codex_sol` itself is untouched by
+        # doing so.
+        self.assertEqual(
+            result["codexSolUntouched"],
+            {"adapter": "provider", "model": "gpt-5.6-sol", "default_reasoning_effort": "low"},
+        )
+
+    def test_reselecting_an_already_known_provider_reuses_its_id_instead_of_minting_one(
+        self,
+    ) -> None:
+        # `builder_primary` already carries exactly `{provider, claude-opus-5,
+        # high}` once `planner`'s own primary is repointed there — picking
+        # the same model+effort for `builder_heavy` should reuse
+        # `planner_primary`'s id, not fork a second `builder_heavy__custom`
+        # entry describing the identical pairing.
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'location.protocol = "http:";'
+            'onModelSelect("builder_heavy", "provider::claude-opus-5");'
+            'onEffortSelect("builder_heavy", "high");'
+            "saveChanges();"
+            "var payload = JSON.parse(FETCH_CALLS[0].options.body);"
+            "console.log(JSON.stringify({"
+            "  builderChain: payload.roles.builder_heavy.preferred_providers,"
+            "  hasCustomEntry: Object.prototype.hasOwnProperty.call(payload.providers, 'builder_heavy__custom')"
+            "}));",
+        )
+
+        self.assertEqual(result["builderChain"][0], "planner_primary")
+        self.assertFalse(result["hasCustomEntry"])
+
+    def test_a_successful_save_commits_the_snapshot_and_shows_a_success_toast(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'location.protocol = "http:";'
+            "FETCH_MODE = 'success';"
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "console.log(JSON.stringify({"
+            "  dirty: dirtyRoleCount(),"
+            "  toasts: TOAST_CONTAINER.children.map(function (t) { return t.className; })"
+            "}));",
+        )
+
+        self.assertEqual(result["dirty"], 0)
+        self.assertTrue(any("toast-success" in cls for cls in result["toasts"]))
+
+    def test_a_rejected_save_leaves_the_role_dirty_and_shows_an_error_toast(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'location.protocol = "http:";'
+            "FETCH_MODE = 'http-error';"
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "console.log(JSON.stringify({"
+            "  dirty: dirtyRoleCount(),"
+            "  toasts: TOAST_CONTAINER.children.map(function (t) { return t.className; })"
+            "}));",
+        )
+
+        self.assertEqual(result["dirty"], 1)
+        self.assertTrue(any("toast-error" in cls for cls in result["toasts"]))
+
+    def test_a_network_failure_leaves_the_role_dirty_and_shows_an_error_toast(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'location.protocol = "http:";'
+            "FETCH_MODE = 'network-error';"
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "console.log(JSON.stringify({"
+            "  dirty: dirtyRoleCount(),"
+            "  toasts: TOAST_CONTAINER.children.map(function (t) { return t.className; })"
+            "}));",
+        )
+
+        self.assertEqual(result["dirty"], 1)
+        self.assertTrue(any("toast-error" in cls for cls in result["toasts"]))
+
+
+class RefreshLiveModelsTests(unittest.TestCase):
+    """`refreshLiveModels` (spec 0013 US8's "🔄 רענן מודלים חיים" button):
+    fetches `GET /api/model-capabilities`, folds any not-yet-seen key into
+    `MODEL_CAPABILITIES`, appends it as an `<option>` to every role's model
+    select, and repaints every role card from its own current selection.
+    """
+
+    def test_the_button_exists_and_is_bound_to_a_click_handler(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "fireClick('refresh-models');"
+            "console.log(JSON.stringify(FETCH_CALLS.length));",
+        )
+
+        self.assertEqual(result, 1)
+
+    def test_a_new_capability_key_is_added_as_an_option_on_every_model_select(self) -> None:
+        # Asserts on the appended `<option>` directly — `select.value = x`
+        # in the DOM stub does not validate `x` against `select.children`,
+        # so a test that only re-selected the new key afterward would still
+        # pass even if `addModelOption` were a no-op.
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "FETCH_RESPONSE_BODY = { capabilities: { 'lm_studio_local::qwen3-coder-30b': {"
+            "  supportedEfforts: [], defaultEffort: null"
+            "} } };"
+            "refreshLiveModels();"
+            "var selects = document.querySelectorAll('.model-select');"
+            "var everySelectCarriesIt = selects.every(function (select) {"
+            "  return select.children.some(function (option) {"
+            "    return option.value === 'lm_studio_local::qwen3-coder-30b'"
+            "      && option.textContent === 'lm_studio_local · qwen3-coder-30b';"
+            "  });"
+            "});"
+            "console.log(JSON.stringify({"
+            "  known: Object.prototype.hasOwnProperty.call(MODEL_CAPABILITIES, 'lm_studio_local::qwen3-coder-30b'),"
+            "  selectCount: selects.length,"
+            "  everySelectCarriesIt: everySelectCarriesIt"
+            "}));",
+        )
+
+        self.assertTrue(result["known"])
+        self.assertGreater(result["selectCount"], 0)
+        self.assertTrue(result["everySelectCarriesIt"])
+
+    def test_the_new_option_is_selectable_and_repaints_the_role_that_picks_it(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "FETCH_RESPONSE_BODY = { capabilities: { 'lm_studio_local::qwen3-coder-30b': {"
+            "  supportedEfforts: [], defaultEffort: null"
+            "} } };"
+            "refreshLiveModels();"
+            'onModelSelect("planner", "lm_studio_local::qwen3-coder-30b");'
+            "console.log(JSON.stringify(snapshot('planner')[0]));",
+        )
+
+        self.assertEqual(result["model"], "lm_studio_local::qwen3-coder-30b")
+        self.assertTrue(result["disabled"])
+        self.assertEqual(result["badgeText"], "none")
+
+    def test_refreshing_with_no_new_keys_still_reports_success_with_zero_found(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "FETCH_RESPONSE_BODY = { capabilities: {} };"
+            "refreshLiveModels();"
+            "console.log(JSON.stringify(REFRESH_STATUS.textContent));",
+        )
+
+        self.assertEqual(result, "אין מודלים חדשים")
+
+    def test_a_network_failure_shows_an_error_toast_and_clears_the_status(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "FETCH_MODE = 'network-error';"
+            "refreshLiveModels();"
+            "console.log(JSON.stringify({"
+            "  status: REFRESH_STATUS.textContent,"
+            "  toasts: TOAST_CONTAINER.children.map(function (t) { return t.className; })"
+            "}));",
+        )
+
+        self.assertEqual(result["status"], "")
+        self.assertTrue(any("toast-error" in cls for cls in result["toasts"]))
+
+    def test_fetch_undefined_shows_an_error_toast_without_throwing(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            "var realFetch = fetch;"
+            "fetch = undefined;"
+            "var dispatched = refreshLiveModels();"
+            "fetch = realFetch;"
+            "console.log(JSON.stringify({"
+            "  dispatched: dispatched,"
+            "  toasts: TOAST_CONTAINER.children.map(function (t) { return t.className; })"
+            "}));",
+        )
+
+        self.assertEqual(result["dispatched"], False)
+        self.assertTrue(any("toast-error" in cls for cls in result["toasts"]))
 
 
 # --- live JSON drawer markup (ticket 50) ---

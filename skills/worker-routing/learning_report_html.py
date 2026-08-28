@@ -1083,6 +1083,10 @@ def _role_matrix_section_html(
     return f"""
     <input type="radio" id="role-mode-simple" name="role-mode" class="sr-only-toggle" checked>
     <input type="radio" id="role-mode-all" name="role-mode" class="sr-only-toggle">
+    <div class="role-matrix-toolbar">
+      <button type="button" class="pill-btn" id="refresh-models">🔄 רענן מודלים חיים</button>
+      <span class="refresh-status" id="refresh-status" aria-live="polite"></span>
+    </div>
     <div class="segmented-toggle">
       <label for="role-mode-simple">תפקידי מפתח (ראשי)</label>
       <label for="role-mode-all">פירוט מלא (מתקדם)</label>
@@ -1112,7 +1116,11 @@ def _role_matrix_section_html(
 _JSON_HTML_ESCAPES: dict[str, str] = {"<": "\\u003c", ">": "\\u003e", "&": "\\u0026"}
 
 
-def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
+def _dashboard_config_json(
+    capabilities: Mapping[tuple[str, str], Any],
+    *,
+    original_config: Mapping[str, Any] | None = None,
+) -> str:
     """Everything the embedded script needs, and nothing it does not, as one
     JSON island.
 
@@ -1138,6 +1146,17 @@ def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
     but the spec's own Testing Decisions group that endpoint with
     `--serve` — the local-server work, not this renderer — so it can
     serialize the whole record once something consumes it.
+
+    `original_config` is `routing_config.RoutingConfig.to_dict()` as loaded
+    for this render — the full `roles`/`providers` shape `POST /api/config`
+    validates, not the reduced `{model, effort}` preview the role cards
+    edit. `saveChanges` (ticket 51/52 follow-up, spec 0013 US14) reconciles
+    the two client-side: it clones this untouched original, then only
+    repoints each edited role's primary `preferred_providers` entry, so a
+    save never has to fabricate the sections this page has no UI for
+    (`council_policy`, `roster_topology`, and so on). Defaults to `{}` for
+    the same reason `capabilities` defaults to empty — a document rendered
+    without a config still renders, it just cannot reconcile a save.
     """
     payload = {
         "capabilities": {
@@ -1149,6 +1168,7 @@ def _dashboard_config_json(capabilities: Mapping[tuple[str, str], Any]) -> str:
         },
         "effortColors": dict(_EFFORT_BADGE_COLORS),
         "neutralColor": _NEUTRAL_COLOR,
+        "originalConfig": dict(original_config) if original_config is not None else {},
     }
     # `sort_keys` alone makes the output deterministic — sorting the input
     # too would be a second mechanism for one guarantee.
@@ -1205,6 +1225,7 @@ var DASHBOARD_CONFIG = JSON.parse(
 var MODEL_CAPABILITIES = DASHBOARD_CONFIG.capabilities;
 var EFFORT_COLORS = DASHBOARD_CONFIG.effortColors;
 var NEUTRAL_COLOR = DASHBOARD_CONFIG.neutralColor;
+var ORIGINAL_CONFIG = DASHBOARD_CONFIG.originalConfig;
 
 function resolveEffortState(modelKey, currentEffort) {
   var capability = MODEL_CAPABILITIES[modelKey];
@@ -1506,14 +1527,125 @@ function resetDefaults() {
   return true;
 }
 
+// "Server mode" per spec 0013 Decision 4: the page was fetched over
+// `http(s)://` (a `--serve` origin) rather than opened straight from disk
+// over `file://`. `location` does not exist at all outside a browser (this
+// script also runs headless under node in tests), so the guard checks for
+// the global before reading off it.
+function isServerMode() {
+  return typeof location !== "undefined" && /^https?:$/.test(location.protocol);
+}
+
+function commitSaveSnapshot() {
+  CLIENT_STATE.savedSnapshot = cloneRoleState(CLIENT_STATE.currentRoles);
+  CLIENT_STATE.undoHistory = [];
+  refreshStateViews();
+}
+
+// Reuses an existing `providers` entry only when its adapter/model/effort
+// already match exactly; otherwise mints a `{roleId}__custom` entry that
+// belongs to this role alone. Never mutates an existing entry in place —
+// `providers` are heavily shared in the shipped config (`codex_sol` alone
+// backs four roles), so overwriting one to reflect a single role's edit
+// would silently repoint every other role sharing it.
+function findOrCreateProviderId(providers, roleId, adapter, modelId, effort) {
+  // `default_reasoning_effort` must be a non-empty string (routing_config's
+  // own schema), but a role bound to a no-ladder model (e.g. LM Studio)
+  // carries effort `""` client-side — the same placeholder the shipped
+  // config already uses for its own no-ladder providers.
+  var resolvedEffort = effort || "medium";
+  for (var providerId in providers) {
+    if (!Object.prototype.hasOwnProperty.call(providers, providerId)) {
+      continue;
+    }
+    var provider = providers[providerId];
+    if (
+      provider.adapter === adapter &&
+      provider.model === modelId &&
+      provider.default_reasoning_effort === resolvedEffort
+    ) {
+      return providerId;
+    }
+  }
+  var newProviderId = roleId + "__custom";
+  providers[newProviderId] = {
+    adapter: adapter,
+    model: modelId,
+    default_reasoning_effort: resolvedEffort
+  };
+  return newProviderId;
+}
+
+// Reconciles the reduced `{model, effort}` role state this page edits back
+// into the full `RoutingConfig` shape `POST /api/config` validates (spec
+// 0013 Decision 4's "Serialization Contract"). Only the edited role's
+// *primary* `preferred_providers` entry is ever replaced — the rest of its
+// fallback chain, every other role, and every section this page has no UI
+// for (`council_policy`, `roster_topology`, ...) is carried through from
+// `ORIGINAL_CONFIG` untouched.
+function buildFullConfigPayload() {
+  var config = JSON.parse(JSON.stringify(ORIGINAL_CONFIG));
+  config.providers = config.providers || {};
+  config.roles = config.roles || {};
+  for (var roleId in CLIENT_STATE.currentRoles) {
+    if (!Object.prototype.hasOwnProperty.call(CLIENT_STATE.currentRoles, roleId)) {
+      continue;
+    }
+    var assignment = CLIENT_STATE.currentRoles[roleId];
+    var role = config.roles[roleId];
+    if (!assignment || !assignment.model || !role) {
+      continue;
+    }
+    var separatorIndex = assignment.model.indexOf("::");
+    if (separatorIndex === -1) {
+      continue;
+    }
+    var adapter = assignment.model.slice(0, separatorIndex);
+    var modelId = assignment.model.slice(separatorIndex + 2);
+    var providerId = findOrCreateProviderId(
+      config.providers, roleId, adapter, modelId, assignment.effort
+    );
+    var chain = (role.preferred_providers || []).slice();
+    if (chain.length) {
+      chain[0] = providerId;
+    } else {
+      chain = [providerId];
+    }
+    role.preferred_providers = chain;
+  }
+  return config;
+}
+
 function saveChanges() {
   if (!dirtyRoleCount()) {
     return false;
   }
-  CLIENT_STATE.savedSnapshot = cloneRoleState(CLIENT_STATE.currentRoles);
-  CLIENT_STATE.undoHistory = [];
-  refreshStateViews();
-  showToast("השינויים נשמרו", "success");
+  if (!isServerMode()) {
+    commitSaveSnapshot();
+    showToast("השינויים נשמרו", "success");
+    return true;
+  }
+  if (typeof fetch === "undefined") {
+    showToast("השמירה לשרת אינה נתמכת בדפדפן זה", "error");
+    return false;
+  }
+  fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildFullConfigPayload())
+  }).then(
+    function (response) {
+      if (response && response.ok) {
+        commitSaveSnapshot();
+        showToast("השינויים נשמרו בדיסק", "success");
+      } else {
+        showToast("השמירה נכשלה (השרת דחה את הבקשה)", "error");
+      }
+    },
+    function () {
+      showToast("השמירה נכשלה — האם השרת המקומי פעיל?", "error");
+    }
+  );
   return true;
 }
 
@@ -1647,6 +1779,116 @@ function bindConfigDrawer() {
   }
 }
 
+// --- live model refresh (ticket 52 follow-up, spec 0013 US8) ---
+
+// Merges a `GET /api/model-capabilities` response into `MODEL_CAPABILITIES`
+// and appends an `<option>` for every key this page did not already offer —
+// "so that newly loaded local LLMs appear immediately in the interface"
+// without a reload. Reuses `select.children`, not `.options`, the same way
+// `setEffortOptions` already does, so the two stay consistent with each
+// other and with the test harness's DOM stub. Returns the newly discovered
+// keys so the caller can report how many were found.
+function addModelOption(key) {
+  var label = key.replace("::", " · ");
+  var selects = document.querySelectorAll(".model-select");
+  for (var i = 0; i < selects.length; i++) {
+    var select = selects[i];
+    var alreadyPresent = false;
+    for (var j = 0; j < select.children.length; j++) {
+      if (select.children[j].value === key) {
+        alreadyPresent = true;
+        break;
+      }
+    }
+    if (!alreadyPresent) {
+      var option = document.createElement("option");
+      option.value = key;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+  }
+}
+
+function applyCapabilitySnapshot(capabilities) {
+  var addedKeys = [];
+  for (var key in capabilities) {
+    if (!Object.prototype.hasOwnProperty.call(capabilities, key)) {
+      continue;
+    }
+    var entry = capabilities[key];
+    if (!Object.prototype.hasOwnProperty.call(MODEL_CAPABILITIES, key)) {
+      addedKeys.push(key);
+      addModelOption(key);
+    }
+    MODEL_CAPABILITIES[key] = {
+      supportedEfforts: entry.supportedEfforts,
+      defaultEffort: entry.defaultEffort
+    };
+  }
+  return addedKeys;
+}
+
+// Repaints every role from its own current `{model, effort}` — not just the
+// dirty ones — so a refreshed ladder (a model whose `supportedEfforts` just
+// changed) is reflected even for a role nobody has touched yet this session.
+function repaintEveryRoleFromState() {
+  for (var roleId in CLIENT_STATE.currentRoles) {
+    if (
+      Object.prototype.hasOwnProperty.call(CLIENT_STATE.currentRoles, roleId) &&
+      CLIENT_STATE.currentRoles[roleId]
+    ) {
+      paintRoleValue(roleId, CLIENT_STATE.currentRoles[roleId]);
+    }
+  }
+}
+
+function setRefreshStatus(message) {
+  var status = document.getElementById("refresh-status");
+  if (status) {
+    status.textContent = message;
+  }
+}
+
+function refreshLiveModels() {
+  if (typeof fetch === "undefined") {
+    showToast("רענון מודלים חי אינו נתמך בדפדפן זה", "error");
+    return false;
+  }
+  setRefreshStatus("בודק מודלים זמינים…");
+  fetch("/api/model-capabilities").then(
+    function (response) {
+      if (!response || !response.ok || typeof response.json !== "function") {
+        setRefreshStatus("");
+        showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+        return;
+      }
+      response.json().then(function (data) {
+        var added = applyCapabilitySnapshot((data && data.capabilities) || {});
+        repaintEveryRoleFromState();
+        setRefreshStatus(
+          added.length ? "נמצאו " + added.length + " מודלים חדשים" : "אין מודלים חדשים"
+        );
+        showToast(
+          added.length ? "נמצאו " + added.length + " מודלים חדשים" : "אין מודלים חדשים",
+          "success"
+        );
+      });
+    },
+    function () {
+      setRefreshStatus("");
+      showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+    }
+  );
+  return true;
+}
+
+function bindRefreshButton() {
+  var button = document.getElementById("refresh-models");
+  if (button) {
+    button.addEventListener("click", refreshLiveModels);
+  }
+}
+
 // Every mutation to `CLIENT_STATE` has exactly two views that must repaint
 // from it — the action pill's dirty count and the drawer's JSON preview —
 // so this is the one seam `recordStateChange`/`undoChange`/
@@ -1674,6 +1916,7 @@ var CLIENT_STATE = {
 bindRoleControls();
 bindActionPill();
 bindConfigDrawer();
+bindRefreshButton();
 refreshStateViews();
 """
 
@@ -1792,6 +2035,13 @@ footer { padding: 1rem 2rem; color: var(--muted); font-size: 0.8rem; }
 #tab-roles:checked ~ #tab-content-roles { display: block; }
 
 .role-matrix-main { padding: 1.5rem 2rem; max-width: 1200px; margin: 0 auto; }
+.role-matrix-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.refresh-status { font-size: 0.8rem; color: var(--muted); }
 .segmented-toggle { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
 .segmented-toggle label {
   cursor: pointer;
@@ -2078,6 +2328,7 @@ def render_html_report(
     window_days: int = DEFAULT_WINDOW_DAYS,
     role_matrix: Mapping[str, Any] | None = None,
     model_capabilities: Mapping[tuple[str, str], Any] | None = None,
+    routing_config_dict: Mapping[str, Any] | None = None,
 ) -> str:
     """The pure contract door: a journal and its two already-computed
     boards in, a standalone HTML document out. Reads no clock, touches no
@@ -2106,6 +2357,14 @@ def render_html_report(
     same reason `role_matrix` does — a document whose dropdowns offer only
     the current binding, never a crash and never a disk read from this
     door.
+
+    `routing_config_dict` is `routing_config.RoutingConfig.to_dict()` —
+    embedded verbatim (see `_dashboard_config_json`) so the reactive
+    `saveChanges` can reconcile an edited role's `{model, effort}` back
+    into a full config payload for `POST /api/config` (spec 0013 US14).
+    Defaults to empty for the same reason the other two do; a document
+    rendered without one still renders, `saveChanges` just has nothing to
+    reconcile onto in server mode.
     """
     _require_aware_now(now)
     _validate_window_days(window_days)
@@ -2164,7 +2423,9 @@ def render_html_report(
     role_matrix_html = _role_matrix_section_html(
         role_matrix if role_matrix is not None else {}, capabilities
     )
-    dashboard_config_json = _dashboard_config_json(capabilities)
+    dashboard_config_json = _dashboard_config_json(
+        capabilities, original_config=routing_config_dict
+    )
 
     return f"""<!DOCTYPE html>
 <html lang="he" dir="rtl">
@@ -2291,8 +2552,9 @@ def write_html_report(
         journal, now=now - timedelta(days=window_days), window_days=window_days
     )
     capabilities = routing_config.build_model_capabilities_registry()
+    loaded_config = routing_config.load_routing_config()
     role_matrix = routing_config.get_role_matrix_view_data(
-        routing_config.load_routing_config(), capabilities=capabilities
+        loaded_config, capabilities=capabilities
     )
     content = render_html_report(
         journal,
@@ -2302,6 +2564,7 @@ def write_html_report(
         window_days=window_days,
         role_matrix=role_matrix,
         model_capabilities=capabilities,
+        routing_config_dict=loaded_config.to_dict(),
     )
     path = output_path if output_path is not None else html_report_path(root_dir, now=now)
     _atomic_text_write(path, content)
