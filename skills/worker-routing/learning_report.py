@@ -491,11 +491,16 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
     `routing_config.parse_routing_config` already validates a config loaded
     from disk — this handler adds no schema knowledge of its own, so a
     payload that would fail `load_routing_config` fails here too, for the
-    same reason. Today's role cards (ticket 48/50) preview a reduced
+    same reason. The role cards (ticket 48/50) preview a reduced
     ``{roles: {role_id: {model, effort}}}`` shape, not this validator's full
-    `RoleConfig`/`ProviderConfig` shape — wiring the "save" button to POST
-    here, and reconciling that reduced shape into a valid config, is
-    separate work this ticket does not include.
+    `RoleConfig`/`ProviderConfig` shape — this handler knows nothing of that
+    reconciliation. It is `learning_report_html`'s embedded
+    `buildFullConfigPayload` (ticket 52 follow-up, spec 0013 US14) that
+    reconstitutes a full config client-side before ever POSTing here: it
+    clones the page's own embedded `originalConfig`, repoints only an
+    edited role's primary `preferred_providers` entry, and reuses or mints
+    a `providers` entry for it — this handler only ever sees, and only
+    ever needs to validate, that full shape.
 
     **GET /api/model-capabilities.** Spec 0013 §1 names this endpoint and
     groups its Testing Decisions with `--serve`. It calls

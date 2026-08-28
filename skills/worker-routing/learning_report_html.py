@@ -1865,13 +1865,11 @@ function refreshLiveModels() {
       response.json().then(function (data) {
         var added = applyCapabilitySnapshot((data && data.capabilities) || {});
         repaintEveryRoleFromState();
-        setRefreshStatus(
-          added.length ? "נמצאו " + added.length + " מודלים חדשים" : "אין מודלים חדשים"
-        );
-        showToast(
-          added.length ? "נמצאו " + added.length + " מודלים חדשים" : "אין מודלים חדשים",
-          "success"
-        );
+        var message = added.length
+          ? "נמצאו " + added.length + " מודלים חדשים"
+          : "אין מודלים חדשים";
+        setRefreshStatus(message);
+        showToast(message, "success");
       });
     },
     function () {
