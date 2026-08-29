@@ -5,6 +5,12 @@
 
 ## Active Entries
 
+### ERR-0006: Transitional Runtime Proxying Obscuring Static Typecheck Seams
+- **Date:** 2026-08-29
+- **Root Cause:** When aliasing deprecated module facades via dynamic `sys.modules[__name__] = canonical_module`, test suites importing the legacy module name fail static analysis (`mypy`) with 96+ false `attr-defined` errors because typecheckers cannot follow runtime dynamic module replacement.
+- **Verified Signal:** `mypy worker_routing` failed with 96 attribute errors on `test_debate_orchestrator.py` while runtime `python3 -m unittest` succeeded. Retargeting imports to `critical_dialogue` resolved all 96 errors cleanly.
+- **Actionable Prevention Rule (Golden Rule 41):** Always update test suites and static type annotations directly to canonical deep modules rather than relying on runtime dynamic aliases during module migrations.
+
 ### ERR-0005: Dispatched Background Threads Bypassing Public Consultation Mock Seams
 - **Date:** 2026-08-29
 - **Root Cause:** In `critical_dialogue.py`, `_run_dispatched_post_mortem` directly invoked `run_critical_dialogue(...)` instead of the public alias `run_advisory_consultation_debate(...)`. Consequently, test harnesses patching `advisory_consultation.run_advisory_consultation_debate` with side effects were bypassed, preventing the background thread exception net from capturing and recording the simulated failure.

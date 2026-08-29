@@ -672,6 +672,14 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("thread", "background", "dispatch_post_mortem_consultation", "run_advisory_consultation_debate", "monkeypatch", "mock", "alias", "seam", "post-mortem"),
         ("critical_dialogue.py", "test_routing.py", "*.py"),
     ),
+    GoldenRule(
+        41,
+        "Testing & TDD Seams",
+        "Retarget test suites and child subprocess strings directly to consolidated module seams",
+        "During facade deprecation and module consolidation, update all test imports, type annotations (under TYPE_CHECKING), and child subprocess scripts (e.g. _InstalledHarness.run_installed_python strings) to import and exercise the canonical deep module (critical_dialogue.py) directly. Relying on transitional runtime proxy aliases (such as sys.modules rebinding) obscures static type inference in mypy (generating false attr-defined errors) and creates latent test regressions when legacy facades are deleted.",
+        ("test", "seam", "facade", "consolidation", "critical_dialogue", "TYPE_CHECKING", "subprocess", "installed harness", "mypy", "proxy"),
+        ("test_*.py", "dialogue_transcript.py", "critical_dialogue.py", "*.py"),
+    ),
 )
 
 _INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (
