@@ -1,5 +1,19 @@
 # Worker Routing Fallbacks
 
+## 2026-08-29 — Multi-Term Query Retrieval Tests Mask Keyword Dropping in Consolidated Golden Rules
+
+- Mission: ticket 60 consolidation of Golden Rules 32–35 into unified Rule 32.
+- Issue: Initial retrieval tests used realistic multi-word query sentences (e.g. `rubber-stamp the verification after a wrong fix`) with `max_rules=5`. Because Rule 32 contained multiple matching terms (`verification`, `wrong fix`, `rubber-stamp`) and file pattern `verify.py`, dropping any single term from the rule (e.g. removing `wrong fix` or `rubber-stamp`) left the test 100% green, masking vocabulary loss.
+- Resolution: Enforced Golden Rule 5 by adding a direct literal set equality assertion `test_rule_32_contains_full_consolidated_keyword_set` asserting `set(rule_32.keywords) == expected_keywords` (18 keywords) where dropping any individual keyword produces an immediate, isolated failure with set difference.
+- Lesson: For rule catalog entries with compound keyword tuples, multi-word retrieval queries must be paired with direct set equality tests. Otherwise, query score redundancy masks accidental keyword omission.
+
+## 2026-08-29 — Obsolete Pending Instructions in Closed Backlog Tickets Create Review Finding Drift
+
+- Mission: ticket 60 completion and two-axis review convergence.
+- Issue: When ticket 60 was implemented, its status was updated to `done`, but the markdown file body still contained `## Decision Needed` with the text "Until that policy is decided, retain rules 32–35 as separate entries." Round 2 review correctly flagged this contradiction between the `done` status and the unresolved decision prompt.
+- Resolution: Converted the section to `## Decision Taken` and documented the adopted consolidation policy.
+- Lesson: In convergence loops, transitioning a ticket from open/policy-decision-required to done requires reconciling the body of the ticket (`Decision Needed` -> `Decision Taken`), ensuring no contradictory pending instructions remain.
+
 ## 2026-08-29 — Ticket 54 Interim Containment: Narrowing Sync Assertions & Exact Test Naming
 
 - Mission: implement ticket 54 under spec 0014 on branch `spec-0013-role-and-model-matrix-dashboard`.
