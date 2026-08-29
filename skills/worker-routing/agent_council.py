@@ -71,7 +71,7 @@ def detect_sensitive_data(text: str) -> bool:
 
 def evaluate_sensitivity(task_text: str) -> tuple[bool, bool]:
     """Return whether a task is sensitive and whether it includes credentials."""
-    is_sensitive = detect_sensitive_data(task_text)
+    is_sensitive = _sensitivity_redactor.scan_sensitivity_markers(task_text) is not None
     contains_credentials = (
         _sensitivity_redactor.scan_sensitivity_markers(
             task_text, markers=_CREDENTIAL_MARKERS
