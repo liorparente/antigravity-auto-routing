@@ -77,8 +77,20 @@ def request_council_review(
     ``ReviewCouncil.review`` is asynchronous because it executes all
     providers concurrently.  The public request helper is synchronous so a
     normal routing decision can obtain its consolidated outcome directly.
+    When called from an already-running event loop, the review runs in an
+    isolated worker thread so this synchronous boundary never nests loops.
     """
     council = ReviewCouncil(policy_path=policy_path)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, council.review(request)).result()
     return asyncio.run(council.review(request))
 
 

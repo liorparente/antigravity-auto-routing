@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,7 +16,23 @@ else:
     import critical_dialogue  # type: ignore[no-redef]
 
 
-class _Adapter:
+def _make_vote_payload(
+    provider: str,
+    vote: str,
+    *,
+    candidate_hash: str | None = None,
+    confidence: float = 1.0,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build a concise, configurable reviewer vote payload for council tests."""
+    payload: dict[str, Any] = {"provider": provider, "vote": vote, "confidence": confidence}
+    if candidate_hash is not None:
+        payload["candidate_hash"] = candidate_hash
+    payload.update(extra)
+    return payload
+
+
+class _MockReviewerAdapter:
     def __init__(self, provider_id: str, responses: list[dict[str, Any]]) -> None:
         self.provider_id = provider_id
         self._responses = responses
@@ -100,15 +117,22 @@ class CouncilReviewBoundaryTests(unittest.TestCase):
     def test_review_council_unanimous_and_security_veto(self) -> None:
         council = critical_dialogue.ReviewCouncil()
         approvals = [
-            _Adapter(provider, [{"provider": provider, "vote": "approve", "confidence": 1.0, "candidate_hash": self.candidate_hash}] * 3)
+            _MockReviewerAdapter(
+                provider, [_make_vote_payload(provider, "approve", candidate_hash=self.candidate_hash)] * 3
+            )
             for provider in ("claude", "codex", "gemini")
         ]
         outcome = asyncio.run(council.review(self._request(), custom_adapters=approvals))
         self.assertEqual(outcome.status, "UNANIMOUS")
 
         vetoes = [
-            _Adapter("claude", [{"provider": "claude", "vote": "approve", "confidence": 1.0}]),
-            _Adapter("codex", [{"provider": "codex", "vote": "block", "findings": [{"severity": "critical", "confidence": 1.0}]}]),
+            _MockReviewerAdapter("claude", [_make_vote_payload("claude", "approve")]),
+            _MockReviewerAdapter(
+                "codex",
+                [_make_vote_payload(
+                    "codex", "block", findings=[{"severity": "critical", "confidence": 1.0}]
+                )],
+            ),
         ]
         outcome = asyncio.run(council.review(self._request(), custom_adapters=vetoes))
         self.assertEqual(outcome.status, "SECURITY_HALT")
@@ -117,9 +141,13 @@ class CouncilReviewBoundaryTests(unittest.TestCase):
         council = critical_dialogue.ReviewCouncil()
         self.assertEqual(council._resolve_adapters(self._request(local=True))[0].provider_id, "lm-studio")
         perspectives = [
-            _Adapter(
+            _MockReviewerAdapter(
                 name,
-                [{"provider": name, "perspective": name, "vote": "approved", "candidate_hash": self.candidate_hash}],
+                [
+                    _make_vote_payload(
+                        name, "approved", candidate_hash=self.candidate_hash, perspective=name
+                    )
+                ],
             )
             for name in ("reviewer_architecture", "reviewer_risk", "reviewer_maintainability", "reviewer_security")
         ]
@@ -129,16 +157,95 @@ class CouncilReviewBoundaryTests(unittest.TestCase):
     def test_request_council_review_runs_the_async_council_to_completion(self) -> None:
         expected = critical_dialogue.ReviewOutcome(status="UNANIMOUS", run_id="test-run")
 
-        class _Council:
+        class _StubCouncil:
             def __init__(self, *, policy_path: str | Path) -> None:
                 self.policy_path = policy_path
 
             async def review(self, _request: Any) -> Any:
                 return expected
 
-        with patch.object(critical_dialogue, "ReviewCouncil", _Council):
+        with patch.object(critical_dialogue, "ReviewCouncil", _StubCouncil):
             outcome = critical_dialogue.request_council_review(self._request())
         self.assertIs(outcome, expected)
+
+    def test_request_council_review_completes_inside_a_running_event_loop(self) -> None:
+        expected = critical_dialogue.ReviewOutcome(status="UNANIMOUS", run_id="loop-run")
+
+        class _StubCouncil:
+            def __init__(self, *, policy_path: str | Path) -> None:
+                self.policy_path = policy_path
+
+            async def review(self, _request: Any) -> Any:
+                return expected
+
+        async def run_in_loop() -> Any:
+            return critical_dialogue.request_council_review(self._request())
+
+        with patch.object(critical_dialogue, "ReviewCouncil", _StubCouncil):
+            outcome = asyncio.run(run_in_loop())
+        self.assertIs(outcome, expected)
+
+
+class CriticalDialoguePersistenceTests(unittest.TestCase):
+    def _approve(self, _model: str, _effort: str, prompt: str) -> str:
+        if "You are the Planner" in prompt:
+            return "Proposed plan"
+        return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
+
+    def test_run_critical_dialogue_applies_budget_degradation_ladder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            budget_path = root / "routing-config.json"
+            budget_path.write_text(
+                json.dumps({"dialogue_budget": {"session_dialogue_cap": 1}}), encoding="utf-8"
+            )
+            calls: list[tuple[str, str]] = []
+
+            def invoke(model: str, effort: str, prompt: str) -> str:
+                calls.append((model, effort))
+                return self._approve(model, effort, prompt)
+
+            reduced_rounds = critical_dialogue.run_critical_dialogue(
+                "Review the implementation", invoke, root_dir=root,
+                session_spend_so_far=1, budget_config_path=budget_path,
+            )
+            cheaper_roster = critical_dialogue.run_critical_dialogue(
+                "Review the implementation", invoke, root_dir=root,
+                session_spend_so_far=2, budget_config_path=budget_path,
+            )
+            skipped = critical_dialogue.run_critical_dialogue(
+                "Review the implementation", invoke, root_dir=root,
+                session_spend_so_far=3, budget_config_path=budget_path,
+            )
+
+        self.assertEqual(reduced_rounds.degradation_rung, 1)
+        self.assertEqual(reduced_rounds.rounds_run, 1)
+        self.assertEqual(cheaper_roster.degradation_rung, 2)
+        self.assertEqual(
+            (cheaper_roster.planner_model, cheaper_roster.critic_model),
+            ("Codex 5.6 Terra", "Codex 5.6 Terra"),
+        )
+        self.assertEqual(skipped.outcome, "budget_skipped")
+        self.assertEqual(skipped.degradation_rung, 3)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[2:], [("Codex 5.6 Terra", "low")] * 2)
+
+    def test_run_critical_dialogue_emits_transcript_and_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = critical_dialogue.run_critical_dialogue(
+                "Review the implementation", self._approve, root_dir=root
+            )
+            transcript_path = root / ".scratch" / "planning_debate.md"
+            telemetry_path = root / ".ralph" / "routing_telemetry.jsonl"
+            self.assertTrue(transcript_path.is_file())
+            self.assertTrue(telemetry_path.is_file())
+            transcript = transcript_path.read_text(encoding="utf-8")
+            telemetry = json.loads(telemetry_path.read_text(encoding="utf-8").splitlines()[-1])
+
+        self.assertIn("**Outcome:** consensus", transcript)
+        self.assertEqual(telemetry["outcome"], result.outcome)
+        self.assertEqual(telemetry["rounds_run"], result.rounds_run)
 
 
 if __name__ == "__main__":
