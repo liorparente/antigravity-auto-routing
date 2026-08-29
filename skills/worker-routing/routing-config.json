@@ -1,31 +1,58 @@
 {
   "context_specialist": {
     "name": "Gemini 3.6 Flash (High/Medium/Low) / Gemini 3.1 Pro (High/Low)",
-    "patterns": ["agy", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro"]
+    "patterns": [
+      "agy",
+      "gemini-3.6-flash",
+      "gemini-3.5-flash",
+      "gemini-3.1-pro"
+    ]
   },
   "planner": {
     "name": "Claude Opus 5 (Thinking) / Claude Fable 5",
-    "patterns": ["claude-opus-5", "claude-fable-5", "claude -p --model"]
+    "patterns": [
+      "claude-opus-5",
+      "claude-fable-5",
+      "claude -p --model"
+    ]
   },
   "critic": {
     "name": "Codex 5.6 Sol / GPT-OSS 120B (Medium)",
-    "patterns": ["codex exec", "gpt-oss-120b", "codex-sol"]
+    "patterns": [
+      "codex exec",
+      "gpt-oss-120b",
+      "codex-sol"
+    ]
   },
   "heavy_doer": {
     "name": "Claude Sonnet 5 (Thinking)",
-    "patterns": ["claude-sonnet-5", "claude -p"]
+    "patterns": [
+      "claude-sonnet-5",
+      "claude -p"
+    ]
   },
   "light_doer": {
     "name": "Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)",
-    "patterns": ["codex exec", "gemini-3.6-flash-low", "codex-terra", "codex-luna"]
+    "patterns": [
+      "codex exec",
+      "gemini-3.6-flash-low",
+      "codex-terra",
+      "codex-luna"
+    ]
   },
   "sensitive_doer": {
     "name": "LM Studio (Local Model)",
-    "patterns": ["127.0.0.1:1234/v1/chat", "localhost:1234/v1/chat"]
+    "patterns": [
+      "127.0.0.1:1234/v1/chat",
+      "localhost:1234/v1/chat"
+    ]
   },
   "qa_auditor": {
     "name": "Codex 5.6 Sol / Claude Opus 5 (Thinking)",
-    "patterns": ["codex review", "claude-opus-5"]
+    "patterns": [
+      "codex review",
+      "claude-opus-5"
+    ]
   },
   "roles": {
     "planner": {
@@ -35,7 +62,11 @@
         "min_context": 200000,
         "local_only": false
       },
-      "preferred_providers": ["claude_opus_5", "claude_fable_5", "codex_sol"]
+      "preferred_providers": [
+        "claude_opus_5",
+        "claude_fable_5",
+        "codex_sol"
+      ]
     },
     "builder_heavy": {
       "capability_requirements": {
@@ -44,7 +75,10 @@
         "min_context": 128000,
         "local_only": false
       },
-      "preferred_providers": ["claude_sonnet_5", "gemini_flash_high"]
+      "preferred_providers": [
+        "claude_sonnet_5",
+        "gemini_flash_high"
+      ]
     },
     "builder_light": {
       "capability_requirements": {
@@ -53,7 +87,11 @@
         "min_context": 32000,
         "local_only": false
       },
-      "preferred_providers": ["codex_terra", "codex_luna", "gemini_flash_high"]
+      "preferred_providers": [
+        "codex_terra",
+        "codex_luna",
+        "gemini_flash_high"
+      ]
     },
     "reviewer_architecture": {
       "capability_requirements": {
@@ -62,7 +100,10 @@
         "min_context": 128000,
         "local_only": false
       },
-      "preferred_providers": ["codex_sol", "claude_opus_5"]
+      "preferred_providers": [
+        "codex_sol",
+        "claude_opus_5"
+      ]
     },
     "reviewer_risk": {
       "capability_requirements": {
@@ -71,7 +112,10 @@
         "min_context": 128000,
         "local_only": false
       },
-      "preferred_providers": ["codex_sol", "gemini_pro"]
+      "preferred_providers": [
+        "codex_sol",
+        "gemini_pro"
+      ]
     },
     "reviewer_maintainability": {
       "capability_requirements": {
@@ -80,7 +124,10 @@
         "min_context": 64000,
         "local_only": false
       },
-      "preferred_providers": ["gemini_flash_high", "codex_terra"]
+      "preferred_providers": [
+        "gemini_flash_high",
+        "codex_terra"
+      ]
     },
     "reviewer_security": {
       "capability_requirements": {
@@ -89,7 +136,10 @@
         "min_context": 128000,
         "local_only": false
       },
-      "preferred_providers": ["codex_sol", "claude_opus_5"]
+      "preferred_providers": [
+        "codex_sol",
+        "claude_opus_5"
+      ]
     },
     "adjudicator": {
       "capability_requirements": {
@@ -98,7 +148,9 @@
         "min_context": 32000,
         "local_only": true
       },
-      "preferred_providers": ["lm_studio_local"]
+      "preferred_providers": [
+        "lm_studio_local"
+      ]
     },
     "sensitive_executor": {
       "capability_requirements": {
@@ -107,7 +159,9 @@
         "min_context": 32000,
         "local_only": true
       },
-      "preferred_providers": ["lm_studio_local"]
+      "preferred_providers": [
+        "lm_studio_local"
+      ]
     }
   },
   "providers": {
@@ -159,20 +213,33 @@
   },
   "council_policy": {
     "fast_path_enabled": true,
-    "quorum_threshold": 0.60,
+    "quorum_threshold": 0.6,
     "perspective_weights": {
-      "reviewer_architecture": 0.30,
+      "reviewer_architecture": 0.3,
       "reviewer_risk": 0.25,
-      "reviewer_maintainability": 0.20,
+      "reviewer_maintainability": 0.2,
       "reviewer_security": 0.25
     },
     "security_veto": {
       "enabled": true,
-      "veto_severities": ["critical", "high"],
-      "security_threshold": 0.80
+      "veto_severities": [
+        "critical",
+        "high"
+      ],
+      "security_threshold": 0.8
     },
-    "deadlines_seconds": {"round_1": 45, "round_2": 60, "round_3": 60},
-    "consensus_policy": ["UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"]
+    "deadlines_seconds": {
+      "round_1": 45,
+      "round_2": 60,
+      "round_3": 60
+    },
+    "consensus_policy": [
+      "UNANIMOUS",
+      "QUALIFIED",
+      "MATERIAL_DISAGREEMENT",
+      "INCOMPLETE",
+      "UNRESOLVED"
+    ]
   },
   "supported_models": [
     "Gemini 3.7 Flash",
@@ -247,29 +314,85 @@
   },
   "consultation_policy": {
     "providers": [
-      {"id": "claude", "model": "claude-opus-5", "effort_mapping": {"high": "high"}},
-      {"id": "codex", "model": "gpt-5.6-sol", "effort_mapping": {"high": "high"}},
-      {"id": "gemini", "model": "gemini-3.1-pro", "effort_mapping": {"high": "high"}}
+      {
+        "id": "claude",
+        "model": "claude-opus-5",
+        "effort_mapping": {
+          "high": "high"
+        }
+      },
+      {
+        "id": "codex",
+        "model": "gpt-5.6-sol",
+        "effort_mapping": {
+          "high": "high"
+        }
+      },
+      {
+        "id": "gemini",
+        "model": "gemini-3.1-pro",
+        "effort_mapping": {
+          "high": "high"
+        }
+      }
     ],
     "adjudicators": [
-      {"id": "lm-studio", "model": "qwen3-coder-30b", "effort_mapping": {"high": "high"}}
+      {
+        "id": "lm-studio",
+        "model": "qwen3-coder-30b",
+        "effort_mapping": {
+          "high": "high"
+        }
+      }
     ],
-    "deadlines_seconds": {"round_1": 120, "round_2": 60, "round_3": 60},
-    "consensus_policy": ["UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"],
+    "deadlines_seconds": {
+      "round_1": 120,
+      "round_2": 60,
+      "round_3": 60
+    },
+    "consensus_policy": [
+      "UNANIMOUS",
+      "QUALIFIED",
+      "MATERIAL_DISAGREEMENT",
+      "INCOMPLETE",
+      "UNRESOLVED"
+    ],
     "weighting": {
-      "initial_weights": {"claude": 0.40, "codex": 0.40, "gemini": 0.20},
+      "initial_weights": {
+        "claude": 0.4,
+        "codex": 0.4,
+        "gemini": 0.2
+      },
       "min_weight": 0.05,
       "max_weight": 0.65,
-      "quorum_threshold": 0.60,
+      "quorum_threshold": 0.6,
       "dynamic_weights_path": ".ralph/council_weights.json"
     },
     "security_veto": {
       "enabled": true,
-      "veto_severities": ["critical", "high"],
-      "security_threshold": 0.80
+      "veto_severities": [
+        "critical",
+        "high"
+      ],
+      "security_threshold": 0.8
     }
   },
-  "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"],
+  "code_extensions": [
+    "ts",
+    "tsx",
+    "css",
+    "js",
+    "jsx",
+    "py",
+    "go",
+    "rs",
+    "tf",
+    "sql",
+    "sh",
+    "rb",
+    "cpp",
+    "h"
+  ],
   "safe_commands": [
     "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
     "^\\s*cat(?:\\s+[^>|&;]+)?\\s*$",
@@ -284,5 +407,6 @@
     "^\\s*find\\s+[^>|&;]*$",
     "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^>|&;]+)?\\s*$",
     "^\\s*lsof(?:\\s+-[a-zA-Z0-9:]+)?(?:\\s+[^>|&;]+)?\\s*$"
-  ]
+  ],
+  "_active_profile": "baseline_cloud_default"
 }

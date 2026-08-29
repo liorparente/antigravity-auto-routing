@@ -33,7 +33,7 @@
         "reasoning_tier": "high",
         "tool_access": "read",
         "min_context": 200000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": ["qwen_local"]
     },
@@ -42,7 +42,7 @@
         "reasoning_tier": "high",
         "tool_access": "workspace-write",
         "min_context": 128000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": ["qwen_local"]
     },
@@ -51,7 +51,7 @@
         "reasoning_tier": "medium",
         "tool_access": "workspace-write",
         "min_context": 32000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": ["qwen_local"]
     },
@@ -60,7 +60,7 @@
         "reasoning_tier": "high",
         "tool_access": "read",
         "min_context": 128000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": ["qwen_local"]
     },
@@ -69,7 +69,7 @@
         "reasoning_tier": "high",
         "tool_access": "read",
         "min_context": 128000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": ["qwen_local"]
     },
@@ -78,7 +78,7 @@
         "reasoning_tier": "medium",
         "tool_access": "read",
         "min_context": 64000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": ["qwen_local"]
     },
@@ -87,7 +87,7 @@
         "reasoning_tier": "high",
         "tool_access": "read",
         "min_context": 128000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": ["qwen_local"]
     },
