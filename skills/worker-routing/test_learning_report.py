@@ -28,11 +28,18 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import learning_journal, learning_report, probe_models, routing_config
+    from . import (
+        learning_journal,
+        learning_report,
+        learning_report_html,
+        probe_models,
+        routing_config,
+    )
     from .test_learning_scoreboard import _find_forbidden_clock_reads
 else:
     import learning_journal  # type: ignore[no-redef]
     import learning_report  # type: ignore[no-redef]
+    import learning_report_html  # type: ignore[no-redef]
     import probe_models  # type: ignore[no-redef]
     import routing_config  # type: ignore[no-redef]
     from test_learning_scoreboard import _find_forbidden_clock_reads  # type: ignore[no-redef]
@@ -925,13 +932,27 @@ class ServeCliTests(unittest.TestCase):
             exit_code = learning_report.main(["--serve", "9321"])
 
         self.assertEqual(exit_code, 0)
-        served.assert_called_once_with(port=9321)
+        served.assert_called_once_with(port=9321, dashboard_root=Path("."))
 
     def test_bare_serve_flag_defaults_to_the_documented_port(self) -> None:
         with mock.patch.object(learning_report, "serve_dashboard") as served:
             learning_report.main(["--serve"])
 
-        served.assert_called_once_with(port=learning_report.DEFAULT_SERVE_PORT)
+        served.assert_called_once_with(
+            port=learning_report.DEFAULT_SERVE_PORT, dashboard_root=Path(".")
+        )
+
+    def test_serve_looks_for_the_dashboard_under_the_given_root_dir(self) -> None:
+        """`GET /` serves a report `--html` wrote, and `--html` writes it
+        under `--root-dir` — so the two flags have to agree on the root.
+        """
+        with mock.patch.object(learning_report, "serve_dashboard") as served:
+            learning_report.main(["--serve", "--root-dir", "/tmp/elsewhere"])
+
+        served.assert_called_once_with(
+            port=learning_report.DEFAULT_SERVE_PORT,
+            dashboard_root=Path("/tmp/elsewhere"),
+        )
 
     def test_serve_needs_no_now_unlike_every_other_mode(self) -> None:
         with mock.patch.object(learning_report, "serve_dashboard"):
@@ -942,6 +963,131 @@ class ServeCliTests(unittest.TestCase):
     def test_now_is_still_required_without_serve(self) -> None:
         with self.assertRaises(SystemExit):
             learning_report.main([])
+
+
+class DashboardDocumentRouteTests(unittest.TestCase):
+    """`GET /` — the route that makes every other route on this server
+    reachable.
+
+    Without it, `--serve` answered only its two `/api/*` endpoints, so the
+    dashboard could only be opened over `file://`, where the page's own
+    `isServerMode()` guard is false — which silently made US14's save
+    branch, Decision 1's launch probe, and US8's refresh button dead code.
+    These are real socket round trips against a real generated report, so a
+    route that 404s cannot read as passing.
+    """
+
+    def _start_server(self, dashboard_root: Path) -> int:
+        server = learning_report.create_dashboard_server(
+            port=0,
+            config_path=dashboard_root / "routing-config.json",
+            capability_snapshot=lambda: probe_models.CatalogSnapshot(providers=()),
+            dashboard_root=dashboard_root,
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, timeout=5)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return int(server.server_address[1])
+
+    def _get_raw(self, port: int, path: str) -> tuple[int, str, bytes]:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        try:
+            connection.request("GET", path)
+            response = connection.getresponse()
+            return (
+                response.status,
+                response.getheader("Content-Type") or "",
+                response.read(),
+            )
+        finally:
+            connection.close()
+
+    def _write_report(self, root: Path, date: str, body: str) -> Path:
+        path = root / learning_report.REPORTS_RELATIVE_DIR / f"weekly-report-{date}.html"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_the_root_path_serves_the_generated_dashboard_as_html(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_report(root, "2026-01-08", "<!doctype html><h1>SENTINEL</h1>")
+            port = self._start_server(root)
+
+            status, content_type, body = self._get_raw(port, "/")
+
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", content_type)
+            self.assertIn("SENTINEL", body.decode("utf-8"))
+
+    def test_the_newest_report_wins_when_several_have_been_generated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_report(root, "2026-01-08", "OLDER")
+            self._write_report(root, "2026-02-11", "NEWEST")
+            port = self._start_server(root)
+
+            _, _, body = self._get_raw(port, "/")
+
+            self.assertIn("NEWEST", body.decode("utf-8"))
+            self.assertNotIn("OLDER", body.decode("utf-8"))
+
+    def test_a_root_request_before_any_report_exists_explains_how_to_make_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            port = self._start_server(Path(tmp))
+
+            status, _, body = self._get_raw(port, "/")
+
+            self.assertEqual(status, 503)
+            self.assertIn("--html", json.loads(body.decode("utf-8"))["error"])
+
+    def test_an_unknown_path_is_still_a_404_and_not_the_dashboard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._write_report(root, "2026-01-08", "SENTINEL")
+            port = self._start_server(root)
+
+            status, _, body = self._get_raw(port, "/nope")
+
+            self.assertEqual(status, 404)
+            self.assertNotIn("SENTINEL", body.decode("utf-8"))
+
+    def test_a_dashboard_generated_after_startup_is_picked_up_without_a_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            port = self._start_server(root)
+            self.assertEqual(self._get_raw(port, "/")[0], 503)
+
+            self._write_report(root, "2026-01-08", "GENERATED LATER")
+
+            status, _, body = self._get_raw(port, "/")
+            self.assertEqual(status, 200)
+            self.assertIn("GENERATED LATER", body.decode("utf-8"))
+
+    def test_serving_a_real_rendered_report_yields_a_page_in_server_mode(self) -> None:
+        """What `--html` actually writes is what `GET /` serves, byte for
+        byte — the real generated report, not just a fixture file.
+
+        This asserts delivery only. That the served script's own
+        `isServerMode()` guard *evaluates* true over an `http:` origin is a
+        JavaScript question, and is covered where the script can actually be
+        run: `test_learning_report_html.LaunchProbeTests`, which drives the
+        guard through `pre_script`. Asserting `"isServerMode" in body` here
+        would only prove the identifier appears in the HTML source, which is
+        true of a page whose guard returns false.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            written = learning_report_html.write_html_report(root, now=_NOW)
+            port = self._start_server(root)
+
+            status, content_type, body = self._get_raw(port, "/")
+
+            self.assertEqual(status, 200)
+            self.assertIn("text/html", content_type)
+            self.assertEqual(body.decode("utf-8"), written.read_text(encoding="utf-8"))
 
 
 class ConfigApiServerTests(unittest.TestCase):

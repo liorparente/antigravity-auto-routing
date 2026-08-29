@@ -1203,15 +1203,16 @@ def audit_config_drift(
                     detail=f"default_reasoning_effort {effort!r} is unsupported by {model_id} (supported: {supported})",
                 )
             )
-    def label_drift_findings(labels: Iterable[str], subject_for: Callable[[str], str]) -> None:
+    def label_drift_findings(labels: Iterable[str], subject_prefix: str) -> None:
         """Shared by both label loops below (`supported_models` and each
         `role_fallback_chains` entry): a label is `unmapped_label` drift
         either because it resolves to no wire identifier at all, or because
-        the identifier it resolves to is not in any active catalog. Only
-        `subject_for` differs between the two call sites.
+        the identifier it resolves to is not in any active catalog. Both
+        call sites report the same `prefix[label]` subject shape, so only
+        the prefix differs between them.
         """
         for label in labels:
-            subject = subject_for(label)
+            subject = f"{subject_prefix}[{label}]"
             try:
                 model_id = resolve_model_id(label, snapshot=snapshot)
             except UnknownModelError:
@@ -1232,9 +1233,9 @@ def audit_config_drift(
                     )
                 )
 
-    label_drift_findings(config.supported_models, lambda label: f"supported_models[{label}]")
+    label_drift_findings(config.supported_models, "supported_models")
     for role, chain in config.roster_topology.role_fallback_chains.items():
-        label_drift_findings(chain, lambda label, role=role: f"roster_topology.{role}[{label}]")
+        label_drift_findings(chain, f"roster_topology.{role}")
     deduplicated = tuple(dict.fromkeys(findings))
     return tuple(sorted(deduplicated, key=lambda finding: (finding.kind, finding.subject)))
 

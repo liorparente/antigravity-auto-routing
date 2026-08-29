@@ -19,8 +19,11 @@
 ## Delivered
 
 `create_dashboard_server`/`serve_dashboard` bind a stdlib `http.server.
-HTTPServer` to a `_ConfigApiHandler` that answers exactly `POST
-/api/config`: read the body, `json.loads` it, validate through
+HTTPServer` to a `_ConfigApiHandler`. As shipped by *this* ticket it
+answered two routes — `POST /api/config` and `GET /api/model-capabilities`,
+the latter named by spec 0013 §1 though absent from this ticket's own
+checklist (ticket 53 later added a third, `GET /` — see the note below).
+`POST /api/config`: read the body, `json.loads` it, validate through
 `routing_config.parse_routing_config(payload, fallback_on_missing=True)`,
 and on success reuse `learning_report._atomic_text_write` (the same
 temp-file-then-`os.replace` helper the Markdown report already used) to
@@ -31,17 +34,22 @@ write nothing; a valid payload returns `200 {"status": "ok"}`. `--serve`
 it never renders a report — `main` now checks for that flag before enforcing
 `--now`.
 
-**One scope boundary, deliberately not crossed.** The save path validates
-and writes whatever full `RoutingConfig`-shaped JSON it is given; it does
-not translate the role cards' reduced `{roles: {role_id: {model, effort}}}`
-preview (tickets 48/50) into a valid `RoleConfig`/`ProviderConfig` payload,
-and nothing yet POSTs to this endpoint from the page itself. Ticket 50's own
-note anticipated this ticket would "own validating a payload through
-`routing_config.parse_routing_config`" — it does, exactly that, and no
-more; reconciling the reduced client shape into a full config, and wiring
-the "שמור שינויים" button to call this endpoint in server mode, is
-unticketed follow-up work, not something this ticket's own checklist asked
-for.
+**One scope boundary, deliberately not crossed *by this ticket*.** The save
+path validates and writes whatever full `RoutingConfig`-shaped JSON it is
+given; it did not translate the role cards' reduced `{roles: {role_id:
+{model, effort}}}` preview (tickets 48/50) into a valid
+`RoleConfig`/`ProviderConfig` payload, and at the time this ticket closed
+nothing POSTed to the endpoint from the page itself. Ticket 50's own note
+anticipated this ticket would "own validating a payload through
+`routing_config.parse_routing_config`" — it does, exactly that, and no more.
+
+> **Superseded by ticket 53.** That follow-up landed: `buildFullConfigPayload`
+> now reconciles the reduced client shape into a full config, "שמור שינויים"
+> POSTs it in server mode, and `GET /` was added because without it the page
+> could only be opened over `file://` — where `isServerMode()` is false, which
+> had left this endpoint unreachable from the dashboard in practice. Ticket 53
+> added exactly one route to the two above, bringing the handler to three:
+> `GET /`, `POST /api/config`, and `GET /api/model-capabilities`.
 
 Tested with real HTTP round trips (`http.client.HTTPConnection` against a
 server bound to an OS-assigned port), not direct calls into handler

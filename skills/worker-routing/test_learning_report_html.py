@@ -492,6 +492,10 @@ function fetch(url, options) {
   };
 }
 
+// The most recent `<a>` `createElement` handed out, so a test can inspect
+// the download link `downloadFullConfig` builds and confirm it was clicked.
+var LAST_ANCHOR = null;
+
 var document = {
   getElementById: function (id) {
     if (!Object.prototype.hasOwnProperty.call(ELEMENTS_BY_ID, id)) {
@@ -516,6 +520,15 @@ var document = {
     }
     if (tag === "div") {
       return makeElement();
+    }
+    if (tag === "a") {
+      var anchor = makeElement();
+      anchor.clicked = false;
+      anchor.click = function () {
+        anchor.clicked = true;
+      };
+      LAST_ANCHOR = anchor;
+      return anchor;
     }
     throw new Error("unsupported tag " + tag);
   }
@@ -1804,7 +1817,7 @@ class OriginalConfigPayloadTests(unittest.TestCase):
     def test_a_role_value_carrying_html_metacharacters_is_still_valid_json(self) -> None:
         journal = learning_journal.JournalRead()
         board, baseline_board = _boards(journal, now=_NOW)
-        routing_config_dict = {
+        routing_config_dict: dict[str, Any] = {
             "roles": {"</script><script>alert(1)</script>": {"preferred_providers": []}}
         }
 
@@ -2157,6 +2170,40 @@ class EmbeddedScriptBehaviorTests(unittest.TestCase):
         )
 
 
+class JsModelOptionLabelParityTests(unittest.TestCase):
+    """`_model_option_label` and the script's `addModelOption` both turn a
+    `{provider}::{model_id}` key into the same `<option>` text — the server
+    renders the audited pairs, `addModelOption` appends the live-probed ones
+    (US8), and a role's dropdown mixes the two. They are the same rule
+    written twice, once per language, so this pins them together: a change
+    to the separator on either side would otherwise leave one dropdown
+    holding two differently-formatted labels, with nothing red.
+    """
+
+    _KEYS = (
+        "claude_code_cli::claude-opus-5",
+        "lm_studio_local::qwen3-coder-30b",
+        "antigravity_cli::gemini-3.6-flash",
+    )
+
+    def test_both_implementations_label_every_key_identically(self) -> None:
+        result = _run_embedded_script(
+            _two_role_reactive_report(),
+            f"var KEYS = {json.dumps(list(self._KEYS))};"
+            "console.log(JSON.stringify(KEYS.map(function (key) {"
+            "  addModelOption(key);"
+            "  var select = document.querySelectorAll('.model-select')[0];"
+            "  var children = select.children;"
+            "  return children[children.length - 1].textContent;"
+            "})));",
+        )
+
+        self.assertEqual(
+            result,
+            [learning_report_html._model_option_label(key) for key in self._KEYS],
+        )
+
+
 class JsEffortSnapParityTests(unittest.TestCase):
     """`_resolve_effort_state` and the script's `resolveEffortState` are the
     same rule written twice, once per language. This runs one table of cases
@@ -2474,6 +2521,111 @@ class ClientStateMachineTests(unittest.TestCase):
         )
 
         self.assertEqual(result, False)
+
+    # node supplies real `Blob`/`URL` globals, so the download genuinely
+    # runs here; this only intercepts `createObjectURL` to capture the bytes
+    # a browser would have written to disk.
+    _CAPTURE_DOWNLOAD_JS = (
+        "var DOWNLOADED = null;"
+        "var REVOKED = null;"
+        "URL = {"
+        "  createObjectURL: function (blob) { DOWNLOADED = blob; return 'blob:x'; },"
+        "  revokeObjectURL: function (url) { REVOKED = url; }"
+        "};"
+    )
+
+    def test_a_standalone_save_downloads_the_full_config_not_the_reduced_preview(
+        self,
+    ) -> None:
+        """US13's "or download it" and Decision 4's standalone
+        "download/copy action". The file is named `routing-config.json`, so
+        it has to carry the shape that can actually replace that file —
+        `buildFullConfigPayload`'s, not the drawer's reduced preview.
+        """
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            self._CAPTURE_DOWNLOAD_JS + 'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "var saved = saveChanges();"
+            "var revokedSynchronously = REVOKED;"
+            "DOWNLOADED.text().then(function (text) {"
+            "  setTimeout(function () {"
+            "    console.log(JSON.stringify({"
+            "      saved: saved,"
+            "      downloaded: text,"
+            "      type: DOWNLOADED.type,"
+            "      revokedSynchronously: revokedSynchronously,"
+            "      revokedLater: REVOKED,"
+            "      filename: LAST_ANCHOR ? LAST_ANCHOR.download : null,"
+            "      clicked: LAST_ANCHOR ? LAST_ANCHOR.clicked : false"
+            "    }));"
+            "  }, 0);"
+            "});",
+        )
+
+        self.assertTrue(result["saved"])
+        self.assertTrue(result["clicked"], "the download link was never clicked")
+        self.assertEqual(result["filename"], "routing-config.json")
+        self.assertEqual(result["type"], "application/json")
+        # Revoking in the same tick as `click()` cancels the download in
+        # Firefox and Safari, so the contract is "revoked, but later".
+        self.assertIsNone(
+            result["revokedSynchronously"],
+            "the object URL was revoked in the same tick as the click",
+        )
+        self.assertEqual(result["revokedLater"], "blob:x", "the object URL leaked")
+
+        payload = json.loads(result["downloaded"])
+        self.assertNotEqual(
+            set(payload["roles"]["planner"]),
+            {"model", "effort"},
+            "downloaded the reduced drawer preview instead of the full config",
+        )
+        provider_id = payload["roles"]["planner"]["preferred_providers"][0]
+        self.assertEqual(payload["providers"][provider_id]["model"], "gpt-5.6-sol")
+
+    def test_the_downloaded_file_is_a_config_the_real_validator_accepts(self) -> None:
+        """The file is named `routing-config.json`, so its one use is
+        replacing that file — it has to survive the same fail-closed
+        `parse_routing_config` gate `POST /api/config` puts it through
+        (US15), not merely look like a config.
+        """
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            self._CAPTURE_DOWNLOAD_JS + 'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "saveChanges();"
+            "DOWNLOADED.text().then(function (text) {"
+            "  console.log(JSON.stringify({ downloaded: text }));"
+            "});",
+        )
+
+        parsed = routing_config.parse_routing_config(
+            json.loads(result["downloaded"]), fallback_on_missing=True
+        )
+
+        binding = parsed.roles["planner"].preferred_providers[0]
+        self.assertEqual(parsed.providers[binding].model, "gpt-5.6-sol")
+
+    def test_a_standalone_save_commits_the_baseline_and_toasts_the_download(self) -> None:
+        """Decision 4's standalone branch does all three things it names:
+        "updates local snapshot, triggers a download/copy action, and
+        displays a success toast".
+        """
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "var saved = saveChanges();"
+            "console.log(JSON.stringify({"
+            "  saved: saved,"
+            "  dirty: dirtyRoleCount(),"
+            "  downloadedFile: LAST_ANCHOR ? LAST_ANCHOR.download : null,"
+            "  toast: TOAST_CONTAINER.children[0].textContent"
+            "}));",
+        )
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(result["dirty"], 0)
+        self.assertEqual(result["downloadedFile"], "routing-config.json")
+        self.assertEqual(result["toast"], "הקונפיגורציה הורדה כקובץ")
 
     def test_undo_reset_and_save_each_show_a_toast(self) -> None:
         result = _run_embedded_script(
@@ -3096,25 +3248,54 @@ class ConfigDrawerBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result, {"model": "provider::gpt-5.6-sol", "effort": "high"})
 
-    def test_copying_writes_the_exact_preview_json_to_the_clipboard(self) -> None:
+    def test_copying_writes_the_full_config_not_the_drawers_display_shape(self) -> None:
+        """US13 asks the copy button for "the valid `routing-config.json`
+        payload". The drawer's own reduced `{model, effort}` readout is a
+        different shape for a different question, and one
+        `parse_routing_config` rejects — so the clipboard must *not* match
+        the drawer text, and must survive the real validator.
+        """
         result = _run_embedded_script(
-            _two_role_reactive_report(),
+            _two_role_reactive_report_with_config(),
             'onModelSelect("planner", "provider::gpt-5.6-sol");'
             "var copied = copyConfigToClipboard();"
             "console.log(JSON.stringify({"
             "  copied: copied,"
             "  writes: CLIPBOARD_WRITES.length,"
             "  matchesDrawer: CLIPBOARD_WRITES[0] === drawerPlainText(),"
-            "  payload: JSON.parse(CLIPBOARD_WRITES[0]).roles.planner"
+            "  clipboard: CLIPBOARD_WRITES[0]"
             "}));",
         )
 
         self.assertEqual(result["copied"], True)
         self.assertEqual(result["writes"], 1)
-        self.assertTrue(result["matchesDrawer"])
-        self.assertEqual(
-            result["payload"], {"model": "provider::gpt-5.6-sol", "effort": "high"}
+        self.assertFalse(
+            result["matchesDrawer"],
+            "the clipboard got the drawer's reduced preview, which is not a valid config",
         )
+
+        parsed = routing_config.parse_routing_config(
+            json.loads(result["clipboard"]), fallback_on_missing=True
+        )
+        binding = parsed.roles["planner"].preferred_providers[0]
+        self.assertEqual(parsed.providers[binding].model, "gpt-5.6-sol")
+
+    def test_the_copied_and_downloaded_payloads_are_byte_identical(self) -> None:
+        """US13's two halves ("to my clipboard or download it") are one
+        payload — an operator must not get different files depending on
+        which button they pressed.
+        """
+        result = _run_embedded_script(
+            _two_role_reactive_report_with_config(),
+            'onModelSelect("planner", "provider::gpt-5.6-sol");'
+            "copyConfigToClipboard();"
+            "console.log(JSON.stringify({"
+            "  clipboard: CLIPBOARD_WRITES[0],"
+            "  serialized: fullConfigJson()"
+            "}));",
+        )
+
+        self.assertEqual(result["clipboard"], result["serialized"])
 
     def test_a_successful_copy_shows_a_success_toast(self) -> None:
         result = _run_embedded_script(

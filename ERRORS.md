@@ -1,5 +1,102 @@
 # Worker Routing Fallbacks
 
+## 2026-08-29 — A Same-Size Mutation Left a Stale `__pycache__` Behind and Faked Two Failures
+
+- Mission: `/iterative-fix-review` on spec 0013, verifying that newly written tests actually fail
+  without the code they cover (mutation testing) rather than passing vacuously — the guard against
+  this repo's dominant defect, a green assertion over a path that never ran.
+- Method: back up the module, patch one string, run the test, restore from the backup.
+- Issue: the patch swapped the JS label separator `" · "` for `" -- "`. `·` is U+00B7, **two bytes in
+  UTF-8** — exactly the width of `--`. So the mutated and restored files had *identical sizes*, and
+  the restoring `cp` landed in the same wall-clock second as the mutation. CPython's bytecode cache
+  validates a `.pyc` on `(source mtime seconds, source size)`, both of which now matched the stale
+  entry, so `import` kept serving the **mutated** bytecode from `__pycache__` after the source was
+  correct again.
+- Detection: the next full-suite run reported three failures instead of one. `grep` on the source
+  showed the correct separator; the failure output showed the mutated one. Source and behavior
+  disagreed — which is only possible through a cache.
+- Resolution: `find . -name __pycache__ -type d -exec rm -rf {} +` before re-running; back to the
+  expected single pre-existing failure. Restoring with `cp -p` (preserving the original mtime) would
+  also have avoided it, since the backup predates the mutation.
+- Lesson: mutation testing edits source *underneath a running toolchain's cache*, and the mtime+size
+  heuristic is defeated precisely by the edits most tempting to make — a one-character swap, a
+  same-width Unicode/ASCII substitution. Always clear `__pycache__` as part of the restore step, not
+  just the file. And when source and observed behavior disagree, suspect a cache before re-reading
+  the diff for a mistake that is not there.
+
+## 2026-08-28 — Testing Load-Time-Gated Behavior Needs State Set Before the Script Runs, Not After
+
+- Mission: `/iterative-fix-review` (second, fresh-baseline invocation) on spec 0013's role/model
+  dashboard, implementing the automatic launch probe (Decision 1).
+- Issue: `_run_embedded_script(report, harness)` concatenates the DOM stub, the report's own
+  `<script>` body, and `harness` in that fixed order — the module's top-level init code (including a
+  new `if (isServerMode()) { refreshLiveModels({silent: true}); }` call) runs to completion *before*
+  `harness` executes a single line. A first draft of the launch-probe tests set
+  `location.protocol = "http:"` inside `harness`, expecting it to gate the auto-probe — it never
+  fired, because by the time that line ran, the init code reading `location.protocol` had already
+  finished, against the stub's default `"file:"`.
+- Detection: running the tests against the new production code and finding `FETCH_CALLS.length`
+  stayed 0 in the "server mode" test case too — a silent false-negative on the very feature under
+  test, not a crash.
+- Resolution: added a `pre_script` parameter to `_run_embedded_script`, inserted between the DOM
+  stub and the executable script, so a test can mutate `location`/`FETCH_MODE`/etc. before the
+  module's own init runs.
+- Lesson: a harness parameter that always runs *after* the code under test has already executed its
+  side effects cannot test anything gated on state read during initialization — check where in the
+  concatenation order a test's setup lands relative to the code path it means to influence, not just
+  whether the two ever appear in the same script.
+
+## 2026-08-28 — Reconciling Reduced UI State Into a Shared-Reference Schema Must Never Mutate a Shared Entry in Place
+
+- Mission: same session, implementing server-mode save (`buildFullConfigPayload`, spec 0013 US14) —
+  reconciling the role cards' reduced `{model, effort}` per-role state back into
+  `routing_config.RoutingConfig`'s full `roles`/`providers` shape.
+- Issue: a role's dropdown picks an adapter+model+effort triple directly, but the config schema
+  stores that as an indirection — `role.preferred_providers[0]` names a `providers` entry's id, and
+  that id is frequently shared: in the shipped config, `codex_sol` alone backs four different roles'
+  fallback slots. A first-instinct implementation would overwrite the primary provider entry's
+  fields in place to match the edited role's new selection — which would silently repoint every
+  *other* role that happened to share that same provider id, not just the one the operator meant to
+  change.
+- Resolution: `findOrCreateProviderId` never mutates an existing `providers` entry. It reuses one
+  only when its `adapter`/`model`/`default_reasoning_effort` already match the edit exactly (byte-
+  for-byte), and otherwise mints a new `{roleId}__custom` entry that belongs to the edited role
+  alone — every other role's reference to the original shared entry is left untouched.
+- Lesson: when a reduced, per-owner UI state has to round-trip back into a schema where the
+  underlying entity is addressed by a shared id rather than owned per-caller, treat every existing
+  entry as immutable from the edit's perspective — match-and-reuse or mint-new, never overwrite —
+  or one owner's edit becomes every sharer's edit.
+
+## 2026-08-28 — An Ambiguous Spec Mechanism Is a Documented Gap, Not a Guess, When Getting It Wrong Costs More Than Leaving It Undone
+
+- Mission: same session, closing out spec 0013's remaining gaps via `/iterative-fix-review`.
+- Context: two separate spec lines named a mechanism without pinning its shape. User story 9 asks to
+  "configure a fallback provider chain for each role" with no UI shape specified — ticket 51 already
+  declined to guess at this. Decision 4 separately says standalone-mode "שמור שינויים" "triggers a
+  download/copy action" — but the only existing copy mechanism (`copyConfigToClipboard`, ticket 50)
+  copies the *reduced* `{roles: {role_id: {model, effort}}}` preview, not the full `RoutingConfig`
+  shape `buildFullConfigPayload` builds for server mode; auto-firing it from `saveChanges` would
+  silently hand a standalone operator a payload that cannot actually replace `routing-config.json`.
+- Resolution at the time: neither was implemented; both were documented inline at the exact call
+  site an implementation would go.
+- What happened next, in the very same branch: only one of the two gaps was real. US9's fallback
+  chain UI genuinely is underspecified and is still deferred (`learning_report_html.py`, above
+  `_role_card_html`'s chain pills). Decision 4's download was *not* underspecified — it was merely
+  unimplementable at the moment the comment was written, because no function yet produced the full
+  `RoutingConfig` shape. `buildFullConfigPayload` was added thirty lines above that same comment,
+  for server mode, in the same commit — and the comment went on asserting no such payload existed.
+  A later review caught it, and the download now ships (`downloadFullConfig`), emitting exactly
+  that payload under the name `routing-config.json`.
+- Lesson: a documented gap is a claim with a *premise*, and the premise is the part that rots. "We
+  cannot do X because Y does not exist" stops being an honest gap the moment someone adds Y — and
+  the person most likely to add Y is you, in the same commit, for a different reason. So: when
+  writing a gap comment, state the premise explicitly and in checkable terms (name the missing
+  function) rather than gesturing at "underspecified", and when reviewing one, re-derive the
+  premise against the current tree instead of accepting the conclusion. The genuinely
+  underspecified case (US9 — no UI shape given, several defensible ones) and the merely
+  not-yet-built case (Decision 4) read identically in a comment and are not remotely the same
+  thing. Only the first is a standing convention; the second is a TODO wearing its costume.
+
 ## 2026-08-28 — A Sibling Module's Forward-Reference Beat a Different Ticket's Own Speculation
 
 - Mission: `/implement` ticket 51 (local dashboard server & atomic save API, spec 0013), then

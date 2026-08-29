@@ -1008,7 +1008,7 @@ def _capability_requirements_pills(requirements: routing_config.CapabilityRequir
 
 def _binding_html(binding: routing_config.RoleModelBinding) -> str:
     capability = binding.capability
-    effort_color = _EFFORT_BADGE_COLORS.get(binding.reasoning_effort, "#8a8377")
+    effort_color = _effort_badge_color(binding.reasoning_effort)
     pills = [
         _pill_html("Provider", binding.provider_id),
         _pill_html("Model", binding.model_id),
@@ -1622,25 +1622,65 @@ function buildFullConfigPayload() {
   return config;
 }
 
-// Decision 4's standalone branch reads "updates local snapshot, triggers a
-// download/copy action, and displays a success toast" — this only does the
-// first and third. Deliberately not wired to `copyConfigToClipboard`
-// (ticket 50/US13's own button): that copies `buildConfigPreview`'s
-// reduced `{roles: {role_id: {model, effort}}}` shape, not the full
-// `RoutingConfig` `buildFullConfigPayload` produces for server mode below —
-// auto-firing it here would silently hand a standalone operator a payload
-// that cannot actually replace `routing-config.json`, which is worse than
-// the explicit, already-tested copy button they can reach themselves.
-// Which of "download" or "copy", and of which shape, Decision 4 actually
-// means is exactly the kind of undetermined design choice ticket 51 left
-// US9 for rather than guess at — same call here, not a fix this loop forces.
+// Decision 4's standalone branch: "updates local snapshot, triggers a
+// download/copy action, and displays a success toast", and US13's "export
+// the valid `routing-config.json` payload directly to my clipboard **or
+// download it**".
+//
+// This downloads `buildFullConfigPayload()` — the full `RoutingConfig`
+// shape `POST /api/config` validates — deliberately *not*
+// `configPreviewJson()`, which the drawer's copy button (ticket 50) emits
+// as the reduced `{roles: {role_id: {model, effort}}}` preview. A file
+// named `routing-config.json` has exactly one meaningful use — replacing
+// the real one on disk — so handing an operator the reduced shape under
+// that name would be a broken paste target. An earlier revision declined
+// to implement this branch at all, on the grounds that no full-shape
+// payload existed to export; `buildFullConfigPayload` (added directly
+// above, for server mode) is that payload, so the reason no longer holds.
+//
+// The one serialization US13's two export halves share — the clipboard
+// button and the download both hand over exactly these bytes, so a
+// `routing-config.json` an operator copies and one they download can never
+// drift apart. Trailing newline because the file it replaces on disk has
+// one (`learning_report._ConfigApiHandler.do_POST` writes it that way).
+function fullConfigJson() {
+  return JSON.stringify(buildFullConfigPayload(), null, 2) + "\n";
+}
+
+// Unlike `copyConfigToClipboard` (further down), this needs no feature
+// detection. `navigator.clipboard` is genuinely absent outside a secure
+// context, which includes the `file://` page Decision 4 names as the
+// zero-friction default — but `Blob` and `URL.createObjectURL` are not
+// secure-context gated, are available on `file://`, and are supplied by
+// node to the test harness too. An earlier revision guarded them anyway;
+// the guard could only ever be reached by a test that deleted the globals
+// to reach it, so it was removed rather than kept alive by that test.
+function downloadFullConfig() {
+  var url = URL.createObjectURL(
+    new Blob([fullConfigJson()], { type: "application/json" })
+  );
+  var link = document.createElement("a");
+  link.href = url;
+  link.download = "routing-config.json";
+  link.click();
+  // Revoked on a later turn, never synchronously after `click()`: the fetch
+  // the click starts is asynchronous, and revoking the object URL in the
+  // same tick cancels the download outright in Firefox and Safari.
+  // `setTimeout` gets no feature guard — `showToast` above already depends
+  // on it unconditionally, and node supplies it to the test harness.
+  setTimeout(function () {
+    URL.revokeObjectURL(url);
+  }, 0);
+}
+
 function saveChanges() {
   if (!dirtyRoleCount()) {
     return false;
   }
   if (!isServerMode()) {
     commitSaveSnapshot();
-    showToast("השינויים נשמרו", "success");
+    downloadFullConfig();
+    showToast("הקונפיגורציה הורדה כקובץ", "success");
     return true;
   }
   if (typeof fetch === "undefined") {
@@ -1684,17 +1724,16 @@ function bindActionPill() {
 
 // --- live JSON drawer & clipboard export (ticket 50) ---
 
-// The drawer previews `CLIENT_STATE.currentRoles` — every role's pending
-// model/effort selection, live, before Save — not a full reconstruction of
-// `routing-config.json`. A role's dropdown offers any audited
-// `{adapter}::{model_id}` pair (ticket 48, user story 4), which carries no
-// guaranteed id in the file's own `providers` section until a save
-// actually resolves one; synthesizing a `RoleConfig`/`ProviderConfig` shape
-// here, client-side, would mean either fabricating a provider id or reading
-// it off the role card's own binding pill, which ticket 48 never repaints
-// and so goes stale the instant a role's model changes. `buildConfigPreview`
-// sticks to what this page knows for certain: the pending `{model, effort}`
-// per role.
+// What the *drawer displays*: every role's pending model/effort selection,
+// live, before Save. Deliberately the reduced shape and not the full
+// `routing-config.json` — the drawer is a "what am I about to change?"
+// readout, and a 200-line config document with two edited fields buried in
+// it does not answer that question at a glance.
+//
+// This is the drawer's display shape only. US13 asks the copy button for
+// "the valid `routing-config.json` payload", which is a different question
+// with a different answer — see `copyConfigToClipboard`, which exports
+// `buildFullConfigPayload()`.
 function buildConfigPreview() {
   return { roles: cloneRoleState(CLIENT_STATE.currentRoles) };
 }
@@ -1761,6 +1800,14 @@ function toggleConfigDrawer() {
   drawer.classList.toggle("is-open");
 }
 
+// Copies `buildFullConfigPayload()` — US13's "the **valid**
+// `routing-config.json` payload" — not `configPreviewJson()`, which is the
+// drawer's reduced display shape and which `parse_routing_config` rejects
+// outright. The button's whole purpose is producing something an operator
+// can paste over the real file, so the two must not be the same string:
+// the drawer answers "what did I change", the clipboard answers "what do I
+// paste". `downloadFullConfig` is the same payload down US13's other half.
+//
 // `navigator.clipboard` is undefined outside a secure context — including
 // a dashboard opened straight from disk over `file://`, the zero-friction
 // default Implementation Decisions §4 names for this page — so this checks
@@ -1775,7 +1822,7 @@ function copyConfigToClipboard() {
     showToast("ההעתקה ללוח אינה נתמכת בדפדפן זה", "error");
     return false;
   }
-  navigator.clipboard.writeText(configPreviewJson()).then(
+  navigator.clipboard.writeText(fullConfigJson()).then(
     function () {
       showToast("הקונפיגורציה הועתקה ללוח", "success");
     },
@@ -1799,13 +1846,10 @@ function bindConfigDrawer() {
 
 // --- live model refresh (ticket 52 follow-up, spec 0013 US8) ---
 
-// Merges a `GET /api/model-capabilities` response into `MODEL_CAPABILITIES`
-// and appends an `<option>` for every key this page did not already offer —
-// "so that newly loaded local LLMs appear immediately in the interface"
-// without a reload. Reuses `select.children`, not `.options`, the same way
+// Appends one `<option>` for `key` to every model `<select>` that does not
+// already offer it. Reuses `select.children`, not `.options`, the same way
 // `setEffortOptions` already does, so the two stay consistent with each
-// other and with the test harness's DOM stub. Returns the newly discovered
-// keys so the caller can report how many were found.
+// other and with the test harness's DOM stub.
 function addModelOption(key) {
   var label = key.replace("::", " · ");
   var selects = document.querySelectorAll(".model-select");
@@ -1827,6 +1871,11 @@ function addModelOption(key) {
   }
 }
 
+// Merges a `GET /api/model-capabilities` response into `MODEL_CAPABILITIES`,
+// calling `addModelOption` for every key this page did not already offer —
+// "so that newly loaded local LLMs appear immediately in the interface"
+// without a reload. Returns the newly discovered keys so the caller can
+// report how many were found.
 function applyCapabilitySnapshot(capabilities) {
   var addedKeys = [];
   for (var key in capabilities) {

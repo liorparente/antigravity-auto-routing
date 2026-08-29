@@ -26,14 +26,16 @@ Markdown out, no clock, no disk); `write_weekly_report` is the three-line
 convenience door that reads the journal, renders, and writes atomically. See
 implementation_plan.md Section 2.
 
-**A third, unrelated door: the local dashboard save server.** Ticket 51 (Spec
+**A third, unrelated door: the local dashboard server.** Ticket 51 (Spec
 0013) added `create_dashboard_server`/`serve_dashboard` and
-`DEFAULT_SERVE_PORT` — the `--serve` CLI mode that answers `POST
-/api/config` and `GET /api/model-capabilities`. It shares this module only
-because the ticket named `learning_report.py` as where `--serve` belongs, not
-because it renders a report: it reads no journal and writes no Markdown, and
-`main` treats it as a fully separate mode that returns before any of the
-report-writing code below runs.
+`DEFAULT_SERVE_PORT` — the `--serve` CLI mode that answers `GET /`,
+`POST /api/config`, and `GET /api/model-capabilities`. It shares this module
+only because the ticket named `learning_report.py` as where `--serve`
+belongs, not because it renders a report: it reads no journal and writes no
+Markdown, and `main` treats it as a fully separate mode that returns before
+any of the report-writing code below runs. `GET /` serves a report `--html`
+wrote earlier rather than rendering one, so this mode stays clock-free like
+the rest of the module.
 
 **This module owns no clock.** `now` is always injected on all three public
 entry points, and there is no `datetime.now`, `datetime.utcnow`, `time.time`,
@@ -468,18 +470,40 @@ def _model_key(provider: str, model_id: str) -> str:
     """The flattened ``{provider}::{model_id}`` capability key — the same
     shape `learning_report_html._model_key` renders into the dashboard's
     `<option>` values, kept as a second one-line function rather than an
-    import across modules: that helper is private, and this package's
-    modules never import each other's private names (`_atomic_text_write`
-    is the precedent — duplicated locally in every module that needs it,
-    not imported from `advisory_consultation` or `agent_council`, for the
-    same reason). See that function's own docstring for why a flattened
+    import across modules. `_atomic_text_write` is the precedent: a
+    one-liner duplicated locally in every module that needs it rather than
+    imported from `advisory_consultation` or `agent_council`. The rule is
+    about *one-liners not worth coupling two modules over*, not a blanket
+    ban on cross-module private access — `routing_config.py` deliberately
+    reads `probe_models._CROSS_PROVIDER_EFFORT_LADDERS` where the shared
+    thing is real data with a single owner. See
+    `learning_report_html._model_key`'s own docstring for why a flattened
     key, not bare `model_id`, is what a capability consumer needs.
     """
     return f"{provider}::{model_id}"
 
 
+def _latest_dashboard_path(root_dir: Path) -> Path | None:
+    """The most recent ``weekly-report-<date>.html`` under `root_dir`, or
+    `None` when none has been generated yet.
+
+    This is how ``GET /`` stays clock-free: report filenames embed an
+    ISO-8601 UTC date, which sorts lexicographically, so "the newest one"
+    is `max()` over the glob rather than a comparison against a live clock
+    this module is forbidden from reading (see the module docstring's
+    "This module owns no clock", enforced by the AST guard test). Resolved
+    per request rather than bound once at startup, so an operator who runs
+    ``--html`` while the server is already up sees the new report on the
+    next reload instead of having to restart it.
+    """
+    reports_dir = root_dir / REPORTS_RELATIVE_DIR
+    candidates = sorted(reports_dir.glob("weekly-report-*.html"))
+    return candidates[-1] if candidates else None
+
+
 class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
-    """Two routes: ``POST /api/config`` and ``GET /api/model-capabilities``.
+    """Three routes: ``GET /``, ``POST /api/config``, and
+    ``GET /api/model-capabilities``.
 
     ``self.server`` is this handler's owning `_ConfigApiServer` — the
     `http.server` machinery re-instantiates a `BaseHTTPRequestHandler` per
@@ -553,6 +577,9 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
         self._respond_json(200, {"status": "ok"})
 
     def do_GET(self) -> None:
+        if self.path == "/":
+            self._serve_dashboard_document()
+            return
         if not self._require_path("/api/model-capabilities"):
             return
         snapshot = self.server.capability_snapshot()
@@ -578,6 +605,56 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
         ]
         self._respond_json(200, {"capabilities": capabilities, "providers": providers})
 
+    def _serve_dashboard_document(self) -> None:
+        """``GET /`` — the dashboard itself, which is what makes every other
+        route on this server reachable.
+
+        Without this route `--serve` bound a socket that answered only its
+        two `/api/*` endpoints, so the only way to open the dashboard was
+        over ``file://`` — and the page's own `isServerMode()` guard
+        (`/^https?:$/.test(location.protocol)`) is false there. That made
+        three separate spec 0013 behaviours dead code in practice: US14's
+        ``POST /api/config`` save branch, Decision 1's automatic launch
+        probe, and US8's "🔄 רענן מודלים חיים" button, whose root-relative
+        `fetch("/api/model-capabilities")` resolves to
+        `file:///api/model-capabilities` and always fails. Serving the
+        document from the same origin as the API is the whole fix.
+
+        The document is read from disk rather than rendered here: rendering
+        needs a `now` (`learning_report_html.render_html_report` requires an
+        aware instant) and this module owns no clock. `--serve` therefore
+        publishes what `--html` already wrote, and says so plainly when
+        nothing has been written yet rather than serving a blank page.
+
+        **Known consequence: a save is not reflected in a *reloaded* page.**
+        `write_html_report` embeds `load_routing_config()` as it stood when
+        `--html` ran, so after a successful `POST /api/config` the file on
+        disk is current but this document is not. Within the open page the
+        operator sees their change (the client state machine owns it, and
+        `commitSaveSnapshot` rebases the dirty baseline), so US14's "changes
+        take effect immediately in the active workspace" holds for the
+        workspace; it is a browser reload that shows the pre-save matrix
+        until `--html` is run again. Re-rendering here would need a clock,
+        which is the one thing this module may not have — so the honest fix
+        is a regeneration step, not a silent stale read, and it is recorded
+        here rather than papered over.
+        """
+        dashboard = _latest_dashboard_path(self.server.dashboard_root)
+        if dashboard is None:
+            self._respond_json(
+                503,
+                {
+                    "error": (
+                        "no dashboard has been generated yet — run "
+                        "`learning_report.py --html --now <ISO-8601>` first"
+                    )
+                },
+            )
+            return
+        self._respond_bytes(
+            200, dashboard.read_bytes(), "text/html; charset=utf-8"
+        )
+
     def _require_path(self, expected: str) -> bool:
         """The 404 guard both routes open with — shared so the "wrong path"
         shape lives in one place rather than twice, verbatim, at the top of
@@ -589,9 +666,11 @@ class _ConfigApiHandler(http.server.BaseHTTPRequestHandler):
         return True
 
     def _respond_json(self, status: int, body: dict[str, Any]) -> None:
-        data = json.dumps(body).encode("utf-8")
+        self._respond_bytes(status, json.dumps(body).encode("utf-8"), "application/json")
+
+    def _respond_bytes(self, status: int, data: bytes, content_type: str) -> None:
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -613,9 +692,11 @@ class _ConfigApiServer(http.server.HTTPServer):
         server_address: tuple[str, int],
         config_path: Path,
         capability_snapshot: CapabilitySnapshotSource,
+        dashboard_root: Path,
     ) -> None:
         self.config_path = config_path
         self.capability_snapshot = capability_snapshot
+        self.dashboard_root = dashboard_root
         super().__init__(server_address, _ConfigApiHandler)
 
 
@@ -624,6 +705,7 @@ def create_dashboard_server(
     port: int,
     config_path: Path | None = None,
     capability_snapshot: CapabilitySnapshotSource | None = None,
+    dashboard_root: Path | None = None,
 ) -> _ConfigApiServer:
     """Construct, but do not start, the local dashboard save server.
 
@@ -639,6 +721,10 @@ def create_dashboard_server(
     `_probe_capability_snapshot`; a test overrides it with a fixed
     `CatalogSnapshot` so `GET /api/model-capabilities` reads the same
     deterministic fixture on every machine, real CLIs installed or not.
+    `dashboard_root` is the project root ``GET /`` looks under for the newest
+    generated report (`_latest_dashboard_path`); it defaults to the process's
+    working directory, matching the CLI's own ``--root-dir`` default, and a
+    test points it at a temporary directory.
     """
     resolved_config_path = (
         config_path if config_path is not None else routing_config.ROUTING_CONFIG_PATH
@@ -646,12 +732,16 @@ def create_dashboard_server(
     resolved_capability_snapshot = (
         capability_snapshot if capability_snapshot is not None else _probe_capability_snapshot
     )
+    resolved_dashboard_root = dashboard_root if dashboard_root is not None else Path(".")
     return _ConfigApiServer(
-        ("127.0.0.1", port), resolved_config_path, resolved_capability_snapshot
+        ("127.0.0.1", port),
+        resolved_config_path,
+        resolved_capability_snapshot,
+        resolved_dashboard_root,
     )
 
 
-def serve_dashboard(*, port: int) -> None:
+def serve_dashboard(*, port: int, dashboard_root: Path) -> None:
     """The CLI door: bind and serve until interrupted.
 
     No `config_path` parameter, unlike `create_dashboard_server`: nothing
@@ -661,9 +751,11 @@ def serve_dashboard(*, port: int) -> None:
     `.serve_forever()`. A prior revision carried the parameter through
     anyway; a Standards review flagged it as dead surface with no caller,
     so it was removed rather than justified with a test that would only
-    exist to justify it.
+    exist to justify it. `dashboard_root` is different: ``--root-dir`` is a
+    real CLI flag that selects it, so it is threaded through rather than
+    defaulted here.
     """
-    server = create_dashboard_server(port=port)
+    server = create_dashboard_server(port=port, dashboard_root=dashboard_root)
     try:
         server.serve_forever()
     finally:
@@ -706,7 +798,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.serve is not None:
-        serve_dashboard(port=args.serve)
+        serve_dashboard(port=args.serve, dashboard_root=args.root_dir)
         return 0
 
     if args.now is None:
