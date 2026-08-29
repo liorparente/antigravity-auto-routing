@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 if __package__:
-    from . import debate_orchestrator as _debate_orchestrator
+    from . import critical_dialogue as _debate_orchestrator
     from . import debate_state_machine as _debate_state_machine
     from . import debate_transport as _debate_transport
     from . import dialogue_contracts as _dialogue_contracts
@@ -16,7 +16,7 @@ if __package__:
     from . import prompt_assembler as _prompt_assembler
     from . import sensitivity_redactor as _sensitivity_redactor
 else:
-    import debate_orchestrator as _debate_orchestrator  # type: ignore[no-redef]
+    import critical_dialogue as _debate_orchestrator  # type: ignore[no-redef]
     import debate_state_machine as _debate_state_machine  # type: ignore[no-redef]
     import debate_transport as _debate_transport  # type: ignore[no-redef]
     import dialogue_contracts as _dialogue_contracts  # type: ignore[no-redef]
