@@ -14,7 +14,11 @@ SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent / "scripts")
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
 
-from council_review import (
+WORKER_ROUTING_DIR = str(Path(__file__).resolve().parents[2] / "worker-routing")
+if WORKER_ROUTING_DIR not in sys.path:
+    sys.path.insert(0, WORKER_ROUTING_DIR)
+
+from critical_dialogue import (
     DEFAULT_CONSULTATION_POLICY,
     PrivacyMode,
     ReviewCouncil,

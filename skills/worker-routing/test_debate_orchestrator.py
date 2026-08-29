@@ -22,10 +22,9 @@ if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import advisory_consultation, debate_orchestrator, dialogue_contracts, learned_state
+    from . import critical_dialogue, dialogue_contracts, learned_state
 else:
-    import advisory_consultation  # type: ignore[no-redef]
-    import debate_orchestrator  # type: ignore[no-redef]
+    import critical_dialogue  # type: ignore[no-redef]
     import dialogue_contracts  # type: ignore[no-redef]
     import learned_state  # type: ignore[no-redef]
 
@@ -34,17 +33,17 @@ class PanelTopologyTests(unittest.TestCase):
     def test_only_complex_reviews_use_the_panel(self) -> None:
         panel_occasions: tuple[dialogue_contracts.Occasion, ...] = ("plan-review", "code-review")
         for occasion in panel_occasions:
-            self.assertTrue(debate_orchestrator.is_panel_topology(occasion, " Complex "))
+            self.assertTrue(critical_dialogue.is_panel_topology(occasion, " Complex "))
         non_panel_occasions: tuple[dialogue_contracts.Occasion, ...] = ("ambiguity", "post-mortem")
         for occasion in non_panel_occasions:
-            self.assertFalse(debate_orchestrator.is_panel_topology(occasion, "complex"))
+            self.assertFalse(critical_dialogue.is_panel_topology(occasion, "complex"))
         for complexity in ("trivial", "simple", "medium", "unknown"):
-            self.assertFalse(debate_orchestrator.is_panel_topology("plan-review", complexity))
+            self.assertFalse(critical_dialogue.is_panel_topology("plan-review", complexity))
 
 
 class StalemateReportTests(unittest.TestCase):
     def test_pair_report_keeps_one_critic_and_three_options(self) -> None:
-        report = debate_orchestrator.build_stalemate_report("planner", "critic")
+        report = critical_dialogue.build_stalemate_report("planner", "critic")
 
         self.assertEqual(report.planner_position, "planner")
         self.assertEqual(report.critic_position, "critic")
@@ -53,7 +52,7 @@ class StalemateReportTests(unittest.TestCase):
         self.assertEqual(report.options[1].label, "Approve Critic Architecture")
 
     def test_panel_report_preserves_each_critic_and_combines_option_text(self) -> None:
-        report = debate_orchestrator.build_stalemate_report("planner", "critic a", "critic b")
+        report = critical_dialogue.build_stalemate_report("planner", "critic a", "critic b")
 
         self.assertEqual(report.critic_position, "critic a")
         self.assertEqual(report.critic_b_position, "critic b")
@@ -66,10 +65,10 @@ class StalemateReportTests(unittest.TestCase):
 
 class VerdictEvaluationTests(unittest.TestCase):
     def test_single_critic_verdicts(self) -> None:
-        self.assertEqual(debate_orchestrator.evaluate_round_verdicts("APPROVE"), (True, None))
-        self.assertEqual(debate_orchestrator.evaluate_round_verdicts("REVISE"), (False, None))
+        self.assertEqual(critical_dialogue.evaluate_round_verdicts("APPROVE"), (True, None))
+        self.assertEqual(critical_dialogue.evaluate_round_verdicts("REVISE"), (False, None))
         self.assertEqual(
-            debate_orchestrator.evaluate_round_verdicts(None),
+            critical_dialogue.evaluate_round_verdicts(None),
             (False, "unparseable verdict: None"),
         )
 
@@ -79,27 +78,27 @@ class VerdictEvaluationTests(unittest.TestCase):
         malformed = dialogue_contracts.VerdictContractResult("unparseable", 0, 0)
 
         self.assertEqual(
-            debate_orchestrator.evaluate_round_verdicts(approved.verdict), (True, None)
+            critical_dialogue.evaluate_round_verdicts(approved.verdict), (True, None)
         )
         self.assertEqual(
-            debate_orchestrator.evaluate_round_verdicts(revise.verdict), (False, None)
+            critical_dialogue.evaluate_round_verdicts(revise.verdict), (False, None)
         )
         self.assertEqual(
-            debate_orchestrator.evaluate_round_verdicts(malformed.verdict),
+            critical_dialogue.evaluate_round_verdicts(malformed.verdict),
             (False, "unparseable verdict: unparseable"),
         )
 
     def test_panel_verdicts_require_both_approvals(self) -> None:
         self.assertEqual(
-            debate_orchestrator.evaluate_round_verdicts("APPROVE", "APPROVE", is_panel=True),
+            critical_dialogue.evaluate_round_verdicts("APPROVE", "APPROVE", is_panel=True),
             (True, None),
         )
         self.assertEqual(
-            debate_orchestrator.evaluate_round_verdicts("APPROVE", "REVISE", is_panel=True),
+            critical_dialogue.evaluate_round_verdicts("APPROVE", "REVISE", is_panel=True),
             (False, None),
         )
         self.assertEqual(
-            debate_orchestrator.evaluate_round_verdicts("APPROVE", None, is_panel=True),
+            critical_dialogue.evaluate_round_verdicts("APPROVE", None, is_panel=True),
             (False, "unparseable verdict: critic_a=APPROVE, critic_b=None"),
         )
 
@@ -117,13 +116,13 @@ class CriticResponsePayloadTests(unittest.TestCase):
 
         for critic_id, model_name, expected_identity in cases:
             with self.subTest(model_name=model_name, critic_id=critic_id):
-                response = debate_orchestrator._critic_response_from_payload(
+                response = critical_dialogue._critic_response_from_payload(
                     critic_id, raw_response, model_name
                 )
                 self.assertEqual(response.critic_id, expected_identity)
 
     def test_missing_candidate_hash_is_not_replaced_with_expected_hash(self) -> None:
-        response = debate_orchestrator._critic_response_from_payload(
+        response = critical_dialogue._critic_response_from_payload(
             "critic_a",
             '{"vote": "approve", "confidence": 1.0}',
             "Codex 5.6 Sol",
@@ -135,9 +134,9 @@ class CriticResponsePayloadTests(unittest.TestCase):
 class ScopedMemoryPromptWiringTests(unittest.TestCase):
     def test_planner_prompt_embeds_scoped_institutional_memory_by_default(self) -> None:
         task = "Fix a flaky test that leaks mocks across the CI suite"
-        expected_memory = debate_orchestrator.extract_scoped_memory(task)
+        expected_memory = critical_dialogue.extract_scoped_memory(task)
 
-        prompt = debate_orchestrator._build_planner_prompt(task)
+        prompt = critical_dialogue._build_planner_prompt(task)
 
         self.assertIn(expected_memory, prompt)
         self.assertLess(
@@ -146,9 +145,9 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
 
     def test_critic_prompt_embeds_scoped_institutional_memory_by_default(self) -> None:
         task = "Fix a flaky test that leaks mocks across the CI suite"
-        expected_memory = debate_orchestrator.extract_scoped_memory(task)
+        expected_memory = critical_dialogue.extract_scoped_memory(task)
 
-        prompt = debate_orchestrator._build_critic_prompt(task, "Proposed plan")
+        prompt = critical_dialogue._build_critic_prompt(task, "Proposed plan")
 
         self.assertIn(expected_memory, prompt)
         self.assertLess(
@@ -170,11 +169,11 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
                 root_dir=root,
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
-            expected_memory = debate_orchestrator.get_scoped_memory(root, task)
-            default_memory = debate_orchestrator.extract_scoped_memory(task)
+            expected_memory = critical_dialogue.get_scoped_memory(root, task)
+            default_memory = critical_dialogue.extract_scoped_memory(task)
             self.assertNotEqual(expected_memory, default_memory)
 
-            prompt = debate_orchestrator._build_planner_prompt(task, root_dir=root)
+            prompt = critical_dialogue._build_planner_prompt(task, root_dir=root)
 
             self.assertIn(expected_memory, prompt)
             self.assertNotIn(default_memory, prompt)
@@ -194,11 +193,11 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
                 root_dir=root,
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
-            expected_memory = debate_orchestrator.get_scoped_memory(root, task)
-            default_memory = debate_orchestrator.extract_scoped_memory(task)
+            expected_memory = critical_dialogue.get_scoped_memory(root, task)
+            default_memory = critical_dialogue.extract_scoped_memory(task)
             self.assertNotEqual(expected_memory, default_memory)
 
-            prompt = debate_orchestrator._build_critic_prompt(
+            prompt = critical_dialogue._build_critic_prompt(
                 task, "Proposed plan", root_dir=root
             )
 
@@ -228,8 +227,8 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
                 root_dir=root,
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
-            expected_memory = debate_orchestrator.get_scoped_memory(root, task)
-            default_memory = debate_orchestrator.extract_scoped_memory(task)
+            expected_memory = critical_dialogue.get_scoped_memory(root, task)
+            default_memory = critical_dialogue.extract_scoped_memory(task)
             self.assertNotEqual(expected_memory, default_memory)
 
             planner_prompts: list[str] = []
@@ -242,7 +241,7 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
                 critic_prompts.append(prompt)
                 return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
 
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 task, invoker, root_dir=root
             )
 
@@ -261,26 +260,26 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
         # ranking has to come from the `target_files` file-pattern match
         # alone, not from keyword overlap with the task text.
         task = "Perform regular repository maintenance"
-        expected_memory = debate_orchestrator.extract_scoped_memory(
+        expected_memory = critical_dialogue.extract_scoped_memory(
             task, target_files=["NOTES.md"]
         )
-        default_memory = debate_orchestrator.extract_scoped_memory(task)
+        default_memory = critical_dialogue.extract_scoped_memory(task)
         self.assertNotEqual(expected_memory, default_memory)
 
-        prompt = debate_orchestrator._build_planner_prompt(task, target_files=["NOTES.md"])
+        prompt = critical_dialogue._build_planner_prompt(task, target_files=["NOTES.md"])
 
         self.assertIn(expected_memory, prompt)
         self.assertNotIn(default_memory, prompt)
 
     def test_critic_prompt_scopes_by_target_files_file_pattern(self) -> None:
         task = "Perform regular repository maintenance"
-        expected_memory = debate_orchestrator.extract_scoped_memory(
+        expected_memory = critical_dialogue.extract_scoped_memory(
             task, target_files=["NOTES.md"]
         )
-        default_memory = debate_orchestrator.extract_scoped_memory(task)
+        default_memory = critical_dialogue.extract_scoped_memory(task)
         self.assertNotEqual(expected_memory, default_memory)
 
-        prompt = debate_orchestrator._build_critic_prompt(
+        prompt = critical_dialogue._build_critic_prompt(
             task, "Proposed plan", target_files=["NOTES.md"]
         )
 
@@ -291,10 +290,10 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
         self,
     ) -> None:
         task = "Perform regular repository maintenance"
-        expected_memory = debate_orchestrator.extract_scoped_memory(
+        expected_memory = critical_dialogue.extract_scoped_memory(
             task, target_files=["NOTES.md"]
         )
-        default_memory = debate_orchestrator.extract_scoped_memory(task)
+        default_memory = critical_dialogue.extract_scoped_memory(task)
         self.assertNotEqual(expected_memory, default_memory)
 
         planner_prompts: list[str] = []
@@ -308,7 +307,7 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
             return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
 
         with tempfile.TemporaryDirectory() as tmp:
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 task, invoker, root_dir=Path(tmp), target_files=["NOTES.md"]
             )
 
@@ -321,10 +320,10 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
 
 class DebateStateTests(unittest.TestCase):
     def test_round_and_session_state_construct_with_safe_defaults(self) -> None:
-        record = debate_orchestrator.DebateRoundRecord(
+        record = critical_dialogue.DebateRoundRecord(
             1, "plan", "critic", "critic b", "REVISE", "APPROVE"
         )
-        state = debate_orchestrator.DebateSessionState("plan-review", "complex", 3, True)
+        state = critical_dialogue.DebateSessionState("plan-review", "complex", 3, True)
 
         self.assertEqual(record.round_index, 1)
         self.assertFalse(record.is_consensus)
@@ -334,13 +333,13 @@ class DebateStateTests(unittest.TestCase):
             state.rounds = (record,)
 
     def test_advance_returns_a_new_pair_or_panel_state(self) -> None:
-        pair = debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False)
-        revised = debate_orchestrator.advance_debate_state(
-            pair, debate_orchestrator.DebateRoundRecord(1, "plan", "critique", critic_a_verdict="REVISE")
+        pair = critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False)
+        revised = critical_dialogue.advance_debate_state(
+            pair, critical_dialogue.DebateRoundRecord(1, "plan", "critique", critic_a_verdict="REVISE")
         )
-        approved = debate_orchestrator.advance_debate_state(
-            debate_orchestrator.DebateSessionState("plan-review", "complex", 2, True),
-            debate_orchestrator.DebateRoundRecord(1, "panel plan", "a", "b", "APPROVE", "APPROVE"),
+        approved = critical_dialogue.advance_debate_state(
+            critical_dialogue.DebateSessionState("plan-review", "complex", 2, True),
+            critical_dialogue.DebateRoundRecord(1, "panel plan", "a", "b", "APPROVE", "APPROVE"),
         )
         self.assertEqual(pair.rounds, ())
         self.assertIsInstance(revised.rounds, tuple)
@@ -349,10 +348,10 @@ class DebateStateTests(unittest.TestCase):
         self.assertEqual(approved.final_plan, "panel plan")
 
     def test_advance_normalizes_record_outcome_fields(self) -> None:
-        state = debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False)
-        result = debate_orchestrator.advance_debate_state(
+        state = critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False)
+        result = critical_dialogue.advance_debate_state(
             state,
-            debate_orchestrator.DebateRoundRecord(
+            critical_dialogue.DebateRoundRecord(
                 1, "plan", "critique", critic_a_verdict="APPROVE", is_consensus=False, error="stale"
             ),
         )
@@ -362,28 +361,28 @@ class DebateStateTests(unittest.TestCase):
         self.assertIsNone(result.rounds[0].error)
 
     def test_advance_leaves_terminal_states_unchanged(self) -> None:
-        record = debate_orchestrator.DebateRoundRecord(2, "new", "critic", critic_a_verdict="APPROVE")
+        record = critical_dialogue.DebateRoundRecord(2, "new", "critic", critic_a_verdict="APPROVE")
         terminal_states = (
-            debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False, consensus_reached=True),
-            debate_orchestrator.DebateSessionState("ambiguity", "medium", 2, False, error="failed"),
-            debate_orchestrator.DebateSessionState(
+            critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False, consensus_reached=True),
+            critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False, error="failed"),
+            critical_dialogue.DebateSessionState(
                 "ambiguity", "medium", 2, False,
-                stalemate_report=debate_orchestrator.build_stalemate_report("plan", "critic"),
+                stalemate_report=critical_dialogue.build_stalemate_report("plan", "critic"),
             ),
-            debate_orchestrator.DebateSessionState(
+            critical_dialogue.DebateSessionState(
                 "ambiguity", "medium", 1, False,
-                rounds=(debate_orchestrator.DebateRoundRecord(1, "plan", "critic"),),
+                rounds=(critical_dialogue.DebateRoundRecord(1, "plan", "critic"),),
             ),
         )
 
         for state in terminal_states:
             with self.subTest(state=state):
-                self.assertIs(debate_orchestrator.advance_debate_state(state, record), state)
+                self.assertIs(critical_dialogue.advance_debate_state(state, record), state)
 
 
 class ProductionOrchestrationTests(unittest.TestCase):
     def test_roster_resolution_prefers_distinct_reachable_families(self) -> None:
-        resolution = debate_orchestrator.resolve_roster(
+        resolution = critical_dialogue.resolve_roster(
             "pair", is_family_reachable=lambda family: family in {"claude", "codex-gpt"}
         )
         self.assertEqual(resolution.model_for("planner"), "Claude Opus 5 (Thinking)")
@@ -391,10 +390,10 @@ class ProductionOrchestrationTests(unittest.TestCase):
         self.assertFalse(resolution.degraded_independence)
 
     def test_canary_execution_returns_a_measurement(self) -> None:
-        fixture = debate_orchestrator.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         response = f'QUOTE: "{fixture.plan_text.splitlines()[0]}"\\n1. flaw found\\nVERDICT: REVISE'
         with tempfile.TemporaryDirectory() as tmp:
-            result = debate_orchestrator.run_canary_dialogue(
+            result = critical_dialogue.run_canary_dialogue(
                 "unused", lambda *_args: response, root_dir=Path(tmp), canary_fixture=fixture
             )
         self.assertEqual(result.outcome, "canary")
@@ -407,11 +406,11 @@ class ProductionOrchestrationTests(unittest.TestCase):
             return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
 
         stderr = io.StringIO()
-        cap = debate_orchestrator._load_dialogue_budget_config(
-            debate_orchestrator._CONFIG_PATH
+        cap = critical_dialogue._load_dialogue_budget_config(
+            critical_dialogue._CONFIG_PATH
         )
         with tempfile.TemporaryDirectory() as tmp, redirect_stderr(stderr):
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the implementation",
                 invoker,
                 root_dir=Path(tmp),
@@ -436,10 +435,10 @@ class ProductionOrchestrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root_dir = Path(tmp)
-            transport = debate_orchestrator.DebateTransport(
+            transport = critical_dialogue.DebateTransport(
                 runner=failing_runner,
-                notifier=debate_orchestrator.RecurringFailureNotifier(
-                    threshold=debate_orchestrator.ESCALATION_FAILURE_THRESHOLD
+                notifier=critical_dialogue.RecurringFailureNotifier(
+                    threshold=critical_dialogue.ESCALATION_FAILURE_THRESHOLD
                 ),
                 root_dir=root_dir,
             )
@@ -480,9 +479,9 @@ class ProductionOrchestrationTests(unittest.TestCase):
             root_dir = Path(tmp)
             errors_path = root_dir / "ERRORS.md"
             with patch.object(
-                debate_orchestrator._current_production_invoker(), "invoke_worker", failing_invoke_worker
-            ), patch.object(debate_orchestrator, "ESCALATION_FAILURE_THRESHOLD", 1):
-                result = debate_orchestrator.run_advisory_consultation_debate(
+                critical_dialogue._current_production_invoker(), "invoke_worker", failing_invoke_worker
+            ), patch.object(critical_dialogue, "ESCALATION_FAILURE_THRESHOLD", 1):
+                result = critical_dialogue.run_advisory_consultation_debate(
                     "Plan the implementation", invoke_worker=None, root_dir=root_dir
                 )
 
@@ -504,19 +503,19 @@ class ProductionOrchestrationTests(unittest.TestCase):
                 return "Proposed plan"
             return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
 
-        real_resolve_topology = debate_orchestrator._resolve_topology
+        real_resolve_topology = critical_dialogue._resolve_topology
         calls: list[tuple[dialogue_contracts.Occasion, str]] = []
 
         def spy(
             occasion: dialogue_contracts.Occasion, complexity: str
-        ) -> debate_orchestrator.ConsultationTopology:
+        ) -> critical_dialogue.ConsultationTopology:
             calls.append((occasion, complexity))
             return real_resolve_topology(occasion, complexity)
 
         with tempfile.TemporaryDirectory() as tmp, patch.object(
-            debate_orchestrator, "_resolve_topology", spy
+            critical_dialogue, "_resolve_topology", spy
         ):
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the implementation", invoker, root_dir=Path(tmp), complexity="medium"
             )
 
@@ -550,7 +549,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             self._write_secret(root)
 
             manifest_path = Path(
-                debate_orchestrator.write_council_manifest(
+                critical_dialogue.write_council_manifest(
                     "UNANIMOUS", "../unsafe/run:id", root
                 )
             )
@@ -596,7 +595,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "implementation_plan.md").write_text("stale", encoding="utf-8")
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan safely", invoker, root_dir=root
             )
 
@@ -627,7 +626,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_secret(root)
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Review architecture",
                 invoker,
                 root_dir=root,
@@ -698,7 +697,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                         )
                     return self._review_response("Proposed plan")
 
-                result = debate_orchestrator.run_advisory_consultation_debate(
+                result = critical_dialogue.run_advisory_consultation_debate(
                     "Review architecture",
                     invoker,
                     root_dir=root,
@@ -738,7 +737,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_secret(root)
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Review architecture",
                 invoker,
                 root_dir=root,
@@ -762,7 +761,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_secret(root)
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Review architecture",
                 invoker,
                 root_dir=root,
@@ -792,7 +791,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                         return "response without a verdict"
                     return self._review_response("Proposed plan")
 
-                result = debate_orchestrator.run_advisory_consultation_debate(
+                result = critical_dialogue.run_advisory_consultation_debate(
                     "Review architecture",
                     invoker,
                     root_dir=root,
@@ -808,7 +807,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                 self._assert_valid_manifest(result.manifest_path, manifest_status)
 
     def test_canary_security_finding_runs_veto_handler(self) -> None:
-        fixture = debate_orchestrator.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         finding = {"id": "SEC-CANARY", "severity": "high", "confidence": 0.95}
 
         def invoker(_model: str, _effort: str, _prompt: str) -> str:
@@ -823,7 +822,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             root = Path(tmp)
             plan_path = root / "implementation_plan.md"
             plan_path.write_text("current plan", encoding="utf-8")
-            result = debate_orchestrator.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Run canary",
                 invoker,
                 root_dir=root,
@@ -853,7 +852,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
                         "Proposed plan", vote=verdict.casefold(), verdict=verdict
                     )
 
-                result = debate_orchestrator.run_advisory_consultation_debate(
+                result = critical_dialogue.run_advisory_consultation_debate(
                     "Plan safely", invoker, root_dir=root, max_rounds=1
                 )
                 self.assertEqual(result.outcome, expected_outcome)
@@ -872,7 +871,7 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
         ):
             root = Path(tmp)
             with self.assertRaisesRegex(RuntimeError, "secret resolution failed"):
-                debate_orchestrator.run_advisory_consultation_debate(
+                critical_dialogue.run_advisory_consultation_debate(
                     "Review architecture",
                     invoker,
                     root_dir=root,
@@ -883,22 +882,31 @@ class SecurityVetoAndManifestTests(unittest.TestCase):
             self.assertEqual(list((root / ".ralph").glob("council-manifest-*.json")), [])
 
     def test_facade_and_orchestrator_signatures_match(self) -> None:
+        """`critical_dialogue` now owns both the wrapper entry points
+        (`run_debate_loop`, `run_canary_dialogue`, `run_post_mortem_loop`,
+        `run_advisory_consultation_debate`, `dispatch_post_mortem_consultation`)
+        and the implementation they forward to, so there is no separate
+        facade module left to diff against. This instead asserts
+        `run_advisory_consultation_debate` stays an exact alias of
+        `run_critical_dialogue`, and that every other wrapper remains an
+        inspectable, callable export on `critical_dialogue`."""
         import inspect
 
+        self.assertEqual(
+            inspect.signature(critical_dialogue.run_advisory_consultation_debate),
+            inspect.signature(critical_dialogue.run_critical_dialogue),
+            "run_advisory_consultation_debate drifted from its run_critical_dialogue alias",
+        )
+
         for symbol in (
-            "run_advisory_consultation_debate",
             "run_debate_loop",
             "run_canary_dialogue",
             "run_post_mortem_loop",
             "dispatch_post_mortem_consultation",
         ):
-            facade_fn = getattr(advisory_consultation, symbol)
-            orch_fn = getattr(debate_orchestrator, symbol)
-            self.assertEqual(
-                inspect.signature(facade_fn),
-                inspect.signature(orch_fn),
-                f"Signature mismatch on {symbol}",
-            )
+            fn = getattr(critical_dialogue, symbol)
+            self.assertTrue(callable(fn), f"{symbol} is not callable")
+            inspect.signature(fn)
 
 
 class _FakePerspectiveAdapter:
@@ -997,8 +1005,8 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         ]
 
     def test_one_shot_fast_path_approves_in_round_1(self) -> None:
-        council = debate_orchestrator.ReviewCouncil()
-        req = debate_orchestrator.ReviewRequest(
+        council = critical_dialogue.ReviewCouncil()
+        req = critical_dialogue.ReviewRequest(
             objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
         )
         adapters = self._adapters({
@@ -1010,14 +1018,14 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
 
         outcome = asyncio.run(council.review(req, custom_adapters=adapters))
 
-        self.assertIsInstance(outcome, debate_orchestrator.ReviewOutcome)
+        self.assertIsInstance(outcome, critical_dialogue.ReviewOutcome)
         self.assertEqual(outcome.status, "UNANIMOUS")
         # 1-shot: every perspective reviewer ran exactly once.
         self.assertEqual([a.call_count for a in adapters], [1, 1, 1, 1])
 
     def test_unilateral_security_veto_with_dict_finding_halts_review(self) -> None:
-        council = debate_orchestrator.ReviewCouncil()
-        req = debate_orchestrator.ReviewRequest(
+        council = critical_dialogue.ReviewCouncil()
+        req = critical_dialogue.ReviewRequest(
             objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
         )
         adapters = self._adapters(
@@ -1040,8 +1048,8 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         self.assertEqual(outcome.unresolved_blockers, 1)
 
     def test_round_1_quorum_failure_escalates_to_stalemate(self) -> None:
-        council = debate_orchestrator.ReviewCouncil()
-        req = debate_orchestrator.ReviewRequest(
+        council = critical_dialogue.ReviewCouncil()
+        req = critical_dialogue.ReviewRequest(
             objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
         )
         adapters = self._adapters({
@@ -1064,8 +1072,8 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         subject_path = os.path.join(self.workspace_root, "subject.txt")
         with open(subject_path, "w", encoding="utf-8") as stream:
             stream.write("original content")
-        council = debate_orchestrator.ReviewCouncil()
-        req = debate_orchestrator.ReviewRequest(
+        council = critical_dialogue.ReviewCouncil()
+        req = critical_dialogue.ReviewRequest(
             objective=self.objective,
             workspace_root=self.workspace_root,
             subject=subject_path,
@@ -1096,8 +1104,8 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         subject_path = os.path.join(self.workspace_root, "subject.txt")
         with open(subject_path, "w", encoding="utf-8") as stream:
             stream.write("original content")
-        council = debate_orchestrator.ReviewCouncil()
-        req = debate_orchestrator.ReviewRequest(
+        council = critical_dialogue.ReviewCouncil()
+        req = critical_dialogue.ReviewRequest(
             objective=self.objective,
             workspace_root=self.workspace_root,
             subject=subject_path,
@@ -1122,7 +1130,7 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         )
 
         with patch.object(
-            debate_orchestrator,
+            critical_dialogue,
             "_load_provider_adapters",
             return_value=_FakeProviderAdaptersModule(approving_adjudicator),
         ):
@@ -1133,14 +1141,14 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         self.assertEqual(outcome.unresolved_blockers, 1)
 
     def test_fast_path_disabled_escalates_to_adjudicator_despite_quorum(self) -> None:
-        base = json.loads(debate_orchestrator.ROUTING_CONFIG_PATH.read_text())
+        base = json.loads(critical_dialogue.ROUTING_CONFIG_PATH.read_text())
         base.setdefault("consultation_policy", {})["council_policy"] = {"fast_path_enabled": False}
         with tempfile.TemporaryDirectory() as config_dir:
             config_path = Path(config_dir) / "routing-config.json"
             config_path.write_text(json.dumps(base), encoding="utf-8")
-            council = debate_orchestrator.ReviewCouncil(config_path)
+            council = critical_dialogue.ReviewCouncil(config_path)
 
-        req = debate_orchestrator.ReviewRequest(
+        req = critical_dialogue.ReviewRequest(
             objective=self.objective, workspace_root=self.workspace_root, by_perspective=True
         )
         adapters = self._adapters({
