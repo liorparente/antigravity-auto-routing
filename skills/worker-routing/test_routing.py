@@ -8897,16 +8897,19 @@ class WorkerRoutingPackageContractTests(unittest.TestCase):
                     package.LearnedState,
                     importlib.import_module("worker_routing.learned_state"),
                 )
-                self.assertIs(
-                    package.ReviewCouncil,
-                    importlib.import_module("worker_routing.advisory_consultation").ReviewCouncil,
+                critical_dialogue = importlib.import_module(
+                    "worker_routing.critical_dialogue"
                 )
+                self.assertIs(package.ReviewCouncil, critical_dialogue.ReviewCouncil)
                 self.assertIs(
                     package.run_critical_dialogue,
-                    importlib.import_module(
-                        "worker_routing.advisory_consultation"
-                    ).run_critical_dialogue,
+                    critical_dialogue.run_critical_dialogue,
                 )
+                self.assertIs(
+                    package.request_council_review,
+                    critical_dialogue.request_council_review,
+                )
+                self.assertIn("request_council_review", package.__all__)
                 self.assertEqual(
                     package.resolve_model_name("Codex 5.6 Sol"),
                     "gpt-5.6-sol",

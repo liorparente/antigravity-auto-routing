@@ -108,11 +108,11 @@ if TYPE_CHECKING:
     # signature and touches neither at runtime (`chosen not in
     # report.options` and `chosen.id` are plain attribute access). Importing
     # it for real would make every caller of `record_test_result` pay for
-    # `advisory_consultation` and the `production_invoker` chain behind it.
+    # `critical_dialogue` and the `production_invoker` chain behind it.
     if __package__:
-        from . import advisory_consultation
+        from . import critical_dialogue
     else:
-        import advisory_consultation  # type: ignore[no-redef]
+        import critical_dialogue  # type: ignore[no-redef]
 
 # Mirrors `advisory_consultation._build_stalemate_report`'s three options, in
 # order: (1) approve the Planner's architecture, (2) approve the Critic's,
@@ -228,8 +228,8 @@ def record_plan_outcome(
 
 def record_stalemate_resolution(
     task_id: str,
-    report: advisory_consultation.AdvisoryStalemateReport,
-    chosen: advisory_consultation.AdvisoryResolutionOption,
+    report: critical_dialogue.AdvisoryStalemateReport,
+    chosen: critical_dialogue.AdvisoryResolutionOption,
     *,
     root_dir: Path,
     run_id: str | None = None,
