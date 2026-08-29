@@ -42,6 +42,19 @@ MANAGED_FILES=(
 )
 PYTHON_MODULE_MANIFEST=".auto-routing-python-modules"
 PYTHON_MODULE_MANIFEST_HEADER="auto-routing-python-modules-v1"
+PYTHON_MODULE_RECEIPT_NAME=".auto-routing-python-modules.receipt"
+PYTHON_MODULE_RECEIPT_HEADER="auto-routing-python-modules-receipt-v2-hmac-sha256"
+INSTALLER_STATE_DIR="${AUTO_ROUTING_STATE_DIR:-$HOME/.local/state/auto-routing}"
+PYTHON_MODULE_KEY="$INSTALLER_STATE_DIR/python-module-manifest.key"
+PROJECT_RECEIPT_ID="$(python3 - "$TARGET_PROJECT_DIR" <<'PYEOF'
+import hashlib
+import os
+import sys
+
+print(hashlib.sha256(os.fsencode(sys.argv[1])).hexdigest())
+PYEOF
+)"
+PYTHON_MODULE_RECEIPT="$INSTALLER_STATE_DIR/projects/$PROJECT_RECEIPT_ID/$PYTHON_MODULE_RECEIPT_NAME"
 PYTHON_MODULES=()
 
 valid_python_module_name() {
@@ -69,8 +82,8 @@ PYEOF
 
 # Populate PARSED_PYTHON_MODULES with validated "digest|name" records. The
 # versioned header distinguishes an installer manifest from a user-file/path
-# collision, while the digest prevents a corrupted record from claiming an
-# unrelated target-side Python file by basename alone.
+# collision. Record digests protect modified files; the independent receipt
+# validated below is what authorizes the manifest as installer provenance.
 read_python_module_manifest() {
     local manifest="$1" header digest module_name extra record existing
     PARSED_PYTHON_MODULES=()
@@ -98,6 +111,45 @@ read_python_module_manifest() {
     } < "$manifest"
 }
 
+# SECURITY INVARIANT: this function and the three helpers above are duplicated
+# in uninstall.sh so each script remains standalone. ManagedFileClosureTests
+# compares their bodies and contract constants byte-for-byte to prevent drift.
+validate_python_module_receipt() {
+    local receipt="$1" key="$2" project="$3" output="$4"
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ -f "$key" ] && [ ! -L "$key" ] || return 1
+    python3 - "$receipt" "$key" "$project" "$output" \
+        "$PYTHON_MODULE_RECEIPT_HEADER" <<'PYEOF'
+import hashlib
+import hmac
+import os
+import sys
+
+receipt_path, key_path, project, output_path, expected_header = sys.argv[1:]
+try:
+    with open(key_path, "r", encoding="ascii") as stream:
+        key_hex = stream.read().strip()
+    if len(key_hex) != 64 or any(char not in "0123456789abcdef" for char in key_hex):
+        raise ValueError("invalid key")
+    with open(receipt_path, "rb") as stream:
+        header = stream.readline().rstrip(b"\n")
+        signature = stream.readline().rstrip(b"\n")
+        manifest = stream.read()
+    if header != expected_header.encode("ascii"):
+        raise ValueError("invalid header")
+    if len(signature) != 64 or any(byte not in b"0123456789abcdef" for byte in signature):
+        raise ValueError("invalid signature")
+    payload = os.fsencode(project) + b"\0" + manifest
+    expected = hmac.new(bytes.fromhex(key_hex), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature.decode("ascii"), expected):
+        raise ValueError("signature mismatch")
+    with open(output_path, "wb") as stream:
+        stream.write(manifest)
+except (OSError, UnicodeError, ValueError):
+    sys.exit(1)
+PYEOF
+}
+
 # All source-side, non-test Python modules are installer-managed. Discovering
 # only from SRC_DIR (rather than an installed target) keeps installation
 # deterministic and gives uninstall an equally surgical ownership boundary.
@@ -116,10 +168,13 @@ done
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
 TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-rollback.XXXXXX")"
 touch "$TRANSACTION_DIR/entries"
+touch "$TRANSACTION_DIR/directories"
+touch "$TRANSACTION_DIR/quarantines"
 COMMITTED=0
 
 rollback() {
-    [ -s "$TRANSACTION_DIR/entries" ] || return 0
+    [ -s "$TRANSACTION_DIR/entries" ] || [ -s "$TRANSACTION_DIR/directories" ] \
+        || [ -s "$TRANSACTION_DIR/quarantines" ] || return 0
     echo "↩️  Rolling back incomplete installation..." >&2
     while IFS='|' read -r number state target; do
         [ -n "$target" ] || continue
@@ -130,6 +185,24 @@ rollback() {
             rm -f "$target"
         fi
     done < "$TRANSACTION_DIR/entries"
+    while IFS='|' read -r target quarantine; do
+        [ -n "$target" ] && [ -e "$quarantine" ] || continue
+        if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+            mv "$quarantine" "$target"
+        fi
+    done < "$TRANSACTION_DIR/quarantines"
+    # Retry globally until no directory can be removed. This handles shared
+    # ancestors recorded before later sibling directories were created.
+    while :; do
+        removed_directory=false
+        while IFS= read -r directory; do
+            [ -n "$directory" ] || continue
+            if rmdir "$directory" 2>/dev/null; then
+                removed_directory=true
+            fi
+        done < "$TRANSACTION_DIR/directories"
+        [ "$removed_directory" = true ] || break
+    done
 }
 
 cleanup() {
@@ -138,12 +211,65 @@ cleanup() {
         rollback || true
         echo "❌ Installation failed; original files were restored." >&2
     fi
+    while IFS='|' read -r target quarantine; do
+        [ -n "$target" ] || continue
+        rm -f "$quarantine"
+    done < "$TRANSACTION_DIR/quarantines"
     rm -rf "$STAGING_DIR" "$TRANSACTION_DIR"
 }
 trap cleanup EXIT
 
+# The HMAC key lives in installer state, outside every writable target
+# project. It authenticates provenance against project-local joint forgery.
+# A same-account attacker who can read this 0600 key is outside that boundary.
+STAGED_PYTHON_MODULE_KEY="$STAGING_DIR/python-module-manifest.key"
+INSTALL_PYTHON_MODULE_KEY=0
+if [ -e "$PYTHON_MODULE_KEY" ] || [ -L "$PYTHON_MODULE_KEY" ]; then
+    if [ ! -f "$PYTHON_MODULE_KEY" ] || [ -L "$PYTHON_MODULE_KEY" ] \
+        || ! key_value="$(tr -d '\n' < "$PYTHON_MODULE_KEY")" \
+        || [ "${#key_value}" -ne 64 ]; then
+        echo "❌ Invalid installer provenance key: $PYTHON_MODULE_KEY" >&2
+        exit 1
+    fi
+    case "$key_value" in
+        *[!0-9a-f]*)
+            echo "❌ Invalid installer provenance key: $PYTHON_MODULE_KEY" >&2
+            exit 1
+            ;;
+    esac
+    cp "$PYTHON_MODULE_KEY" "$STAGED_PYTHON_MODULE_KEY"
+else
+    python3 - "$STAGED_PYTHON_MODULE_KEY" <<'PYEOF'
+import secrets
+import sys
+
+with open(sys.argv[1], "w", encoding="ascii") as stream:
+    stream.write(secrets.token_hex(32) + "\n")
+PYEOF
+    chmod 600 "$STAGED_PYTHON_MODULE_KEY"
+    INSTALL_PYTHON_MODULE_KEY=1
+fi
+
 SNAPSHOT_COUNT=0
 SNAPSHOT_SEEN=""
+DIRECTORY_SNAPSHOT_SEEN=""
+
+snapshot_created_directories() {
+    local directory="$1"
+    while [ ! -d "$directory" ]; do
+        [ ! -e "$directory" ] && [ ! -L "$directory" ] || return 1
+        case "$DIRECTORY_SNAPSHOT_SEEN" in
+            *"|$directory|"*) ;;
+            *)
+                DIRECTORY_SNAPSHOT_SEEN="${DIRECTORY_SNAPSHOT_SEEN:-|}$directory|"
+                # Record leaf-to-root: rollback removes children before parents.
+                printf '%s\n' "$directory" >> "$TRANSACTION_DIR/directories"
+                ;;
+        esac
+        [ "$directory" != "/" ] || return 1
+        directory="$(dirname "$directory")"
+    done
+}
 
 snapshot_file() {
     local target="$1" number
@@ -164,10 +290,12 @@ snapshot_file() {
 atomic_copy() {
     local source="$1" target="$2" temporary
     snapshot_file "$target"
+    snapshot_created_directories "$(dirname "$target")"
     mkdir -p "$(dirname "$target")"
     temporary="${target}.auto-routing-tmp.$$"
     cp "$source" "$temporary"
     mv -f "$temporary" "$target"
+    record_mutation "copy:$target"
 }
 
 merge_consultation_policy() {
@@ -290,6 +418,30 @@ done
             "$python_module_name"
     done
 } > "$STAGING_DIR/python-module-manifest"
+python3 - \
+    "$STAGED_PYTHON_MODULE_KEY" \
+    "$TARGET_PROJECT_DIR" \
+    "$STAGING_DIR/python-module-manifest" \
+    "$STAGING_DIR/python-module-receipt" \
+    "$PYTHON_MODULE_RECEIPT_HEADER" <<'PYEOF'
+import hashlib
+import hmac
+import os
+import sys
+
+key_path, project, manifest_path, receipt_path, header = sys.argv[1:]
+with open(key_path, "r", encoding="ascii") as stream:
+    key = bytes.fromhex(stream.read().strip())
+with open(manifest_path, "rb") as stream:
+    manifest = stream.read()
+signature = hmac.new(
+    key, os.fsencode(project) + b"\0" + manifest, hashlib.sha256
+).hexdigest()
+with open(receipt_path, "wb") as stream:
+    stream.write(header.encode("ascii") + b"\n")
+    stream.write(signature.encode("ascii") + b"\n")
+    stream.write(manifest)
+PYEOF
 
 # Stage the complete Council Review skill alongside worker-routing. Ignore
 # interpreter caches, which are runtime artifacts rather than installable
@@ -387,12 +539,61 @@ for index in "${!DOCS[@]}"; do
 done
 cp "$PROTOCOL_SRC" "$STAGING_DIR/claude-rule.md"
 
-# Validate every existing ownership manifest before the first target write.
-# A malformed file, symlink, or directory at the reserved path is ambiguous:
-# fail closed instead of overwriting user content or trusting attacker-chosen
-# removal entries. Normalized records are staged by target index for the
-# transactional stale-module cleanup below.
+# Authenticate one canonical previous manifest before the first target write.
+# The receipt embeds and signs that canonical manifest, so a missing target or
+# target-local manifest can be healed without weakening collision checks.
+# Pre-receipt v1 manifests are inherently unauthenticated; migration therefore
+# requires explicit operator authority and agreement among every present copy.
 mkdir -p "$STAGING_DIR/previous-python-modules"
+AUTHENTICATED_PREVIOUS_MANIFEST="$STAGING_DIR/authenticated-previous-manifest"
+PREVIOUS_MANIFEST_AUTHORIZED=0
+if [ -e "$PYTHON_MODULE_RECEIPT" ] || [ -L "$PYTHON_MODULE_RECEIPT" ]; then
+    if ! validate_python_module_receipt \
+        "$PYTHON_MODULE_RECEIPT" \
+        "$PYTHON_MODULE_KEY" \
+        "$TARGET_PROJECT_DIR" \
+        "$AUTHENTICATED_PREVIOUS_MANIFEST"; then
+        echo "❌ Invalid Python ownership receipt: $PYTHON_MODULE_RECEIPT" >&2
+        exit 1
+    fi
+    if ! read_python_module_manifest "$AUTHENTICATED_PREVIOUS_MANIFEST"; then
+        echo "❌ Invalid authenticated Python ownership manifest." >&2
+        exit 1
+    fi
+    PREVIOUS_MANIFEST_AUTHORIZED=1
+else
+    first_legacy_manifest=""
+    for target_dir in "${TARGET_DIRS[@]}"; do
+        manifest_path="$target_dir/$PYTHON_MODULE_MANIFEST"
+        if [ -e "$manifest_path" ] || [ -L "$manifest_path" ]; then
+            if ! read_python_module_manifest "$manifest_path"; then
+                echo "❌ Invalid or colliding Python ownership manifest: $manifest_path" >&2
+                exit 1
+            fi
+            if [ -z "$first_legacy_manifest" ]; then
+                first_legacy_manifest="$manifest_path"
+            elif ! cmp -s "$first_legacy_manifest" "$manifest_path"; then
+                echo "❌ Conflicting pre-receipt Python ownership manifests." >&2
+                exit 1
+            fi
+        fi
+    done
+    if [ -n "$first_legacy_manifest" ]; then
+        if [ "${AUTO_ROUTING_MIGRATE_PRE_RECEIPT:-0}" != "1" ]; then
+            echo "❌ Pre-receipt Python ownership requires explicit migration: set AUTO_ROUTING_MIGRATE_PRE_RECEIPT=1 after reviewing the manifests." >&2
+            exit 1
+        fi
+        cp "$first_legacy_manifest" "$AUTHENTICATED_PREVIOUS_MANIFEST"
+        PREVIOUS_MANIFEST_AUTHORIZED=1
+    fi
+fi
+
+if [ "$PREVIOUS_MANIFEST_AUTHORIZED" -eq 1 ]; then
+    read_python_module_manifest "$AUTHENTICATED_PREVIOUS_MANIFEST"
+    printf '%s\n' "${PARSED_PYTHON_MODULES[@]}" \
+        > "$STAGING_DIR/authorized-previous-python-modules"
+fi
+
 for index in "${!TARGET_DIRS[@]}"; do
     manifest_path="${TARGET_DIRS[$index]}/$PYTHON_MODULE_MANIFEST"
     if [ -e "$manifest_path" ] || [ -L "$manifest_path" ]; then
@@ -400,9 +601,41 @@ for index in "${!TARGET_DIRS[@]}"; do
             echo "❌ Invalid or colliding Python ownership manifest: $manifest_path" >&2
             exit 1
         fi
-        printf '%s\n' "${PARSED_PYTHON_MODULES[@]}" \
-            > "$STAGING_DIR/previous-python-modules/$index"
+        if [ "$PREVIOUS_MANIFEST_AUTHORIZED" -eq 1 ] \
+            && ! cmp -s "$manifest_path" "$AUTHENTICATED_PREVIOUS_MANIFEST"; then
+            echo "❌ Python ownership manifest does not match authenticated provenance: $manifest_path" >&2
+            exit 1
+        fi
     fi
+    if [ "$PREVIOUS_MANIFEST_AUTHORIZED" -eq 1 ]; then
+        cp "$STAGING_DIR/authorized-previous-python-modules" \
+            "$STAGING_DIR/previous-python-modules/$index"
+    fi
+
+    # Refuse to overwrite a current source basename unless a validated
+    # receipt (or explicit migration authority) proves prior ownership.
+    # Byte-identical content is deliberately insufficient provenance.
+    for python_module_name in "${PYTHON_MODULES[@]}"; do
+        installed_path="${TARGET_DIRS[$index]}/$python_module_name"
+        [ -e "$installed_path" ] || [ -L "$installed_path" ] || continue
+        if [ ! -f "$installed_path" ] || [ -L "$installed_path" ]; then
+            echo "❌ Unowned Python module collision: $installed_path" >&2
+            exit 1
+        fi
+        module_is_owned=false
+        if [ -f "$STAGING_DIR/previous-python-modules/$index" ]; then
+            while IFS='|' read -r previous_digest previous_module_name; do
+                if [ "$previous_module_name" = "$python_module_name" ]; then
+                    module_is_owned=true
+                    break
+                fi
+            done < "$STAGING_DIR/previous-python-modules/$index"
+        fi
+        if [ "$module_is_owned" = false ]; then
+            echo "❌ Unowned Python module collision: $installed_path" >&2
+            exit 1
+        fi
+    done
 done
 
 # Test-only fault injection verifies that preflight has no side effects.
@@ -413,19 +646,53 @@ fi
 
 write_count=0
 routing_config_index=0
-# One helper shared by every managed write below (MANAGED_FILES and, when
-# staged, learned state) so both count against the same
-# AUTO_ROUTING_FAIL_AFTER_WRITES fault-injection hook and roll back through
-# the same atomic_copy/snapshot_file transaction.
-copy_managed() {
-    local source="$1" target="$2"
-    atomic_copy "$source" "$target"
+record_mutation() {
+    local description="${1:-unspecified}"
     write_count=$((write_count + 1))
+    if [ "${AUTO_ROUTING_TRACE_MUTATIONS:-0}" = "1" ]; then
+        echo "🧭 Mutation $write_count: $description" >&2
+    fi
     if [ "${AUTO_ROUTING_FAIL_AFTER_WRITES:-0}" = "$write_count" ]; then
-        echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_WRITES triggered." >&2
+        echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_WRITES triggered after $description." >&2
         exit 1
     fi
 }
+
+copy_managed() {
+    atomic_copy "$1" "$2"
+}
+
+quarantine_managed() {
+    local target="$1" quarantine
+    quarantine="${target}.auto-routing-quarantine.$$"
+    if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+        echo "❌ Quarantine path collision: $quarantine" >&2
+        exit 1
+    fi
+    printf '%s|%s\n' "$target" "$quarantine" >> "$TRANSACTION_DIR/quarantines"
+    mv "$target" "$quarantine"
+    LAST_QUARANTINE="$quarantine"
+    record_mutation "remove:$target"
+}
+
+remove_managed_digest() {
+    local target="$1" expected_digest="$2"
+    quarantine_managed "$target"
+    if [ "$(sha256_file "$LAST_QUARANTINE")" != "$expected_digest" ]; then
+        mv "$LAST_QUARANTINE" "$target"
+        return 1
+    fi
+}
+
+chmod_managed() {
+    chmod "$1" "$2"
+    record_mutation "chmod:$2"
+}
+
+if [ "$INSTALL_PYTHON_MODULE_KEY" -eq 1 ]; then
+    copy_managed "$STAGED_PYTHON_MODULE_KEY" "$PYTHON_MODULE_KEY"
+    chmod_managed 600 "$PYTHON_MODULE_KEY"
+fi
 
 for index in "${!TARGET_DIRS[@]}"; do
     target_dir="${TARGET_DIRS[$index]}"
@@ -443,10 +710,7 @@ for index in "${!TARGET_DIRS[@]}"; do
             [ "$module_is_current" = false ] || continue
             stale_target="$target_dir/$previous_module_name"
             if [ -f "$stale_target" ] && [ ! -L "$stale_target" ]; then
-                if [ "$(sha256_file "$stale_target")" = "$previous_digest" ]; then
-                    snapshot_file "$stale_target"
-                    rm -f "$stale_target"
-                else
+                if ! remove_managed_digest "$stale_target" "$previous_digest"; then
                     echo "⚠️  Preserving modified stale module: $stale_target" >&2
                 fi
             elif [ -e "$stale_target" ] || [ -L "$stale_target" ]; then
@@ -468,7 +732,8 @@ for index in "${!TARGET_DIRS[@]}"; do
             "$SRC_DIR/routing-config.json" \
             "$target_dir/routing-config.json"
     fi
-    chmod +x "$target_dir/routing-audit.sh" "$target_dir/agent_council.py"
+    chmod_managed +x "$target_dir/routing-audit.sh"
+    chmod_managed +x "$target_dir/agent_council.py"
 
     if [ "$STAGED_LEARNED_STATE" -eq 1 ]; then
         copy_managed \
@@ -503,11 +768,15 @@ for index in "${!TARGET_DIRS[@]}"; do
         "$council_target_dir/council-policy.json" \
         "$council_target_dir/references/council-policy.json"; do
         if [ -e "$legacy_policy" ]; then
-            snapshot_file "$legacy_policy"
-            rm -f "$legacy_policy"
+            quarantine_managed "$legacy_policy"
         fi
     done
 done
+
+# Commit the installation-level provenance only after all five target
+# manifests have been synchronized. A target-local manifest on its own can
+# never authorize removal; every target must match this independent receipt.
+copy_managed "$STAGING_DIR/python-module-receipt" "$PYTHON_MODULE_RECEIPT"
 
 atomic_copy "$STAGING_DIR/claude-rule.md" "$CLAUDE_RULE"
 for index in "${!DOCS[@]}"; do

@@ -680,6 +680,66 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("test", "seam", "facade", "consolidation", "critical_dialogue", "TYPE_CHECKING", "subprocess", "installed harness", "mypy", "proxy"),
         ("test_*.py", "dialogue_transcript.py", "critical_dialogue.py", "*.py"),
     ),
+    GoldenRule(
+        42,
+        "State & File Locking Hygiene",
+        "Back up symlink targets, not only symlink topology",
+        "A moved symlink preserves only its target string; it is not a backup of the "
+        "target's contents. Before declaring a configuration backup self-contained, "
+        "resolve every in-scope symlink, copy the target content into the backup when "
+        "the target may be removed independently, and record any intentionally external "
+        "dependency in the restore manifest.",
+        (
+            "backup",
+            "symlink",
+            "dangling",
+            "target",
+            "restore",
+            "manifest",
+            "configuration",
+        ),
+        ("install.sh", "uninstall.sh", "RESTORE.md", "*.sh", "*.md"),
+    ),
+    GoldenRule(
+        43,
+        "Multi-Harness Sync & Governance",
+        "Treat configuration verification as potentially state-creating",
+        "Launching Codex to list MCP servers, plugins, or other configuration can "
+        "materialize bootstrap state such as a trust-only config.toml. Capture an "
+        "immediate post-move snapshot, compare metadata before and after verification "
+        "commands, then run a final inventory. Restore scripts must refuse live-path "
+        "collisions instead of overwriting newly generated state.",
+        (
+            "codex",
+            "config.toml",
+            "verification",
+            "bootstrap",
+            "trust",
+            "collision",
+            "restore",
+        ),
+        ("install.sh", "uninstall.sh", "RESTORE.md", "*.sh", "*.md"),
+    ),
+    GoldenRule(
+        44,
+        "Multi-Harness Sync & Governance",
+        "Separate reversible configuration from protected identity and runtime state",
+        "A clean-slate reset must inventory configuration from documented global, "
+        "project, managed, plugin, skill, hook, subagent, command, and editor surfaces, "
+        "while leaving authentication, credentials, sessions, runtime databases, and "
+        "project source in place. Move configuration into a mirrored-path backup, verify "
+        "each destination immediately, and generate a collision-safe restore manifest.",
+        (
+            "clean slate",
+            "configuration",
+            "authentication",
+            "credentials",
+            "session",
+            "backup",
+            "restore",
+        ),
+        ("install.sh", "uninstall.sh", "RESTORE.md", "AGENTS.md", "*.sh", "*.md"),
+    ),
 )
 
 _INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (
