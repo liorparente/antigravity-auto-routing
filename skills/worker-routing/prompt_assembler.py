@@ -656,6 +656,14 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("critical dialogue", "advisory", "council review", "facade", "shallow", "deep module", "seam", "alias", "re-export", "consolidation"),
         ("critical_dialogue.py", "debate_*.py", "council_*.py", "dialogue_*.py", "*.py"),
     ),
+    GoldenRule(
+        39,
+        "Architecture & Deep Modules",
+        "Bridge active event loops in synchronous convenience entry points",
+        "When exposing synchronous convenience entry points (e.g. request_council_review) over asynchronous coroutines (e.g. ReviewCouncil.review), check for an active running event loop using try: loop = asyncio.get_running_loop(). Calling asyncio.run() inside an already running loop raises RuntimeError: This event loop is already running. In active loop environments (e.g. asynchronous test runners, notebooks, or live orchestrators), bridge execution safely using concurrent.futures.ThreadPoolExecutor(max_workers=1) to isolate loop lifecycles.",
+        ("asyncio", "event loop", "asyncio.run", "threadpool", "synchronous", "request_council_review", "RuntimeError", "coroutine", "bridge", "council"),
+        ("critical_dialogue.py", "test_critical_dialogue.py", "*.py"),
+    ),
 )
 
 _INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (

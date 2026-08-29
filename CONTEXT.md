@@ -73,7 +73,7 @@ which the journal cannot verify and the caller therefore owns. Spec 0004.
 An action the orchestrator performs itself rather than routing to a worker. The set is closed and enumerated: everything outside it is a routing violation. Membership is decided by whether a worker *can* do the work, not by whether the orchestrator finds it convenient — version control is a member because worker sandboxes cannot perform it at all.
 
 ### CriticalDialogue
-The upgraded [[AdvisoryConsultation]] machinery serving four occasions — ambiguity, plan review, post-execution code review, and post-mortem — under one round/contract/transcript/telemetry infrastructure. Tiered topology: a cross-family Planner–Critic pair by default; for Complex tasks, a panel of one Planner and two Critics from two other model families, where consensus requires an explicit approval from both. Stalemates halt to the human in every mode. Spec 0003.
+The consolidated, deep deliberation module in `skills/worker-routing/critical_dialogue.py` unifying Planner/Critic debates, multi-perspective council reviews, quorum reductions, HMAC signing, transcript rendering, and degradation ladder transitions behind a single canonical execution boundary. Supersedes fragmented legacy facades. Spec 0015.
 
 ### VerdictContract
 The response contract a Critic must satisfy for its approval to count: rationale before the verdict line, quotes from the reviewed artifact that verify mechanically, and enumerable atomic objections. An approval carrying zero engagement units parses as "not approved" — the structural defense against rubber-stamping, extending spec 0001's rule that absence of rejection is not agreement.

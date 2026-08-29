@@ -5,6 +5,12 @@
 
 ## Active Entries
 
+### ERR-0004: Event Loop Re-entrancy Failure in Synchronous Entry Points
+- **Date:** 2026-08-29
+- **Root Cause:** Invoking synchronous convenience wrappers (such as `request_council_review`) containing naked `asyncio.run(council.review(request))` from within an active asyncio event loop (e.g. asynchronous test runners, notebooks, or live async orchestrators) raised `RuntimeError: This event loop is already running`.
+- **Verified TDD Reproduction:** `skills/worker-routing/test_critical_dialogue.py::test_request_council_review_completes_inside_a_running_event_loop` proved that calling `request_council_review` inside an `async def run_in_loop()` raised `RuntimeError` before fix and completed cleanly after thread-pool bridging.
+- **Actionable Prevention Rule (Golden Rule 39):** Check `asyncio.get_running_loop()` before calling `asyncio.run()`, and dispatch through a dedicated `ThreadPoolExecutor` worker when an event loop is already active.
+
 ### ERR-0003: macOS Dotfile Permission Lock & TCC Extended Attributes on LM Studio
 - **Date:** 2026-08-29
 - **Root Cause:** LM Studio's macOS sandbox/TCC permissions and extended-attribute handling can deny writes to dotfile paths beneath its application-managed directory, even when ordinary filesystem permissions appear valid.
