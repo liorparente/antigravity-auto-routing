@@ -761,14 +761,15 @@ for index in "${!TARGET_DIRS[@]}"; do
         find "$STAGING_DIR/learn-session" -type f -print0 | LC_ALL=C sort -z
     )
 
-    # council-policy.json was superseded by worker-routing/routing-config.json.
-    # Remove both historic placements transactionally so a failed install can
-    # restore an existing legacy policy exactly as it was.
-    for legacy_policy in \
+    # Remove retired council-review artifacts transactionally so upgrades do
+    # not strand files that are no longer present in the source skill. A
+    # failed install restores each existing artifact exactly as it was.
+    for legacy_council_artifact in \
+        "$council_target_dir/scripts/council_review.py" \
         "$council_target_dir/council-policy.json" \
         "$council_target_dir/references/council-policy.json"; do
-        if [ -e "$legacy_policy" ]; then
-            quarantine_managed "$legacy_policy"
+        if [ -e "$legacy_council_artifact" ]; then
+            quarantine_managed "$legacy_council_artifact"
         fi
     done
 done

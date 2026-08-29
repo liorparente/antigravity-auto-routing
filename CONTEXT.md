@@ -161,13 +161,13 @@ A pure voting aggregation rule evaluated over arbitrary sequences of critic resp
 The deliberate normalization of `"abstain"` / timeout critic responses into valid non-approval votes without triggering unparseable verdict errors or terminating the debate. Abstentions increment total participant count without contributing to affirmative approvals, allowing quorum policies to evaluate gracefully under partial panel availability.
 
 ### Dyad
-A binary turn-based deliberation exchange between a single Planner and a single Critic across up to three revision rounds, orchestrated within `debate_orchestrator.py` for Medium-complexity tasks. Spec 0009.
+A binary turn-based deliberation exchange between a single Planner and a single Critic across up to three revision rounds, orchestrated within `critical_dialogue.py` for Medium-complexity tasks. Spec 0009 / Spec 0015.
 
 ### CouncilPanel
-A concurrent multi-model review ensemble evaluated under weighted scoring, soft confidence metrics, and selective HMAC-SHA256 manifest signing, orchestrated within `debate_orchestrator.py`. Spec 0009.
+A concurrent multi-model review ensemble evaluated under weighted scoring, soft confidence metrics, and selective HMAC-SHA256 manifest signing, orchestrated within `critical_dialogue.py`. Spec 0009 / Spec 0015.
 
 ### ReviewCouncilFacade
-The lightweight, backward-compatible 19-line delegating module in `skills/council-review/scripts/council_review.py` that routes external CLI and library callers directly to `debate_orchestrator.ReviewCouncil` without duplicating state machines or policy files. Spec 0009.
+The retired compatibility seam formerly provided by `skills/council-review/scripts/council_review.py`. Spec 0015 removed the facade; callers now use `critical_dialogue.ReviewCouncil` directly.
 
 ### SecurityVetoHandler
 The universal fail-closed circuit breaker in `production_invoker.py` and `debate_state_machine.py` combining domain-agnostic finding severity/confidence evaluation (Trigger 1: any perspective with Critical/High finding at confidence $\ge 0.80$ halts debate) with perspective-exclusive unilateral block evaluation (Trigger 2: `reviewer_security` explicit `BLOCK` verdict halts debate unconditionally, while non-security `BLOCK` votes participate in weighted quorum reduction). Spec 0009, Spec 0012.

@@ -27,7 +27,6 @@ antigravity-auto-routing/
     ├── council-review/               # Multi-agent peer review skill
     │   ├── SKILL.md                  # Council Review specification and trigger rules
     │   ├── scripts/
-    │   │   ├── council_review.py     # Compatibility facade for the unified debate engine
     │   │   └── provider_adapters.py  # Transport adapters for Claude, Codex, agy, LM Studio
     │   ├── references/               # Manifest schemas & member review contracts
     │   └── tests/                    # Council review test suite
@@ -39,7 +38,7 @@ antigravity-auto-routing/
         ├── routing-audit.sh          # Wrapper: locates conversation logs and invokes audit
         ├── routing_check.py          # Log audit engine: step-bounded parsing & violation checks
         ├── agent_council.py          # Deterministic 3-tier task routing decision engine & HMAC signer
-        ├── debate_orchestrator.py    # Unified debate engine (canary, advisory, post-mortem)
+        ├── critical_dialogue.py      # Unified debate and council-review engine
         ├── debate_state_machine.py   # Pure debate state machine, consensus table & quorum evaluator
         ├── debate_transport.py       # Isolated worker transport & recurring failure notifications
         ├── dialogue_contracts.py     # Pure contract types, quotes/objections parser & verdicts

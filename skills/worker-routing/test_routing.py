@@ -810,6 +810,9 @@ class ProtocolSyncTests(unittest.TestCase):
                 target.parent / "council-review" for target in worker_targets
             )
             for council_target in council_targets:
+                legacy_facade = council_target / "scripts" / "council_review.py"
+                legacy_facade.parent.mkdir(parents=True, exist_ok=True)
+                legacy_facade.write_text("# retired facade\n", encoding="utf-8")
                 legacy_policy = council_target / "references" / "council-policy.json"
                 legacy_policy.parent.mkdir(parents=True, exist_ok=True)
                 legacy_policy.write_text("{}\n", encoding="utf-8")
@@ -826,6 +829,9 @@ class ProtocolSyncTests(unittest.TestCase):
                         ).read_text(encoding="utf-8"),
                     )
                     self.assertTrue(
+                        (council_target / "scripts" / "provider_adapters.py").exists()
+                    )
+                    self.assertFalse(
                         (council_target / "scripts" / "council_review.py").exists()
                     )
                     self.assertFalse(
@@ -8887,24 +8893,6 @@ class _InstalledHarness:
             cwd=self.installed_dir,
             env=self.env(),
         )
-
-
-class CriticalDialogueFacadeCompatibilityTests(unittest.TestCase):
-    """The historic facade exposes the full production entry-point surface."""
-
-    def test_run_critical_dialogue_is_exported_with_the_production_signature(self) -> None:
-        import importlib
-        import inspect
-
-        advisory_consultation = importlib.import_module("advisory_consultation")
-        debate_orchestrator = importlib.import_module("debate_orchestrator")
-        self.assertIn("run_critical_dialogue", advisory_consultation.__all__)
-        for module in (advisory_consultation, debate_orchestrator):
-            with self.subTest(module=module.__name__):
-                self.assertEqual(
-                    inspect.signature(module.run_critical_dialogue),
-                    inspect.signature(module.run_advisory_consultation_debate),
-                )
 
 
 class WorkerRoutingPackageContractTests(unittest.TestCase):

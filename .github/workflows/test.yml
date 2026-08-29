@@ -30,14 +30,12 @@ jobs:
         skills/worker-routing/test_prompt_assembler.py
         skills/worker-routing/sensitivity_redactor.py
         skills/worker-routing/test_sensitivity_redactor.py
-        skills/worker-routing/debate_orchestrator.py
         skills/worker-routing/debate_state_machine.py
         skills/worker-routing/consultation_policy.py
         skills/worker-routing/debate_transport.py
         skills/worker-routing/test_debate_orchestrator.py
         skills/worker-routing/test_debate_state_machine.py
         skills/worker-routing/test_debate_transport.py
-        skills/worker-routing/advisory_consultation.py
         skills/worker-routing/test_dialogue_contracts.py
         skills/worker-routing/test_dialogue_degradation.py
         skills/worker-routing/test_dialogue_transcript.py
@@ -69,7 +67,6 @@ jobs:
         skills/worker-routing/test_switch_profile.py
         skills/worker-routing/regenerate_institutional_memory.py
         skills/council-review/scripts/provider_adapters.py
-        skills/council-review/scripts/council_review.py
         skills/council-review/tests/test_council_review.py
       # Every test file that must actually run. Listed separately from
       # PYTHON_MODULES for the same single-sourcing reason, and because the
