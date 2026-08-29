@@ -1,0 +1,1657 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Learning Dashboard — לוח בקרה למידה</title>
+<style>
+:root {
+  --bg: #faf6ef;
+  --panel: #ffffff;
+  --ink: #2b2a28;
+  --muted: #6f6a61;
+  --slate: #4a5568;
+  --border: #e6ddd0;
+  --good: #1a7a4c;
+  --bad: #b3261e;
+  --neutral: #8a8377;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Rubik', 'Heebo', system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+}
+header {
+  padding: 1.5rem 2rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+header h1 { margin: 0 0 0.25rem 0; font-size: 1.5rem; }
+header .subtitle { color: var(--muted); font-size: 0.9rem; }
+main { padding: 1.5rem 2rem; max-width: 1200px; margin: 0 auto; }
+section { margin-bottom: 2rem; }
+section h2 {
+  font-size: 1.1rem;
+  border-bottom: 2px solid var(--border);
+  padding-bottom: 0.4rem;
+  margin-bottom: 1rem;
+}
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+.kpi-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+}
+.kpi-name { font-weight: 600; font-size: 0.95rem; }
+.kpi-direction { color: var(--muted); font-size: 0.75rem; margin-bottom: 0.5rem; }
+.kpi-value { font-size: 1.6rem; font-weight: 700; }
+.kpi-baseline { color: var(--muted); font-size: 0.8rem; }
+.kpi-metric-id { color: var(--neutral); font-size: 0.7rem; margin-top: 0.35rem; }
+.kpi-status {
+  display: inline-block;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+}
+.status-improved .kpi-status { background: #e3f3ea; color: var(--good); }
+.status-regressed .kpi-status { background: #fbe7e5; color: var(--bad); }
+.status-held .kpi-status, .status-indeterminate .kpi-status {
+  background: #eeece6; color: var(--neutral);
+}
+.data-table { width: 100%; border-collapse: collapse; background: var(--panel); }
+.data-table th, .data-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  text-align: start;
+  font-size: 0.9rem;
+}
+.data-table th { color: var(--slate); font-weight: 600; }
+.event-list { list-style: none; margin: 0; padding: 0; }
+.event-list li {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+}
+.empty-state { color: var(--muted); font-style: italic; }
+.consensus-summary { display: flex; flex-wrap: wrap; gap: 1rem; }
+.consensus-summary div { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: .75rem 1rem; }
+footer { padding: 1rem 2rem; color: var(--muted); font-size: 0.8rem; }
+
+/* Two-tab navigation & role-mode toggle (ticket 47) — CSS-only, driven by
+   checked radio inputs and general-sibling selectors. This document ships
+   no script tags at all; see this module's docstring for why. */
+.sr-only-toggle { position: absolute; opacity: 0; width: 1px; height: 1px; pointer-events: none; }
+.tab-bar { display: flex; gap: 0.5rem; margin-top: 0.75rem; }
+.tab-bar label {
+  cursor: pointer;
+  padding: 0.4rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+#tab-metrics:checked ~ header label[for="tab-metrics"],
+#tab-roles:checked ~ header label[for="tab-roles"] {
+  background: var(--slate);
+  color: #fff;
+  border-color: var(--slate);
+}
+#tab-content-metrics, #tab-content-roles { display: none; }
+#tab-metrics:checked ~ #tab-content-metrics { display: block; }
+#tab-roles:checked ~ #tab-content-roles { display: block; }
+
+.role-matrix-main { padding: 1.5rem 2rem; max-width: 1200px; margin: 0 auto; }
+.role-matrix-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+.refresh-status { font-size: 0.8rem; color: var(--muted); }
+.segmented-toggle { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+.segmented-toggle label {
+  cursor: pointer;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+#role-mode-simple:checked ~ .segmented-toggle label[for="role-mode-simple"],
+#role-mode-all:checked ~ .segmented-toggle label[for="role-mode-all"] {
+  background: var(--slate);
+  color: #fff;
+  border-color: var(--slate);
+}
+.role-grid { display: none; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+#role-mode-simple:checked ~ #role-grid-simple { display: grid; }
+#role-mode-all:checked ~ #role-grid-all { display: grid; }
+.role-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-inline-start: 4px solid var(--neutral);
+  border-radius: 10px;
+  padding: 1rem;
+}
+.role-card-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.5rem; }
+.role-name { font-weight: 700; font-size: 1rem; }
+.role-id { color: var(--neutral); font-size: 0.75rem; }
+.role-card-requirements, .role-binding-pills { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.5rem; }
+.role-binding { border-top: 1px dashed var(--border); padding-top: 0.5rem; margin-top: 0.5rem; }
+.capability-pill {
+  display: inline-block;
+  background: #eeece6;
+  color: var(--ink);
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  direction: ltr;
+}
+
+/* Reactive model & effort controls (ticket 48). */
+.role-card-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.control-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--muted);
+  flex: 1 1 8rem;
+}
+.control-label select {
+  font-family: inherit;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  max-width: 100%;
+}
+.control-label select:disabled { color: var(--neutral); background: #f4f1ea; }
+.effort-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: #eeece6;
+  color: var(--neutral);
+}
+
+/* Floating action pill & toast notifications (ticket 49). Both live inside
+   `#tab-content-roles` (see `render_html_report`) rather than at the
+   document's top level: that div is exactly what the tab-bar's CSS-only
+   toggle already hides while the metrics tab is active, which keeps a
+   dirty-state pill from ever floating over unrelated content on the other
+   tab — no extra rule needed here to replicate that. */
+.action-pill {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  transform: translate(-50%, 150%);
+  opacity: 0;
+  pointer-events: none;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(230, 221, 208, 0.85);
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  z-index: 40;
+}
+.action-pill.is-visible {
+  transform: translate(-50%, 0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.action-pill-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--bad);
+  flex: none;
+  animation: action-pill-pulse 1.6s ease-in-out infinite;
+}
+@keyframes action-pill-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(179, 38, 30, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(179, 38, 30, 0); }
+}
+.action-pill-label { font-size: 0.85rem; font-weight: 600; white-space: nowrap; }
+.action-pill-buttons { display: flex; gap: 0.4rem; }
+.pill-btn {
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 0.35rem 0.85rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+.pill-btn-primary { background: var(--slate); color: #fff; border-color: var(--slate); }
+.pill-btn-danger { color: var(--bad); border-color: var(--bad); }
+
+.toast-stack {
+  position: fixed;
+  left: 50%;
+  bottom: 5rem;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  z-index: 50;
+  pointer-events: none;
+}
+.toast {
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  background: var(--slate);
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.2);
+  animation: toast-in 0.2s ease;
+}
+.toast-success { background: var(--good); }
+.toast-info { background: var(--slate); }
+.toast-error { background: var(--bad); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* Live JSON drawer & clipboard export (ticket 50). Lives inside
+   `#tab-content-roles` for the same reason the action pill does — see the
+   comment above `.action-pill`. */
+.config-drawer {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.08);
+  z-index: 30;
+}
+.config-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+}
+.config-drawer-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--ink);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.2rem 0;
+}
+.config-drawer-caret {
+  display: inline-block;
+  transition: transform 0.2s ease;
+}
+.config-drawer.is-open .config-drawer-caret { transform: rotate(90deg); }
+.config-drawer-body {
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.2s ease;
+  border-top: 1px solid transparent;
+}
+.config-drawer.is-open .config-drawer-body {
+  max-height: 40vh;
+  overflow: auto;
+  border-top-color: var(--border);
+}
+.config-drawer-json {
+  margin: 0;
+  padding: 0.85rem 1rem;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+/* Token colors `syntaxHighlightJson` wraps the preview's spans in. A
+   key's own trailing colon is part of its matched token (`tokenPattern`'s
+   optional trailing-colon group), so it renders in `.json-key`'s color
+   too, not `--ink` — only braces, commas, and whitespace are never
+   wrapped and so stay `.config-drawer-json`'s own `--ink`. */
+.config-drawer-json .json-key { color: #1d4ed8; font-weight: 600; }
+.config-drawer-json .json-string { color: var(--good); }
+.config-drawer-json .json-number { color: #b45309; }
+.config-drawer-json .json-boolean { color: #7c3aed; }
+.config-drawer-json .json-null { color: var(--neutral); font-style: italic; }
+</style>
+</head>
+<body>
+<input type="radio" id="tab-metrics" name="dashboard-tab" class="sr-only-toggle" checked>
+<input type="radio" id="tab-roles" name="dashboard-tab" class="sr-only-toggle">
+<header>
+  <h1>Learning Dashboard <span style="color: var(--muted);">לוח בקרה למידה</span></h1>
+  <div class="subtitle" dir="ltr">Light Mode · Window: 2026-08-22T17:28:00Z → 2026-08-29T17:28:00Z (7 days)</div>
+  <div class="tab-bar">
+    <label for="tab-metrics">מדדי ביצוע ולמידה</label>
+    <label for="tab-roles">הגדרת תפקידים ומודלים</label>
+  </div>
+</header>
+<div id="tab-content-metrics">
+<main>
+  <section>
+    <h2>Key Performance Indicators — מדדים מרכזיים</h2>
+    <div class="kpi-grid">
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Violations / Session</div>
+        <div class="kpi-direction">lower is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">6 (n=1)</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">violations_per_session</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Canary Catch Rate</div>
+        <div class="kpi-direction">higher is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">canary_catch_rate</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Mean Engagement</div>
+        <div class="kpi-direction">higher is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">mean_engagement_count</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Escalation Rate</div>
+        <div class="kpi-direction">lower is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">escalation_rate</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Dialogue Non-Consensus Rate</div>
+        <div class="kpi-direction">lower is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">dialogue_non_consensus_rate</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Mean Rework / Task</div>
+        <div class="kpi-direction">lower is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">mean_rework_per_task</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Cost / Completed Task (USD)</div>
+        <div class="kpi-direction">lower is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">cost_per_completed_task_usd</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Mean Benchmark Score</div>
+        <div class="kpi-direction">higher is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">mean_benchmark_score</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">First-Pass Yield (FPY)</div>
+        <div class="kpi-direction">higher is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">first_pass_yield</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Total Windowed Cost (USD)</div>
+        <div class="kpi-direction">lower is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">total_cost_usd</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Cost Savings vs Baseline (USD)</div>
+        <div class="kpi-direction">higher is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">cost_savings_usd</div>
+      </div>
+      <div class="kpi-card status-indeterminate">
+        <div class="kpi-name">Token Savings</div>
+        <div class="kpi-direction">higher is better</div>
+        <div class="kpi-value" dir="ltr">no data</div>
+        <div class="kpi-baseline">was <span dir="ltr">no data</span></div>
+        <div class="kpi-status">No trend</div>
+        <div class="kpi-metric-id" dir="ltr">token_savings</div>
+      </div>
+    </div>
+  </section>
+  <section>
+    <h2>Model Family Performance — ביצועי משפחות מודלים</h2>
+    <p class="empty-state">No worker executions in this window.</p>
+  </section>
+  <section>
+    <h2>Compliance Audits — ביקורות ציות</h2>
+    <p class="empty-state">No compliance audits in this window.</p>
+  </section>
+  <section>
+    <h2>Consensus &amp; Debate — קונצנזוס ודיונים</h2>
+    <p class="empty-state">No debates in this window.</p>
+  </section>
+  <section>
+    <h2>Budget Degradations — אירועי הידרדרות תקציב</h2>
+    <p class="empty-state">No budget degradations in this window.</p>
+  </section>
+</main>
+</div>
+<div id="tab-content-roles">
+<main class="role-matrix-main">
+  <section>
+    <h2>Role &amp; Model Configuration Matrix — מטריצת תפקידים ומודלים</h2>
+    
+    <input type="radio" id="role-mode-simple" name="role-mode" class="sr-only-toggle" checked>
+    <input type="radio" id="role-mode-all" name="role-mode" class="sr-only-toggle">
+    <div class="role-matrix-toolbar">
+      <button type="button" class="pill-btn" id="refresh-models">🔄 רענן מודלים חיים</button>
+      <span class="refresh-status" id="refresh-status" aria-live="polite"></span>
+    </div>
+    <div class="segmented-toggle">
+      <label for="role-mode-simple">תפקידי מפתח (ראשי)</label>
+      <label for="role-mode-all">פירוט מלא (מתקדם)</label>
+    </div>
+    <div class="role-grid" id="role-grid-simple">
+      <div class="role-card" data-role-id="planner" style="border-inline-start-color:#2563eb;">
+        <div class="role-card-header">
+          <div class="role-name">Planner — מתכנן</div>
+          <div class="role-id" dir="ltr">planner</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 200000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="planner" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5" selected>claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="planner" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="planner" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_opus_5</span><span class="capability-pill">Model: claude-opus-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_fable_5</span><span class="capability-pill">Model: claude-fable-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_sol</span><span class="capability-pill">Model: gpt-5.6-sol</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="builder_heavy" style="border-inline-start-color:#059669;">
+        <div class="role-card-header">
+          <div class="role-name">Heavy Builder — בנאי כבד</div>
+          <div class="role-id" dir="ltr">builder_heavy</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: workspace-write</span><span class="capability-pill">Min Context: 128000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="builder_heavy" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5" selected>claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="builder_heavy" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="builder_heavy" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_sonnet_5</span><span class="capability-pill">Model: claude-sonnet-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: gemini_flash_high</span><span class="capability-pill">Model: gemini-3.6-flash</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="builder_light" style="border-inline-start-color:#10b981;">
+        <div class="role-card-header">
+          <div class="role-name">Light Builder — בנאי קל</div>
+          <div class="role-id" dir="ltr">builder_light</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: medium</span><span class="capability-pill">Tool Access: workspace-write</span><span class="capability-pill">Min Context: 32000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="builder_light" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra" selected>codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="builder_light" dir="ltr"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="builder_light" dir="ltr" style="background:#1d4ed81a;color:#1d4ed8;">medium</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_terra</span><span class="capability-pill">Model: gpt-5.6-terra</span><span class="capability-pill" style="background:#1d4ed81a;color:#1d4ed8;">Effort: medium</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_luna</span><span class="capability-pill">Model: gpt-5.6-luna</span><span class="capability-pill" style="background:#1a7a4c1a;color:#1a7a4c;">Effort: low</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: gemini_flash_high</span><span class="capability-pill">Model: gemini-3.6-flash</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="reviewer_risk" style="border-inline-start-color:#7c3aed;">
+        <div class="role-card-header">
+          <div class="role-name">Critic — מבקר</div>
+          <div class="role-id" dir="ltr">reviewer_risk</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 128000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="reviewer_risk" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol" selected>codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="reviewer_risk" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="reviewer_risk" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_sol</span><span class="capability-pill">Model: gpt-5.6-sol</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: gemini_pro</span><span class="capability-pill">Model: gemini-3.1-pro</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="adjudicator" style="border-inline-start-color:#d97706;">
+        <div class="role-card-header">
+          <div class="role-name">Adjudicator — פוסק</div>
+          <div class="role-id" dir="ltr">adjudicator</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 32000</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Local Only: yes</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="adjudicator" dir="ltr"><option value="lm_studio_local::qwen3-coder-30b" selected>lm_studio_local · qwen3-coder-30b (drift)</option><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="adjudicator" disabled dir="ltr"><option value="medium" selected>medium</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="adjudicator" dir="ltr" style="background:#8a83771a;color:#8a8377;">unknown</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: lm_studio_local</span><span class="capability-pill">Model: qwen3-coder-30b</span><span class="capability-pill" style="background:#1d4ed81a;color:#1d4ed8;">Effort: medium</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+    </div>
+    <div class="role-grid" id="role-grid-all">
+      <div class="role-card" data-role-id="planner" style="border-inline-start-color:#2563eb;">
+        <div class="role-card-header">
+          <div class="role-name">Planner — מתכנן</div>
+          <div class="role-id" dir="ltr">planner</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 200000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="planner" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5" selected>claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="planner" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="planner" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_opus_5</span><span class="capability-pill">Model: claude-opus-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_fable_5</span><span class="capability-pill">Model: claude-fable-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_sol</span><span class="capability-pill">Model: gpt-5.6-sol</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="builder_heavy" style="border-inline-start-color:#059669;">
+        <div class="role-card-header">
+          <div class="role-name">Heavy Builder — בנאי כבד</div>
+          <div class="role-id" dir="ltr">builder_heavy</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: workspace-write</span><span class="capability-pill">Min Context: 128000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="builder_heavy" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5" selected>claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="builder_heavy" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="builder_heavy" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_sonnet_5</span><span class="capability-pill">Model: claude-sonnet-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: gemini_flash_high</span><span class="capability-pill">Model: gemini-3.6-flash</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="builder_light" style="border-inline-start-color:#10b981;">
+        <div class="role-card-header">
+          <div class="role-name">Light Builder — בנאי קל</div>
+          <div class="role-id" dir="ltr">builder_light</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: medium</span><span class="capability-pill">Tool Access: workspace-write</span><span class="capability-pill">Min Context: 32000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="builder_light" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra" selected>codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="builder_light" dir="ltr"><option value="low">low</option><option value="medium" selected>medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="builder_light" dir="ltr" style="background:#1d4ed81a;color:#1d4ed8;">medium</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_terra</span><span class="capability-pill">Model: gpt-5.6-terra</span><span class="capability-pill" style="background:#1d4ed81a;color:#1d4ed8;">Effort: medium</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_luna</span><span class="capability-pill">Model: gpt-5.6-luna</span><span class="capability-pill" style="background:#1a7a4c1a;color:#1a7a4c;">Effort: low</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: gemini_flash_high</span><span class="capability-pill">Model: gemini-3.6-flash</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="reviewer_architecture" style="border-inline-start-color:#7c3aed;">
+        <div class="role-card-header">
+          <div class="role-name">Architecture Reviewer — מבקר ארכיטקטורה</div>
+          <div class="role-id" dir="ltr">reviewer_architecture</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 128000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="reviewer_architecture" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol" selected>codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="reviewer_architecture" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="reviewer_architecture" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_sol</span><span class="capability-pill">Model: gpt-5.6-sol</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_opus_5</span><span class="capability-pill">Model: claude-opus-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="reviewer_risk" style="border-inline-start-color:#7c3aed;">
+        <div class="role-card-header">
+          <div class="role-name">Critic — מבקר</div>
+          <div class="role-id" dir="ltr">reviewer_risk</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 128000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="reviewer_risk" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol" selected>codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="reviewer_risk" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="reviewer_risk" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_sol</span><span class="capability-pill">Model: gpt-5.6-sol</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: gemini_pro</span><span class="capability-pill">Model: gemini-3.1-pro</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="reviewer_maintainability" style="border-inline-start-color:#7c3aed;">
+        <div class="role-card-header">
+          <div class="role-name">Maintainability Reviewer — מבקר תחזוקתיות</div>
+          <div class="role-id" dir="ltr">reviewer_maintainability</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: medium</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 64000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="reviewer_maintainability" dir="ltr"><option value="antigravity_cli::gemini-3.6-flash" selected>antigravity_cli · gemini-3.6-flash (drift)</option><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="reviewer_maintainability" disabled dir="ltr"><option value="high" selected>high</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="reviewer_maintainability" dir="ltr" style="background:#8a83771a;color:#8a8377;">unknown</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: gemini_flash_high</span><span class="capability-pill">Model: gemini-3.6-flash</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_terra</span><span class="capability-pill">Model: gpt-5.6-terra</span><span class="capability-pill" style="background:#1d4ed81a;color:#1d4ed8;">Effort: medium</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="reviewer_security" style="border-inline-start-color:#dc2626;">
+        <div class="role-card-header">
+          <div class="role-name">Security Reviewer — מבקר אבטחה</div>
+          <div class="role-id" dir="ltr">reviewer_security</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 128000</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="reviewer_security" dir="ltr"><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol" selected>codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="reviewer_security" dir="ltr"><option value="low">low</option><option value="medium">medium</option><option value="high" selected>high</option><option value="xhigh">xhigh</option><option value="max">max</option><option value="ultra">ultra</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="reviewer_security" dir="ltr" style="background:#7c3aed1a;color:#7c3aed;">high</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: codex_sol</span><span class="capability-pill">Model: gpt-5.6-sol</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: ultra</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max, ultra</span><span class="capability-pill">Context: 272000</span></div>
+        </div>
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: claude_opus_5</span><span class="capability-pill">Model: claude-opus-5</span><span class="capability-pill" style="background:#7c3aed1a;color:#7c3aed;">Effort: high</span><span class="capability-pill">Tier: max</span><span class="capability-pill">Supported Efforts: low, medium, high, xhigh, max</span><span class="capability-pill">Context: 1000000</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="adjudicator" style="border-inline-start-color:#d97706;">
+        <div class="role-card-header">
+          <div class="role-name">Adjudicator — פוסק</div>
+          <div class="role-id" dir="ltr">adjudicator</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: read</span><span class="capability-pill">Min Context: 32000</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Local Only: yes</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="adjudicator" dir="ltr"><option value="lm_studio_local::qwen3-coder-30b" selected>lm_studio_local · qwen3-coder-30b (drift)</option><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="adjudicator" disabled dir="ltr"><option value="medium" selected>medium</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="adjudicator" dir="ltr" style="background:#8a83771a;color:#8a8377;">unknown</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: lm_studio_local</span><span class="capability-pill">Model: qwen3-coder-30b</span><span class="capability-pill" style="background:#1d4ed81a;color:#1d4ed8;">Effort: medium</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+      <div class="role-card" data-role-id="sensitive_executor" style="border-inline-start-color:#dc2626;">
+        <div class="role-card-header">
+          <div class="role-name">Sensitive Executor — מבצע רגיש</div>
+          <div class="role-id" dir="ltr">sensitive_executor</div>
+        </div>
+        <div class="role-card-requirements"><span class="capability-pill">Reasoning Tier: high</span><span class="capability-pill">Tool Access: workspace-write</span><span class="capability-pill">Min Context: 32000</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Local Only: yes</span></div>
+        <div class="role-card-controls">
+          <label class="control-label">מודל
+            <select class="model-select" data-role-id="sensitive_executor" dir="ltr"><option value="lm_studio_local::qwen3-coder-30b" selected>lm_studio_local · qwen3-coder-30b (drift)</option><option value="antigravity_cli::claude-opus-4-6-thinking">antigravity_cli · claude-opus-4-6-thinking</option><option value="antigravity_cli::claude-sonnet-4-6">antigravity_cli · claude-sonnet-4-6</option><option value="antigravity_cli::gemini-3.1-pro-high">antigravity_cli · gemini-3.1-pro-high</option><option value="antigravity_cli::gemini-3.1-pro-low">antigravity_cli · gemini-3.1-pro-low</option><option value="antigravity_cli::gemini-3.5-flash-high">antigravity_cli · gemini-3.5-flash-high</option><option value="antigravity_cli::gemini-3.5-flash-low">antigravity_cli · gemini-3.5-flash-low</option><option value="antigravity_cli::gemini-3.5-flash-medium">antigravity_cli · gemini-3.5-flash-medium</option><option value="antigravity_cli::gemini-3.6-flash-high">antigravity_cli · gemini-3.6-flash-high</option><option value="antigravity_cli::gemini-3.6-flash-low">antigravity_cli · gemini-3.6-flash-low</option><option value="antigravity_cli::gemini-3.6-flash-medium">antigravity_cli · gemini-3.6-flash-medium</option><option value="antigravity_cli::gemini-3.7-flash-high">antigravity_cli · gemini-3.7-flash-high</option><option value="antigravity_cli::gemini-3.7-flash-low">antigravity_cli · gemini-3.7-flash-low</option><option value="antigravity_cli::gemini-3.7-flash-medium">antigravity_cli · gemini-3.7-flash-medium</option><option value="antigravity_cli::gpt-oss-120b-medium">antigravity_cli · gpt-oss-120b-medium</option><option value="claude_code_cli::claude-3-7-sonnet">claude_code_cli · claude-3-7-sonnet</option><option value="claude_code_cli::claude-fable-5">claude_code_cli · claude-fable-5</option><option value="claude_code_cli::claude-opus-5">claude_code_cli · claude-opus-5</option><option value="claude_code_cli::claude-sonnet-4-6">claude_code_cli · claude-sonnet-4-6</option><option value="claude_code_cli::claude-sonnet-5">claude_code_cli · claude-sonnet-5</option><option value="codex_cli::gpt-5.3-codex-spark">codex_cli · gpt-5.3-codex-spark</option><option value="codex_cli::gpt-5.4">codex_cli · gpt-5.4</option><option value="codex_cli::gpt-5.4-mini">codex_cli · gpt-5.4-mini</option><option value="codex_cli::gpt-5.5">codex_cli · gpt-5.5</option><option value="codex_cli::gpt-5.6-luna">codex_cli · gpt-5.6-luna</option><option value="codex_cli::gpt-5.6-sol">codex_cli · gpt-5.6-sol</option><option value="codex_cli::gpt-5.6-terra">codex_cli · gpt-5.6-terra</option><option value="lm_studio_local::gemma-4-e4b-it-mlx">lm_studio_local · gemma-4-e4b-it-mlx</option><option value="lm_studio_local::qwen3.8-27b-mlx">lm_studio_local · qwen3.8-27b-mlx</option></select>
+          </label>
+          <label class="control-label">רמת חשיבה
+            <select class="effort-select" data-role-id="sensitive_executor" disabled dir="ltr"><option value="medium" selected>medium</option></select>
+          </label>
+          <span class="effort-badge" data-role-id="sensitive_executor" dir="ltr" style="background:#8a83771a;color:#8a8377;">unknown</span>
+        </div>
+        <div class="role-card-bindings">
+        <div class="role-binding">
+          <div class="role-binding-pills"><span class="capability-pill">Provider: lm_studio_local</span><span class="capability-pill">Model: qwen3-coder-30b</span><span class="capability-pill" style="background:#1d4ed81a;color:#1d4ed8;">Effort: medium</span><span class="capability-pill" style="background:#b3261e1a;color:#b3261e;">Capability: unknown (drift)</span></div>
+        </div></div>
+      </div>
+    </div>
+  </section>
+</main>
+    <div class="action-pill" id="action-pill">
+      <span class="action-pill-dot" aria-hidden="true"></span>
+      <span class="action-pill-label" id="action-pill-label">אין שינויים לא שמורים</span>
+      <div class="action-pill-buttons">
+        <button type="button" class="pill-btn" id="action-undo">↩ בטל פעולה</button>
+        <button type="button" class="pill-btn pill-btn-danger" id="action-reset">אפס לברירת מחדל</button>
+        <button type="button" class="pill-btn pill-btn-primary" id="action-save">שמור שינויים</button>
+      </div>
+    </div>
+    <div class="toast-stack" id="toast-container" aria-live="polite"></div>
+    <div class="config-drawer" id="config-drawer">
+      <div class="config-drawer-header">
+        <button type="button" class="config-drawer-toggle" id="config-drawer-toggle">
+          <span class="config-drawer-caret" aria-hidden="true">▸</span>
+          <span>routing-config.json</span>
+        </button>
+        <button type="button" class="pill-btn" id="config-drawer-copy">📋 העתק קונפיגורציה</button>
+      </div>
+      <div class="config-drawer-body">
+        <pre class="config-drawer-json" id="config-drawer-json" dir="ltr"></pre>
+      </div>
+    </div>
+</div>
+<footer dir="ltr">Journal health: 0 unreadable line(s), 0 unknown-kind line(s).</footer>
+<script type="application/json" id="dashboard-config">{"capabilities": {"antigravity_cli::claude-opus-4-6-thinking": {"defaultEffort": null, "supportedEfforts": ["low", "medium", "high"]}, "antigravity_cli::claude-sonnet-4-6": {"defaultEffort": null, "supportedEfforts": ["low", "medium", "high"]}, "antigravity_cli::gemini-3.1-pro-high": {"defaultEffort": "high", "supportedEfforts": ["high"]}, "antigravity_cli::gemini-3.1-pro-low": {"defaultEffort": "low", "supportedEfforts": ["low"]}, "antigravity_cli::gemini-3.5-flash-high": {"defaultEffort": "high", "supportedEfforts": ["high"]}, "antigravity_cli::gemini-3.5-flash-low": {"defaultEffort": "low", "supportedEfforts": ["low"]}, "antigravity_cli::gemini-3.5-flash-medium": {"defaultEffort": "medium", "supportedEfforts": ["medium"]}, "antigravity_cli::gemini-3.6-flash-high": {"defaultEffort": "high", "supportedEfforts": ["high"]}, "antigravity_cli::gemini-3.6-flash-low": {"defaultEffort": "low", "supportedEfforts": ["low"]}, "antigravity_cli::gemini-3.6-flash-medium": {"defaultEffort": "medium", "supportedEfforts": ["medium"]}, "antigravity_cli::gemini-3.7-flash-high": {"defaultEffort": "high", "supportedEfforts": ["high"]}, "antigravity_cli::gemini-3.7-flash-low": {"defaultEffort": "low", "supportedEfforts": ["low"]}, "antigravity_cli::gemini-3.7-flash-medium": {"defaultEffort": "medium", "supportedEfforts": ["medium"]}, "antigravity_cli::gpt-oss-120b-medium": {"defaultEffort": "medium", "supportedEfforts": ["medium"]}, "claude_code_cli::claude-3-7-sonnet": {"defaultEffort": null, "supportedEfforts": []}, "claude_code_cli::claude-fable-5": {"defaultEffort": "high", "supportedEfforts": ["low", "medium", "high", "xhigh", "max"]}, "claude_code_cli::claude-opus-5": {"defaultEffort": "high", "supportedEfforts": ["low", "medium", "high", "xhigh", "max"]}, "claude_code_cli::claude-sonnet-4-6": {"defaultEffort": null, "supportedEfforts": ["low", "medium", "high", "max"]}, "claude_code_cli::claude-sonnet-5": {"defaultEffort": "high", "supportedEfforts": ["low", "medium", "high", "xhigh", "max"]}, "codex_cli::gpt-5.3-codex-spark": {"defaultEffort": "high", "supportedEfforts": ["low", "medium", "high", "xhigh"]}, "codex_cli::gpt-5.4": {"defaultEffort": "medium", "supportedEfforts": ["low", "medium", "high", "xhigh"]}, "codex_cli::gpt-5.4-mini": {"defaultEffort": "medium", "supportedEfforts": ["low", "medium", "high", "xhigh"]}, "codex_cli::gpt-5.5": {"defaultEffort": "medium", "supportedEfforts": ["low", "medium", "high", "xhigh"]}, "codex_cli::gpt-5.6-luna": {"defaultEffort": "medium", "supportedEfforts": ["low", "medium", "high", "xhigh", "max"]}, "codex_cli::gpt-5.6-sol": {"defaultEffort": "low", "supportedEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}, "codex_cli::gpt-5.6-terra": {"defaultEffort": "medium", "supportedEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"]}, "lm_studio_local::gemma-4-e4b-it-mlx": {"defaultEffort": null, "supportedEfforts": []}, "lm_studio_local::qwen3.8-27b-mlx": {"defaultEffort": null, "supportedEfforts": []}}, "effortColors": {"high": "#7c3aed", "low": "#1a7a4c", "max": "#9f1239", "medium": "#1d4ed8", "ultra": "#92400e", "xhigh": "#a21caf"}, "neutralColor": "#8a8377", "originalConfig": {"acceptance_gate": {"score_threshold": 0.8, "trials": 5}, "canary_cadence": {"dialogues_per_canary": 20, "seconds_between_canaries": 604800.0}, "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"], "consultation_policy": {"adjudicators": [{"effort_mapping": {"high": "high"}, "id": "lm-studio", "model": "qwen3-coder-30b"}], "consensus_policy": ["UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"], "deadlines_seconds": {"round_1": 120, "round_2": 60, "round_3": 60}, "providers": [{"effort_mapping": {"high": "high"}, "id": "claude", "model": "claude-opus-5"}, {"effort_mapping": {"high": "high"}, "id": "codex", "model": "gpt-5.6-sol"}, {"effort_mapping": {"high": "high"}, "id": "gemini", "model": "gemini-3.1-pro"}], "security_veto": {"enabled": true, "security_threshold": 0.8, "veto_severities": ["critical", "high"]}, "weighting": {"dynamic_weights_path": ".ralph/council_weights.json", "initial_weights": {"claude": 0.4, "codex": 0.4, "gemini": 0.2}, "max_weight": 0.65, "min_weight": 0.05, "quorum_threshold": 0.6}}, "context_specialist": {"name": "Gemini 3.6 Flash (High/Medium/Low) / Gemini 3.1 Pro (High/Low)", "patterns": ["agy", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3.1-pro"]}, "council_policy": {"consensus_policy": ["UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"], "deadlines_seconds": {"round_1": 45, "round_2": 60, "round_3": 60}, "fast_path_enabled": true, "perspective_weights": {"reviewer_architecture": 0.3, "reviewer_maintainability": 0.2, "reviewer_risk": 0.25, "reviewer_security": 0.25}, "quorum_threshold": 0.6, "security_veto": {"enabled": true, "security_threshold": 0.8, "veto_severities": ["critical", "high"]}}, "critic": {"name": "Codex 5.6 Sol / GPT-OSS 120B (Medium)", "patterns": ["codex exec", "gpt-oss-120b", "codex-sol"]}, "critical_dialogue": {"code_review_diff_line_threshold": 300, "security_sensitive_path_patterns": ["auth", "credential", "secret", ".env", "password", "token", "/keys/", "security", "iam", "acl", "permission"]}, "dialogue_budget": {"session_dialogue_cap": 10}, "heavy_doer": {"name": "Claude Sonnet 5 (Thinking)", "patterns": ["claude-sonnet-5", "claude -p"]}, "light_doer": {"name": "Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)", "patterns": ["codex exec", "gemini-3.6-flash-low", "codex-terra", "codex-luna"]}, "planner": {"name": "Claude Opus 5 (Thinking) / Claude Fable 5", "patterns": ["claude-opus-5", "claude-fable-5", "claude -p --model"]}, "providers": {"claude_fable_5": {"adapter": "claude_code_cli", "default_reasoning_effort": "high", "model": "claude-fable-5"}, "claude_opus_5": {"adapter": "claude_code_cli", "default_reasoning_effort": "high", "model": "claude-opus-5"}, "claude_sonnet_5": {"adapter": "claude_code_cli", "default_reasoning_effort": "high", "model": "claude-sonnet-5"}, "codex_luna": {"adapter": "codex_cli", "default_reasoning_effort": "low", "model": "gpt-5.6-luna"}, "codex_sol": {"adapter": "codex_cli", "default_reasoning_effort": "high", "model": "gpt-5.6-sol"}, "codex_terra": {"adapter": "codex_cli", "default_reasoning_effort": "medium", "model": "gpt-5.6-terra"}, "gemini_flash_high": {"adapter": "antigravity_cli", "default_reasoning_effort": "high", "model": "gemini-3.6-flash"}, "gemini_pro": {"adapter": "antigravity_cli", "default_reasoning_effort": "high", "model": "gemini-3.1-pro"}, "lm_studio_local": {"adapter": "lm_studio_local", "default_reasoning_effort": "medium", "model": "qwen3-coder-30b"}}, "qa_auditor": {"name": "Codex 5.6 Sol / Claude Opus 5 (Thinking)", "patterns": ["codex review", "claude-opus-5"]}, "roles": {"adjudicator": {"capability_requirements": {"local_only": true, "min_context": 32000, "reasoning_tier": "high", "tool_access": "read"}, "preferred_providers": ["lm_studio_local"]}, "builder_heavy": {"capability_requirements": {"local_only": false, "min_context": 128000, "reasoning_tier": "high", "tool_access": "workspace-write"}, "preferred_providers": ["claude_sonnet_5", "gemini_flash_high"]}, "builder_light": {"capability_requirements": {"local_only": false, "min_context": 32000, "reasoning_tier": "medium", "tool_access": "workspace-write"}, "preferred_providers": ["codex_terra", "codex_luna", "gemini_flash_high"]}, "planner": {"capability_requirements": {"local_only": false, "min_context": 200000, "reasoning_tier": "high", "tool_access": "read"}, "preferred_providers": ["claude_opus_5", "claude_fable_5", "codex_sol"]}, "reviewer_architecture": {"capability_requirements": {"local_only": false, "min_context": 128000, "reasoning_tier": "high", "tool_access": "read"}, "preferred_providers": ["codex_sol", "claude_opus_5"]}, "reviewer_maintainability": {"capability_requirements": {"local_only": false, "min_context": 64000, "reasoning_tier": "medium", "tool_access": "read"}, "preferred_providers": ["gemini_flash_high", "codex_terra"]}, "reviewer_risk": {"capability_requirements": {"local_only": false, "min_context": 128000, "reasoning_tier": "high", "tool_access": "read"}, "preferred_providers": ["codex_sol", "gemini_pro"]}, "reviewer_security": {"capability_requirements": {"local_only": false, "min_context": 128000, "reasoning_tier": "high", "tool_access": "read"}, "preferred_providers": ["codex_sol", "claude_opus_5"]}, "sensitive_executor": {"capability_requirements": {"local_only": true, "min_context": 32000, "reasoning_tier": "high", "tool_access": "workspace-write"}, "preferred_providers": ["lm_studio_local"]}}, "roster_topology": {"role_fallback_chains": {"critic_a": ["Codex 5.6 Sol", "GPT-OSS 120B (Medium)", "Gemini 3.6 Flash (High)", "Claude Opus 5 (Thinking)", "Qwen3.8-27B-MLX-6bit"], "critic_b": ["Gemini 3.6 Flash", "Gemini 3.1 Pro (High)", "Codex 5.6 Sol", "Claude Opus 5 (Thinking)", "Gemma 4 E4B"], "planner": ["Claude Opus 5 (Thinking)", "Claude Fable 5", "Codex 5.6 Sol", "Gemini 3.6 Flash (High)", "Gemma 4 E4B"]}}, "safe_commands": ["^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^\u003e|\u0026;]+)?\\s*$", "^\\s*cat(?:\\s+[^\u003e|\u0026;]+)?\\s*$", "^\\s*grep(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^\u003e|\u0026;]+)?\\s*$", "^\\s*rg(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^\u003e|\u0026;]+)?\\s*$", "^\\s*git\\s+(?:status|log|diff|show|branch)(?:\\s+[^\u003e|\u0026;]+)?\\s*$", "^\\s*curl\\s+-[a-zA-Z]+(?:\\s+[^\u003e|\u0026;]+)?\\s*$", "^\\s*jq\\s+[^\u003e|\u0026;]*$", "^\\s*which\\s+[^\u003e|\u0026;]+\\s*$", "^\\s*echo\\s+[^\u003e|\u0026;]*$", "^\\s*pwd\\s*$", "^\\s*find\\s+[^\u003e|\u0026;]*$", "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^\u003e|\u0026;]+)?\\s*$", "^\\s*lsof(?:\\s+-[a-zA-Z0-9:]+)?(?:\\s+[^\u003e|\u0026;]+)?\\s*$"], "sensitive_doer": {"name": "LM Studio (Local Model)", "patterns": ["127.0.0.1:1234/v1/chat", "localhost:1234/v1/chat"]}, "supported_models": ["Gemini 3.7 Flash", "Gemini 3.6 Flash (High)", "Gemini 3.6 Flash (Medium)", "Gemini 3.6 Flash (Low)", "Gemini 3.5 Flash (High)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (Low)", "Gemini 3.1 Pro (High)", "Gemini 3.1 Pro (Low)", "Claude 3.7 Sonnet", "Claude Sonnet 5 (Thinking)", "Claude Opus 5 (Thinking)", "Codex 5.6 Sol", "Codex 5.6 Terra", "Codex 5.6 Luna", "GPT-OSS 120B (Medium)", "LM Studio (Local Model)"]}}</script>
+<script>
+var DASHBOARD_CONFIG = JSON.parse(
+  document.getElementById("dashboard-config").textContent
+);
+var MODEL_CAPABILITIES = DASHBOARD_CONFIG.capabilities;
+var EFFORT_COLORS = DASHBOARD_CONFIG.effortColors;
+var NEUTRAL_COLOR = DASHBOARD_CONFIG.neutralColor;
+var ORIGINAL_CONFIG = DASHBOARD_CONFIG.originalConfig;
+
+function resolveEffortState(modelKey, currentEffort) {
+  var capability = MODEL_CAPABILITIES[modelKey];
+  if (!capability) {
+    return { status: "unknown", effort: currentEffort, efforts: [] };
+  }
+  var supported = capability.supportedEfforts;
+  if (supported.length === 0) {
+    return { status: "none", effort: null, efforts: [] };
+  }
+  if (supported.indexOf(currentEffort) !== -1) {
+    return { status: "ok", effort: currentEffort, efforts: supported };
+  }
+  if (supported.indexOf(capability.defaultEffort) !== -1) {
+    return { status: "ok", effort: capability.defaultEffort, efforts: supported };
+  }
+  return { status: "ok", effort: supported[0], efforts: supported };
+}
+
+function effortOptionPairs(state) {
+  if (state.status === "ok") {
+    return state.efforts.map(function (effort) {
+      return [effort, effort];
+    });
+  }
+  if (!state.effort) {
+    return [["", "none"]];
+  }
+  return [[state.effort, state.effort]];
+}
+
+function setEffortOptions(select, state) {
+  while (select.firstChild) {
+    select.removeChild(select.firstChild);
+  }
+  var pairs = effortOptionPairs(state);
+  for (var i = 0; i < pairs.length; i++) {
+    var option = document.createElement("option");
+    option.value = pairs[i][0];
+    option.textContent = pairs[i][1];
+    select.appendChild(option);
+  }
+  select.value = state.status === "ok" ? state.effort : pairs[0][0];
+  select.disabled = state.status !== "ok";
+}
+
+function paintBadge(badge, state) {
+  var color = state.status === "ok" && EFFORT_COLORS[state.effort]
+    ? EFFORT_COLORS[state.effort]
+    : NEUTRAL_COLOR;
+  badge.textContent = state.status === "ok" ? state.effort : state.status;
+  badge.style.background = color + "1a";
+  badge.style.color = color;
+}
+
+function roleCards(roleId) {
+  var matching = [];
+  var cards = document.querySelectorAll(".role-card");
+  for (var i = 0; i < cards.length; i++) {
+    if (cards[i].getAttribute("data-role-id") === roleId) {
+      matching.push(cards[i]);
+    }
+  }
+  return matching;
+}
+
+function paintRoleValue(roleId, assignment) {
+  var cards = roleCards(roleId);
+  if (!cards.length) {
+    return null;
+  }
+  var state = resolveEffortState(assignment.model, assignment.effort);
+  for (var i = 0; i < cards.length; i++) {
+    var card = cards[i];
+    card.querySelector(".model-select").value = assignment.model;
+    setEffortOptions(card.querySelector(".effort-select"), state);
+    paintBadge(card.querySelector(".effort-badge"), state);
+  }
+  return state;
+}
+
+// Shared by `onModelSelect` and `onEffortSelect`, which differ only in
+// which half of the pair the user just changed: paint the role from the
+// candidate `{model, effort}` (snapping effort through `resolveEffortState`
+// exactly as a fresh model pick would), then record whatever the paint
+// actually landed on — not the raw candidate — as this edit's new value,
+// since an unsupported effort snaps to something other than what was asked
+// for. Only ever called with a `roleId` its caller already confirmed has
+// cards, so `paintRoleValue` here never returns its "no such role" `null`.
+function commitRoleEdit(roleId, model, effort) {
+  var state = paintRoleValue(roleId, { model: model, effort: effort });
+  recordStateChange(roleId, {
+    model: model,
+    effort: state.status === "ok" ? state.effort : (state.effort || "")
+  });
+  return state;
+}
+
+function onModelSelect(roleId, newModel) {
+  var cards = roleCards(roleId);
+  if (!cards.length) {
+    return null;
+  }
+  var currentEffort = cards[0].querySelector(".effort-select").value;
+  return commitRoleEdit(roleId, newModel, currentEffort);
+}
+
+function onEffortSelect(roleId, newEffort) {
+  var cards = roleCards(roleId);
+  if (!cards.length) {
+    return { status: "ok", effort: newEffort, efforts: [] };
+  }
+  var currentModel = cards[0].querySelector(".model-select").value;
+  return commitRoleEdit(roleId, currentModel, newEffort);
+}
+
+function bindSelect(select, roleId, handler) {
+  if (!select) {
+    return;
+  }
+  select.addEventListener("change", function () {
+    handler(roleId, select.value);
+  });
+}
+
+function bindRoleControls() {
+  var cards = document.querySelectorAll(".role-card");
+  for (var i = 0; i < cards.length; i++) {
+    var card = cards[i];
+    var roleId = card.getAttribute("data-role-id");
+    bindSelect(card.querySelector(".model-select"), roleId, onModelSelect);
+    bindSelect(card.querySelector(".effort-select"), roleId, onEffortSelect);
+  }
+}
+
+// --- client state machine & floating action pill (ticket 49) ---
+
+function cloneValue(assignment) {
+  return assignment ? { model: assignment.model, effort: assignment.effort } : null;
+}
+
+function cloneRoleState(state) {
+  var clone = {};
+  for (var roleId in state) {
+    if (Object.prototype.hasOwnProperty.call(state, roleId)) {
+      clone[roleId] = cloneValue(state[roleId]);
+    }
+  }
+  return clone;
+}
+
+function buildRoleState() {
+  var state = {};
+  var cards = document.querySelectorAll(".role-card");
+  for (var i = 0; i < cards.length; i++) {
+    var roleId = cards[i].getAttribute("data-role-id");
+    if (Object.prototype.hasOwnProperty.call(state, roleId)) {
+      continue;
+    }
+    var modelSelect = cards[i].querySelector(".model-select");
+    var effortSelect = cards[i].querySelector(".effort-select");
+    if (!modelSelect || !effortSelect) {
+      continue;
+    }
+    state[roleId] = { model: modelSelect.value, effort: effortSelect.value };
+  }
+  return state;
+}
+
+function roleIsDirty(roleId) {
+  var current = CLIENT_STATE.currentRoles[roleId];
+  var saved = CLIENT_STATE.savedSnapshot[roleId];
+  if (!current || !saved) {
+    return false;
+  }
+  return current.model !== saved.model || current.effort !== saved.effort;
+}
+
+function dirtyRoleCount() {
+  var count = 0;
+  for (var roleId in CLIENT_STATE.currentRoles) {
+    if (
+      Object.prototype.hasOwnProperty.call(CLIENT_STATE.currentRoles, roleId) &&
+      roleIsDirty(roleId)
+    ) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function recordStateChange(roleId, nextAssignment) {
+  var previous = cloneValue(CLIENT_STATE.currentRoles[roleId]);
+  CLIENT_STATE.currentRoles[roleId] = cloneValue(nextAssignment);
+  if (
+    previous &&
+    (previous.model !== nextAssignment.model || previous.effort !== nextAssignment.effort)
+  ) {
+    CLIENT_STATE.undoHistory.push({ roleId: roleId, previous: previous });
+  }
+  refreshStateViews();
+}
+
+function updateActionPill() {
+  var pill = document.getElementById("action-pill");
+  if (!pill) {
+    return;
+  }
+  var count = dirtyRoleCount();
+  var label = document.getElementById("action-pill-label");
+  if (label) {
+    if (count === 0) {
+      label.textContent = "אין שינויים לא שמורים";
+    } else if (count === 1) {
+      label.textContent = "שינוי אחד לא שמור";
+    } else {
+      label.textContent = count + " שינויים לא שמורים";
+    }
+  }
+  if (count > 0) {
+    pill.classList.add("is-visible");
+  } else {
+    pill.classList.remove("is-visible");
+  }
+}
+
+function showToast(message, kind) {
+  var container = document.getElementById("toast-container");
+  if (!container) {
+    return null;
+  }
+  var toast = document.createElement("div");
+  toast.className = "toast toast-" + (kind || "info");
+  toast.textContent = message;
+  container.appendChild(toast);
+  var timer = setTimeout(function () {
+    container.removeChild(toast);
+  }, TOAST_DURATION_MS);
+  // `setTimeout` in Node returns a `Timeout` with `.unref()`, which lets the
+  // process exit immediately instead of waiting out the toast's lifetime; a
+  // browser's numeric return has no such method, and probing for it first
+  // keeps this line a no-op there instead of a `TypeError`.
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  return toast;
+}
+
+function undoChange() {
+  if (!CLIENT_STATE.undoHistory.length) {
+    return false;
+  }
+  var entry = CLIENT_STATE.undoHistory.pop();
+  paintRoleValue(entry.roleId, entry.previous);
+  CLIENT_STATE.currentRoles[entry.roleId] = cloneValue(entry.previous);
+  refreshStateViews();
+  showToast("הפעולה האחרונה בוטלה", "info");
+  return true;
+}
+
+function isRoleStateAtSystemDefaults() {
+  for (var roleId in SYSTEM_DEFAULTS) {
+    if (Object.prototype.hasOwnProperty.call(SYSTEM_DEFAULTS, roleId)) {
+      var current = CLIENT_STATE.currentRoles[roleId];
+      var reference = SYSTEM_DEFAULTS[roleId];
+      if (!current || current.model !== reference.model || current.effort !== reference.effort) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+// Restores `SYSTEM_DEFAULTS` — the values this page was rendered with, an
+// immutable snapshot `saveChanges` never touches — never `savedSnapshot`,
+// which does move on every save. "Restore factory routing presets at any
+// time" (spec 0013 US12) means always, including after a save already
+// moved the dirty-check baseline away from what shipped in
+// `routing-config.json`; resetting `savedSnapshot` here too is what makes a
+// post-reset edit register as dirty again against the same factory values,
+// instead of against whatever was most recently saved.
+function resetDefaults() {
+  if (isRoleStateAtSystemDefaults()) {
+    return false;
+  }
+  if (!confirm("לאפס את כל השינויים ולחזור לברירת המחדל של המערכת?")) {
+    return false;
+  }
+  for (var roleId in SYSTEM_DEFAULTS) {
+    if (Object.prototype.hasOwnProperty.call(SYSTEM_DEFAULTS, roleId)) {
+      paintRoleValue(roleId, SYSTEM_DEFAULTS[roleId]);
+      CLIENT_STATE.currentRoles[roleId] = cloneValue(SYSTEM_DEFAULTS[roleId]);
+    }
+  }
+  CLIENT_STATE.savedSnapshot = cloneRoleState(SYSTEM_DEFAULTS);
+  CLIENT_STATE.undoHistory = [];
+  refreshStateViews();
+  showToast("התפקידים אופסו לברירת המחדל", "success");
+  return true;
+}
+
+// "Server mode" per spec 0013 Decision 4: the page was fetched over
+// `http(s)://` (a `--serve` origin) rather than opened straight from disk
+// over `file://`. `location` does not exist at all outside a browser (this
+// script also runs headless under node in tests), so the guard checks for
+// the global before reading off it.
+function isServerMode() {
+  return typeof location !== "undefined" && /^https?:$/.test(location.protocol);
+}
+
+function commitSaveSnapshot() {
+  CLIENT_STATE.savedSnapshot = cloneRoleState(CLIENT_STATE.currentRoles);
+  CLIENT_STATE.undoHistory = [];
+  refreshStateViews();
+}
+
+// Reuses an existing `providers` entry only when its adapter/model/effort
+// already match exactly; otherwise mints a `{roleId}__custom` entry that
+// belongs to this role alone. Never mutates an existing entry in place —
+// `providers` are heavily shared in the shipped config (`codex_sol` alone
+// backs four roles), so overwriting one to reflect a single role's edit
+// would silently repoint every other role sharing it.
+function findOrCreateProviderId(providers, roleId, adapter, modelId, effort) {
+  // `default_reasoning_effort` must be a non-empty string (routing_config's
+  // own schema), but a role bound to a no-ladder model (e.g. LM Studio)
+  // carries effort `""` client-side — the same placeholder the shipped
+  // config already uses for its own no-ladder providers.
+  var resolvedEffort = effort || "medium";
+  for (var providerId in providers) {
+    if (!Object.prototype.hasOwnProperty.call(providers, providerId)) {
+      continue;
+    }
+    var provider = providers[providerId];
+    if (
+      provider.adapter === adapter &&
+      provider.model === modelId &&
+      provider.default_reasoning_effort === resolvedEffort
+    ) {
+      return providerId;
+    }
+  }
+  var newProviderId = roleId + "__custom";
+  providers[newProviderId] = {
+    adapter: adapter,
+    model: modelId,
+    default_reasoning_effort: resolvedEffort
+  };
+  return newProviderId;
+}
+
+// Reconciles the reduced `{model, effort}` role state this page edits back
+// into the full `RoutingConfig` shape `POST /api/config` validates (spec
+// 0013 Decision 4's "Serialization Contract"). Only the edited role's
+// *primary* `preferred_providers` entry is ever replaced — the rest of its
+// fallback chain, every other role, and every section this page has no UI
+// for (`council_policy`, `roster_topology`, ...) is carried through from
+// `ORIGINAL_CONFIG` untouched.
+function buildFullConfigPayload() {
+  var config = JSON.parse(JSON.stringify(ORIGINAL_CONFIG));
+  config.providers = config.providers || {};
+  config.roles = config.roles || {};
+  for (var roleId in CLIENT_STATE.currentRoles) {
+    if (!Object.prototype.hasOwnProperty.call(CLIENT_STATE.currentRoles, roleId)) {
+      continue;
+    }
+    var assignment = CLIENT_STATE.currentRoles[roleId];
+    var role = config.roles[roleId];
+    if (!assignment || !assignment.model || !role) {
+      continue;
+    }
+    var separatorIndex = assignment.model.indexOf("::");
+    if (separatorIndex === -1) {
+      continue;
+    }
+    var adapter = assignment.model.slice(0, separatorIndex);
+    var modelId = assignment.model.slice(separatorIndex + 2);
+    var providerId = findOrCreateProviderId(
+      config.providers, roleId, adapter, modelId, assignment.effort
+    );
+    var chain = (role.preferred_providers || []).slice();
+    if (chain.length) {
+      chain[0] = providerId;
+    } else {
+      chain = [providerId];
+    }
+    role.preferred_providers = chain;
+  }
+  return config;
+}
+
+// Decision 4's standalone branch: "updates local snapshot, triggers a
+// download/copy action, and displays a success toast", and US13's "export
+// the valid `routing-config.json` payload directly to my clipboard **or
+// download it**".
+//
+// This downloads `buildFullConfigPayload()` — the full `RoutingConfig`
+// shape `POST /api/config` validates — deliberately *not*
+// `configPreviewJson()`, which the drawer's copy button (ticket 50) emits
+// as the reduced `{roles: {role_id: {model, effort}}}` preview. A file
+// named `routing-config.json` has exactly one meaningful use — replacing
+// the real one on disk — so handing an operator the reduced shape under
+// that name would be a broken paste target. An earlier revision declined
+// to implement this branch at all, on the grounds that no full-shape
+// payload existed to export; `buildFullConfigPayload` (added directly
+// above, for server mode) is that payload, so the reason no longer holds.
+//
+// The one serialization US13's two export halves share — the clipboard
+// button and the download both hand over exactly these bytes, so a
+// `routing-config.json` an operator copies and one they download can never
+// drift apart. Trailing newline because the file it replaces on disk has
+// one (`learning_report._ConfigApiHandler.do_POST` writes it that way).
+function fullConfigJson() {
+  return JSON.stringify(buildFullConfigPayload(), null, 2) + "\n";
+}
+
+// Unlike `copyConfigToClipboard` (further down), this needs no feature
+// detection. `navigator.clipboard` is genuinely absent outside a secure
+// context, which includes the `file://` page Decision 4 names as the
+// zero-friction default — but `Blob` and `URL.createObjectURL` are not
+// secure-context gated, are available on `file://`, and are supplied by
+// node to the test harness too. An earlier revision guarded them anyway;
+// the guard could only ever be reached by a test that deleted the globals
+// to reach it, so it was removed rather than kept alive by that test.
+function downloadFullConfig() {
+  var url = URL.createObjectURL(
+    new Blob([fullConfigJson()], { type: "application/json" })
+  );
+  var link = document.createElement("a");
+  link.href = url;
+  link.download = "routing-config.json";
+  link.click();
+  // Revoked on a later turn, never synchronously after `click()`: the fetch
+  // the click starts is asynchronous, and revoking the object URL in the
+  // same tick cancels the download outright in Firefox and Safari.
+  // `setTimeout` gets no feature guard — `showToast` above already depends
+  // on it unconditionally, and node supplies it to the test harness.
+  setTimeout(function () {
+    URL.revokeObjectURL(url);
+  }, 0);
+}
+
+function saveChanges() {
+  if (!dirtyRoleCount()) {
+    return false;
+  }
+  if (!isServerMode()) {
+    commitSaveSnapshot();
+    downloadFullConfig();
+    showToast("הקונפיגורציה הורדה כקובץ", "success");
+    return true;
+  }
+  if (typeof fetch === "undefined") {
+    showToast("השמירה לשרת אינה נתמכת בדפדפן זה", "error");
+    return false;
+  }
+  fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(buildFullConfigPayload())
+  }).then(
+    function (response) {
+      if (response && response.ok) {
+        commitSaveSnapshot();
+        showToast("השינויים נשמרו בדיסק", "success");
+      } else {
+        showToast("השמירה נכשלה (השרת דחה את הבקשה)", "error");
+      }
+    },
+    function () {
+      showToast("השמירה נכשלה — האם השרת המקומי פעיל?", "error");
+    }
+  );
+  return true;
+}
+
+function bindActionPill() {
+  var undoButton = document.getElementById("action-undo");
+  var resetButton = document.getElementById("action-reset");
+  var saveButton = document.getElementById("action-save");
+  if (undoButton) {
+    undoButton.addEventListener("click", undoChange);
+  }
+  if (resetButton) {
+    resetButton.addEventListener("click", resetDefaults);
+  }
+  if (saveButton) {
+    saveButton.addEventListener("click", saveChanges);
+  }
+}
+
+// --- live JSON drawer & clipboard export (ticket 50) ---
+
+// What the *drawer displays*: every role's pending model/effort selection,
+// live, before Save. Deliberately the reduced shape and not the full
+// `routing-config.json` — the drawer is a "what am I about to change?"
+// readout, and a 200-line config document with two edited fields buried in
+// it does not answer that question at a glance.
+//
+// This is the drawer's display shape only. US13 asks the copy button for
+// "the valid `routing-config.json` payload", which is a different question
+// with a different answer — see `copyConfigToClipboard`, which exports
+// `buildFullConfigPayload()`.
+function buildConfigPreview() {
+  return { roles: cloneRoleState(CLIENT_STATE.currentRoles) };
+}
+
+function configPreviewJson() {
+  return JSON.stringify(buildConfigPreview(), null, 2);
+}
+
+// Escapes text for safe insertion as HTML *markup* rather than as a text
+// node — needed the moment `updateConfigDrawer` stops writing
+// `textContent` (which never interprets its argument) and starts building
+// highlighted `innerHTML` instead. `syntaxHighlightJson` below wraps
+// substrings of this escaped text in `<span>` tags, so every `&`/`<`/`>`
+// the original JSON could carry must already be neutralized before that
+// wrapping happens, the same concern `ScriptInjectionTests` holds every
+// other interpolation in this document to.
+function escapeHtmlText(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// A minimal hand-rolled JSON syntax highlighter for the drawer's preview —
+// no runtime dependency pulled in for it, matching this module's own
+// "zero build step, zero external runtime dependencies" rule
+// (Implementation Decisions §2), the same way this repo's own WCAG/ΔE
+// color math is written out by hand rather than imported. Runs over
+// `json` only after `escapeHtmlText` has already neutralized it, so the
+// token regex below only ever recognizes shapes within already-safe text
+// and never reintroduces a raw `<`/`>`/`&`. A matched string is a key
+// exactly when it is immediately followed by `:` (`JSON.stringify`'s own
+// two-space indent never puts whitespace before that colon, but `\s*`
+// tolerates it if that ever changes).
+function syntaxHighlightJson(json) {
+  var tokenPattern =
+    /("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\btrue\b|\bfalse\b|\bnull\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g;
+  return escapeHtmlText(json).replace(tokenPattern, function (match) {
+    var cssClass = "json-number";
+    if (match.charAt(0) === '"') {
+      cssClass = /:$/.test(match) ? "json-key" : "json-string";
+    } else if (match === "true" || match === "false") {
+      cssClass = "json-boolean";
+    } else if (match === "null") {
+      cssClass = "json-null";
+    }
+    return '<span class="' + cssClass + '">' + match + "</span>";
+  });
+}
+
+function updateConfigDrawer() {
+  var output = document.getElementById("config-drawer-json");
+  if (!output) {
+    return;
+  }
+  output.innerHTML = syntaxHighlightJson(configPreviewJson());
+}
+
+function toggleConfigDrawer() {
+  var drawer = document.getElementById("config-drawer");
+  if (!drawer) {
+    return;
+  }
+  drawer.classList.toggle("is-open");
+}
+
+// Copies `buildFullConfigPayload()` — US13's "the **valid**
+// `routing-config.json` payload" — not `configPreviewJson()`, which is the
+// drawer's reduced display shape and which `parse_routing_config` rejects
+// outright. The button's whole purpose is producing something an operator
+// can paste over the real file, so the two must not be the same string:
+// the drawer answers "what did I change", the clipboard answers "what do I
+// paste". `downloadFullConfig` is the same payload down US13's other half.
+//
+// `navigator.clipboard` is undefined outside a secure context — including
+// a dashboard opened straight from disk over `file://`, the zero-friction
+// default Implementation Decisions §4 names for this page — so this checks
+// for it rather than letting a missing global throw a `TypeError` out of a
+// click handler.
+function copyConfigToClipboard() {
+  if (
+    typeof navigator === "undefined" ||
+    !navigator.clipboard ||
+    !navigator.clipboard.writeText
+  ) {
+    showToast("ההעתקה ללוח אינה נתמכת בדפדפן זה", "error");
+    return false;
+  }
+  navigator.clipboard.writeText(fullConfigJson()).then(
+    function () {
+      showToast("הקונפיגורציה הועתקה ללוח", "success");
+    },
+    function () {
+      showToast("העתקת הקונפיגורציה נכשלה", "error");
+    }
+  );
+  return true;
+}
+
+function bindConfigDrawer() {
+  var toggleButton = document.getElementById("config-drawer-toggle");
+  var copyButton = document.getElementById("config-drawer-copy");
+  if (toggleButton) {
+    toggleButton.addEventListener("click", toggleConfigDrawer);
+  }
+  if (copyButton) {
+    copyButton.addEventListener("click", copyConfigToClipboard);
+  }
+}
+
+// --- live model refresh (ticket 52 follow-up, spec 0013 US8) ---
+
+// Appends one `<option>` for `key` to every model `<select>` that does not
+// already offer it. Reuses `select.children`, not `.options`, the same way
+// `setEffortOptions` already does, so the two stay consistent with each
+// other and with the test harness's DOM stub.
+function addModelOption(key) {
+  var label = key.replace("::", " · ");
+  var selects = document.querySelectorAll(".model-select");
+  for (var i = 0; i < selects.length; i++) {
+    var select = selects[i];
+    var alreadyPresent = false;
+    for (var j = 0; j < select.children.length; j++) {
+      if (select.children[j].value === key) {
+        alreadyPresent = true;
+        break;
+      }
+    }
+    if (!alreadyPresent) {
+      var option = document.createElement("option");
+      option.value = key;
+      option.textContent = label;
+      select.appendChild(option);
+    }
+  }
+}
+
+// Merges a `GET /api/model-capabilities` response into `MODEL_CAPABILITIES`,
+// calling `addModelOption` for every key this page did not already offer —
+// "so that newly loaded local LLMs appear immediately in the interface"
+// without a reload. Returns the newly discovered keys so the caller can
+// report how many were found.
+function applyCapabilitySnapshot(capabilities) {
+  var addedKeys = [];
+  for (var key in capabilities) {
+    if (!Object.prototype.hasOwnProperty.call(capabilities, key)) {
+      continue;
+    }
+    var entry = capabilities[key];
+    if (!Object.prototype.hasOwnProperty.call(MODEL_CAPABILITIES, key)) {
+      addedKeys.push(key);
+      addModelOption(key);
+    }
+    MODEL_CAPABILITIES[key] = {
+      supportedEfforts: entry.supportedEfforts,
+      defaultEffort: entry.defaultEffort
+    };
+  }
+  return addedKeys;
+}
+
+// Repaints every role from its own current `{model, effort}` — not just the
+// dirty ones — so a refreshed ladder (a model whose `supportedEfforts` just
+// changed) is reflected even for a role nobody has touched yet this session.
+function repaintEveryRoleFromState() {
+  for (var roleId in CLIENT_STATE.currentRoles) {
+    if (
+      Object.prototype.hasOwnProperty.call(CLIENT_STATE.currentRoles, roleId) &&
+      CLIENT_STATE.currentRoles[roleId]
+    ) {
+      paintRoleValue(roleId, CLIENT_STATE.currentRoles[roleId]);
+    }
+  }
+}
+
+function setRefreshStatus(message) {
+  var status = document.getElementById("refresh-status");
+  if (status) {
+    status.textContent = message;
+  }
+}
+
+// `silent` (spec 0013 Decision 1's automatic launch probe, run once from
+// this script's own init below) suppresses the "checking…"/toast chatter a
+// manual click (spec's own on-demand US8) should still show — an operator
+// who never clicked anything should not see a toast merely because the
+// page finished loading, but the discovered models and the status line
+// still update either way.
+function refreshLiveModels(options) {
+  var silent = Boolean(options && options.silent);
+  if (typeof fetch === "undefined") {
+    if (!silent) {
+      showToast("רענון מודלים חי אינו נתמך בדפדפן זה", "error");
+    }
+    return false;
+  }
+  if (!silent) {
+    setRefreshStatus("בודק מודלים זמינים…");
+  }
+  fetch("/api/model-capabilities").then(
+    function (response) {
+      if (!response || !response.ok || typeof response.json !== "function") {
+        setRefreshStatus("");
+        if (!silent) {
+          showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+        }
+        return;
+      }
+      response.json().then(function (data) {
+        var added = applyCapabilitySnapshot((data && data.capabilities) || {});
+        repaintEveryRoleFromState();
+        var message = added.length
+          ? "נמצאו " + added.length + " מודלים חדשים"
+          : "אין מודלים חדשים";
+        setRefreshStatus(message);
+        if (!silent) {
+          showToast(message, "success");
+        }
+      });
+    },
+    function () {
+      setRefreshStatus("");
+      if (!silent) {
+        showToast("רענון המודלים נכשל — האם השרת המקומי פעיל?", "error");
+      }
+    }
+  );
+  return true;
+}
+
+function bindRefreshButton() {
+  var button = document.getElementById("refresh-models");
+  if (button) {
+    button.addEventListener("click", function () {
+      refreshLiveModels();
+    });
+  }
+}
+
+// Every mutation to `CLIENT_STATE` has exactly two views that must repaint
+// from it — the action pill's dirty count and the drawer's JSON preview —
+// so this is the one seam `recordStateChange`/`undoChange`/
+// `resetDefaults`/`saveChanges` (and the initial render, below) call,
+// mirroring why `commitRoleEdit` exists: a shape shared by more than one
+// call site belongs in one place, not repeated at each of them.
+function refreshStateViews() {
+  updateActionPill();
+  updateConfigDrawer();
+}
+
+var TOAST_DURATION_MS = 3200;
+
+// The page's own rendered values — the only "system defaults" this
+// document can know about (see `resetDefaults`) — captured once and never
+// reassigned afterward, unlike `CLIENT_STATE.savedSnapshot`.
+var SYSTEM_DEFAULTS = cloneRoleState(buildRoleState());
+
+var CLIENT_STATE = {
+  currentRoles: buildRoleState(),
+  savedSnapshot: cloneRoleState(SYSTEM_DEFAULTS),
+  undoHistory: []
+};
+
+bindRoleControls();
+bindActionPill();
+bindConfigDrawer();
+bindRefreshButton();
+refreshStateViews();
+
+// Spec 0013 Solution §2 / Decision 1: "Automatic, non-blocking ... probe
+// ... on dashboard launch" — distinct from US8's on-demand button click.
+// Only in server mode: a `file://` page has no `/api/model-capabilities`
+// to reach at all, and probing it there would just be an error toast on
+// every single open with nothing an operator asked for.
+if (isServerMode()) {
+  refreshLiveModels({ silent: true });
+}
+</script>
+</body>
+</html>
