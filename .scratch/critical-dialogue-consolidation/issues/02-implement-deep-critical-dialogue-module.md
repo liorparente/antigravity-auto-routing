@@ -4,9 +4,9 @@
 
 **Blocked by:** 01 — Extract Pure SensitivityRedactor Delegation in agent_council.py
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Consolidate the debate engine and council review capabilities into `skills/worker-routing/critical_dialogue.py`
-- [ ] Expose the canonical public interface (`run_critical_dialogue`, `request_council_review`, `run_canary_dialogue`, `ReviewCouncil`)
-- [ ] Encapsulate internal submodules (state machine, contracts, transcripts, degradation ladder) behind private seams
-- [ ] Add dedicated unit tests exercising the new module directly
+- [x] Consolidate the debate engine and council review capabilities into `skills/worker-routing/critical_dialogue.py`
+- [x] Expose the canonical public interface (`run_critical_dialogue`, `request_council_review`, `run_canary_dialogue`, `ReviewCouncil`)
+- [x] Encapsulate internal submodules (state machine, contracts, transcripts, degradation ladder) behind private seams
+- [x] Add dedicated unit tests exercising the new module directly

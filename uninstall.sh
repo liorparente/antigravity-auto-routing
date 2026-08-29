@@ -70,7 +70,7 @@ CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 # left `learning_journal.py` behind cannot recur silently in either script.
 INSTALLED_FILES=(
     SKILL.md REFERENCE.md routing-audit.sh __init__.py routing_check.py
-    agent_council.py dialogue_contracts.py dialogue_degradation.py
+    agent_council.py critical_dialogue.py dialogue_contracts.py dialogue_degradation.py
     executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py regenerate_institutional_memory.py
     sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py
     consultation_policy.py debate_transport.py advisory_consultation.py

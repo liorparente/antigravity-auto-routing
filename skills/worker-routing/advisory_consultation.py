@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 if __package__:
-    from . import debate_orchestrator as _debate_orchestrator
+    from . import critical_dialogue as _critical_dialogue
     from . import debate_state_machine as _debate_state_machine
     from . import debate_transport as _debate_transport
     from . import dialogue_contracts as _dialogue_contracts
@@ -16,7 +16,7 @@ if __package__:
     from . import prompt_assembler as _prompt_assembler
     from . import sensitivity_redactor as _sensitivity_redactor
 else:
-    import debate_orchestrator as _debate_orchestrator  # type: ignore[no-redef]
+    import critical_dialogue as _critical_dialogue  # type: ignore[no-redef]
     import debate_state_machine as _debate_state_machine  # type: ignore[no-redef]
     import debate_transport as _debate_transport  # type: ignore[no-redef]
     import dialogue_contracts as _dialogue_contracts  # type: ignore[no-redef]
@@ -25,6 +25,10 @@ else:
     import executive_dialogue_report as _executive_dialogue_report  # type: ignore[no-redef]
     import prompt_assembler as _prompt_assembler  # type: ignore[no-redef]
     import sensitivity_redactor as _sensitivity_redactor  # type: ignore[no-redef]
+
+# Keep the established facade implementation below intact while making the
+# consolidated module its canonical source.
+_debate_orchestrator = _critical_dialogue
 
 _CONFIG_PATH = Path(__file__).with_name("routing-config.json")
 

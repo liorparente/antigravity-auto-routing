@@ -19,6 +19,8 @@ jobs:
         skills/worker-routing/test_routing.py
         test_suite.py
         skills/worker-routing/agent_council.py
+        skills/worker-routing/critical_dialogue.py
+        skills/worker-routing/test_critical_dialogue.py
         skills/worker-routing/dialogue_contracts.py
         skills/worker-routing/dialogue_degradation.py
         skills/worker-routing/executive_dialogue_report.py
@@ -79,6 +81,7 @@ jobs:
       # one of them having executed.
       PYTHON_TESTS: >-
         skills/worker-routing/test_routing.py
+        skills/worker-routing/test_critical_dialogue.py
         skills/worker-routing/test_dialogue_contracts.py
         skills/worker-routing/test_dialogue_degradation.py
         skills/worker-routing/test_executive_dialogue_report.py

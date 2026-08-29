@@ -8,7 +8,7 @@ WORKER_ROUTING_DIR = str(Path(__file__).resolve().parents[2] / "worker-routing")
 if WORKER_ROUTING_DIR not in sys.path:
     sys.path.insert(0, WORKER_ROUTING_DIR)
 
-from debate_orchestrator import (
+from critical_dialogue import (
     DEFAULT_CONSULTATION_POLICY,
     ROUTING_CONFIG_PATH,
     ConsensusTable,
