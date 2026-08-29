@@ -1,5 +1,100 @@
 # Worker Routing Fallbacks
 
+## 2026-08-29 — Three Unit-Green Features Were All Unreachable Because Nothing Served the Page
+
+- Mission: ticket 53's two-axis audit over spec 0013's dashboard branch.
+- Issue: `learning_report.py --serve` bound an HTTP server that answered `POST /api/config` and
+  `GET /api/model-capabilities` — and nothing else. There was no route serving the dashboard
+  document, so the only way to open the page was over `file://`. The page's own mode guard,
+  `isServerMode()` = `/^https?:$/.test(location.protocol)`, is false there. Consequence: US14's
+  server-mode save branch, Decision 1's automatic launch probe, and US8's "🔄 רענן מודלים חיים"
+  button (whose root-relative `fetch("/api/model-capabilities")` resolved to
+  `file:///api/model-capabilities`) were **all** dead code in practice.
+- What makes this the interesting case: every one of those three features was individually
+  implemented, individually unit-tested, and individually green. Each test supplied the `http:`
+  origin the feature needed — via `pre_script`, a stub, or a mock. So nothing ever asked whether
+  that origin was *reachable through the real entry point*. The defect lived in the space between
+  the units, which is precisely where unit tests do not look.
+- Detection: a Spec-axis reviewer reading `do_GET` against the spec's user stories, not any test.
+  Confirmed by `curl`-ing a real `--serve` process and getting `404` on `/`.
+- Resolution: added `GET /`, serving the newest `weekly-report-*.html` under `--root-dir` via
+  `_latest_dashboard_path`. It serves a file `--html` already wrote rather than rendering on demand,
+  because rendering needs an injected `now` and this module is bound by the no-live-clock AST guard.
+- Lesson: when several features share one precondition — an origin, a protocol, a mode flag, an
+  auth state — unit tests will each *supply* that precondition and none will *verify it is
+  producible*. Test the real entry point's ability to establish it: for a server, actually start it
+  and `curl` it. "All the parts are green" and "the thing works" are different claims, and only the
+  second one is what a user has.
+
+## 2026-08-29 — A Fix That Replaces One False Claim With Another Is Still a Finding (Four Times in One Loop)
+
+- Mission: the same five-round `/iterative-fix-review`.
+- Issue: this loop's reviewers raised four separate findings of the identical species — a comment or
+  docstring asserting something untrue of the code beneath it — and **three of them were on the same
+  function's justification, each one introduced by the fix for the previous one**:
+  1. `_model_key`'s docstring claimed "this package's modules never import each other's private
+     names", contradicted by `routing_config.py` reading `probe_models._CROSS_PROVIDER_EFFORT_LADDERS`.
+  2. `downloadFullConfig`'s revoke guard was justified with "`setTimeout` is absent from the test
+     stub" — false; node supplies it, and `showToast` ten lines above already called it unguarded.
+     That justification was written *while fixing* a different false comment.
+  3. The replacement comment then claimed the `Blob`/`URL` guard "exists for the headless test stub" —
+     also false, node supplies those too. The only thing that ever reached the guard's `return false`
+     was a test that deleted `Blob` in order to reach it.
+  4. A ticket record correction asserted ticket 51 "answered exactly one route"; `git show c207dc7`
+     shows it shipped two.
+- Resolution: (1) and (4) rewritten against the actual code/history; (2) and (3) resolved by
+  deleting the guard *and* the test that existed only to justify it, per this repo's standing
+  precedent that Speculative Generality is settled by deletion, not by a caller invented to keep it.
+- Lesson: the reflex when fixing a false comment is to write a *replacement* explanation, and a
+  replacement written under that reflex gets the same amount of verification the original got —
+  which is none. Treat every rewritten sentence as a brand-new claim requiring its own evidence, and
+  when the claim is "this guard is needed for environment E", go check E. If the only reachable path
+  to a defensive branch is a test that manufactures the condition, the branch is not defensive, it
+  is decorative.
+
+## 2026-08-29 — An End-to-End POST Overwrote the Repo's Own `routing-config.json`
+
+- Mission: verifying ticket 53's new `GET /` route end to end with a real server and `curl`.
+- Issue: after confirming the read routes, a `POST /api/config` was fired at the running server with
+  `DEFAULT_ROUTING_CONFIG` as the body, to prove the save path worked over the wire. It did — by
+  atomically overwriting `skills/worker-routing/routing-config.json`, the repo's real, shipped,
+  git-tracked config, reducing it from 9 roles and 9 providers to 0 and 0.
+- Root cause: `create_dashboard_server`'s `config_path` defaults to
+  `routing_config.ROUTING_CONFIG_PATH`, and `serve_dashboard` — the `--serve` CLI door — deliberately
+  exposes no override for it (a Standards review had removed the unused parameter as dead surface).
+  So *any* `--serve` process run from this checkout saves to the live file. That is the documented
+  intent of the feature; it is only a hazard when the thing POSTing is a test.
+- Detection: `git diff --stat` immediately after, showing 133 insertions / 225 deletions in the
+  config. Restored with `git checkout --`, verified back to 9 roles / 9 providers.
+- Lesson: a write endpoint whose destination defaults to a real project file cannot be smoke-tested
+  in place. Point it at a temp path first — `create_dashboard_server(config_path=...)` exists for
+  exactly this and every unit test already uses it — or accept that the CLI door and the test door
+  are different doors on purpose. Read-only routes are safe to `curl` against a default-path server;
+  the moment the verification turns into a write, it needs its own sandbox.
+
+## 2026-08-29 — Two of Nine Review Findings Would Have Introduced Defects
+
+- Mission: the same five-round audit, adjudicating findings from independent Standards/Spec reviewers.
+- Context: reviewer findings arrive with confident prose and a plausible fix, and the cheap response
+  is to apply them. Two here were wrong, and both would have shipped a regression:
+  1. "`resolve_model_id`'s exact-match loop then casefold loop are duplicated; one casefolded pass
+     covers both." It does not: exact-before-folded is deliberate precedence (mirroring the
+     `DISPLAY_LABEL_TO_MODEL_ID` / `_CASEFOLDED_LABEL_INDEX` pair above it). Collapsing them makes
+     the result depend on iteration order whenever two live models differ only by case.
+  2. "`get_role_matrix_view_data` should route `provider.model` through `resolve_model_id`, the way
+     `audit_config_drift` does." Measured against the shipped config: of 9 providers, the 3 that miss
+     the registry (`gemini-3.6-flash`, `gemini-3.1-pro`, `qwen3-coder-30b`) are *also* unresolvable
+     by `resolve_model_id`. The change is a no-op on every real input, and would convert an honest
+     `capability=None` drift signal — which the dashboard exists to surface — into a raising call.
+- Resolution: both rejected, each with the evidence above recorded, and the rejections handed back to
+  the next review round to challenge. Both later reviewers agreed on the evidence.
+- Lesson: a review finding is a hypothesis, not a defect report, and the way to settle it is to run
+  it against real data rather than to reason about the diff. Finding 2 took one script over the
+  actual config to disprove. Adjudicating findings is part of the fix-review loop's job — a round
+  that applies every finding is not converging, it is drifting under the reviewer's confidence, and
+  "zero findings" and "every finding applied" are both valid rounds only when the difference was
+  measured.
+
 ## 2026-08-29 — A Same-Size Mutation Left a Stale `__pycache__` Behind and Faked Two Failures
 
 - Mission: `/iterative-fix-review` on spec 0013, verifying that newly written tests actually fail
