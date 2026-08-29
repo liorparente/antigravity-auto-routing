@@ -41,9 +41,8 @@ MAX_DEBATE_ROUNDS = 3
 # constant under the same name rather than importing it — importing
 # `agent_council` from `advisory_consultation` would pull `urllib.request`
 # and `asyncio` into a module whose docstring promises none, and both files
-# are loaded by path rather than as an installed package (see the identical
-# `SENSITIVE_PATTERNS`/`SENSITIVITY_MARKERS` precedent below). The two
-# constants are kept from drifting apart by
+# are loaded by path rather than as an installed package. The two constants
+# are kept from drifting apart by
 # `test_escalation_failure_threshold_matches_agent_council_constant` in
 # `test_routing.py`, not by a shared import.
 ESCALATION_FAILURE_THRESHOLD = 2
