@@ -2,7 +2,7 @@
 
 **Spec:** 0014 — Institutional Memory Catalog
 
-**Status:** open — policy decision required
+**Status:** done — consolidated into Golden Rule 32 (Full consolidation policy chosen to optimize injection-slot budget)
 
 ## Proposal
 

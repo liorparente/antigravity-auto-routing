@@ -227,7 +227,7 @@ PERSPECTIVE_PROMPTS: dict[ReviewerPerspective, str] = {
 # `knowledge/institutional-memory.md` used to carry 103 free-text, dated
 # entries (~90KB) — too large to inject into a worker's mission brief
 # without degrading attention and blowing the token budget. This module
-# instead ships a fixed, structured distillation of that history — 35 rules
+# instead ships a fixed, structured distillation of that history — 32 rules
 # across 5 categories — and `extract_scoped_memory` below picks only the
 # 3-5 rules relevant to one task, instead of the whole document. The full
 # historical record is preserved, unedited, in
@@ -584,43 +584,10 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
     GoldenRule(
         32,
         "Testing & TDD Seams",
-        "Fixing one false factual claim in a comment can produce a new false claim, not convergence",
-        "Ticket 47's _ROLE_ACCENT_COLORS comment took four /iterative-fix-review rounds: "
-        "a nonexistent sensitivity_gate config key → a wrong \"unique to this role\" "
-        "claim about local_only (another role shared it) → an overclaimed \"from the "
-        "spec's palette\" attribution (the spec only names one of seven hex values) → "
-        "finally clean. Each rewrite was independently plausible and independently wrong.",
-        ("comment", "claim", "factual", "convergence", "review", "drift", "verification"),
+        "When fixing review findings, re-derive whole claim blocks from primary sources and settle cosmetic drift in the same pass",
+        "Patching single clauses incrementally risks introducing new plausible-but-false claims (ticket 47 incident). Re-derive the entire multi-sentence comment block from primary sources in one pass, brief verifiers with the history of prior failed fixes rather than rubber-stamping, and resolve fix-introduced cosmetic or comment drift immediately.",
+        ("review", "comment", "claim", "factual", "re-derive", "primary sources", "verifier", "convergence", "drift", "cosmetic", "cleanup", "pass"),
         ("*.py", "*.md"),
-    ),
-    GoldenRule(
-        33,
-        "Testing & TDD Seams",
-        "When a reviewer flags one wrong claim inside a multi-sentence comment, re-derive the whole block from primary sources in one pass — not just the flagged clause",
-        "All three wrong claims in rule 32's incident lived in the same ~15-line comment; "
-        "each incremental patch left an adjacent, equally-unverified sentence standing, "
-        "which is exactly what the next review round caught.",
-        ("reviewer", "comment", "re-derive", "primary sources", "verification", "claim"),
-        ("*.py", "*.md"),
-    ),
-    GoldenRule(
-        34,
-        "Testing & TDD Seams",
-        "Brief a re-verification agent with the specific history of prior wrong fixes, and instruct it to re-derive every claim from primary sources",
-        "A verifier told only \"check this fix\" tends to confirm it looks plausible; a "
-        "verifier told \"the last two fixes for this exact spot were both wrong, re-derive "
-        "independently\" is what actually caught rounds 2 and 3 of rule 32's incident "
-        "instead of rubber-stamping them.",
-        ("verifier", "verification", "re-derive", "primary sources", "wrong fix", "rubber-stamp"),
-        ("*.py", "*.md"),
-    ),
-    GoldenRule(
-        35,
-        "Testing & TDD Seams",
-        "Fix a review-flagged cosmetic/non-functional inconsistency introduced by the fix itself in the same pass, even though it changes no runtime behavior",
-        "When a fix introduces an inconsistency (e.g. comment drift describing removed code), settle it immediately while the file is already in hand rather than leaving behind stale documentation.",
-        ("review", "cosmetic", "inconsistency", "cleanup", "cycle", "pass"),
-        ("*.py",),
     ),
 )
 
