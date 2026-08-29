@@ -1,9 +1,11 @@
 """Hermetic coverage for the pure CriticalDialogue prompt assembler."""
 from __future__ import annotations
 
+import ast
 import dataclasses
 import sys
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 if __package__ is None or __package__ == "":
@@ -165,6 +167,101 @@ class GoldenRulesCatalogTests(unittest.TestCase):
                 self.assertTrue(rule.title)
                 self.assertTrue(rule.directive)
                 self.assertTrue(rule.category)
+
+
+class CatalogMetadataTests(unittest.TestCase):
+    def test_metadata_is_frozen_and_has_the_specified_default_interval(self) -> None:
+        metadata = prompt_assembler.CatalogMetadata(last_reviewed="2026-08-26")
+
+        self.assertEqual(metadata.last_reviewed, "2026-08-26")
+        self.assertEqual(metadata.review_interval_days, 30)
+        self.assertEqual(prompt_assembler.CATALOG_METADATA.last_reviewed, "2026-08-26")
+        self.assertEqual(prompt_assembler.CATALOG_METADATA.review_interval_days, 30)
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            metadata.review_interval_days = 31
+
+    def test_review_due_boundaries_and_future_review_date(self) -> None:
+        metadata = prompt_assembler.CatalogMetadata(last_reviewed="2026-08-26")
+        review_start = datetime(2026, 8, 26, tzinfo=timezone.utc)
+
+        self.assertFalse(
+            prompt_assembler.is_catalog_review_due(
+                metadata, now=review_start + timedelta(days=29)
+            )
+        )
+        self.assertTrue(
+            prompt_assembler.is_catalog_review_due(
+                metadata, now=review_start + timedelta(days=30)
+            )
+        )
+        self.assertTrue(
+            prompt_assembler.is_catalog_review_due(
+                metadata, now=review_start + timedelta(days=31)
+            )
+        )
+        self.assertFalse(
+            prompt_assembler.is_catalog_review_due(
+                prompt_assembler.CatalogMetadata(last_reviewed="2026-09-01"),
+                now=review_start,
+            )
+        )
+
+    def test_review_due_converts_non_utc_now_to_utc_date(self) -> None:
+        metadata = prompt_assembler.CatalogMetadata(last_reviewed="2026-08-26")
+        plus_two = timezone(timedelta(hours=2))
+
+        self.assertFalse(
+            prompt_assembler.is_catalog_review_due(
+                metadata, now=datetime(2026, 9, 25, 1, tzinfo=plus_two)
+            )
+        )
+        self.assertTrue(
+            prompt_assembler.is_catalog_review_due(
+                metadata, now=datetime(2026, 9, 25, 2, tzinfo=plus_two)
+            )
+        )
+
+    def test_review_due_rejects_naive_and_non_datetime_now_values(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "now must be a timezone-aware datetime, got a naive value"
+        ):
+            prompt_assembler.is_catalog_review_due(now=datetime(2026, 9, 25))
+        with self.assertRaises(TypeError):
+            prompt_assembler.is_catalog_review_due(now="2026-09-25")  # type: ignore[arg-type]
+
+    def test_review_due_accepts_explicit_custom_metadata(self) -> None:
+        metadata = prompt_assembler.CatalogMetadata(
+            last_reviewed="2026-08-26", review_interval_days=7
+        )
+
+        self.assertTrue(
+            prompt_assembler.is_catalog_review_due(
+                metadata, now=datetime(2026, 9, 2, tzinfo=timezone.utc)
+            )
+        )
+
+    def test_review_due_function_contains_no_clock_reads(self) -> None:
+        source = Path(prompt_assembler.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        forbidden_calls = {
+            ("datetime", "now"),
+            ("datetime", "utcnow"),
+            ("date", "today"),
+            ("time", "time"),
+            ("time", "monotonic"),
+            ("time", "perf_counter"),
+        }
+
+        clock_calls = [
+            (node.func.value.id, node.func.attr)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and (node.func.value.id, node.func.attr) in forbidden_calls
+        ]
+
+        self.assertEqual(clock_calls, [])
 
 
 class GoldenRuleKeywordMatchingTests(unittest.TestCase):

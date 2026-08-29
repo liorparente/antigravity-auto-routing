@@ -100,8 +100,11 @@ current_version_dir = _learned_state.current_version_dir
 get_scoped_memory = _learned_state.get_scoped_memory
 
 extract_scoped_memory = _prompt_assembler.extract_scoped_memory
+CatalogMetadata = _prompt_assembler.CatalogMetadata
+CATALOG_METADATA = _prompt_assembler.CATALOG_METADATA
 GoldenRule = _prompt_assembler.GoldenRule
 GOLDEN_RULES = _prompt_assembler.GOLDEN_RULES
+is_catalog_review_due = _prompt_assembler.is_catalog_review_due
 
 # Perspective Reviewer prompts & contracts (spec 0012 / workflow-v2 ticket 06).
 StructuredFinding = _dialogue_contracts.StructuredFinding
@@ -166,7 +169,8 @@ __version__ = "3.6.0"
 __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tuple(sorted(__all__)) == __all__
     "AcceptanceGateResult", "AdvisoryDebateResult", "AdvisoryDebateRound", "AdvisoryOutcome",
     "AdvisoryResolutionOption", "AdvisoryRoundVerdict", "AdvisoryStalemateReport",
-    "AdvisoryTelemetryRecord", "CanaryFixture", "CanaryResult", "ComplianceRecord",
+    "AdvisoryTelemetryRecord", "CATALOG_METADATA", "CanaryFixture", "CanaryResult",
+    "CatalogMetadata", "ComplianceRecord",
     "ConsensusTable", "ConsultationTranscript", "CriticResponse", "CriticVerdict",
     "DebateRoundRecord", "DebateSessionState", "DebateState", "DebateTransport",
     "DegradationLadderState", "DegradationRung", "DialogueQualityRecord", "DialogueRound",
@@ -185,7 +189,7 @@ __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tu
     "current_version_dir", "dispatch_post_mortem_consultation", "escalate_routing_effort",
     "evaluate_proposal_gate", "extract_issue_codes", "extract_perspective_tag",
     "extract_scoped_memory", "extract_structured_findings", "get_scoped_memory",
-    "invoke_worker", "journal_path", "parse_perspective_review",
+    "invoke_worker", "is_catalog_review_due", "journal_path", "parse_perspective_review",
     "probe_local_model_availability", "prompt_local_fallback_decision", "read_current",
     "read_history", "read_journal", "record_plan_outcome", "record_review_verdict",
     "record_stalemate_resolution", "record_test_result", "reduce_outcomes_by_key",

@@ -9,6 +9,7 @@ import fnmatch
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from functools import cache
 
 try:
@@ -38,6 +39,7 @@ __all__ = [
     "CRITIC_VERDICT_APPROVE",
     "CRITIC_VERDICT_BLOCK",
     "CRITIC_VERDICT_REVISE",
+    "CATALOG_METADATA",
     "GOLDEN_RULES",
     "LEGACY_WORKER_MODE_TOKEN",
     "MISSION_COPY",
@@ -49,6 +51,7 @@ __all__ = [
     "WORKER_MODE_TOKEN",
     "WORKER_MODE_TOKENS",
     "GoldenRule",
+    "CatalogMetadata",
     "MissionCopy",
     "Occasion",
     "ReviewerPerspective",
@@ -61,6 +64,7 @@ __all__ = [
     "combine_panel_critic_feedback",
     "escape_delimiters",
     "extract_scoped_memory",
+    "is_catalog_review_due",
 ]
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: NESTED-EXEC]"
@@ -68,6 +72,40 @@ LEGACY_WORKER_MODE_TOKEN = "[WORKER-MODE: AGY-NESTED-EXEC]"
 WORKER_MODE_TOKENS = (WORKER_MODE_TOKEN, LEGACY_WORKER_MODE_TOKEN)
 
 _DELIMITER_RE = re.compile(r"===\s*(BEGIN|END)", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class CatalogMetadata:
+    """Frozen metadata record accompanying the golden rule catalog."""
+
+    last_reviewed: str
+    review_interval_days: int = 30
+
+
+CATALOG_METADATA = CatalogMetadata(
+    last_reviewed="2026-08-26",
+    review_interval_days=30,
+)
+
+
+def is_catalog_review_due(
+    metadata: CatalogMetadata = CATALOG_METADATA,
+    *,
+    now: datetime,
+) -> bool:
+    """Check whether the golden rule catalog is due for review relative to `now`.
+
+    This pure function takes an explicit timezone-aware clock value and makes
+    no clock reads of its own.
+    """
+    if not isinstance(now, datetime):
+        raise TypeError("now must be a datetime")
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("now must be a timezone-aware datetime, got a naive value")
+
+    last_reviewed_date = date.fromisoformat(metadata.last_reviewed)
+    now_date = now.astimezone(timezone.utc).date()
+    return (now_date - last_reviewed_date).days >= metadata.review_interval_days
 
 
 @dataclass(frozen=True)
