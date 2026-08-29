@@ -160,14 +160,42 @@ class GoldenRulesCatalogTests(unittest.TestCase):
             list(range(1, len(prompt_assembler.GOLDEN_RULES) + 1)),
         )
 
-    def test_every_rule_has_non_empty_keywords_and_file_patterns(self) -> None:
+    def test_every_rule_has_valid_attributes_and_canonical_category(self) -> None:
         for rule in prompt_assembler.GOLDEN_RULES:
             with self.subTest(rule_id=rule.id):
                 self.assertTrue(rule.keywords)
                 self.assertTrue(rule.file_patterns)
                 self.assertTrue(rule.title)
                 self.assertTrue(rule.directive)
-                self.assertTrue(rule.category)
+                self.assertIn(
+                    rule.category,
+                    prompt_assembler._INSTITUTIONAL_MEMORY_CATEGORY_ORDER,
+                )
+
+    def test_rule_32_contains_full_consolidated_keyword_set(self) -> None:
+        """Ticket 60: Rule 32 must retain all keywords from former rules 32-35."""
+        rule_32 = next(r for r in prompt_assembler.GOLDEN_RULES if r.id == 32)
+        expected_keywords = {
+            "review",
+            "reviewer",
+            "verifier",
+            "verification",
+            "comment",
+            "claim",
+            "factual",
+            "re-derive",
+            "primary sources",
+            "wrong fix",
+            "rubber-stamp",
+            "convergence",
+            "drift",
+            "cosmetic",
+            "inconsistency",
+            "cleanup",
+            "cycle",
+            "pass",
+        }
+        self.assertEqual(set(rule_32.keywords), expected_keywords)
 
 
 class CatalogMetadataTests(unittest.TestCase):
@@ -530,6 +558,34 @@ class ExtractScopedMemoryTests(unittest.TestCase):
         second = prompt_assembler.extract_scoped_memory("Refactor the CLI adapter", target_files=["adapter.py"])
 
         self.assertEqual(first, second)
+
+    def test_rule_32_consolidated_facets_are_retrieved(self) -> None:
+        """Ticket 60: Rule 32 consolidated four review-convergence facets.
+        Verify that retrieval queries targeting each facet and specific vocabulary terms
+        (including rubber-stamp, wrong fix, verification, inconsistency, primary sources)
+        successfully select Rule 32.
+        """
+        facets = [
+            ("Review finding: false factual claim in documentation comment", ["module.py"]),
+            ("Re-derive the entire block from primary sources rather than patching one line", ["doc.md"]),
+            ("Brief verifier agent with history of prior wrong fixes to avoid rubber-stamp", ["verify.py"]),
+            ("Fix review cosmetic drift and comment inconsistency in the same cleanup pass", ["cleanup.py"]),
+            ("rubber-stamp the verification after a wrong fix", ["verify.py"]),
+            ("reviewer flagged factual claim drift", ["review.py"]),
+            ("cosmetic inconsistency cycle", ["cleanup.py"]),
+        ]
+        for query, target_files in facets:
+            with self.subTest(query=query):
+                scoped = prompt_assembler.extract_scoped_memory(
+                    query, target_files=target_files, max_rules=5
+                )
+                blocks = _scoped_rule_blocks(scoped)
+                rule_32_blocks = [b for b in blocks if b.startswith("32. ")]
+                self.assertEqual(
+                    len(rule_32_blocks),
+                    1,
+                    f"Expected Rule 32 in scoped memory for query '{query}', got blocks: {blocks}",
+                )
 
 
 class PerspectiveReviewerPromptTests(unittest.TestCase):

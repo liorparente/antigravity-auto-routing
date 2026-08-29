@@ -16,6 +16,6 @@ Rules 32–35 cover closely related facets: a corrected factual claim needs fres
 - **Consolidate the rules:** reduces duplication and preserves more scoped-memory slots for other categories. The cost is coarser retrieval: one broader rule may score less precisely, and a worker may miss a specific operational facet hidden inside a long combined directive.
 - **Partial consolidation:** can combine the factual-claim rules (32–34) while leaving the same-pass cosmetic-drift rule (35) separate. This balances slot use against retrieval specificity, but requires defining and defending the grouping boundary.
 
-## Decision Needed
+## Decision Taken
 
-Choose the catalog policy for balancing granular facet retrieval against bounded injection-slot competition, then update the catalog, generated institutional memory, and retrieval tests together. Until that policy is decided, retain rules 32–35 as separate entries.
+Adopted full consolidation: Golden Rules 32–35 are consolidated into a single unified Golden Rule 32 in `prompt_assembler.py`, covering all four review-convergence facets (fresh proof, whole-block re-derivation, prior-failure history, and same-pass cosmetic drift). The catalog is reduced to 32 sequential rules, preserving bounded injection slots while maintaining keyword-retrieval fidelity verified by dedicated regression tests.
