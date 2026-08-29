@@ -154,7 +154,7 @@ class PromptAssemblerTests(unittest.TestCase):
 
 class GoldenRulesCatalogTests(unittest.TestCase):
     def test_catalog_has_unique_sequential_ids(self) -> None:
-        self.assertGreaterEqual(len(prompt_assembler.GOLDEN_RULES), 32)
+        self.assertGreaterEqual(len(prompt_assembler.GOLDEN_RULES), 34)
         self.assertEqual(
             [rule.id for rule in prompt_assembler.GOLDEN_RULES],
             list(range(1, len(prompt_assembler.GOLDEN_RULES) + 1)),
@@ -341,7 +341,7 @@ class InstitutionalMemoryRendererTests(unittest.TestCase):
         rendered = prompt_assembler.render_institutional_memory()
 
         self.assertTrue(rendered)
-        self.assertIn("# Institutional Memory — 32 Golden Rules", rendered)
+        self.assertIn("# Institutional Memory — 34 Golden Rules", rendered)
         self.assertIn(
             f"- **Last reviewed:** {prompt_assembler.CATALOG_METADATA.last_reviewed}",
             rendered,

@@ -608,6 +608,22 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ),
         ("*.py", "*.md"),
     ),
+    GoldenRule(
+        33,
+        "Architecture & Deep Modules",
+        "Calibrate reasoning effort and model roles for cost and rate-limit insulation",
+        "In multi-tier routing, calibrate Planner and Critic to 'medium' effort to cut latency by ~50% and conserve token quotas without sacrificing boundary isolation or AST precision. Pair high-throughput thinking models (Gemini 3.7 Flash) for heavy implementation loops and reserve local open-weight models strictly for $0 boilerplate and air-gapped sensitive execution.",
+        ("reasoning effort", "effort", "planner", "critic", "hybrid", "rate limit", "quota", "gemini 3.7", "opus", "codex sol", "profile"),
+        ("routing-config.json", "profiles/*.json", "routing_config.py", "*.py"),
+    ),
+    GoldenRule(
+        34,
+        "Multi-Harness Sync & Governance",
+        "Isolate open-weight local models from multi-agent council adjudication",
+        "Local 27B open-weight models lack the meta-reasoning calibration needed to arbitrate multi-model debates or high-level maintainability reviews; they suffer from positional bias and erratic verdicts when judging frontier models. Keep local models strictly scoped to sensitive file execution (secrets/.env) and light single-file tasks, while routing council review and adjudication to frontier models or deterministic voting policies.",
+        ("adjudicator", "council", "judge", "llm-as-a-judge", "qwen", "local model", "lm-studio", "verdict", "arbitration"),
+        ("council_*.py", "debate_*.py", "profiles/*.json", "routing-config.json"),
+    ),
 )
 
 _INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (
