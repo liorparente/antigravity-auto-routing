@@ -41,11 +41,10 @@ For each insight, apply the appropriate update:
 
 ### Institutional Memory
 - **`[global]`**: Update `~/.gemini/antigravity/knowledge/global-memory.md`.
-- **`[local]` in a catalog-backed workspace**: Add a structured `GoldenRule` entry to `GOLDEN_RULES` in `skills/worker-routing/prompt_assembler.py`, update the catalog-count assertion in `skills/worker-routing/test_prompt_assembler.py`, then execute:
+- **`[local]` in a catalog-backed workspace**:
 
-  ```bash
-  python3 skills/worker-routing/regenerate_institutional_memory.py
-  ```
+  1. Add the new `GoldenRule` entry to `GOLDEN_RULES` in `skills/worker-routing/prompt_assembler.py` (with the next sequential ID, category, keywords, file_patterns, title, and directive).
+  2. Run `python3 skills/worker-routing/regenerate_institutional_memory.py` to regenerate `knowledge/institutional-memory.md`.
 
   Never write directly to `knowledge/institutional-memory.md`; it is generated output.
 - **`[local]` outside a catalog-backed workspace**: Update that workspace's institutional-memory store according to its documented ownership model.
