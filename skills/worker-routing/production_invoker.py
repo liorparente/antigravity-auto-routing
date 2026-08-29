@@ -711,7 +711,10 @@ def build_worker_command(
                 {
                     "model": effective_model,
                     "messages": [{"role": "user", "content": routed_prompt}],
-                    "temperature": 0,
+                    "temperature": 0.3,
+                    "top_p": 0.95,
+                    "min_p": 0.05,
+                    "repetition_penalty": 1.0,
                 }
             )
             return [
@@ -770,7 +773,10 @@ def build_worker_command(
             {
                 "model": normalized_model,
                 "messages": [{"role": "user", "content": routed_prompt}],
-                "temperature": 0,
+                "temperature": 0.3,
+                "top_p": 0.95,
+                "min_p": 0.05,
+                "repetition_penalty": 1.0,
             }
         )
         return [

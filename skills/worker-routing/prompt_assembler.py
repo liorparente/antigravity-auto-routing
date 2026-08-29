@@ -84,7 +84,7 @@ class CatalogMetadata:
 
 
 CATALOG_METADATA = CatalogMetadata(
-    last_reviewed="2026-08-26",
+    last_reviewed="2026-08-29",
     review_interval_days=30,
 )
 
@@ -227,7 +227,7 @@ PERSPECTIVE_PROMPTS: dict[ReviewerPerspective, str] = {
 # `knowledge/institutional-memory.md` used to carry 103 free-text, dated
 # entries (~90KB) — too large to inject into a worker's mission brief
 # without degrading attention and blowing the token budget. This module
-# instead ships a fixed, structured distillation of that history — 32 rules
+# instead ships a fixed, structured distillation of that history — 37 rules
 # across 5 categories — and `extract_scoped_memory` below picks only the
 # 3-5 rules relevant to one task, instead of the whole document. The full
 # historical record is preserved, unedited, in
@@ -639,6 +639,22 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         "Adding top-level configuration keys (such as _active_profile) requires updating both routing_check.NON_ROLE_CONFIG_KEYS and routing_config.STRUCTURAL_KEYS in lockstep. Because routing_check.py dynamically prioritizes routing_config.STRUCTURAL_KEYS when imported, omitting a key from STRUCTURAL_KEYS silently degrades into runtime schema drift where the key is erroneously treated as an invalid worker role.",
         ("structural", "config", "schema", "non-role", "active_profile", "routing_config", "routing_check", "STRUCTURAL_KEYS", "NON_ROLE_CONFIG_KEYS", "drift"),
         ("routing-config.json", "routing_config.py", "routing_check.py", "test_declarative_schema.py"),
+    ),
+    GoldenRule(
+        37,
+        "Architecture & Deep Modules",
+        "Calibrate local coding models with moderate temperature and dynamic Min-P filtering",
+        "Greedy decoding (T=0.0) locks local coding workers into local optima and repetitive self-repair loops. For local coding models (e.g. Qwen3.8-27B-MLX), configure moderate temperature (0.3) paired with dynamic Min-P (0.05), Top-P (0.95), and disabled repetition penalty (1.0) in production_invoker.py and LM Studio presets. Min-P dynamically prunes low-probability tokens below 5% relative to the leading candidate, eliminating syntax corruption while preserving algorithmic exploration.",
+        ("sampling", "temperature", "min_p", "top_p", "repetition_penalty", "lm-studio", "qwen", "coding", "greedy", "local model"),
+        ("production_invoker.py", "routing-config.json", "test_lmstudio.py", "*.py"),
+    ),
+    GoldenRule(
+        38,
+        "Architecture & Deep Modules",
+        "Consolidate multi-occasion deliberation into deep CriticalDialogue modules and eliminate shallow facades",
+        "When an orchestrator manages multi-occasion deliberations (ambiguity, plan reviews, diff audits, panel reviews), consolidate them into a single deep CriticalDialogue module rather than scattering shallow wrapper facades (e.g. advisory_consultation.py, council_review.py) with 60+ re-exported alias chains. Maintain locality and high leverage by keeping state machine transitions, contract quote verification, transcripts, and degradation rungs behind private module seams, and delete obsolete pass-through files completely.",
+        ("critical dialogue", "advisory", "council review", "facade", "shallow", "deep module", "seam", "alias", "re-export", "consolidation"),
+        ("critical_dialogue.py", "debate_*.py", "council_*.py", "dialogue_*.py", "*.py"),
     ),
 )
 

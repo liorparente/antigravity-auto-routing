@@ -204,7 +204,7 @@ class CatalogMetadataTests(unittest.TestCase):
 
         self.assertEqual(metadata.last_reviewed, "2026-08-26")
         self.assertEqual(metadata.review_interval_days, 30)
-        self.assertEqual(prompt_assembler.CATALOG_METADATA.last_reviewed, "2026-08-26")
+        self.assertEqual(prompt_assembler.CATALOG_METADATA.last_reviewed, "2026-08-29")
         self.assertEqual(prompt_assembler.CATALOG_METADATA.review_interval_days, 30)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             metadata.review_interval_days = 31  # type: ignore[misc]

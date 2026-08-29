@@ -231,3 +231,12 @@ A process execution standard requiring explicit `sys.stdout.flush()` on every st
 
 ### StructuralConfigDrift
 A runtime schema drift failure where a top-level configuration key (e.g. `_active_profile`) is registered only in `routing_check.NON_ROLE_CONFIG_KEYS` but omitted from `routing_config.STRUCTURAL_KEYS`, causing the dispatcher to parse top-level configuration metadata as invalid worker role definitions.
+
+### MinPSampling
+A local-model decoding strategy that keeps tokens whose probability is at least a fixed fraction of the leading candidate's probability. For local coding workers, a Min-P threshold of `0.05` paired with `temperature=0.3`, `top_p=0.95`, and `repetition_penalty=1.0` limits low-confidence syntax corruption while preserving enough exploration to avoid greedy-decoding local optima and repetitive self-repair loops.
+
+### MLXMetalAttention
+The Apple-silicon inference path used by MLX-backed local models, where transformer attention is executed through Metal on the GPU. Its model-serving configuration, including sampling controls, is managed through LM Studio-compatible presets and the local invocation contract rather than through cloud-provider reasoning-effort settings.
+
+### CriticalDialogueConsolidation
+The unification of ambiguity deliberation, plan review, code review, post-mortem, and multi-model council review into a single deep module (`CriticalDialogue`), eliminating legacy pass-through facades (`advisory_consultation.py`, `council_review.py`) and duplicate security checks in `agent_council.py` to maximize locality and testability. Spec 0015 / ADR 0015.

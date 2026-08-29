@@ -5,6 +5,12 @@
 
 ## Active Entries
 
+### ERR-0003: macOS Dotfile Permission Lock & TCC Extended Attributes on LM Studio
+- **Date:** 2026-08-29
+- **Root Cause:** LM Studio's macOS sandbox/TCC permissions and extended-attribute handling can deny writes to dotfile paths beneath its application-managed directory, even when ordinary filesystem permissions appear valid.
+- **Verified Signal:** Writing `~/.lmstudio/test.txt` failed with `EPERM`, demonstrating that the denial occurs at the macOS privacy/extended-attribute layer rather than as an application-level model-server failure.
+- **Actionable Prevention Rule:** Do not use `~/.lmstudio` as a general scratch or validation path. Use an approved workspace or temporary directory for test artifacts, and inspect TCC grants and extended attributes before treating an `EPERM` as a code defect.
+
 ### ERR-0002: Declarative Schema Key Desynchronization between STRUCTURAL_KEYS and NON_ROLE_CONFIG_KEYS
 - **Date:** 2026-08-29
 - **Root Cause:** In `routing_check.py:354`, structural keys are resolved dynamically via `routing_config.STRUCTURAL_KEYS if routing_config is not None else NON_ROLE_CONFIG_KEYS`. When `_active_profile` was added only to `NON_ROLE_CONFIG_KEYS` and `test_declarative_schema.EXPECTED_NON_ROLE_KEYS`, `routing_config.STRUCTURAL_KEYS` remained unupdated, silently bypassing the schema fix in runtime environments where `routing_config` is imported.
