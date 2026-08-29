@@ -24,9 +24,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     if __package__:
-        from .debate_orchestrator import AdvisoryDebateResult, CanaryFixture
+        from .critical_dialogue import AdvisoryDebateResult, CanaryFixture
     else:
-        from debate_orchestrator import (  # type: ignore[no-redef]
+        from critical_dialogue import (  # type: ignore[no-redef]
             AdvisoryDebateResult,
             CanaryFixture,
         )

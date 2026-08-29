@@ -9116,7 +9116,7 @@ class ManagedFileClosureTests(unittest.TestCase):
         """
         with _InstalledHarness() as harness:
             result = harness.run_installed_python(
-                "import advisory_consultation, learning_outcomes, "
+                "import critical_dialogue, learning_outcomes, "
                 "production_invoker, routing_check\n"
                 "print('imports ok')"
             )
@@ -9143,12 +9143,12 @@ class ManagedFileClosureTests(unittest.TestCase):
         program = (
             "import sys\n"
             "from pathlib import Path\n"
-            "import advisory_consultation, production_invoker\n"
+            "import critical_dialogue, production_invoker\n"
             f"replies = iter([{plan!r}, {_approve(plan)!r}])\n"
             "production_invoker.invoke_worker = (\n"
             "    lambda model, effort, prompt, **kwargs: next(replies)\n"
             ")\n"
-            "result = advisory_consultation.run_advisory_consultation_debate(\n"
+            "result = critical_dialogue.run_advisory_consultation_debate(\n"
             "    'Plan the auth rewrite', root_dir=Path(sys.argv[1]),\n"
             "    task_id='installed-consultation-1',\n"
             ")\n"
