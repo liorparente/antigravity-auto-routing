@@ -85,6 +85,17 @@ class CriticalDialogueTests(unittest.TestCase):
         self.assertEqual(result.outcome, "stalemate")
         self.assertEqual(result.rounds_run, 2)
 
+    def test_run_critical_dialogue_halts_on_sensitive_marker_when_unreachable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = critical_dialogue.run_critical_dialogue(
+                "Rotate the BEGIN PRIVATE KEY credential",
+                _mock_approve,
+                root_dir=Path(tmp),
+                reachability_check=lambda _family: False,
+            )
+
+        self.assertEqual(result.outcome, "sensitivity_halt")
+
     def test_run_canary_dialogue_returns_a_seeded_flaw_measurement(self) -> None:
         fixture = critical_dialogue.CANARY_FIXTURES[0]
         response = f'QUOTE: "{fixture.plan_text.splitlines()[0]}"\nVERDICT: REVISE\nRace condition.'
@@ -149,6 +160,23 @@ class CouncilReviewBoundaryTests(unittest.TestCase):
         ]
         outcome = asyncio.run(council.review(self._request(), custom_adapters=vetoes))
         self.assertEqual(outcome.status, "SECURITY_HALT")
+
+    def test_review_council_weighted_quorum_majority_approval(self) -> None:
+        council = critical_dialogue.ReviewCouncil()
+        votes = [
+            _MockReviewerAdapter(
+                provider,
+                [
+                    _make_vote_payload(provider, "approve"),
+                    _make_vote_payload(provider, vote, candidate_hash=self.candidate_hash),
+                ],
+            )
+            for provider, vote in (("claude", "approve"), ("codex", "approve"), ("gemini", "revise"))
+        ]
+
+        outcome = asyncio.run(council.review(self._request(), custom_adapters=votes))
+
+        self.assertEqual(outcome.status, "QUALIFIED")
 
     def test_review_council_local_and_perspective_modes(self) -> None:
         council = critical_dialogue.ReviewCouncil()

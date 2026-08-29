@@ -1899,7 +1899,7 @@ combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
 _combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
 
 
-def run_advisory_consultation_debate(
+def run_critical_dialogue(
     task_description: str,
     invoke_worker: InvokeWorker | None = None,
     *,
@@ -3334,7 +3334,7 @@ def _run_dispatched_post_mortem(
     skipping the fourth journal family here.
     """
     try:
-        run_advisory_consultation_debate(
+        run_critical_dialogue(
             task_description,
             invoke_worker,
             root_dir=root_dir,
@@ -3557,24 +3557,24 @@ def dispatch_post_mortem_consultation(
 
 def run_debate_loop(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     """Execute the production Planner/Critic state machine."""
-    return run_advisory_consultation_debate(*args, **kwargs)
+    return run_critical_dialogue(*args, **kwargs)
 
 
 # Historic name retained as an exact alias, rather than a forwarding wrapper:
 # callers inspecting the public API receive the complete production signature.
-run_critical_dialogue = run_advisory_consultation_debate
+run_advisory_consultation_debate = run_critical_dialogue
 
 
 def run_canary_dialogue(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     """Execute one seeded-flaw Critic probe through the production loop."""
     kwargs["is_canary"] = True
-    return run_advisory_consultation_debate(*args, **kwargs)
+    return run_critical_dialogue(*args, **kwargs)
 
 
 def run_post_mortem_loop(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     """Execute a post-mortem through the ordinary production loop."""
     kwargs.setdefault("occasion", "post-mortem")
-    return run_advisory_consultation_debate(*args, **kwargs)
+    return run_critical_dialogue(*args, **kwargs)
 
 
 def request_council_review(
