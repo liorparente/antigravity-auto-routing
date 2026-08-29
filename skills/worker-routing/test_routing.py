@@ -131,7 +131,10 @@ def _target_dirs(script: Path, *, home: str, target_project_dir: str) -> tuple[P
 
 
 def _installer_receipt(*, home: str, target_project_dir: str) -> Path:
-    project = str(Path(target_project_dir).resolve())
+    # Match install.sh's `cd "$TARGET_PROJECT_DIR" && pwd`: normalize an
+    # incoming relative path without resolving symlinks that participate in
+    # the installer receipt's project identity.
+    project = os.path.abspath(target_project_dir)
     project_id = hashlib.sha256(os.fsencode(project)).hexdigest()
     return (
         Path(home)
@@ -9474,7 +9477,7 @@ class ManagedFileClosureTests(unittest.TestCase):
             # Jointly forge every target manifest and recompute the old,
             # unkeyed checksum receipt. The v2 verifier must still reject it.
             forged_manifest = targets[0] / ".auto-routing-python-modules"
-            receipt = Path(target_dir) / ".auto-routing-python-modules.receipt"
+            receipt = _installer_receipt(home=fake_home, target_project_dir=target_dir)
             receipt.write_text(
                 "auto-routing-python-modules-receipt-v1\n"
                 f"{hashlib.sha256(forged_manifest.read_bytes()).hexdigest()}\n",
@@ -9539,7 +9542,7 @@ class ManagedFileClosureTests(unittest.TestCase):
             preserved.write_text("# user-modified legacy module\n", encoding="utf-8")
             for installed_dir in targets:
                 (installed_dir / ".auto-routing-python-modules").unlink()
-            (Path(target_dir) / ".auto-routing-python-modules.receipt").unlink()
+            _installer_receipt(home=fake_home, target_project_dir=target_dir).unlink()
 
             uninstalled = self._run_installer_script(
                 source_root / "uninstall.sh", target_dir, home=fake_home
@@ -9630,7 +9633,7 @@ class ManagedFileClosureTests(unittest.TestCase):
             targets = _target_dirs(
                 source_root / "install.sh", home=fake_home, target_project_dir=target_dir
             )
-            (Path(target_dir) / ".auto-routing-python-modules.receipt").unlink()
+            _installer_receipt(home=fake_home, target_project_dir=target_dir).unlink()
             stale_source.unlink()
 
             refused = self._run_installer_script(
@@ -9650,7 +9653,7 @@ class ManagedFileClosureTests(unittest.TestCase):
             for installed_dir in targets:
                 self.assertFalse((installed_dir / "pre_receipt_stale.py").exists())
             self.assertTrue(
-                (Path(target_dir) / ".auto-routing-python-modules.receipt").is_file()
+                _installer_receipt(home=fake_home, target_project_dir=target_dir).is_file()
             )
 
     def test_uninstall_quarantines_exact_object_before_digest_decision(self) -> None:
