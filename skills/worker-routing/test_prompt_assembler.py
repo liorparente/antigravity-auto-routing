@@ -341,7 +341,10 @@ class InstitutionalMemoryRendererTests(unittest.TestCase):
         rendered = prompt_assembler.render_institutional_memory()
 
         self.assertTrue(rendered)
-        self.assertIn("# Institutional Memory — 34 Golden Rules", rendered)
+        self.assertIn(
+            f"# Institutional Memory — {len(prompt_assembler.GOLDEN_RULES)} Golden Rules",
+            rendered,
+        )
         self.assertIn(
             f"- **Last reviewed:** {prompt_assembler.CATALOG_METADATA.last_reviewed}",
             rendered,

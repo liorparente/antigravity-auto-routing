@@ -223,3 +223,9 @@ The authoritative, strongly-typed in-code catalog of distilled engineering direc
 ### InstitutionalMemoryDocument
 The human-readable Markdown build artifact (`knowledge/institutional-memory.md`) rendered deterministically from the [[RuleCatalog]] and its metadata by `prompt_assembler.render_institutional_memory()`. It is never edited directly. Spec 0014.
 
+### CoTStreamingBlindspot
+An execution failure mode where an SSE streaming client listens only to `delta.content` and discards `delta.reasoning_content` while calling a local reasoning model (e.g. Qwen 27B / DeepSeek R1). The client produces zero pipe bytes during the initial 60–150s Chain-of-Thought thinking phase, causing background task watchers to falsely flag the process as frozen (`Last progress: never`).
+
+### UnbufferedInferenceTransport
+A process execution standard requiring explicit `sys.stdout.flush()` on every streaming token and the use of unbuffered execution (`python3 -u` / `PYTHONUNBUFFERED=1`) when dispatching background Python scripts or CLI sub-processes over non-TTY pipes.
+

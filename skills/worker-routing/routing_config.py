@@ -79,6 +79,7 @@ ROUTING_CONFIG_PATH = Path(__file__).resolve().parent / "routing-config.json"
 # `routing_check`-local copy, so the two modules cannot silently drift.
 STRUCTURAL_KEYS = frozenset(
     {
+        "_active_profile",
         "roles",
         "providers",
         "council_policy",

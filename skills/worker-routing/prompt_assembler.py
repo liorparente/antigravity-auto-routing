@@ -624,6 +624,14 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("adjudicator", "council", "judge", "llm-as-a-judge", "qwen", "local model", "lm-studio", "verdict", "arbitration"),
         ("council_*.py", "debate_*.py", "profiles/*.json", "routing-config.json"),
     ),
+    GoldenRule(
+        35,
+        "Subprocess & CLI Process Safety",
+        "Stream local inference with reasoning-delta handling and unbuffered flush",
+        "Local reasoning models in LM Studio (e.g. Qwen 27B, DeepSeek R1) emit extensive thinking tokens under delta.reasoning_content before generating delta.content. Ingestion clients must parse reasoning deltas and execute explicit sys.stdout.flush() or run with python3 -u (PYTHONUNBUFFERED=1) to prevent 0-byte pipe silence, task supervisor timeouts, and 'Last progress: never' hangs.",
+        ("lm-studio", "streaming", "reasoning_content", "cot", "unbuffered", "flush", "stdout", "pipe", "progress", "qwen"),
+        ("production_invoker.py", "test_lmstudio.py", "*.py", "*.sh"),
+    ),
 )
 
 _INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (

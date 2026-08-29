@@ -9,9 +9,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TextIO
 
-try:
+if __package__:
     from . import routing_config
-except ImportError:  # Direct execution: ``python skills/worker-routing/switch_profile.py``.
+else:
     import routing_config  # type: ignore[no-redef]
 
 
