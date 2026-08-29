@@ -65,6 +65,7 @@ __all__ = [
     "escape_delimiters",
     "extract_scoped_memory",
     "is_catalog_review_due",
+    "render_institutional_memory",
 ]
 
 WORKER_MODE_TOKEN = "[WORKER-MODE: NESTED-EXEC]"
@@ -86,7 +87,6 @@ CATALOG_METADATA = CatalogMetadata(
     last_reviewed="2026-08-26",
     review_interval_days=30,
 )
-
 
 def is_catalog_review_due(
     metadata: CatalogMetadata = CATALOG_METADATA,
@@ -625,6 +625,52 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("*.py",),
     ),
 )
+
+_INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (
+    "Architecture & Deep Modules",
+    "Testing & TDD Seams",
+    "Subprocess & CLI Process Safety",
+    "State & File Locking Hygiene",
+    "Multi-Harness Sync & Governance",
+)
+
+
+def render_institutional_memory(
+    rules: Sequence[GoldenRule] = GOLDEN_RULES,
+    metadata: CatalogMetadata = CATALOG_METADATA,
+) -> str:
+    """Render the complete institutional memory Markdown document.
+
+    Pure, deterministic, and clock-free.
+    """
+    grouped_rules: dict[str, list[GoldenRule]] = {}
+    for rule in rules:
+        grouped_rules.setdefault(rule.category, []).append(rule)
+
+    category_order = _INSTITUTIONAL_MEMORY_CATEGORY_ORDER + tuple(
+        sorted(set(grouped_rules) - set(_INSTITUTIONAL_MEMORY_CATEGORY_ORDER))
+    )
+    sections = [
+        "<!-- GENERATED FILE — DO NOT EDIT. Regenerate with: "
+        "python3 -m skills.worker_routing.regenerate_institutional_memory -->",
+        "",
+        f"# Institutional Memory — {len(rules)} Golden Rules",
+        "",
+        "## Metadata",
+        f"- **Last reviewed:** {metadata.last_reviewed}",
+    ]
+
+    for category in category_order:
+        category_rules = grouped_rules.get(category)
+        if not category_rules:
+            continue
+        sections.extend(("", f"## {category}", ""))
+        sections.extend(
+            f"{rule.id}. **{rule.title.rstrip('.')}.** {rule.directive}"
+            for rule in sorted(category_rules, key=lambda rule: rule.id)
+        )
+
+    return "\n".join(sections) + "\n"
 
 SCOPED_MEMORY_BEGIN = "=== BEGIN SCOPED INSTITUTIONAL MEMORY ==="
 SCOPED_MEMORY_END = "=== END SCOPED INSTITUTIONAL MEMORY ==="

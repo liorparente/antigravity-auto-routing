@@ -105,6 +105,7 @@ CATALOG_METADATA = _prompt_assembler.CATALOG_METADATA
 GoldenRule = _prompt_assembler.GoldenRule
 GOLDEN_RULES = _prompt_assembler.GOLDEN_RULES
 is_catalog_review_due = _prompt_assembler.is_catalog_review_due
+render_institutional_memory = _prompt_assembler.render_institutional_memory
 
 # Perspective Reviewer prompts & contracts (spec 0012 / workflow-v2 ticket 06).
 StructuredFinding = _dialogue_contracts.StructuredFinding
@@ -193,7 +194,7 @@ __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tu
     "probe_local_model_availability", "prompt_local_fallback_decision", "read_current",
     "read_history", "read_journal", "record_plan_outcome", "record_review_verdict",
     "record_stalemate_resolution", "record_test_result", "reduce_outcomes_by_key",
-    "reduce_outcomes_positionally", "resolve_cli_command", "resolve_model_name", "roll_back",
+    "reduce_outcomes_positionally", "render_institutional_memory", "resolve_cli_command", "resolve_model_name", "roll_back",
     "run_advisory_consultation_debate", "run_audit", "run_canary_dialogue",
     "run_critical_dialogue", "run_debate_loop", "run_post_mortem_loop",
 )

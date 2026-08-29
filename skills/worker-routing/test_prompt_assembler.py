@@ -264,6 +264,87 @@ class CatalogMetadataTests(unittest.TestCase):
         self.assertEqual(clock_calls, [])
 
 
+class InstitutionalMemoryRendererTests(unittest.TestCase):
+    def test_synthetic_catalog_renders_exact_canonical_snapshot(self) -> None:
+        rules = (
+            prompt_assembler.GoldenRule(
+                20, "Testing & TDD Seams", "Later test title.", "Test later.", (), ()
+            ),
+            prompt_assembler.GoldenRule(
+                3, "Architecture & Deep Modules", "Architecture title.", "Design first.", (), ()
+            ),
+            prompt_assembler.GoldenRule(
+                1, "Architecture & Deep Modules", "Earlier architecture title", "Design early.", (), ()
+            ),
+            prompt_assembler.GoldenRule(
+                2, "Unexpected Category", "Unexpected title.", "Sort after canonical.", (), ()
+            ),
+        )
+        metadata = prompt_assembler.CatalogMetadata(last_reviewed="2030-01-02")
+
+        rendered = prompt_assembler.render_institutional_memory(rules, metadata)
+
+        self.assertEqual(
+            rendered,
+            "<!-- GENERATED FILE — DO NOT EDIT. Regenerate with: "
+            "python3 -m skills.worker_routing.regenerate_institutional_memory -->\n"
+            "\n"
+            "# Institutional Memory — 4 Golden Rules\n"
+            "\n"
+            "## Metadata\n"
+            "- **Last reviewed:** 2030-01-02\n"
+            "\n"
+            "## Architecture & Deep Modules\n"
+            "\n"
+            "1. **Earlier architecture title.** Design early.\n"
+            "3. **Architecture title.** Design first.\n"
+            "\n"
+            "## Testing & TDD Seams\n"
+            "\n"
+            "20. **Later test title.** Test later.\n"
+            "\n"
+            "## Unexpected Category\n"
+            "\n"
+            "2. **Unexpected title.** Sort after canonical.\n",
+        )
+
+    def test_default_catalog_is_complete_and_uses_catalog_metadata(self) -> None:
+        rendered = prompt_assembler.render_institutional_memory()
+
+        self.assertTrue(rendered)
+        self.assertIn("# Institutional Memory — 35 Golden Rules", rendered)
+        self.assertIn(
+            f"- **Last reviewed:** {prompt_assembler.CATALOG_METADATA.last_reviewed}",
+            rendered,
+        )
+        for rule in prompt_assembler.GOLDEN_RULES:
+            self.assertIn(f"{rule.id}. **", rendered)
+
+    def test_renderer_function_contains_no_clock_reads(self) -> None:
+        source = Path(prompt_assembler.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        renderer = next(
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "render_institutional_memory"
+        )
+        forbidden_calls = {
+            ("datetime", "now"), ("datetime", "utcnow"), ("date", "today"),
+            ("time", "time"), ("time", "monotonic"), ("time", "perf_counter"),
+        }
+
+        clock_calls = [
+            (node.func.value.id, node.func.attr)
+            for node in ast.walk(renderer)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and (node.func.value.id, node.func.attr) in forbidden_calls
+        ]
+
+        self.assertEqual(clock_calls, [])
+
+
 class GoldenRuleKeywordMatchingTests(unittest.TestCase):
     """Council Review fix: `_score_golden_rules` must match keywords on a
 
