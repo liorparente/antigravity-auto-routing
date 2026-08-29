@@ -1,5 +1,26 @@
 # Worker Routing Fallbacks
 
+## 2026-08-29 — Ticket 54 Interim Containment: Narrowing Sync Assertions & Exact Test Naming
+
+- Mission: implement ticket 54 under spec 0014 on branch `spec-0013-role-and-model-matrix-dashboard`.
+- Issue: `knowledge/institutional-memory.md` contained 35 rules while `prompt_assembler.GOLDEN_RULES`
+  held 25 rules. The previous test `test_institutional_memory_matches_golden_rules` failed on
+  `len(parsed) == 25`. Naively patching only the `len` check would immediately fail on dictionary
+  equality `golden_rules_by_id == parsed_categories_by_id` because keys differ (35 vs 25).
+- Resolution: split the sync test in `InstitutionalMemorySyncTests`:
+  1. Active subset guard `test_institutional_memory_contains_all_golden_rule_ids_and_matching_categories`
+     asserting that every rule ID in `prompt_assembler.GOLDEN_RULES` exists in the document with the
+     exact matching category heading. This subset assertion stays green as rules are added/migrated.
+  2. Neutralized total parity check `test_institutional_memory_matches_golden_rules` with `@unittest.skip`
+     explicitly pointing to spec 0014 pending generator migration in ticket 58.
+- Review finding & exact naming standard: round 1 code review flagged that the draft test name
+  `test_institutional_memory_contains_all_golden_rules` overstated what was asserted, since the parser
+  only extracts `(id, category)` and not the full directive text (proven via mutation test where
+  altering directive text remained green). Renamed to accurately describe the ID and category scope.
+- Lesson: when writing interim containment tests, (1) test subset inclusion rather than total equality
+  so subsequent migration tickets stay green, and (2) name the test strictly according to the properties
+  it actively asserts to avoid giving false-positive confidence in unexercised invariants.
+
 ## 2026-08-29 — Three Unit-Green Features Were All Unreachable Because Nothing Served the Page
 
 - Mission: ticket 53's two-axis audit over spec 0013's dashboard branch.
