@@ -100,6 +100,13 @@ def _bash_array(script: Path, name: str) -> list[str]:
     return match.group(1).split()
 
 
+def _production_python_modules(skill_dir: Path = SKILL_DIR) -> list[str]:
+    """Return the source-side Python files installer scripts own."""
+    return sorted(
+        path.name for path in skill_dir.glob("*.py") if not path.name.startswith("test_")
+    )
+
+
 def _target_dirs(script: Path, *, home: str, target_project_dir: str) -> tuple[Path, ...]:
     """Resolve `script`'s `TARGET_DIRS` bash array into concrete paths, the
     same way the shell would substitute `$HOME` and `$TARGET_PROJECT_DIR`.
@@ -1228,17 +1235,18 @@ class LearnedStatePropagationTests(unittest.TestCase):
     """
 
     def _isolated_source_tree(self) -> Path:
-        """A scratch `install.sh` plus a minimal `skills/worker-routing`
-        holding only `MANAGED_FILES` and `routing-config.json` — what
-        `install.sh` actually reads from `SRC_DIR` — not a full copy of this
-        skill directory's caches and other test files."""
+        """A scratch installer and the source artifacts it reads."""
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         source_root = Path(tmp)
         shutil.copy(INSTALL_SH, source_root / "install.sh")
         worker_routing_dir = source_root / "skills" / "worker-routing"
         worker_routing_dir.mkdir(parents=True)
-        for name in [*_bash_array(INSTALL_SH, "MANAGED_FILES"), "routing-config.json"]:
+        for name in [
+            *_bash_array(INSTALL_SH, "MANAGED_FILES"),
+            *_production_python_modules(),
+            "routing-config.json",
+        ]:
             shutil.copy(SKILL_DIR / name, worker_routing_dir / name)
         shutil.copytree(
             REPO_ROOT / "skills" / "council-review",
@@ -1431,12 +1439,14 @@ class LearnedStatePropagationTests(unittest.TestCase):
         source_root = self._isolated_source_tree()
         self._adopt(source_root, memory="memory v1", briefs="briefs v1")
 
-        # MANAGED_FILES writes land first for each target directory; the two
+        # Managed artifact writes land first for each target directory; the two
         # learned-state writes ("history.jsonl", then "briefs" — the
         # alphabetically-first adopted document) follow immediately after.
         # Failing on the second of those proves both roll back together,
         # and that a later target directory in the loop is never reached.
-        managed_files_count = len(_bash_array(INSTALL_SH, "MANAGED_FILES"))
+        managed_files_count = len(_bash_array(INSTALL_SH, "MANAGED_FILES")) + len(
+            _production_python_modules()
+        ) + 1  # install-owned dynamic Python module manifest
         fail_after = managed_files_count + 2
 
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -8947,7 +8957,7 @@ class WorkerRoutingPackageContractTests(unittest.TestCase):
 
 
 class ManagedFileClosureTests(unittest.TestCase):
-    """`install.sh`'s `MANAGED_FILES` must be closed under sibling imports.
+    """Source-discovered installer modules must be closed under sibling imports.
 
     A managed module importing an unmanaged sibling is the one defect class
     that is invisible in a checkout by construction: every module sits in one
@@ -8972,7 +8982,57 @@ class ManagedFileClosureTests(unittest.TestCase):
         return match.group(1).split()
 
     def _managed(self) -> list[str]:
-        return self._bash_array(INSTALL_SH, "MANAGED_FILES")
+        return [*_bash_array(INSTALL_SH, "MANAGED_FILES"), *_production_python_modules()]
+
+    def _isolated_installer_tree(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        shutil.copy(INSTALL_SH, root / "install.sh")
+        shutil.copy(UNINSTALL_SH, root / "uninstall.sh")
+        shutil.copytree(
+            SKILL_DIR,
+            root / "skills" / "worker-routing",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        for skill_name in ("council-review", "learn-session"):
+            shutil.copytree(
+                REPO_ROOT / "skills" / skill_name,
+                root / "skills" / skill_name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        return root
+
+    @staticmethod
+    def _run_installer_script(
+        script: Path,
+        target_dir: str,
+        *,
+        home: str,
+        **env_overrides: str,
+    ) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.update(env_overrides)
+        return subprocess.run(
+            ["bash", str(script), target_dir],
+            capture_output=True,
+            check=False,
+            text=True,
+            env=env,
+        )
+
+    @staticmethod
+    def _manifest_modules(manifest: Path) -> list[str]:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0] != "auto-routing-python-modules-v1":
+            raise AssertionError(f"invalid manifest header in {manifest}")
+        modules: list[str] = []
+        for record in lines[1:]:
+            digest, separator, module_name = record.partition("\t")
+            if separator != "\t" or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise AssertionError(f"invalid manifest record: {record!r}")
+            modules.append(module_name)
+        return modules
 
     @staticmethod
     def _sibling_imports(module_path: Path) -> set[str]:
@@ -9091,11 +9151,11 @@ class ManagedFileClosureTests(unittest.TestCase):
                 )
 
     def test_uninstall_removes_every_file_install_manages(self) -> None:
-        """The mirror image, and the same drift in the other direction: a
-        module added to `MANAGED_FILES` and forgotten in `uninstall.sh` is
-        left behind on every uninstall, where a stale copy goes on being
-        imported by whatever else remains."""
-        removed = set(self._bash_array(UNINSTALL_SH, "INSTALLED_FILES"))
+        """Uninstall owns the same static artifacts and source modules."""
+        removed = {
+            *self._bash_array(UNINSTALL_SH, "INSTALLED_FILES"),
+            *_production_python_modules(),
+        }
 
         for name in self._managed():
             with self.subTest(managed_file=name):
@@ -9104,6 +9164,283 @@ class ManagedFileClosureTests(unittest.TestCase):
                     removed,
                     f"install.sh installs {name} but uninstall.sh never removes it",
                 )
+
+    def test_dynamic_modules_sync_to_all_harnesses_and_uninstall_preserves_user_python(
+        self,
+    ) -> None:
+        """A future module needs no manifest edit, while target-only files stay put."""
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            source_root = self._isolated_installer_tree()
+            source_skill = source_root / "skills" / "worker-routing"
+            future_module = source_skill / "future_production_module.py"
+            future_module.write_text("VALUE = 'installed dynamically'\n", encoding="utf-8")
+
+            install = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
+
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / future_module.name).read_text(encoding="utf-8"),
+                        "VALUE = 'installed dynamically'\n",
+                    )
+                    self.assertEqual(
+                        self._manifest_modules(
+                            installed_dir / ".auto-routing-python-modules"
+                        ),
+                        _production_python_modules(source_skill),
+                    )
+                    self.assertFalse((installed_dir / "test_routing.py").exists())
+                    (installed_dir / "test_user_extension.py").write_text("keep test\n")
+                    (installed_dir / "user_extension.py").write_text("keep module\n")
+
+            # A later source cleanup must not strand this installed module.
+            future_module.unlink()
+
+            uninstall = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(uninstall.returncode, 0, uninstall.stdout + uninstall.stderr)
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertFalse((installed_dir / future_module.name).exists())
+                    self.assertFalse(
+                        (installed_dir / ".auto-routing-python-modules").exists()
+                    )
+                    self.assertEqual(
+                        (installed_dir / "test_user_extension.py").read_text(encoding="utf-8"),
+                        "keep test\n",
+                    )
+                    self.assertEqual(
+                        (installed_dir / "user_extension.py").read_text(encoding="utf-8"),
+                        "keep module\n",
+                    )
+
+    def test_reinstall_removes_stale_owned_modules_from_every_harness(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "removed_after_install.py"
+        stale_source.write_text("VALUE = 'owned'\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            first = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            stale_source.unlink()
+
+            second = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertFalse((installed_dir / stale_source.name).exists())
+                    self.assertNotIn(
+                        stale_source.name,
+                        self._manifest_modules(
+                            installed_dir / ".auto-routing-python-modules"
+                        ),
+                    )
+
+    def test_manifest_ownership_beats_later_source_addition_on_uninstall(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        later_source = source_skill / "added_after_install.py"
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            later_source.write_text("SOURCE = True\n", encoding="utf-8")
+            for installed_dir in targets:
+                (installed_dir / later_source.name).write_text(
+                    "user-owned\n", encoding="utf-8"
+                )
+
+            removed = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / later_source.name).read_text(encoding="utf-8"),
+                        "user-owned\n",
+                    )
+
+    def test_modified_stale_module_is_preserved_and_released_on_reinstall(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "customized_before_removal.py"
+        stale_source.write_text("owned = True\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            stale_source.unlink()
+            for installed_dir in targets:
+                (installed_dir / stale_source.name).write_text(
+                    "user-modified\n", encoding="utf-8"
+                )
+
+            reinstalled = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(
+                reinstalled.returncode, 0, reinstalled.stdout + reinstalled.stderr
+            )
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / stale_source.name).read_text(encoding="utf-8"),
+                        "user-modified\n",
+                    )
+                    self.assertNotIn(
+                        stale_source.name,
+                        self._manifest_modules(
+                            installed_dir / ".auto-routing-python-modules"
+                        ),
+                    )
+
+    def test_malformed_manifest_aborts_install_and_uninstall_before_mutation(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            manifest = targets[0] / ".auto-routing-python-modules"
+            manifest.write_text(
+                "auto-routing-python-modules-v1\n"
+                f"{'0' * 64}\t../../user_file.py\n",
+                encoding="utf-8",
+            )
+            sentinel = targets[-1] / "SKILL.md"
+            original_sentinel = sentinel.read_bytes()
+
+            reinstall = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(reinstall.returncode, 0)
+            self.assertIn("ownership manifest", reinstall.stderr)
+            self.assertEqual(sentinel.read_bytes(), original_sentinel)
+
+            uninstall = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(uninstall.returncode, 0)
+            self.assertIn("ownership manifest", uninstall.stderr)
+            self.assertEqual(sentinel.read_bytes(), original_sentinel)
+            self.assertTrue(manifest.exists())
+
+    def test_manifest_path_collisions_fail_closed(self) -> None:
+        source_root = self._isolated_installer_tree()
+        for collision_kind in ("file", "directory", "symlink"):
+            with self.subTest(collision_kind=collision_kind), tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+                first_target = _target_dirs(
+                    source_root / "install.sh",
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )[0]
+                first_target.mkdir(parents=True)
+                collision = first_target / ".auto-routing-python-modules"
+                if collision_kind == "file":
+                    collision.write_text("user-owned\n", encoding="utf-8")
+                elif collision_kind == "directory":
+                    collision.mkdir()
+                else:
+                    destination = Path(fake_home) / "user-owned-manifest"
+                    destination.write_text("user-owned\n", encoding="utf-8")
+                    collision.symlink_to(destination)
+
+                result = self._run_installer_script(
+                    source_root / "install.sh", target_dir, home=fake_home
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ownership manifest", result.stderr)
+                self.assertTrue(collision.exists() or collision.is_symlink())
+                self.assertFalse((first_target / "SKILL.md").exists())
+
+    def test_manifest_digest_preserves_injected_safe_basename(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            for installed_dir in targets:
+                user_module = installed_dir / "user_extension.py"
+                user_module.write_text("user-owned\n", encoding="utf-8")
+                manifest = installed_dir / ".auto-routing-python-modules"
+                with manifest.open("a", encoding="utf-8") as stream:
+                    stream.write(f"{'0' * 64}\t{user_module.name}\n")
+
+            uninstalled = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(
+                uninstalled.returncode, 0, uninstalled.stdout + uninstalled.stderr
+            )
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / "user_extension.py").read_text(encoding="utf-8"),
+                        "user-owned\n",
+                    )
+
+    def test_stale_cleanup_rolls_back_with_fault_injection(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "rollback_stale_module.py"
+        stale_source.write_text("owned = True\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            stale_installed = first_target / stale_source.name
+            manifest = first_target / ".auto-routing-python-modules"
+            original_manifest = manifest.read_bytes()
+            stale_source.unlink()
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("AUTO_ROUTING_FAIL_AFTER_WRITES", failed.stderr)
+            self.assertEqual(stale_installed.read_text(encoding="utf-8"), "owned = True\n")
+            self.assertEqual(manifest.read_bytes(), original_manifest)
 
     def test_an_installed_harness_can_import_the_production_path(self) -> None:
         """The failure itself, reproduced end to end.

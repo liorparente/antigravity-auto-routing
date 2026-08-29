@@ -61,44 +61,99 @@ GEMINI_MD="$HOME/.gemini/GEMINI.md"
 AGENTS_MD="$TARGET_PROJECT_DIR/AGENTS.md"
 CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 
-# Mirrors install.sh's MANAGED_FILES, plus the routing-config.json install.sh
-# writes separately (it installs only the default and preserves a customized
-# one, but it did put the file there, so uninstall removes it). Kept as an
-# array rather than one long `rm -f` line so a module added to install.sh and
-# forgotten here is visible; `test_routing.py`'s `ManagedFileClosureTests`
-# additionally asserts this list covers every managed file, so the drift that
-# left `learning_journal.py` behind cannot recur silently in either script.
+# Mirrors install.sh's non-Python artifacts, plus the routing-config.json
+# install.sh writes separately (it installs only the default and preserves a
+# customized one, but it did put the file there, so uninstall removes it).
 INSTALLED_FILES=(
-    SKILL.md REFERENCE.md routing-audit.sh __init__.py routing_check.py
-    agent_council.py critical_dialogue.py dialogue_contracts.py dialogue_degradation.py
-    executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py regenerate_institutional_memory.py
-    sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py
-    consultation_policy.py debate_transport.py advisory_consultation.py
-    production_invoker.py learning_journal.py learning_outcomes.py
-    learning_scoreboard.py learning_report.py learning_report_html.py acceptance_gate.py
-    learned_state.py risk_tiered_application.py learner_worker.py protocol.md
-    routing-config.json routing_config.py probe_models.py switch_profile.py
+    SKILL.md REFERENCE.md routing-audit.sh protocol.md routing-config.json
 )
+PYTHON_MODULE_MANIFEST=".auto-routing-python-modules"
+PYTHON_MODULE_MANIFEST_HEADER="auto-routing-python-modules-v1"
+PYTHON_MODULES=()
 
-# Mirrors install.sh's own dynamic discovery of future production modules —
-# every non-test `.py` file in THIS repo's own skills/worker-routing/ source
-# directory is a module install.sh would have propagated, whether or not it
-# already appears in the static list above. Discovering from this script's
-# own source directory (never by globbing the target directory) is what
-# keeps removal surgical: TARGET_DIRS's own comment documents ".agents/",
-# ".agent/", and ".codex/" as convention directories other tools may also
-# populate, so only files this installer is actually responsible for are
-# ever removed from them.
+valid_python_module_name() {
+    local module_name="$1" module_stem
+    case "$module_name" in
+        *.py) module_stem="${module_name%.py}" ;;
+        *) return 1 ;;
+    esac
+    case "$module_stem" in
+        ""|test_*|.*|*.*|*[!A-Za-z0-9_]*) return 1 ;;
+        [A-Za-z_]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+sha256_file() {
+    python3 - "$1" <<'PYEOF'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.sha256(stream.read()).hexdigest())
+PYEOF
+}
+
+read_python_module_manifest() {
+    local manifest="$1" header digest module_name extra record existing
+    PARSED_PYTHON_MODULES=()
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    {
+        IFS= read -r header || return 1
+        [ "$header" = "$PYTHON_MODULE_MANIFEST_HEADER" ] || return 1
+        while IFS=$'\t' read -r digest module_name extra \
+            || [ -n "$digest$module_name$extra" ]; do
+            [ -z "$extra" ] || return 1
+            [ "${#digest}" -eq 64 ] || return 1
+            case "$digest" in
+                *[!0-9a-f]*) return 1 ;;
+            esac
+            valid_python_module_name "$module_name" || return 1
+            if [ "${#PARSED_PYTHON_MODULES[@]}" -gt 0 ]; then
+                for record in "${PARSED_PYTHON_MODULES[@]}"; do
+                    existing="${record#*|}"
+                    [ "$existing" != "$module_name" ] || return 1
+                done
+            fi
+            PARSED_PYTHON_MODULES+=("$digest|$module_name")
+        done
+        [ "${#PARSED_PYTHON_MODULES[@]}" -gt 0 ] || return 1
+    } < "$manifest"
+}
+
+# Every source-side, non-test Python module is installer-managed. Never glob
+# target directories: a target may contain user tests or another tool's
+# modules, which uninstall must preserve.
 if [ -d "$SRC_DIR" ]; then
     for python_module in "$SRC_DIR"/*.py; do
         [ -e "$python_module" ] || continue
         python_module_name="$(basename "$python_module")"
         [[ "$python_module_name" == test_* ]] && continue
-        if [[ " ${INSTALLED_FILES[*]} " != *" $python_module_name "* ]]; then
-            INSTALLED_FILES+=("$python_module_name")
-        fi
+        valid_python_module_name "$python_module_name" || continue
+        PYTHON_MODULES+=("$python_module_name")
     done
 fi
+
+# Preflight all manifest paths before deleting anything. A malformed regular
+# file, symlink, or directory at the reserved location may be user-owned or
+# attacker-controlled, so ambiguity preserves every target and aborts.
+UNINSTALL_STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-uninstall.XXXXXX")"
+cleanup_uninstall_state() {
+    rm -rf "$UNINSTALL_STATE_DIR"
+}
+trap cleanup_uninstall_state EXIT
+mkdir -p "$UNINSTALL_STATE_DIR/python-modules"
+for index in "${!TARGET_DIRS[@]}"; do
+    manifest_path="${TARGET_DIRS[$index]}/$PYTHON_MODULE_MANIFEST"
+    if [ -e "$manifest_path" ] || [ -L "$manifest_path" ]; then
+        if ! read_python_module_manifest "$manifest_path"; then
+            echo "❌ Invalid or colliding Python ownership manifest: $manifest_path" >&2
+            exit 1
+        fi
+        printf '%s\n' "${PARSED_PYTHON_MODULES[@]}" \
+            > "$UNINSTALL_STATE_DIR/python-modules/$index"
+    fi
+done
 
 # Same versionless sentinel markers install.sh writes/looks for.
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
@@ -181,6 +236,30 @@ for i in "${!TARGET_DIRS[@]}"; do
         for installed_file in "${INSTALLED_FILES[@]}"; do
             rm -f "$target_dir/$installed_file"
         done
+        # Manifest-backed installs remove exactly their recorded modules.
+        # Legacy installs have no record, so fall back to the current source
+        # set without ever globbing the target directory.
+        normalized_manifest="$UNINSTALL_STATE_DIR/python-modules/$i"
+        if [ -f "$normalized_manifest" ]; then
+            while IFS='|' read -r installed_digest python_module_name \
+                || [ -n "$installed_digest$python_module_name" ]; do
+                installed_path="$target_dir/$python_module_name"
+                if [ -f "$installed_path" ] && [ ! -L "$installed_path" ]; then
+                    if [ "$(sha256_file "$installed_path")" = "$installed_digest" ]; then
+                        rm -f "$installed_path"
+                    else
+                        echo "⚠️  Preserving modified Python module: $installed_path" >&2
+                    fi
+                elif [ -e "$installed_path" ] || [ -L "$installed_path" ]; then
+                    echo "⚠️  Preserving non-regular Python module path: $installed_path" >&2
+                fi
+            done < "$normalized_manifest"
+            rm -f "$target_dir/$PYTHON_MODULE_MANIFEST"
+        else
+            for python_module_name in "${PYTHON_MODULES[@]}"; do
+                rm -f "$target_dir/$python_module_name"
+            done
+        fi
         rm -rf "$target_dir/learned-state"
         rmdir "$target_dir" 2>/dev/null || true
         if [ -d "$target_dir" ]; then

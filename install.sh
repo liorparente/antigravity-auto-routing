@@ -34,38 +34,83 @@ CLAUDE_RULE="$TARGET_PROJECT_DIR/.claude/rules/worker-routing.md"
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END="# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
 LEGACY_MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
-# Every artifact propagated to an installed harness.  A managed module that
-# imports an unmanaged sibling is a broken installation, not a lint nit: the
-# import fails only on installed copies, never in a dev checkout, so nothing
-# short of an installation reproduces it.  `test_routing.py`'s
-# `ManagedFileClosureTests` parses this array and asserts the set is closed
-# under sibling imports, so the next module a ticket adds cannot be forgotten
-# here the way `learning_journal.py` and `learning_outcomes.py` were.
-# Closure alone still missed a module nothing imported yet — `learning_report.py`
-# and then `acceptance_gate.py`, each shipped a ticket ahead of its caller — so
-# the same test now also requires every non-test `.py` in the skill directory to
-# appear below, whether or not a sibling already imports it.
+# Non-Python artifacts propagated to an installed harness. Python production
+# modules are discovered below, so extracting a future module cannot leave an
+# installed harness missing an import solely because this array was not edited.
 MANAGED_FILES=(
-    SKILL.md REFERENCE.md routing-audit.sh __init__.py routing_check.py
-    agent_council.py critical_dialogue.py dialogue_contracts.py dialogue_degradation.py
-    executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py regenerate_institutional_memory.py
-    sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py
-    consultation_policy.py debate_transport.py advisory_consultation.py
-    production_invoker.py learning_journal.py learning_outcomes.py
-    learning_scoreboard.py learning_report.py learning_report_html.py acceptance_gate.py
-    learned_state.py risk_tiered_application.py learner_worker.py protocol.md
-    routing_config.py probe_models.py switch_profile.py
+    SKILL.md REFERENCE.md routing-audit.sh protocol.md
 )
+PYTHON_MODULE_MANIFEST=".auto-routing-python-modules"
+PYTHON_MODULE_MANIFEST_HEADER="auto-routing-python-modules-v1"
+PYTHON_MODULES=()
 
-# Preserve the audited static manifest above while also propagating future
-# production modules automatically. Tests remain deliberately excluded: they
-# are development artifacts, never part of an installed routing harness.
+valid_python_module_name() {
+    local module_name="$1" module_stem
+    case "$module_name" in
+        *.py) module_stem="${module_name%.py}" ;;
+        *) return 1 ;;
+    esac
+    case "$module_stem" in
+        ""|test_*|.*|*.*|*[!A-Za-z0-9_]*) return 1 ;;
+        [A-Za-z_]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+sha256_file() {
+    python3 - "$1" <<'PYEOF'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.sha256(stream.read()).hexdigest())
+PYEOF
+}
+
+# Populate PARSED_PYTHON_MODULES with validated "digest|name" records. The
+# versioned header distinguishes an installer manifest from a user-file/path
+# collision, while the digest prevents a corrupted record from claiming an
+# unrelated target-side Python file by basename alone.
+read_python_module_manifest() {
+    local manifest="$1" header digest module_name extra record existing
+    PARSED_PYTHON_MODULES=()
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    {
+        IFS= read -r header || return 1
+        [ "$header" = "$PYTHON_MODULE_MANIFEST_HEADER" ] || return 1
+        while IFS=$'\t' read -r digest module_name extra \
+            || [ -n "$digest$module_name$extra" ]; do
+            [ -z "$extra" ] || return 1
+            [ "${#digest}" -eq 64 ] || return 1
+            case "$digest" in
+                *[!0-9a-f]*) return 1 ;;
+            esac
+            valid_python_module_name "$module_name" || return 1
+            if [ "${#PARSED_PYTHON_MODULES[@]}" -gt 0 ]; then
+                for record in "${PARSED_PYTHON_MODULES[@]}"; do
+                    existing="${record#*|}"
+                    [ "$existing" != "$module_name" ] || return 1
+                done
+            fi
+            PARSED_PYTHON_MODULES+=("$digest|$module_name")
+        done
+        [ "${#PARSED_PYTHON_MODULES[@]}" -gt 0 ] || return 1
+    } < "$manifest"
+}
+
+# All source-side, non-test Python modules are installer-managed. Discovering
+# only from SRC_DIR (rather than an installed target) keeps installation
+# deterministic and gives uninstall an equally surgical ownership boundary.
 for python_module in "$SRC_DIR"/*.py; do
+    [ -f "$python_module" ] || continue
     python_module_name="$(basename "$python_module")"
     [[ "$python_module_name" == test_* ]] && continue
-    if [[ " ${MANAGED_FILES[*]} " != *" $python_module_name "* ]]; then
-        MANAGED_FILES+=("$python_module_name")
+    if ! valid_python_module_name "$python_module_name"; then
+        echo "❌ Unsafe Python module filename: $python_module_name" >&2
+        exit 1
     fi
+    MANAGED_FILES+=("$python_module_name")
+    PYTHON_MODULES+=("$python_module_name")
 done
 
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
@@ -234,6 +279,17 @@ for file in "${MANAGED_FILES[@]}"; do
     [ -r "$SRC_DIR/$file" ] || { echo "❌ Missing required source: $file" >&2; exit 1; }
     cp "$SRC_DIR/$file" "$STAGING_DIR/files/$file"
 done
+# Keep an installed ownership record for the dynamically discovered modules.
+# This lets a later uninstall remove a module that was present at install time
+# but has since been deleted from this checkout, without globbing target files.
+{
+    printf '%s\n' "$PYTHON_MODULE_MANIFEST_HEADER"
+    for python_module_name in "${PYTHON_MODULES[@]}"; do
+        printf '%s\t%s\n' \
+            "$(sha256_file "$STAGING_DIR/files/$python_module_name")" \
+            "$python_module_name"
+    done
+} > "$STAGING_DIR/python-module-manifest"
 
 # Stage the complete Council Review skill alongside worker-routing. Ignore
 # interpreter caches, which are runtime artifacts rather than installable
@@ -331,6 +387,24 @@ for index in "${!DOCS[@]}"; do
 done
 cp "$PROTOCOL_SRC" "$STAGING_DIR/claude-rule.md"
 
+# Validate every existing ownership manifest before the first target write.
+# A malformed file, symlink, or directory at the reserved path is ambiguous:
+# fail closed instead of overwriting user content or trusting attacker-chosen
+# removal entries. Normalized records are staged by target index for the
+# transactional stale-module cleanup below.
+mkdir -p "$STAGING_DIR/previous-python-modules"
+for index in "${!TARGET_DIRS[@]}"; do
+    manifest_path="${TARGET_DIRS[$index]}/$PYTHON_MODULE_MANIFEST"
+    if [ -e "$manifest_path" ] || [ -L "$manifest_path" ]; then
+        if ! read_python_module_manifest "$manifest_path"; then
+            echo "❌ Invalid or colliding Python ownership manifest: $manifest_path" >&2
+            exit 1
+        fi
+        printf '%s\n' "${PARSED_PYTHON_MODULES[@]}" \
+            > "$STAGING_DIR/previous-python-modules/$index"
+    fi
+done
+
 # Test-only fault injection verifies that preflight has no side effects.
 if [ "${AUTO_ROUTING_FAIL_AFTER_STAGE:-0}" = "1" ]; then
     echo "🧪 Test hook AUTO_ROUTING_FAIL_AFTER_STAGE=1 triggered — aborting install before target mutation." >&2
@@ -353,10 +427,39 @@ copy_managed() {
     fi
 }
 
-for target_dir in "${TARGET_DIRS[@]}"; do
+for index in "${!TARGET_DIRS[@]}"; do
+    target_dir="${TARGET_DIRS[$index]}"
+    previous_manifest="$STAGING_DIR/previous-python-modules/$index"
+    if [ -f "$previous_manifest" ]; then
+        while IFS='|' read -r previous_digest previous_module_name \
+            || [ -n "$previous_digest$previous_module_name" ]; do
+            module_is_current=false
+            for python_module_name in "${PYTHON_MODULES[@]}"; do
+                if [ "$python_module_name" = "$previous_module_name" ]; then
+                    module_is_current=true
+                    break
+                fi
+            done
+            [ "$module_is_current" = false ] || continue
+            stale_target="$target_dir/$previous_module_name"
+            if [ -f "$stale_target" ] && [ ! -L "$stale_target" ]; then
+                if [ "$(sha256_file "$stale_target")" = "$previous_digest" ]; then
+                    snapshot_file "$stale_target"
+                    rm -f "$stale_target"
+                else
+                    echo "⚠️  Preserving modified stale module: $stale_target" >&2
+                fi
+            elif [ -e "$stale_target" ] || [ -L "$stale_target" ]; then
+                echo "⚠️  Preserving non-regular stale module path: $stale_target" >&2
+            fi
+        done < "$previous_manifest"
+    fi
     for file in "${MANAGED_FILES[@]}"; do
         copy_managed "$STAGING_DIR/files/$file" "$target_dir/$file"
     done
+    copy_managed \
+        "$STAGING_DIR/python-module-manifest" \
+        "$target_dir/$PYTHON_MODULE_MANIFEST"
     # Preserve customized routing configuration; install only the default.
     if [ ! -f "$target_dir/routing-config.json" ]; then
         atomic_copy "$SRC_DIR/routing-config.json" "$target_dir/routing-config.json"
