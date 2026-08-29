@@ -26,6 +26,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from . import sensitivity_redactor as _sensitivity_redactor
+else:
+    import sensitivity_redactor as _sensitivity_redactor  # type: ignore[no-redef]
+
 CACHE_TTL_SECONDS = 24 * 60 * 60
 CACHE_VERSION = 2
 MAX_DEBATE_ROUNDS = 3
@@ -55,31 +60,24 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 UNSAFE_LEXEMES = ("$(", "`", ";", "&&", "||", "|", ">", "<")
 CALIBRATION_FIELDS = ("task_id", "task", "complexity", "effort", "decision", "nonce")
 HMAC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
-SENSITIVE_PATTERNS = (
-    "AGY_CALIBRATION_SECRET",
-    "api_key",
-    "sk-",
-    "bearer ",
-    "BEGIN PRIVATE KEY",
-    "password",
-    "secret",
-    "[SENSITIVE]",
-)
+SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
+SENSITIVE_PATTERNS = SENSITIVITY_MARKERS
+_CREDENTIAL_MARKERS = ("api_key", "sk-", "bearer ", "private key", "password")
 
 
 def detect_sensitive_data(text: str) -> bool:
     """Return True if text contains sensitive security patterns or flags."""
-    lowered = text.lower()
-    return any(pattern.lower() in lowered for pattern in SENSITIVE_PATTERNS)
+    return _sensitivity_redactor.scan_sensitivity_markers(text) is not None
 
 
 def evaluate_sensitivity(task_text: str) -> tuple[bool, bool]:
     """Return whether a task is sensitive and whether it includes credentials."""
-    lowered = task_text.lower()
     is_sensitive = detect_sensitive_data(task_text)
-    contains_credentials = any(
-        keyword in lowered
-        for keyword in ("api_key", "sk-", "bearer ", "private key", "password")
+    contains_credentials = (
+        _sensitivity_redactor.scan_sensitivity_markers(
+            task_text, markers=_CREDENTIAL_MARKERS
+        )
+        is not None
     )
     return is_sensitive, contains_credentials
 
