@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>פרוטוטייפ אינטראקטיבי: מטריצת ניתוב מודלים, כיול מאמץ ומערך מבקרים</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Rubik', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'monospace'],
+          },
+          colors: {
+            brand: {
+              50: '#eff6ff',
+              100: '#dbeafe',
+              500: '#3b82f6',
+              600: '#2563eb',
+              700: '#1d4ed8',
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Google Fonts: Rubik & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Rubik:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+
+  <style>
+    body {
+      font-family: 'Rubik', sans-serif;
+    }
+    .code-font {
+      font-family: 'JetBrains Mono', monospace;
+    }
+    /* Custom scrollbars */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(51, 65, 85, 0.7);
+    }
+    .glass-card {
+      background: rgba(30, 41, 59, 0.7);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(71, 85, 105, 0.4);
+    }
+    .badge-glow {
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.3);
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col selection:bg-blue-500 selection:text-white">
+
+  <!-- Header -->
+  <header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      
+      <!-- Brand & Title -->
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20 text-white font-black text-xl">
+          ⚡
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-lg font-bold text-white tracking-tight">Auto-Routing Matrix & Model Roles</h1>
+            <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">v3.7 Interactive Prototype</span>
+          </div>
+          <p class="text-xs text-slate-400">חקר והמחשה: מודלים, מאמצי חשיבה (Effort), ביצועי DeepSWE ושילוב Qwen מקומי</p>
+        </div>
+      </div>
+
+      <!-- Quick Actions / Live Status -->
+      <div class="flex items-center gap-3">
+        <div id="lmstudio-status-badge" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium cursor-pointer" onclick="toggleLMStudioStatus()">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span>LM Studio (Qwen 3.8): פעיל</span>
+        </div>
+        <button onclick="resetToDefaults()" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-xs font-medium text-slate-300 transition-colors">
+          איפוס לברירת מחדל
+        </button>
+      </div>
+
+    </div>
+
+    <!-- Navigation Tabs -->
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex space-x-reverse space-x-6 border-t border-slate-800/60 overflow-x-auto">
+      <button onclick="switchTab('matrix')" id="tab-matrix" class="tab-btn py-3 px-1 border-b-2 border-blue-500 text-blue-400 text-sm font-semibold flex items-center gap-2 whitespace-nowrap">
+        <span>🧩</span> הגדרת תפקידים ומודלים (Bento Grid)
+      </button>
+      <button onclick="switchTab('deepswe')" id="tab-deepswe" class="tab-btn py-3 px-1 border-b-2 border-transparent text-slate-400 hover:text-slate-200 text-sm font-medium flex items-center gap-2 whitespace-nowrap">
+        <span>📊</span> בנצ'מרק DeepSWE ופארטו עלות-תועלת
+      </button>
+      <button onclick="switchTab('qwen')" id="tab-qwen" class="tab-btn py-3 px-1 border-b-2 border-transparent text-slate-400 hover:text-slate-200 text-sm font-medium flex items-center gap-2 whitespace-nowrap">
+        <span>🔒</span> שילוב Qwen מקומי (Air-Gapped & Probe)
+      </button>
+      <button onclick="switchTab('council')" id="tab-council" class="tab-btn py-3 px-1 border-b-2 border-transparent text-slate-400 hover:text-slate-200 text-sm font-medium flex items-center gap-2 whitespace-nowrap">
+        <span>⚖️</span> סימולטור מועצת מבקרים ו-Security Veto
+      </button>
+      <button onclick="switchTab('json')" id="tab-json" class="tab-btn py-3 px-1 border-b-2 border-transparent text-slate-400 hover:text-slate-200 text-sm font-medium flex items-center gap-2 whitespace-nowrap">
+        <span>📋</span> תצורת JSON חיה (`routing-config.json`)
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Container -->
+  <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+    <!-- ========================================== -->
+    <!-- TAB 1: Bento Grid Role & Model Matrix     -->
+    <!-- ========================================== -->
+    <section id="view-matrix" class="space-y-6">
+      
+      <!-- Top banner / Presets -->
+      <div class="glass-panel p-5 rounded-2xl flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 class="text-base font-bold text-white flex items-center gap-2">
+            <span>🎯</span> בחר פרופיל מוכן מראש (Presets):
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">לחץ על תרחיש כדי לראות כיצד התפקידים ומאמצי החשיבה מתכווננים אוטומטית</p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="applyPreset('balanced')" class="px-3.5 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 border border-blue-500/40 text-blue-300 text-xs font-semibold transition-all">
+            ⚖️ ברירת מחדל מאוזנת (Opus 5 + Sol + Flash 3.7)
+          </button>
+          <button onclick="applyPreset('cost_hyper')" class="px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-300 text-xs font-semibold transition-all">
+            ⚡ חיסכון מקסימלי DeepSWE (Luna Max + Flash 3.7)
+          </button>
+          <button onclick="applyPreset('local_secure')" class="px-3.5 py-1.5 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 border border-purple-500/40 text-purple-300 text-xs font-semibold transition-all">
+            🔒 מקומי ומאובטח 100% (Qwen 3.8 Local Priority)
+          </button>
+          <button onclick="applyPreset('zero_defect')" class="px-3.5 py-1.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/30 border border-amber-500/40 text-amber-300 text-xs font-semibold transition-all">
+            🛡️ Zero-Defect Enterprise (Opus 5 + Codex Sol Ultra)
+          </button>
+        </div>
+      </div>
+
+      <!-- Bento Grid -->
+      <div id="roles-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <!-- Rendered via JS -->
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- TAB 2: DeepSWE Benchmark & Pareto Curve    -->
+    <!-- ========================================== -->
+    <section id="view-deepswe" class="hidden space-y-6">
+      <div class="glass-panel p-6 rounded-2xl space-y-6">
+        <div>
+          <div class="flex items-center gap-3">
+            <span class="px-3 py-1 text-xs font-bold rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">Datacurve DeepSWE 2026</span>
+            <h2 class="text-xl font-bold text-white">ניתוח בנצ'מרק DeepSWE: כוחם של מודלי חשיבה קומפקטיים</h2>
+          </div>
+          <p class="text-sm text-slate-300 mt-2 leading-relaxed">
+            בנצ'מרק DeepSWE מודד סוכני תכנות על 113 משימות מורכבות וארוכות-טווח ללא זיהום נתונים (Contamination-Free).
+            הממצא המשמעותי ביותר הוא <strong>חזית הפארטו (Pareto Efficiency)</strong>: הרצת <strong>GPT-5.6 Luna במאמץ Max</strong> או <strong>Gemini 3.7 Flash עם תקציב חשיבה (Thinking)</strong> מייצרת פתרון של בעיות תוכנה כבדות בעלות שברירית לעומת מודלי הדגל!
+          </p>
+        </div>
+
+        <!-- Metric Cards -->
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div class="glass-card p-4 rounded-xl border border-slate-700/60">
+            <div class="text-xs text-slate-400 font-medium">עלות ממוצעת למשימת SWE (Luna Max)</div>
+            <div class="text-2xl font-bold text-emerald-400 mt-1 code-font">$0.45 <span class="text-xs text-slate-400 font-normal">/ משימה</span></div>
+            <div class="text-xs text-slate-400 mt-1">לעומת $8.50 במודלי ענק ללא חשיבה</div>
+          </div>
+          <div class="glass-card p-4 rounded-xl border border-slate-700/60">
+            <div class="text-xs text-slate-400 font-medium">מהירות פתרון (Gemini 3.7 Flash Thinking)</div>
+            <div class="text-2xl font-bold text-blue-400 mt-1 code-font">145 TPS <span class="text-xs text-slate-400 font-normal">תפוקה חיה</span></div>
+            <div class="text-xs text-slate-400 mt-1">סריקת 1,000,000 טוקנים בפחות מ-4 שניות</div>
+          </div>
+          <div class="glass-card p-4 rounded-xl border border-slate-700/60">
+            <div class="text-xs text-slate-400 font-medium">דיוק פתרון מורכב (DeepSWE Pass Rate)</div>
+            <div class="text-2xl font-bold text-amber-400 mt-1 code-font">78.4% <span class="text-xs text-emerald-400 text-xs">↑ מוביל</span></div>
+            <div class="text-xs text-slate-400 mt-1">במאמץ חשיבה מקסימלי (Opus 5 / Sol / Luna Max)</div>
+          </div>
+        </div>
+
+        <!-- Interactive Comparison Table -->
+        <div class="overflow-x-auto rounded-xl border border-slate-800">
+          <table class="w-full text-right text-xs">
+            <thead class="bg-slate-900/90 text-slate-400 font-semibold border-b border-slate-800">
+              <tr>
+                <th class="p-3.5">מודל</th>
+                <th class="p-3.5">מאמץ חשיבה מומלץ</th>
+                <th class="p-3.5">ציון DeepSWE</th>
+                <th class="p-3.5">עלות ל-1M טוקנים</th>
+                <th class="p-3.5">חלון הקשר</th>
+                <th class="p-3.5">תפקיד מומלץ באוטו-ראוטינג</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-800 text-slate-200">
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3.5 font-bold text-emerald-400 flex items-center gap-1.5">
+                  <span>⚡</span> GPT-5.6 Luna
+                </td>
+                <td class="p-3.5"><span class="px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-mono">max / high</span></td>
+                <td class="p-3.5 font-bold text-white">71.2%</td>
+                <td class="p-3.5 font-mono text-emerald-300">$1.00 in / $6.00 out</td>
+                <td class="p-3.5 font-mono">272,000</td>
+                <td class="p-3.5">Heavy Builder מהיר / Scoped Reviewer</td>
+              </tr>
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3.5 font-bold text-blue-400 flex items-center gap-1.5">
+                  <span>🌐</span> Gemini 3.7 Flash
+                </td>
+                <td class="p-3.5"><span class="px-2 py-0.5 rounded bg-blue-500/20 text-blue-300 font-mono">high thinking</span></td>
+                <td class="p-3.5 font-bold text-white">74.6%</td>
+                <td class="p-3.5 font-mono text-emerald-300">$0.15 in / $0.60 out</td>
+                <td class="p-3.5 font-mono">2,000,000</td>
+                <td class="p-3.5">Deep Context Specialist / Repo Scanner</td>
+              </tr>
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3.5 font-bold text-purple-400 flex items-center gap-1.5">
+                  <span>👑</span> Claude Opus 5
+                </td>
+                <td class="p-3.5"><span class="px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono">high</span></td>
+                <td class="p-3.5 font-bold text-white">81.4%</td>
+                <td class="p-3.5 font-mono text-slate-300">$15.00 in / $75.00 out</td>
+                <td class="p-3.5 font-mono">1,000,000</td>
+                <td class="p-3.5">Planner / Deep Thinker</td>
+              </tr>
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3.5 font-bold text-amber-400 flex items-center gap-1.5">
+                  <span>🛡️</span> Codex 5.6 Sol
+                </td>
+                <td class="p-3.5"><span class="px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-mono">ultra</span></td>
+                <td class="p-3.5 font-bold text-white">82.1%</td>
+                <td class="p-3.5 font-mono text-slate-300">$5.00 in / $30.00 out</td>
+                <td class="p-3.5 font-mono">272,000</td>
+                <td class="p-3.5">Zero-Defect QA & AST Critic</td>
+              </tr>
+              <tr class="hover:bg-slate-800/40">
+                <td class="p-3.5 font-bold text-teal-400 flex items-center gap-1.5">
+                  <span>💻</span> Qwen 3.8 27B (MLX)
+                </td>
+                <td class="p-3.5"><span class="px-2 py-0.5 rounded bg-slate-600 text-slate-300 font-mono">local (native)</span></td>
+                <td class="p-3.5 font-bold text-white">67.8%</td>
+                <td class="p-3.5 font-mono text-emerald-400">$0.00 (Local RAM)</td>
+                <td class="p-3.5 font-mono">256,000</td>
+                <td class="p-3.5">Sensitive Executor / Air-Gapped Tasks</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- TAB 3: Qwen Local Integration             -->
+    <!-- ========================================== -->
+    <section id="view-qwen" class="hidden space-y-6">
+      <div class="glass-panel p-6 rounded-2xl space-y-6">
+        
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="text-2xl">🔒</span>
+            <h2 class="text-xl font-bold text-white">אינטגרציית Qwen 3.8 27B המקומי בתהליך העבודה</h2>
+          </div>
+          <p class="text-sm text-slate-300 mt-1">
+            הרץ מודל מקומי ב-LM Studio בקוונטיזציית 6-bit (MLX על Apple Silicon) עבור משימות רגישות, אפס עלות ואבטחה מוחלטת.
+          </p>
+        </div>
+
+        <!-- 3 Pillars of Qwen Integration -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+          
+          <div class="glass-card p-5 rounded-xl border border-slate-700/60 space-y-3">
+            <div class="w-10 h-10 rounded-lg bg-purple-500/20 text-purple-400 flex items-center justify-center font-bold text-lg">1</div>
+            <h3 class="text-base font-bold text-white">שער משימות רגישות (Sensitive Gate)</h3>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              כל משימה הנוגעת בקובצי <code class="code-font bg-slate-800 px-1 py-0.5 rounded text-amber-300">.env</code>, סיסמאות, מפתחות API או קניין רוחני מנותבת מיידית ל-Qwen ללא יציאה לענן (Fail-Closed).
+            </p>
+          </div>
+
+          <div class="glass-card p-5 rounded-xl border border-slate-700/60 space-y-3">
+            <div class="w-10 h-10 rounded-lg bg-blue-500/20 text-blue-400 flex items-center justify-center font-bold text-lg">2</div>
+            <h3 class="text-base font-bold text-white">בדיקת 200ms חיה (Probe-First)</h3>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              לפני פנייה ל-API בענן עבור משימות קלות (בדיקות יחידה/תיעוד), המערכת בודקת האם Qwen טעון ב-LM Studio. אם כן, המשימה רצה מקומית בחינם!
+            </p>
+          </div>
+
+          <div class="glass-card p-5 rounded-xl border border-slate-700/60 space-y-3">
+            <div class="w-10 h-10 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-lg">3</div>
+            <h3 class="text-base font-bold text-white">בורר ניטרלי בדיוני מועצה</h3>
+            <p class="text-xs text-slate-300 leading-relaxed">
+              במצב של מחלוקת בין Claude (מתכנן) ל-Codex (מבקר), Qwen פועל כ-Adjudicator אובייקטיבי ממשפחה שלישית ללא עלות טוקנים.
+            </p>
+          </div>
+
+        </div>
+
+        <!-- Interactive Task Routing Tester -->
+        <div class="glass-card p-5 rounded-xl border border-slate-700/60 space-y-4">
+          <h3 class="text-sm font-bold text-white flex items-center gap-2">
+            <span>🧪</span> בחן את שער הניתוב בזמן אמת (Task Routing Simulator)
+          </h3>
+          
+          <div class="flex gap-2">
+            <input id="test-task-input" type="text" value="Update authentication middleware and rotate .env JWT secrets" 
+              class="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-4 py-2.5 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-blue-500 code-font">
+            <button onclick="testTaskRouting()" class="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold transition-colors">
+              בדוק ניתוב
+            </button>
+          </div>
+
+          <div id="routing-result-box" class="p-4 rounded-xl bg-slate-900/90 border border-purple-500/30 text-xs space-y-2">
+            <div class="flex items-center justify-between">
+              <span class="text-slate-400">החלטת ניתוב:</span>
+              <span class="px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 font-bold code-font">[ROUTING: Local LM Studio (Qwen 3.8 27B)]</span>
+            </div>
+            <p class="text-slate-300">
+              <strong>סיבה:</strong> זוהו מילות מפתח רגישות (<code class="text-amber-300 code-font">.env</code>, <code class="text-amber-300 code-font">secrets</code>). המשימה נחסמה מיציאה לענן ותבוצע מקומית ב-LM Studio ללא עלות ובפרטיות מלאה.
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- TAB 4: Council Review & Multi-Critic Sim   -->
+    <!-- ========================================== -->
+    <section id="view-council" class="hidden space-y-6">
+      <div class="glass-panel p-6 rounded-2xl space-y-6">
+        <div>
+          <div class="flex items-center gap-2">
+            <span class="text-2xl">⚖️</span>
+            <h2 class="text-xl font-bold text-white">סימולטור מועצת מבקרים, דיאלוג אדברסרי ו-Security Veto</h2>
+          </div>
+          <p class="text-sm text-slate-300 mt-1">
+            כיצד נמנעת הטיית העדפה עצמית (Self-Preference Bias) ואישור עיוור באמצעות פאנל רב-מודלי.
+          </p>
+        </div>
+
+        <!-- Interactive Scenario Player -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          <!-- Scenarios list -->
+          <div class="space-y-3">
+            <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider">בחר תרחיש דיון:</h3>
+            
+            <button onclick="playCouncilScenario('normal_pair')" class="scenario-btn w-full text-right p-3.5 rounded-xl border border-blue-500/40 bg-blue-500/10 text-white text-xs hover:border-blue-400 transition-all">
+              <div class="font-bold flex items-center justify-between">
+                <span>1. משימה בינונית: זוג מודלים</span>
+                <span class="text-blue-400">Claude + Codex</span>
+              </div>
+              <p class="text-slate-400 text-[11px] mt-1">מתכנן ומבקר ממשפחות שונות מגיעים להסכמה בסבב שני.</p>
+            </button>
+
+            <button onclick="playCouncilScenario('tri_council')" class="scenario-btn w-full text-right p-3.5 rounded-xl border border-slate-700 bg-slate-900/60 text-slate-300 text-xs hover:border-slate-500 transition-all">
+              <div class="font-bold flex items-center justify-between">
+                <span>2. משימה מורכבת: פאנל תלת-מודלי</span>
+                <span class="text-purple-400">Opus + Sol + Gemini</span>
+              </div>
+              <p class="text-slate-400 text-[11px] mt-1">דרישת אישור כפול משני מבקרים בלתי-תלויים.</p>
+            </button>
+
+            <button onclick="playCouncilScenario('security_veto')" class="scenario-btn w-full text-right p-3.5 rounded-xl border border-red-500/40 bg-red-500/10 text-slate-300 text-xs hover:border-red-400 transition-all">
+              <div class="font-bold flex items-center justify-between text-red-300">
+                <span>3. זיהוי פגיעות אבטחה: Security Veto</span>
+                <span class="text-red-400">עצירת חירום</span>
+              </div>
+              <p class="text-slate-400 text-[11px] mt-1">מודל יחיד מטיל וטו ביטחוני קריטי ובולם את השינוי.</p>
+            </button>
+          </div>
+
+          <!-- Dialogue Transcript Simulation Box -->
+          <div class="lg:col-span-2 glass-card p-5 rounded-xl border border-slate-700 flex flex-col justify-between space-y-4">
+            <div>
+              <div class="flex items-center justify-between border-b border-slate-700/60 pb-3">
+                <span id="council-scenario-title" class="text-xs font-bold text-white flex items-center gap-2">
+                  <span class="w-2 h-2 rounded-full bg-blue-400"></span> תרחיש: דיאלוג זוגי (Claude Opus 5 ➔ Codex Sol)
+                </span>
+                <span id="council-scenario-status" class="px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-300">
+                  הושגה הסכמה (Consensus)
+                </span>
+              </div>
+
+              <div id="council-dialogue-feed" class="mt-4 space-y-3 code-font text-xs max-h-72 overflow-y-auto pr-1">
+                <!-- Injected via JS -->
+              </div>
+            </div>
+
+            <div class="p-3 bg-slate-900/90 rounded-lg border border-slate-800 flex items-center justify-between text-xs">
+              <span class="text-slate-400">רישום ליומן למידה:</span>
+              <span id="council-outcome-tag" class="code-font text-blue-400">learning_outcomes.record_review_verdict(task_id, approved=True)</span>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ========================================== -->
+    <!-- TAB 5: Live JSON Configuration View       -->
+    <!-- ========================================== -->
+    <section id="view-json" class="hidden space-y-6">
+      <div class="glass-panel p-6 rounded-2xl space-y-4">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-bold text-white flex items-center gap-2">
+              <span>📋</span> קובץ תצורה חי: `routing-config.json`
+            </h2>
+            <p class="text-xs text-slate-400">כל שינוי בממשק מסתנכרן בזמן אמת עם מבנה הנתונים הרשמי של המערכת</p>
+          </div>
+          <button onclick="copyJsonToClipboard()" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold flex items-center gap-2 transition-colors">
+            <span>📋</span> העתק JSON
+          </button>
+        </div>
+
+        <pre id="json-viewer" class="bg-slate-900 border border-slate-800 p-4 rounded-xl text-xs code-font text-blue-300 overflow-x-auto max-h-[500px]">
+          <!-- Rendered via JS -->
+        </pre>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="border-t border-slate-800/80 bg-slate-900/50 py-4 text-center text-xs text-slate-500">
+    Auto-Routing & Collaboration Protocol v3.7 • Antigravity Pure Orchestration • Research & Prototype
+  </footer>
+
+  <!-- State & Logic Script -->
+  <script>
+    // Model Capabilities Data Dictionary (Audited from probe_models.py & DeepSWE)
+    const MODEL_CAPABILITIES = {
+      'claude-opus-5': {
+        name: 'Claude Opus 5 (Thinking)',
+        provider: 'Anthropic CLI',
+        supported_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'high',
+        context: '1,000,000',
+        pricing: '$15 / $75',
+        color: 'purple',
+        badge: 'Top Architecture'
+      },
+      'claude-sonnet-5': {
+        name: 'Claude Sonnet 5 (Thinking)',
+        provider: 'Anthropic CLI',
+        supported_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'high',
+        context: '1,000,000',
+        pricing: '$3 / $15',
+        color: 'purple',
+        badge: 'Heavy Doer'
+      },
+      'gpt-5.6-sol': {
+        name: 'Codex 5.6 Sol',
+        provider: 'OpenAI Codex CLI',
+        supported_efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+        default_effort: 'high',
+        context: '272,000',
+        pricing: '$5 / $30',
+        color: 'amber',
+        badge: 'AST & Zero-Defect QA'
+      },
+      'gpt-5.6-terra': {
+        name: 'Codex 5.6 Terra',
+        provider: 'OpenAI Codex CLI',
+        supported_efforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+        default_effort: 'medium',
+        context: '272,000',
+        pricing: '$2.5 / $15',
+        color: 'amber',
+        badge: 'Balanced Builder'
+      },
+      'gpt-5.6-luna': {
+        name: 'Codex 5.6 Luna',
+        provider: 'OpenAI Codex CLI',
+        supported_efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+        default_effort: 'max',
+        context: '272,000',
+        pricing: '$1 / $6',
+        color: 'emerald',
+        badge: 'DeepSWE Hyper-Efficiency'
+      },
+      'gemini-3.7-flash': {
+        name: 'Gemini 3.7 Flash',
+        provider: 'Antigravity (agy)',
+        supported_efforts: ['low', 'medium', 'high'],
+        default_effort: 'high',
+        context: '2,000,000',
+        pricing: '$0.15 / $0.60',
+        color: 'blue',
+        badge: 'Repo Scanner & Thinking'
+      },
+      'gemini-3.1-pro': {
+        name: 'Gemini 3.1 Pro',
+        provider: 'Antigravity (agy)',
+        supported_efforts: ['low', 'high'],
+        default_effort: 'high',
+        context: '2,000,000',
+        pricing: '$1.25 / $5.00',
+        color: 'blue',
+        badge: 'Topology Critic'
+      },
+      'qwen3.8-27b-mlx': {
+        name: 'Qwen 3.8 27B (MLX Local)',
+        provider: 'LM Studio (Local API)',
+        supported_efforts: ['none'],
+        default_effort: 'none',
+        context: '256,000',
+        pricing: '$0.00 (Local RAM)',
+        color: 'teal',
+        badge: 'Air-Gapped & Secrets'
+      }
+    };
+
+    // Primary Roles State
+    let state = {
+      roles: {
+        orchestrator: {
+          title: 'Orchestrator (מנהל על)',
+          desc: 'מפרק משימות, מנהל שערים, מזמן עובדים. חל איסור עריכת קוד ישירה.',
+          model: 'claude-opus-5',
+          effort: 'high',
+          readOnly: true
+        },
+        context_specialist: {
+          title: 'Deep Context Specialist (סורק הקשר)',
+          desc: 'סורק את כלל ה-Repo והתלויות הודות ל-2M קונטקסט ו-Prefill מהיר.',
+          model: 'gemini-3.7-flash',
+          effort: 'high'
+        },
+        planner: {
+          title: 'Planner (מתכנן ארכיטקטוני)',
+          desc: 'תכנון ממשקים, בידוד מודולים וחשיבה עמוקה לפני כתיבת שורת קוד אחת.',
+          model: 'claude-opus-5',
+          effort: 'high'
+        },
+        critic: {
+          title: 'Critic (מבקר תוכנית וקוד)',
+          desc: 'ביקורת קפדנית, מניעת הטיית אישור עצמי ובדיקת מקרי קצה וטיפוסים.',
+          model: 'gpt-5.6-sol',
+          effort: 'high'
+        },
+        heavy_doer: {
+          title: 'Heavy Doer (מבצע שינויים מורכבים)',
+          desc: 'ביצוע רפקטורינג ושינויי קוד רב-קובציים ברמת איכות ודיוק מקסימלית.',
+          model: 'claude-sonnet-5',
+          effort: 'high'
+        },
+        light_doer: {
+          title: 'Light Doer (מבצע מהיר וחסכוני)',
+          desc: 'יצירת בדיקות יחידה, תיעוד ועיצוב קבצים בעלות מינימלית.',
+          model: 'gpt-5.6-luna',
+          effort: 'max'
+        },
+        sensitive_executor: {
+          title: 'Sensitive / Local Executor (פרטיות)',
+          desc: 'משימות עם מפתחות, סיסמאות ונתונים רגישים – הרצה מקומית בלבד.',
+          model: 'qwen3.8-27b-mlx',
+          effort: 'none'
+        },
+        qa_auditor: {
+          title: 'QA & Zero-Defect Auditor (ביקורת סופית)',
+          desc: 'ביקורת סופית על ה-git diff המצטבר לפני הכרזה על סיום משימה.',
+          model: 'gpt-5.6-sol',
+          effort: 'ultra'
+        }
+      },
+      lmStudioOnline: true
+    };
+
+    // Render Bento Grid
+    function renderRolesGrid() {
+      const container = document.getElementById('roles-grid');
+      container.innerHTML = '';
+
+      Object.entries(state.roles).forEach(([roleKey, roleData]) => {
+        const currentModelCap = MODEL_CAPABILITIES[roleData.model] || MODEL_CAPABILITIES['claude-opus-5'];
+        
+        const card = document.createElement('div');
+        card.className = `glass-card p-5 rounded-2xl border transition-all duration-200 hover:border-slate-500 relative flex flex-col justify-between space-y-4`;
+        
+        // Color badge based on effort
+        let effortBadgeClass = 'bg-blue-500/20 text-blue-300 border-blue-500/30';
+        if (roleData.effort === 'ultra' || roleData.effort === 'max') effortBadgeClass = 'bg-red-500/20 text-red-300 border-red-500/30';
+        if (roleData.effort === 'none') effortBadgeClass = 'bg-teal-500/20 text-teal-300 border-teal-500/30';
+        if (roleData.effort === 'low') effortBadgeClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+
+        card.innerHTML = `
+          <div class="space-y-3">
+            <div class="flex items-start justify-between gap-2">
+              <div>
+                <h3 class="text-sm font-bold text-white flex items-center gap-1.5">${roleData.title}</h3>
+                <span class="text-[11px] text-slate-400 font-mono">${roleKey}</span>
+              </div>
+              <span class="px-2 py-0.5 text-[10px] font-bold rounded-md border ${effortBadgeClass} code-font">
+                Effort: ${roleData.effort.toUpperCase()}
+              </span>
+            </div>
+
+            <p class="text-xs text-slate-300 leading-relaxed">${roleData.desc}</p>
+          </div>
+
+          <div class="pt-3 border-t border-slate-700/60 space-y-3">
+            
+            <!-- Model Select -->
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">מודל מוקצה:</label>
+              <select onchange="handleModelChange('${roleKey}', this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 code-font">
+                ${Object.entries(MODEL_CAPABILITIES).map(([mKey, mVal]) => `
+                  <option value="${mKey}" ${mKey === roleData.model ? 'selected' : ''}>
+                    ${mVal.name} (${mVal.pricing})
+                  </option>
+                `).join('')}
+              </select>
+            </div>
+
+            <!-- Effort Select -->
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">מאמץ חשיבה (Reasoning Effort):</label>
+              <select onchange="handleEffortChange('${roleKey}', this.value)" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-blue-500 code-font" ${currentModelCap.supported_efforts.includes('none') ? 'disabled' : ''}>
+                ${currentModelCap.supported_efforts.map(eff => `
+                  <option value="${eff}" ${eff === roleData.effort ? 'selected' : ''}>
+                    ${eff.toUpperCase()} ${eff === currentModelCap.default_effort ? '(Default)' : ''}
+                  </option>
+                `).join('')}
+              </select>
+            </div>
+
+            <!-- Capability Pills -->
+            <div class="flex flex-wrap gap-1.5 pt-1 text-[10px] text-slate-400 font-mono">
+              <span class="px-1.5 py-0.5 rounded bg-slate-800">Context: ${currentModelCap.context}</span>
+              <span class="px-1.5 py-0.5 rounded bg-slate-800">${currentModelCap.badge}</span>
+            </div>
+
+          </div>
+        `;
+        container.appendChild(card);
+      });
+
+      renderJsonView();
+    }
+
+    // Handle Model Selection with Auto-Snap (Spec 0013 / Ticket 46)
+    function handleModelChange(roleKey, newModelKey) {
+      const cap = MODEL_CAPABILITIES[newModelKey];
+      state.roles[roleKey].model = newModelKey;
+      
+      // Auto-snap effort if unsupported
+      if (!cap.supported_efforts.includes(state.roles[roleKey].effort)) {
+        state.roles[roleKey].effort = cap.default_effort;
+      }
+      
+      renderRolesGrid();
+    }
+
+    function handleEffortChange(roleKey, newEffort) {
+      state.roles[roleKey].effort = newEffort;
+      renderRolesGrid();
+    }
+
+    // Apply Presets
+    function applyPreset(presetName) {
+      if (presetName === 'balanced') {
+        state.roles.planner.model = 'claude-opus-5';
+        state.roles.planner.effort = 'high';
+        state.roles.critic.model = 'gpt-5.6-sol';
+        state.roles.critic.effort = 'high';
+        state.roles.context_specialist.model = 'gemini-3.7-flash';
+        state.roles.context_specialist.effort = 'high';
+        state.roles.heavy_doer.model = 'claude-sonnet-5';
+        state.roles.light_doer.model = 'gpt-5.6-luna';
+        state.roles.light_doer.effort = 'max';
+      } else if (presetName === 'cost_hyper') {
+        state.roles.planner.model = 'claude-opus-5';
+        state.roles.planner.effort = 'medium';
+        state.roles.critic.model = 'gpt-5.6-luna';
+        state.roles.critic.effort = 'max';
+        state.roles.context_specialist.model = 'gemini-3.7-flash';
+        state.roles.context_specialist.effort = 'medium';
+        state.roles.heavy_doer.model = 'gpt-5.6-luna';
+        state.roles.heavy_doer.effort = 'max';
+        state.roles.light_doer.model = 'gpt-5.6-luna';
+        state.roles.light_doer.effort = 'low';
+      } else if (presetName === 'local_secure') {
+        state.roles.planner.model = 'qwen3.8-27b-mlx';
+        state.roles.planner.effort = 'none';
+        state.roles.critic.model = 'qwen3.8-27b-mlx';
+        state.roles.critic.effort = 'none';
+        state.roles.heavy_doer.model = 'qwen3.8-27b-mlx';
+        state.roles.heavy_doer.effort = 'none';
+        state.roles.sensitive_executor.model = 'qwen3.8-27b-mlx';
+      } else if (presetName === 'zero_defect') {
+        state.roles.planner.model = 'claude-opus-5';
+        state.roles.planner.effort = 'high';
+        state.roles.critic.model = 'gpt-5.6-sol';
+        state.roles.critic.effort = 'ultra';
+        state.roles.qa_auditor.model = 'gpt-5.6-sol';
+        state.roles.qa_auditor.effort = 'ultra';
+      }
+      renderRolesGrid();
+    }
+
+    function resetToDefaults() {
+      applyPreset('balanced');
+    }
+
+    // Toggle LM Studio Status Simulator
+    function toggleLMStudioStatus() {
+      state.lmStudioOnline = !state.lmStudioOnline;
+      const badge = document.getElementById('lmstudio-status-badge');
+      if (state.lmStudioOnline) {
+        badge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium cursor-pointer';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span><span>LM Studio (Qwen 3.8): פעיל</span>';
+      } else {
+        badge.className = 'flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-medium cursor-pointer';
+        badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-red-400"></span><span>LM Studio: מנותק (Fallback לענן)</span>';
+      }
+    }
+
+    // Task Routing Simulator Tester
+    function testTaskRouting() {
+      const taskText = document.getElementById('test-task-input').value.toLowerCase();
+      const resultBox = document.getElementById('routing-result-box');
+
+      if (taskText.includes('.env') || taskText.includes('secret') || taskText.includes('auth') || taskText.includes('key') || taskText.includes('token')) {
+        resultBox.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="text-slate-400">החלטת ניתוב:</span>
+            <span class="px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 font-bold code-font">[ROUTING: Local LM Studio (Qwen 3.8 27B)]</span>
+          </div>
+          <p class="text-slate-300">
+            <strong>סיבה:</strong> זוהו מילות מפתח רגישות. המשימה נחסמה מיציאה לענן (Fail-Closed) ותבוצע מקומית ב-LM Studio ב-$0 ופרטיות מלאה.
+          </p>
+        `;
+      } else if (taskText.includes('refactor') || taskText.includes('implement') || taskText.includes('feature')) {
+        resultBox.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="text-slate-400">החלטת ניתוב:</span>
+            <span class="px-2.5 py-0.5 rounded-full bg-blue-500/20 text-blue-300 font-bold code-font">[ROUTING: Claude Sonnet 5 — effort: high]</span>
+          </div>
+          <p class="text-slate-300">
+            <strong>סיבה:</strong> משימת פיתוח מורכבת מרובת קבצים (Heavy Doer) עבור איכות ביצוע מקסימלית.
+          </p>
+        `;
+      } else {
+        resultBox.innerHTML = `
+          <div class="flex items-center justify-between">
+            <span class="text-slate-400">החלטת ניתוב:</span>
+            <span class="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold code-font">[ROUTING: Codex Luna / Gemini Flash — effort: max]</span>
+          </div>
+          <p class="text-slate-300">
+            <strong>סיבה:</strong> משימה מהירה/פשוטה — מנותבת למודל חשיבה חסכוני (DeepSWE Efficiency) ב-$0.001 בלבד.
+          </p>
+        `;
+      }
+    }
+
+    // Council Review Scenarios Feed
+    const SCENARIO_DATA = {
+      normal_pair: {
+        title: 'תרחיש 1: דיאלוג זוגי (Claude Opus 5 ➔ Codex Sol)',
+        status: 'הושגה הסכמה (Consensus R2)',
+        statusColor: 'bg-emerald-500/20 text-emerald-300',
+        outcome: 'learning_outcomes.record_review_verdict(task_id, approved=True)',
+        messages: [
+          { role: 'Planner (Claude Opus 5)', text: 'הצעת תוכנית עבודה לשדרוג מודול האימות: הפרדת שכבת JWT ויצירת Seam לבדיקות יחידה.' },
+          { role: 'Critic (Codex 5.6 Sol)', text: 'דחייה בסבב 1: זוהה Race Condition בפונקציית refresh token וחסר טיפוס TypeScript מחמיר לשגיאות.', action: 'REJECT' },
+          { role: 'Planner (Claude Opus 5)', text: 'תיקון בתוכנית: הוספת Mutex מקומי לביטול מרוצי רענון טוקנים והגדרת טיפוס AuthErrorRecord.' },
+          { role: 'Critic (Codex 5.6 Sol)', text: 'אישור בסבב 2: כל הציטוטים אומתו, שגיאות הטיפוס טופלו והאינטגרציה מוכנה לביצוע.', action: 'APPROVE' }
+        ]
+      },
+      tri_council: {
+        title: 'תרחיש 2: פאנל תלת-מודלי (Opus 5 + Sol + Gemini 3.7)',
+        status: 'אישור פאנל מלא (Dual-Critic Consensus)',
+        statusColor: 'bg-purple-500/20 text-purple-300',
+        outcome: 'learning_outcomes.record_plan_outcome(task_id, accepted=True)',
+        messages: [
+          { role: 'Planner (Claude Opus 5)', text: 'הצעת ארכיטקטורה למיגרציית מסד נתונים ללא השבתה (Zero-Downtime).' },
+          { role: 'Critic A - AST (Codex Sol)', text: 'אישור: מבני הנתונים תקינים, אין שגיאות טיפוסים.', action: 'APPROVE' },
+          { role: 'Critic B - Topology (Gemini 3.7)', text: 'הסתייגות: סריקת כלל ה-Repo מראה השפעה על 14 קובצי Controller ישנים שאינם מתועדים בתוכנית.', action: 'REJECT' },
+          { role: 'Planner (Claude Opus 5)', text: 'עדכון תוכנית: הוספת שלב תאימות לאחור (Dual-Write Adapter) עבור 14 הקבצים.' },
+          { role: 'Critic B - Topology (Gemini 3.7)', text: 'אישור סופי: כל התלויות מכוסות במלואן.', action: 'APPROVE' }
+        ]
+      },
+      security_veto: {
+        title: 'תרחיש 3: הטלת וטו ביטחוני (SECURITY_VETO Triggered)',
+        status: 'בלימת חירום (Security Halt)',
+        statusColor: 'bg-red-500/20 text-red-300',
+        outcome: 'learning_outcomes.record_security_veto(task_id, cwe="CWE-89", halt=True)',
+        messages: [
+          { role: 'Planner (Claude Opus 5)', text: 'תוכנית לבניית מנוע שאילתות דינמי באמצעות שרשור מחרוזות SQL.' },
+          { role: 'Security Critic (Codex Sol)', text: '🚨 SECURITY_VETO TRIGGERED! זוהתה פגיעות SQL Injection (CWE-89) בשורה 42. ה-Pipeline נחסם מיידית.', action: 'VETO' },
+          { role: 'Orchestrator', text: 'עצירת חירום: השינוי נחסם, הפגיעות נרשמה ביומן האבטחה ונשלחה דרישת תיקון מיידית ל-Parameterized Query.' }
+        ]
+      }
+    };
+
+    function playCouncilScenario(key) {
+      const data = SCENARIO_DATA[key];
+      document.getElementById('council-scenario-title').innerHTML = `<span class="w-2 h-2 rounded-full bg-blue-400"></span> ${data.title}`;
+      
+      const statusEl = document.getElementById('council-scenario-status');
+      statusEl.className = `px-2 py-0.5 rounded text-[11px] font-bold ${data.statusColor}`;
+      statusEl.innerText = data.status;
+
+      document.getElementById('council-outcome-tag').innerText = data.outcome;
+
+      const feed = document.getElementById('council-dialogue-feed');
+      feed.innerHTML = '';
+
+      data.messages.forEach(msg => {
+        const msgDiv = document.createElement('div');
+        let borderClass = 'border-slate-800 bg-slate-900/60 text-slate-200';
+        if (msg.action === 'REJECT') borderClass = 'border-amber-500/40 bg-amber-500/10 text-amber-200';
+        if (msg.action === 'APPROVE') borderClass = 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200';
+        if (msg.action === 'VETO') borderClass = 'border-red-500/50 bg-red-500/10 text-red-200';
+
+        msgDiv.className = `p-3 rounded-lg border ${borderClass} space-y-1`;
+        msgDiv.innerHTML = `
+          <div class="font-bold text-[11px] text-slate-400 flex items-center justify-between">
+            <span>${msg.role}</span>
+            ${msg.action ? `<span class="px-1.5 py-0.2 rounded text-[10px] font-mono font-bold">${msg.action}</span>` : ''}
+          </div>
+          <div>${msg.text}</div>
+        `;
+        feed.appendChild(msgDiv);
+      });
+    }
+
+    // Switch Tabs
+    function switchTab(tabId) {
+      ['matrix', 'deepswe', 'qwen', 'council', 'json'].forEach(t => {
+        document.getElementById(`view-${t}`).classList.add('hidden');
+        document.getElementById(`tab-${t}`).className = 'tab-btn py-3 px-1 border-b-2 border-transparent text-slate-400 hover:text-slate-200 text-sm font-medium flex items-center gap-2 whitespace-nowrap';
+      });
+
+      document.getElementById(`view-${tabId}`).classList.remove('hidden');
+      document.getElementById(`tab-${tabId}`).className = 'tab-btn py-3 px-1 border-b-2 border-blue-500 text-blue-400 text-sm font-semibold flex items-center gap-2 whitespace-nowrap';
+    }
+
+    // Render JSON Viewer
+    function renderJsonView() {
+      const viewer = document.getElementById('json-viewer');
+      const exportData = {
+        roles: state.roles,
+        model_capabilities: MODEL_CAPABILITIES,
+        deep_swe_pareto_enabled: true,
+        local_lmstudio_probe_url: "http://127.0.0.1:1234/v1"
+      };
+      viewer.innerText = JSON.stringify(exportData, null, 2);
+    }
+
+    function copyJsonToClipboard() {
+      const jsonText = document.getElementById('json-viewer').innerText;
+      navigator.clipboard.writeText(jsonText).then(() => {
+        alert('קובץ ה-JSON הועתק בהצלחה ללוח!');
+      });
+    }
+
+    // Init
+    window.onload = function() {
+      renderRolesGrid();
+      playCouncilScenario('normal_pair');
+    };
+  </script>
+</body>
+</html>

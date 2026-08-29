@@ -1,0 +1,248 @@
+{
+  "context_specialist": {
+    "name": "LM Studio (Local Model)",
+    "patterns": ["127.0.0.1:1234/v1/chat", "localhost:1234/v1/chat"]
+  },
+  "planner": {
+    "name": "Claude Opus 5 (Thinking) / Claude Fable 5",
+    "patterns": ["claude-opus-5", "claude-fable-5", "claude -p --model"]
+  },
+  "critic": {
+    "name": "Codex 5.6 Sol / GPT-OSS 120B (Medium)",
+    "patterns": ["codex exec", "gpt-oss-120b", "codex-sol"]
+  },
+  "heavy_doer": {
+    "name": "Claude Sonnet 5 (Thinking)",
+    "patterns": ["claude-sonnet-5", "claude -p"]
+  },
+  "light_doer": {
+    "name": "Codex 5.6 Terra / Luna / Gemini 3.6 Flash (Low)",
+    "patterns": ["codex exec", "gemini-3.6-flash-low", "codex-terra", "codex-luna"]
+  },
+  "sensitive_doer": {
+    "name": "LM Studio (Local Model)",
+    "patterns": ["127.0.0.1:1234/v1/chat", "localhost:1234/v1/chat"]
+  },
+  "qa_auditor": {
+    "name": "Codex 5.6 Sol / Claude Opus 5 (Thinking)",
+    "patterns": ["codex review", "claude-opus-5"]
+  },
+  "roles": {
+    "planner": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "read",
+        "min_context": 200000,
+        "local_only": false
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "builder_heavy": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "workspace-write",
+        "min_context": 128000,
+        "local_only": false
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "builder_light": {
+      "capability_requirements": {
+        "reasoning_tier": "medium",
+        "tool_access": "workspace-write",
+        "min_context": 32000,
+        "local_only": false
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "reviewer_architecture": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "read",
+        "min_context": 128000,
+        "local_only": false
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "reviewer_risk": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "read",
+        "min_context": 128000,
+        "local_only": false
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "reviewer_maintainability": {
+      "capability_requirements": {
+        "reasoning_tier": "medium",
+        "tool_access": "read",
+        "min_context": 64000,
+        "local_only": false
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "reviewer_security": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "read",
+        "min_context": 128000,
+        "local_only": false
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "adjudicator": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "read",
+        "min_context": 32000,
+        "local_only": true
+      },
+      "preferred_providers": ["qwen_local"]
+    },
+    "sensitive_executor": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "workspace-write",
+        "min_context": 32000,
+        "local_only": true
+      },
+      "preferred_providers": ["qwen_local"]
+    }
+  },
+  "providers": {
+    "qwen_local": {
+      "adapter": "lm_studio_local",
+      "model": "qwen3.8-27b-mlx",
+      "default_reasoning_effort": "medium"
+    }
+  },
+  "council_policy": {
+    "fast_path_enabled": true,
+    "quorum_threshold": 0.60,
+    "perspective_weights": {
+      "reviewer_architecture": 0.30,
+      "reviewer_risk": 0.25,
+      "reviewer_maintainability": 0.20,
+      "reviewer_security": 0.25
+    },
+    "security_veto": {
+      "enabled": true,
+      "veto_severities": ["critical", "high"],
+      "security_threshold": 0.80
+    },
+    "deadlines_seconds": {"round_1": 45, "round_2": 60, "round_3": 60},
+    "consensus_policy": ["UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"]
+  },
+  "supported_models": [
+    "Gemini 3.7 Flash",
+    "Gemini 3.6 Flash (High)",
+    "Gemini 3.6 Flash (Medium)",
+    "Gemini 3.6 Flash (Low)",
+    "Gemini 3.5 Flash (High)",
+    "Gemini 3.5 Flash (Medium)",
+    "Gemini 3.5 Flash (Low)",
+    "Gemini 3.1 Pro (High)",
+    "Gemini 3.1 Pro (Low)",
+    "Claude 3.7 Sonnet",
+    "Claude Sonnet 5 (Thinking)",
+    "Claude Opus 5 (Thinking)",
+    "Codex 5.6 Sol",
+    "Codex 5.6 Terra",
+    "Codex 5.6 Luna",
+    "GPT-OSS 120B (Medium)",
+    "LM Studio (Local Model)"
+  ],
+  "critical_dialogue": {
+    "code_review_diff_line_threshold": 300,
+    "security_sensitive_path_patterns": [
+      "auth",
+      "credential",
+      "secret",
+      ".env",
+      "password",
+      "token",
+      "/keys/",
+      "security",
+      "iam",
+      "acl",
+      "permission"
+    ]
+  },
+  "roster_topology": {
+    "role_fallback_chains": {
+      "planner": [
+        "Claude Opus 5 (Thinking)",
+        "Claude Fable 5",
+        "Codex 5.6 Sol",
+        "Gemini 3.6 Flash (High)",
+        "Gemma 4 E4B"
+      ],
+      "critic_a": [
+        "Codex 5.6 Sol",
+        "GPT-OSS 120B (Medium)",
+        "Gemini 3.6 Flash (High)",
+        "Claude Opus 5 (Thinking)",
+        "Qwen3.8-27B-MLX-6bit"
+      ],
+      "critic_b": [
+        "Gemini 3.6 Flash",
+        "Gemini 3.1 Pro (High)",
+        "Codex 5.6 Sol",
+        "Claude Opus 5 (Thinking)",
+        "Gemma 4 E4B"
+      ]
+    }
+  },
+  "canary_cadence": {
+    "dialogues_per_canary": 20,
+    "seconds_between_canaries": 604800
+  },
+  "dialogue_budget": {
+    "session_dialogue_cap": 10
+  },
+  "acceptance_gate": {
+    "trials": 5,
+    "score_threshold": 0.8
+  },
+  "consultation_policy": {
+    "providers": [
+      {"id": "claude", "model": "claude-opus-5", "effort_mapping": {"high": "high"}},
+      {"id": "codex", "model": "gpt-5.6-sol", "effort_mapping": {"high": "high"}},
+      {"id": "gemini", "model": "gemini-3.1-pro", "effort_mapping": {"high": "high"}}
+    ],
+    "adjudicators": [
+      {"id": "lm-studio", "model": "qwen3-coder-30b", "effort_mapping": {"high": "high"}}
+    ],
+    "deadlines_seconds": {"round_1": 120, "round_2": 60, "round_3": 60},
+    "consensus_policy": ["UNANIMOUS", "QUALIFIED", "MATERIAL_DISAGREEMENT", "INCOMPLETE", "UNRESOLVED"],
+    "weighting": {
+      "initial_weights": {"claude": 0.40, "codex": 0.40, "gemini": 0.20},
+      "min_weight": 0.05,
+      "max_weight": 0.65,
+      "quorum_threshold": 0.60,
+      "dynamic_weights_path": ".ralph/council_weights.json"
+    },
+    "security_veto": {
+      "enabled": true,
+      "veto_severities": ["critical", "high"],
+      "security_threshold": 0.80
+    }
+  },
+  "code_extensions": ["ts", "tsx", "css", "js", "jsx", "py", "go", "rs", "tf", "sql", "sh", "rb", "cpp", "h"],
+  "safe_commands": [
+    "^\\s*ls(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*cat(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*grep(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*rg(?:\\s+-[a-zA-Z0-9]+)?(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*git\\s+(?:status|log|diff|show|branch)(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*curl\\s+-[a-zA-Z]+(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*jq\\s+[^>|&;]*$",
+    "^\\s*which\\s+[^>|&;]+\\s*$",
+    "^\\s*echo\\s+[^>|&;]*$",
+    "^\\s*pwd\\s*$",
+    "^\\s*find\\s+[^>|&;]*$",
+    "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^>|&;]+)?\\s*$",
+    "^\\s*lsof(?:\\s+-[a-zA-Z0-9:]+)?(?:\\s+[^>|&;]+)?\\s*$"
+  ]
+}
