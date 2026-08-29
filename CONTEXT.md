@@ -229,3 +229,5 @@ An execution failure mode where an SSE streaming client listens only to `delta.c
 ### UnbufferedInferenceTransport
 A process execution standard requiring explicit `sys.stdout.flush()` on every streaming token and the use of unbuffered execution (`python3 -u` / `PYTHONUNBUFFERED=1`) when dispatching background Python scripts or CLI sub-processes over non-TTY pipes.
 
+### StructuralConfigDrift
+A runtime schema drift failure where a top-level configuration key (e.g. `_active_profile`) is registered only in `routing_check.NON_ROLE_CONFIG_KEYS` but omitted from `routing_config.STRUCTURAL_KEYS`, causing the dispatcher to parse top-level configuration metadata as invalid worker role definitions.

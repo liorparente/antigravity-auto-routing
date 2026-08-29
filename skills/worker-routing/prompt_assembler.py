@@ -632,6 +632,14 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("lm-studio", "streaming", "reasoning_content", "cot", "unbuffered", "flush", "stdout", "pipe", "progress", "qwen"),
         ("production_invoker.py", "test_lmstudio.py", "*.py", "*.sh"),
     ),
+    GoldenRule(
+        36,
+        "Architecture & Deep Modules",
+        "Synchronize structural non-role configuration keys across routing_config and routing_check",
+        "Adding top-level configuration keys (such as _active_profile) requires updating both routing_check.NON_ROLE_CONFIG_KEYS and routing_config.STRUCTURAL_KEYS in lockstep. Because routing_check.py dynamically prioritizes routing_config.STRUCTURAL_KEYS when imported, omitting a key from STRUCTURAL_KEYS silently degrades into runtime schema drift where the key is erroneously treated as an invalid worker role.",
+        ("structural", "config", "schema", "non-role", "active_profile", "routing_config", "routing_check", "STRUCTURAL_KEYS", "NON_ROLE_CONFIG_KEYS", "drift"),
+        ("routing-config.json", "routing_config.py", "routing_check.py", "test_declarative_schema.py"),
+    ),
 )
 
 _INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (
