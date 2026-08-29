@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 if __package__:
     from . import debate_orchestrator as _engine
@@ -92,13 +91,6 @@ def request_council_review(
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, council.review(request)).result()
     return asyncio.run(council.review(request))
-
-
-# Retain the narrow internal compatibility seam used by established callers
-# without exposing every implementation detail as supported public API.
-def __getattr__(name: str) -> Any:
-    """Resolve historic engine attributes during the consolidation window."""
-    return getattr(_engine, name)
 
 
 __all__ = (

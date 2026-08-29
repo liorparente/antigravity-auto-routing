@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -44,17 +46,28 @@ class _MockReviewerAdapter:
         return response
 
 
-class CriticalDialogueTests(unittest.TestCase):
-    def _approve(self, _model: str, _effort: str, prompt: str) -> str:
-        if "You are the Planner" in prompt:
-            return "Proposed plan"
-        return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
+def _mock_approve(_model: str, _effort: str, prompt: str) -> str:
+    if "You are the Planner" in prompt:
+        return "Proposed plan"
+    return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
 
+
+class _StubCouncil:
+    outcome: Any
+
+    def __init__(self, *, policy_path: str | Path) -> None:
+        self.policy_path = policy_path
+
+    async def review(self, _request: Any) -> Any:
+        return self.outcome
+
+
+class CriticalDialogueTests(unittest.TestCase):
     def test_run_critical_dialogue_handles_blocking_occasions_and_approval(self) -> None:
         for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
             with self.subTest(occasion=occasion), tempfile.TemporaryDirectory() as tmp:
                 result = critical_dialogue.run_critical_dialogue(
-                    "Review the implementation", self._approve, root_dir=Path(tmp), occasion=occasion
+                    "Review the implementation", _mock_approve, root_dir=Path(tmp), occasion=occasion
                 )
                 self.assertEqual(result.outcome, "consensus")
                 self.assertTrue(result.consensus_reached)
@@ -157,41 +170,28 @@ class CouncilReviewBoundaryTests(unittest.TestCase):
     def test_request_council_review_runs_the_async_council_to_completion(self) -> None:
         expected = critical_dialogue.ReviewOutcome(status="UNANIMOUS", run_id="test-run")
 
-        class _StubCouncil:
-            def __init__(self, *, policy_path: str | Path) -> None:
-                self.policy_path = policy_path
-
-            async def review(self, _request: Any) -> Any:
-                return expected
-
-        with patch.object(critical_dialogue, "ReviewCouncil", _StubCouncil):
+        with (
+            patch.object(critical_dialogue, "ReviewCouncil", _StubCouncil),
+            patch.object(_StubCouncil, "outcome", expected, create=True),
+        ):
             outcome = critical_dialogue.request_council_review(self._request())
         self.assertIs(outcome, expected)
 
     def test_request_council_review_completes_inside_a_running_event_loop(self) -> None:
         expected = critical_dialogue.ReviewOutcome(status="UNANIMOUS", run_id="loop-run")
 
-        class _StubCouncil:
-            def __init__(self, *, policy_path: str | Path) -> None:
-                self.policy_path = policy_path
-
-            async def review(self, _request: Any) -> Any:
-                return expected
-
         async def run_in_loop() -> Any:
             return critical_dialogue.request_council_review(self._request())
 
-        with patch.object(critical_dialogue, "ReviewCouncil", _StubCouncil):
+        with (
+            patch.object(critical_dialogue, "ReviewCouncil", _StubCouncil),
+            patch.object(_StubCouncil, "outcome", expected, create=True),
+        ):
             outcome = asyncio.run(run_in_loop())
         self.assertIs(outcome, expected)
 
 
 class CriticalDialoguePersistenceTests(unittest.TestCase):
-    def _approve(self, _model: str, _effort: str, prompt: str) -> str:
-        if "You are the Planner" in prompt:
-            return "Proposed plan"
-        return 'QUOTE: "Proposed plan"\nVERDICT: APPROVE'
-
     def test_run_critical_dialogue_applies_budget_degradation_ladder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -203,20 +203,21 @@ class CriticalDialoguePersistenceTests(unittest.TestCase):
 
             def invoke(model: str, effort: str, prompt: str) -> str:
                 calls.append((model, effort))
-                return self._approve(model, effort, prompt)
+                return _mock_approve(model, effort, prompt)
 
-            reduced_rounds = critical_dialogue.run_critical_dialogue(
-                "Review the implementation", invoke, root_dir=root,
-                session_spend_so_far=1, budget_config_path=budget_path,
-            )
-            cheaper_roster = critical_dialogue.run_critical_dialogue(
-                "Review the implementation", invoke, root_dir=root,
-                session_spend_so_far=2, budget_config_path=budget_path,
-            )
-            skipped = critical_dialogue.run_critical_dialogue(
-                "Review the implementation", invoke, root_dir=root,
-                session_spend_so_far=3, budget_config_path=budget_path,
-            )
+            with redirect_stderr(io.StringIO()):
+                reduced_rounds = critical_dialogue.run_critical_dialogue(
+                    "Review the implementation", invoke, root_dir=root,
+                    session_spend_so_far=1, budget_config_path=budget_path,
+                )
+                cheaper_roster = critical_dialogue.run_critical_dialogue(
+                    "Review the implementation", invoke, root_dir=root,
+                    session_spend_so_far=2, budget_config_path=budget_path,
+                )
+                skipped = critical_dialogue.run_critical_dialogue(
+                    "Review the implementation", invoke, root_dir=root,
+                    session_spend_so_far=3, budget_config_path=budget_path,
+                )
 
         self.assertEqual(reduced_rounds.degradation_rung, 1)
         self.assertEqual(reduced_rounds.rounds_run, 1)
@@ -234,7 +235,7 @@ class CriticalDialoguePersistenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = critical_dialogue.run_critical_dialogue(
-                "Review the implementation", self._approve, root_dir=root
+                "Review the implementation", _mock_approve, root_dir=root
             )
             transcript_path = root / ".scratch" / "planning_debate.md"
             telemetry_path = root / ".ralph" / "routing_telemetry.jsonl"
