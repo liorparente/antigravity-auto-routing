@@ -15,6 +15,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
 COUNCIL_SRC_DIR="$SCRIPT_DIR/skills/council-review"
+LEARN_SESSION_SRC_DIR="$SCRIPT_DIR/skills/learn-session"
 
 TARGET_PROJECT_DIR="${1:-.}"
 if [ ! -d "$TARGET_PROJECT_DIR" ]; then
@@ -128,6 +129,7 @@ echo "---"
 for i in "${!TARGET_DIRS[@]}"; do
     target_dir="${TARGET_DIRS[$i]}"
     council_target_dir="$(dirname "$target_dir")/council-review"
+    learn_target_dir="$(dirname "$target_dir")/learn-session"
     if [ -d "$council_target_dir" ]; then
         if [ -d "$COUNCIL_SRC_DIR" ]; then
             while IFS= read -r -d '' council_file; do
@@ -151,6 +153,28 @@ for i in "${!TARGET_DIRS[@]}"; do
                 "(other content preserved)"
         else
             echo "✅ Removed $council_target_dir"
+        fi
+    fi
+    if [ -d "$learn_target_dir" ]; then
+        if [ -d "$LEARN_SESSION_SRC_DIR" ]; then
+            while IFS= read -r -d '' learn_session_file; do
+                relative="${learn_session_file#"$LEARN_SESSION_SRC_DIR/"}"
+                rm -f "$learn_target_dir/$relative"
+            done < <(
+                find "$LEARN_SESSION_SRC_DIR" -type f \
+                    ! -path '*/__pycache__/*' \
+                    ! -name '*.pyc' \
+                    -print0 | LC_ALL=C sort -z
+            )
+        fi
+        while IFS= read -r -d '' learn_session_dir; do
+            rmdir "$learn_session_dir" 2>/dev/null || true
+        done < <(find "$learn_target_dir" -depth -type d -print0)
+        if [ -d "$learn_target_dir" ]; then
+            echo "✅ Removed learn-session skill files from $learn_target_dir " \
+                "(other content preserved)"
+        else
+            echo "✅ Removed $learn_target_dir"
         fi
     fi
     if [ -d "$target_dir" ]; then

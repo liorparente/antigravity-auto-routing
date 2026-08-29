@@ -6,13 +6,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/skills/worker-routing"
 COUNCIL_SRC_DIR="$SCRIPT_DIR/skills/council-review"
+LEARN_SESSION_SRC_DIR="$SCRIPT_DIR/skills/learn-session"
 PROTOCOL_SRC="$SRC_DIR/protocol.md"
 TARGET_PROJECT_DIR="${1:-.}"
 
 if [ ! -d "$TARGET_PROJECT_DIR" ] \
     || [ ! -r "$PROTOCOL_SRC" ] \
-    || [ ! -d "$COUNCIL_SRC_DIR" ]; then
-    echo "❌ Target project, protocol source, or council-review source is unavailable." \
+    || [ ! -d "$COUNCIL_SRC_DIR" ] \
+    || [ ! -d "$LEARN_SESSION_SRC_DIR" ]; then
+    echo "❌ Target project, protocol source, council-review source, or learn-session source is unavailable." \
         >&2
     exit 1
 fi
@@ -249,6 +251,20 @@ done < <(
         -print0 | LC_ALL=C sort -z
 )
 
+# Stage the complete learn-session skill with the same cache exclusions as
+# council-review, so every harness receives the canonical learning workflow.
+mkdir -p "$STAGING_DIR/learn-session"
+while IFS= read -r -d '' learn_session_file; do
+    relative="${learn_session_file#"$LEARN_SESSION_SRC_DIR/"}"
+    mkdir -p "$STAGING_DIR/learn-session/$(dirname "$relative")"
+    cp "$learn_session_file" "$STAGING_DIR/learn-session/$relative"
+done < <(
+    find "$LEARN_SESSION_SRC_DIR" -type f \
+        ! -path '*/__pycache__/*' \
+        ! -name '*.pyc' \
+        -print0 | LC_ALL=C sort -z
+)
+
 # Adopted learned state (spec 0004 ticket 23) joins the same atomic
 # staging/sync mechanism as every other managed artifact rather than getting
 # a second, parallel one. `learned_state.py`'s `root_dir` for this repo's own
@@ -367,6 +383,14 @@ for target_dir in "${TARGET_DIRS[@]}"; do
         copy_managed "$council_file" "$council_target_dir/$relative"
     done < <(
         find "$STAGING_DIR/council-review" -type f -print0 | LC_ALL=C sort -z
+    )
+
+    learn_target_dir="$(dirname "$target_dir")/learn-session"
+    while IFS= read -r -d '' learn_session_file; do
+        relative="${learn_session_file#"$STAGING_DIR/learn-session/"}"
+        copy_managed "$learn_session_file" "$learn_target_dir/$relative"
+    done < <(
+        find "$STAGING_DIR/learn-session" -type f -print0 | LC_ALL=C sort -z
     )
 
     # council-policy.json was superseded by worker-routing/routing-config.json.

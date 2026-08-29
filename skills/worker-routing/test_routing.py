@@ -807,6 +807,26 @@ class ProtocolSyncTests(unittest.TestCase):
                         (council_target / "references" / "council-policy.json").exists()
                     )
 
+    def test_install_sh_synchronizes_learn_session_to_every_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            learn_targets = tuple(
+                target.parent / "learn-session"
+                for target in _target_dirs(
+                    INSTALL_SH, home=fake_home, target_project_dir=target_dir
+                )
+            )
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            source_skill = REPO_ROOT / "skills" / "learn-session" / "SKILL.md"
+            for learn_target in learn_targets:
+                with self.subTest(learn_target=learn_target):
+                    self.assertEqual(
+                        (learn_target / "SKILL.md").read_text(encoding="utf-8"),
+                        source_skill.read_text(encoding="utf-8"),
+                    )
+
     def test_install_sh_merges_missing_consultation_policy_into_custom_config(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             missing_policy_dir = (
@@ -975,6 +995,10 @@ class ProtocolSyncTests(unittest.TestCase):
             self.assertFalse((Path(target_dir) / ".agents").exists())
             self.assertFalse((Path(target_dir) / ".agent" / "skills" / "worker-routing").exists())
             self.assertFalse((Path(target_dir) / ".agent").exists())
+            for target in _target_dirs(
+                INSTALL_SH, home=fake_home, target_project_dir=target_dir
+            ):
+                self.assertFalse((target.parent / "learn-session").exists())
 
     def test_uninstall_sh_removes_local_agents_dir_skill_files(self) -> None:
         # uninstall.sh's TARGET_DIRS now covers the project-local .agents/
@@ -1219,6 +1243,11 @@ class LearnedStatePropagationTests(unittest.TestCase):
         shutil.copytree(
             REPO_ROOT / "skills" / "council-review",
             source_root / "skills" / "council-review",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        shutil.copytree(
+            REPO_ROOT / "skills" / "learn-session",
+            source_root / "skills" / "learn-session",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
         return source_root
