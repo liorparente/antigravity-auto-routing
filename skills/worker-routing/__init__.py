@@ -195,7 +195,8 @@ __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tu
     "probe_local_model_availability", "prompt_local_fallback_decision", "read_current",
     "read_history", "read_journal", "record_plan_outcome", "record_review_verdict",
     "record_stalemate_resolution", "record_test_result", "reduce_outcomes_by_key",
-    "reduce_outcomes_positionally", "render_institutional_memory", "request_council_review", "resolve_cli_command", "resolve_model_name", "roll_back",
+    "reduce_outcomes_positionally", "render_institutional_memory", "request_council_review",
+    "resolve_cli_command", "resolve_model_name", "roll_back",
     "run_advisory_consultation_debate", "run_audit", "run_canary_dialogue",
     "run_critical_dialogue", "run_debate_loop", "run_post_mortem_loop",
 )
