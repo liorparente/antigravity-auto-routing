@@ -227,7 +227,7 @@ PERSPECTIVE_PROMPTS: dict[ReviewerPerspective, str] = {
 # `knowledge/institutional-memory.md` used to carry 103 free-text, dated
 # entries (~90KB) — too large to inject into a worker's mission brief
 # without degrading attention and blowing the token budget. This module
-# instead ships a fixed, structured distillation of that history — 20 rules
+# instead ships a fixed, structured distillation of that history — 35 rules
 # across 5 categories — and `extract_scoped_memory` below picks only the
 # 3-5 rules relevant to one task, instead of the whole document. The full
 # historical record is preserved, unedited, in
@@ -508,6 +508,121 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         "historical replay and passing AST clock guards.",
         ("cli", "now", "iso-8601", "clock-free", "ast", "invariants", "replay"),
         ("learning_report.py", "learning_report_html.py", "*.py"),
+    ),
+    GoldenRule(
+        26,
+        "Testing & TDD Seams",
+        "pipx run mypy needs a symlink workaround for skills/worker-routing/",
+        "A hyphenated directory name is not a valid Python package name, so mypy "
+        "refuses outright (... is not a valid Python package name) rather than "
+        "type-checking anything — CI dodges this by sed-rewriting the module list to "
+        "worker_routing/ first; reproduce locally with ln -sfn worker-routing "
+        "skills/worker_routing before invoking pipx run mypy --config-file "
+        "pyproject.toml skills/worker_routing/<file>.py.",
+        ("mypy", "typecheck", "type check", "symlink", "worker-routing", "worker_routing", "pyproject.toml", "pipx"),
+        ("pyproject.toml", "*.py"),
+    ),
+    GoldenRule(
+        27,
+        "Multi-Harness Sync & Governance",
+        "Re-read the ticket's own backlog file before trusting a memory summary of it",
+        "Cross-session project memory can carry a stale or outright wrong ticket "
+        "description (e.g. describing ticket 47 as a GET /api/model-capabilities "
+        "endpoint when .scratch/routing-backlog/issues/47-*.md actually specified "
+        "two-tab navigation and a Bento Grid) — always open the actual issues/<N>-*.md "
+        "file at the start of a ticket, even when a memory note seems to already know "
+        "what it says.",
+        ("backlog", "ticket", "issue", "memory", "stale", "specification", "drift"),
+        ("*.md", "issues/*"),
+    ),
+    GoldenRule(
+        28,
+        "Architecture & Deep Modules",
+        "Prefer CSS-only interactivity (checked-radio + sibling selectors) over inline <script> in static HTML reports",
+        "A tab bar or segmented toggle can switch visible sections with radio inputs "
+        "and ~/ + sibling CSS rules, keeping a \"ships zero script tags\" invariant "
+        "intact (learning_report_html.py's two-tab dashboard, ticket 47) until a "
+        "ticket's scope genuinely requires real client-side state (model/effort binding, "
+        "undo, floating action bars) to justify breaking it.",
+        ("css", "interactivity", "radio", "tab", "report", "html", "script", "dashboard"),
+        ("*_html.py", "*.html", "*.css"),
+    ),
+    GoldenRule(
+        29,
+        "Multi-Harness Sync & Governance",
+        "install.sh's mirrored copies (.agents/, .codex/, .agent/) are gitignored — edit only the canonical skills/worker-routing/ file, then run ./install.sh to sync",
+        "git status/commits never need the mirrors touched directly, but other harnesses "
+        "(Codex, Gemini) only see a change after install.sh re-copies it; verify with "
+        "git check-ignore -v before assuming a mirrored path needs staging.",
+        ("install.sh", "sync", "mirrored", "gitignored", "harness", "canonical", "skills"),
+        ("install.sh", "uninstall.sh", "skills/*"),
+    ),
+    GoldenRule(
+        30,
+        "Testing & TDD Seams",
+        "This repo's HTML-report tests assert substrings, never full-document equality",
+        "test_learning_report_html.py's convention is assertIn/assertNotIn against "
+        "fragments — verify this holds before extending a rendered template, since it "
+        "means new sections/tabs can be added without rewriting dozens of pre-existing "
+        "tests, as long as their asserted substrings still appear somewhere in the "
+        "larger document.",
+        ("html", "report", "test", "substring", "assertIn", "assertNotIn", "fragment"),
+        ("test_*_html.py", "test_*.py"),
+    ),
+    GoldenRule(
+        31,
+        "Testing & TDD Seams",
+        "A first-pass zero-findings /code-review is a signal the change was well-scoped, not that review was skipped",
+        "Ticket 47 (backward-compatible optional params, additive markup, substring-safe "
+        "tests) converged with 0 Standards/Spec findings on iteration 1, unlike ticket "
+        "46's 8 rounds / 25 findings — treat a fast convergence as confirmation the "
+        "smaller, additive-only shape of a change is worth repeating, not as grounds to "
+        "skip the review step itself.",
+        ("code-review", "review", "zero-findings", "convergence", "well-scoped", "iteration"),
+        ("*.py", "test_*.py"),
+    ),
+    GoldenRule(
+        32,
+        "Testing & TDD Seams",
+        "Fixing one false factual claim in a comment can produce a new false claim, not convergence",
+        "Ticket 47's _ROLE_ACCENT_COLORS comment took four /iterative-fix-review rounds: "
+        "a nonexistent sensitivity_gate config key → a wrong \"unique to this role\" "
+        "claim about local_only (another role shared it) → an overclaimed \"from the "
+        "spec's palette\" attribution (the spec only names one of seven hex values) → "
+        "finally clean. Each rewrite was independently plausible and independently wrong.",
+        ("comment", "claim", "factual", "convergence", "review", "drift", "verification"),
+        ("*.py", "*.md"),
+    ),
+    GoldenRule(
+        33,
+        "Testing & TDD Seams",
+        "When a reviewer flags one wrong claim inside a multi-sentence comment, re-derive the whole block from primary sources in one pass — not just the flagged clause",
+        "All three wrong claims in rule 32's incident lived in the same ~15-line comment; "
+        "each incremental patch left an adjacent, equally-unverified sentence standing, "
+        "which is exactly what the next review round caught.",
+        ("reviewer", "comment", "re-derive", "primary sources", "verification", "claim"),
+        ("*.py", "*.md"),
+    ),
+    GoldenRule(
+        34,
+        "Testing & TDD Seams",
+        "Brief a re-verification agent with the specific history of prior wrong fixes, and instruct it to re-derive every claim from primary sources",
+        "A verifier told only \"check this fix\" tends to confirm it looks plausible; a "
+        "verifier told \"the last two fixes for this exact spot were both wrong, re-derive "
+        "independently\" is what actually caught rounds 2 and 3 of rule 32's incident "
+        "instead of rubber-stamping them.",
+        ("verifier", "verification", "re-derive", "primary sources", "wrong fix", "rubber-stamp"),
+        ("*.py", "*.md"),
+    ),
+    GoldenRule(
+        35,
+        "Testing & TDD Seams",
+        "Fix a review-flagged cosmetic/non-functional inconsistency in the same pass, even though it changes no behavior",
+        "Two dict literals left listing roles in a stale order after a third was reordered "
+        "were flagged as harmless but got re-flagged in the next review round anyway — "
+        "closing it immediately costs less than the extra review cycle it otherwise causes.",
+        ("review", "cosmetic", "inconsistency", "cleanup", "cycle", "pass"),
+        ("*.py",),
     ),
 )
 

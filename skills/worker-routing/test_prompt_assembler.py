@@ -153,10 +153,10 @@ class PromptAssemblerTests(unittest.TestCase):
 
 
 class GoldenRulesCatalogTests(unittest.TestCase):
-    def test_catalog_has_exactly_twenty_five_rules_with_unique_sequential_ids(self) -> None:
-        self.assertEqual(len(prompt_assembler.GOLDEN_RULES), 25)
+    def test_catalog_has_exactly_thirty_five_rules_with_unique_sequential_ids(self) -> None:
+        self.assertEqual(len(prompt_assembler.GOLDEN_RULES), 35)
         self.assertEqual(
-            [rule.id for rule in prompt_assembler.GOLDEN_RULES], list(range(1, 26))
+            [rule.id for rule in prompt_assembler.GOLDEN_RULES], list(range(1, 36))
         )
 
     def test_every_rule_has_non_empty_keywords_and_file_patterns(self) -> None:
