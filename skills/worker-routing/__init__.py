@@ -13,8 +13,8 @@ if _PKG_DIR not in _sys.path:
     _sys.path.insert(0, _PKG_DIR)
 
 from . import acceptance_gate as _gate
-from . import advisory_consultation as _advisory
 from . import agent_council as _council
+from . import critical_dialogue as _dialogue
 from . import dialogue_contracts as _dialogue_contracts
 from . import dialogue_degradation as _dialogue_degradation
 from . import learned_state as _learned_state
@@ -25,52 +25,53 @@ from . import prompt_assembler as _prompt_assembler
 from . import routing_check as _routing_check
 
 # Advisory and critical dialogue.
-run_critical_dialogue = _advisory.run_critical_dialogue
-run_advisory_consultation_debate = _advisory.run_advisory_consultation_debate
-run_debate_loop = _advisory.run_debate_loop
-run_canary_dialogue = _advisory.run_canary_dialogue
-run_post_mortem_loop = _advisory.run_post_mortem_loop
-dispatch_post_mortem_consultation = _advisory.dispatch_post_mortem_consultation
-ReviewCouncil = _advisory.ReviewCouncil
-ReviewRequest = _advisory.ReviewRequest
-ReviewOutcome = _advisory.ReviewOutcome
-SecurityVeto = _advisory.SecurityVeto
-SecurityVetoHandler = _advisory.SecurityVetoHandler
-ConsensusTable = _advisory.ConsensusTable
-PrivacyMode = _advisory.PrivacyMode
-DebateTransport = _advisory.DebateTransport
-RecurringFailureNotifier = _advisory.RecurringFailureNotifier
+run_critical_dialogue = _dialogue.run_critical_dialogue
+run_advisory_consultation_debate = _dialogue.run_advisory_consultation_debate
+run_debate_loop = _dialogue.run_debate_loop
+run_canary_dialogue = _dialogue.run_canary_dialogue
+run_post_mortem_loop = _dialogue.run_post_mortem_loop
+dispatch_post_mortem_consultation = _dialogue.dispatch_post_mortem_consultation
+request_council_review = _dialogue.request_council_review
+ReviewCouncil = _dialogue.ReviewCouncil
+ReviewRequest = _dialogue.ReviewRequest
+ReviewOutcome = _dialogue.ReviewOutcome
+SecurityVeto = _dialogue.SecurityVeto
+SecurityVetoHandler = _dialogue.SecurityVetoHandler
+ConsensusTable = _dialogue.ConsensusTable
+PrivacyMode = _dialogue.PrivacyMode
+DebateTransport = _dialogue.DebateTransport
+RecurringFailureNotifier = _dialogue.RecurringFailureNotifier
 
 # Dialogue contracts.
-AdvisoryDebateResult = _advisory.AdvisoryDebateResult
-AdvisoryDebateRound = _advisory.AdvisoryDebateRound
+AdvisoryDebateResult = _dialogue.AdvisoryDebateResult
+AdvisoryDebateRound = _dialogue.AdvisoryDebateRound
 AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
 AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
 AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
 AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
-AdvisoryTelemetryRecord = _advisory.AdvisoryTelemetryRecord
-CanaryFixture = _advisory.CanaryFixture
-CanaryResult = _advisory.CanaryResult
-ConsultationTranscript = _advisory.ConsultationTranscript
-CriticResponse = _advisory.CriticResponse
+AdvisoryTelemetryRecord = _dialogue.AdvisoryTelemetryRecord
+CanaryFixture = _dialogue.CanaryFixture
+CanaryResult = _dialogue.CanaryResult
+ConsultationTranscript = _dialogue.ConsultationTranscript
+CriticResponse = _dialogue.CriticResponse
 CriticVerdict = _dialogue_contracts.CriticVerdict
-DebateRoundRecord = _advisory.DebateRoundRecord
-DebateSessionState = _advisory.DebateSessionState
-DebateState = _advisory.DebateState
-DegradationLadderState = _advisory.DegradationLadderState
+DebateRoundRecord = _dialogue.DebateRoundRecord
+DebateSessionState = _dialogue.DebateSessionState
+DebateState = _dialogue.DebateState
+DegradationLadderState = _dialogue.DegradationLadderState
 DegradationRung = _dialogue_degradation.DegradationRung
-ExecutiveDialogueReport = _advisory.ExecutiveDialogueReport
-InvokeWorker = _advisory.InvokeWorker
-IsFamilyReachable = _advisory.IsFamilyReachable
-MissionCopy = _advisory.MissionCopy
+ExecutiveDialogueReport = _dialogue.ExecutiveDialogueReport
+InvokeWorker = _dialogue.InvokeWorker
+IsFamilyReachable = _dialogue.IsFamilyReachable
+MissionCopy = _dialogue.MissionCopy
 Occasion = _dialogue_contracts.Occasion
-RosterAssignment = _advisory.RosterAssignment
-RosterResolution = _advisory.RosterResolution
-RosterResolutionError = _advisory.RosterResolutionError
-RosterRole = _advisory.RosterRole
-RosterTopology = _advisory.RosterTopology
-RoundTurnResult = _advisory.RoundTurnResult
-TaskIdentity = _advisory.TaskIdentity
+RosterAssignment = _dialogue.RosterAssignment
+RosterResolution = _dialogue.RosterResolution
+RosterResolutionError = _dialogue.RosterResolutionError
+RosterRole = _dialogue.RosterRole
+RosterTopology = _dialogue.RosterTopology
+RoundTurnResult = _dialogue.RoundTurnResult
+TaskIdentity = _dialogue.TaskIdentity
 VerdictContractResult = _dialogue_contracts.VerdictContractResult
 
 
@@ -149,7 +150,7 @@ def resolve_model_name(model: str) -> str:
 
 
 resolve_cli_command = _invoker.build_worker_command
-classify_model_family = _advisory.classify_model_family
+classify_model_family = _dialogue.classify_model_family
 
 
 def classify_complexity(complexity: str) -> str:
@@ -194,7 +195,7 @@ __all__ = (  # noqa: RUF022 - plain str-sorted order; test_routing.py asserts tu
     "probe_local_model_availability", "prompt_local_fallback_decision", "read_current",
     "read_history", "read_journal", "record_plan_outcome", "record_review_verdict",
     "record_stalemate_resolution", "record_test_result", "reduce_outcomes_by_key",
-    "reduce_outcomes_positionally", "render_institutional_memory", "resolve_cli_command", "resolve_model_name", "roll_back",
+    "reduce_outcomes_positionally", "render_institutional_memory", "request_council_review", "resolve_cli_command", "resolve_model_name", "roll_back",
     "run_advisory_consultation_debate", "run_audit", "run_canary_dialogue",
     "run_critical_dialogue", "run_debate_loop", "run_post_mortem_loop",
 )

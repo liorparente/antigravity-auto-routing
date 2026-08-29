@@ -3334,7 +3334,7 @@ def _run_dispatched_post_mortem(
     skipping the fourth journal family here.
     """
     try:
-        run_critical_dialogue(
+        run_advisory_consultation_debate(
             task_description,
             invoke_worker,
             root_dir=root_dir,

@@ -4,8 +4,8 @@
 
 **Blocked by:** 02 — Expand: Implement the Deep CriticalDialogue Module
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Update `skills/worker-routing/__init__.py` to import dialogue symbols from `critical_dialogue.py`
-- [ ] Update all internal callers in `skills/worker-routing/` and `skills/council-review/` to target `critical_dialogue.py`
-- [ ] Verify that package-level symbol resolution and `__all__` sorting tests pass cleanly
+- [x] Update `skills/worker-routing/__init__.py` to import dialogue symbols from `critical_dialogue.py`
+- [x] Update all internal callers in `skills/worker-routing/` and `skills/council-review/` to target `critical_dialogue.py`
+- [x] Verify that package-level symbol resolution and `__all__` sorting tests pass cleanly
