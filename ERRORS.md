@@ -5,6 +5,12 @@
 
 ## Active Entries
 
+### ERR-0005: Dispatched Background Threads Bypassing Public Consultation Mock Seams
+- **Date:** 2026-08-29
+- **Root Cause:** In `critical_dialogue.py`, `_run_dispatched_post_mortem` directly invoked `run_critical_dialogue(...)` instead of the public alias `run_advisory_consultation_debate(...)`. Consequently, test harnesses patching `advisory_consultation.run_advisory_consultation_debate` with side effects were bypassed, preventing the background thread exception net from capturing and recording the simulated failure.
+- **Verified TDD Reproduction:** `skills/worker-routing/test_routing.py::AdvisoryBlockingStanceTests::test_dispatch_post_mortem_consultation_records_unexpected_exceptions_instead_of_dropping_them` failed with `AssertionError: 'sentinel-oops' not found in transcript` when direct invocation was used, and passed cleanly once routed through `run_advisory_consultation_debate`.
+- **Actionable Prevention Rule (Golden Rule 40):** Background dispatch wrappers must call the canonical public consultation alias to preserve mockable test seams across thread boundaries.
+
 ### ERR-0004: Event Loop Re-entrancy Failure in Synchronous Entry Points
 - **Date:** 2026-08-29
 - **Root Cause:** Invoking synchronous convenience wrappers (such as `request_council_review`) containing naked `asyncio.run(council.review(request))` from within an active asyncio event loop (e.g. asynchronous test runners, notebooks, or live async orchestrators) raised `RuntimeError: This event loop is already running`.

@@ -664,6 +664,14 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         ("asyncio", "event loop", "asyncio.run", "threadpool", "synchronous", "request_council_review", "RuntimeError", "coroutine", "bridge", "council"),
         ("critical_dialogue.py", "test_critical_dialogue.py", "*.py"),
     ),
+    GoldenRule(
+        40,
+        "Testing & TDD Seams",
+        "Invoke canonical consultation aliases in background dispatch threads",
+        "When spawning a background execution thread (e.g. dispatch_post_mortem_consultation), invoke the public consultation entry point (run_advisory_consultation_debate) as the thread's target rather than a direct internal function (run_critical_dialogue). This guarantees that dynamic test patches and mock side effects applied to the public alias propagate seamlessly into the background thread's execution net without leaking unhandled thread exceptions.",
+        ("thread", "background", "dispatch_post_mortem_consultation", "run_advisory_consultation_debate", "monkeypatch", "mock", "alias", "seam", "post-mortem"),
+        ("critical_dialogue.py", "test_routing.py", "*.py"),
+    ),
 )
 
 _INSTITUTIONAL_MEMORY_CATEGORY_ORDER = (
