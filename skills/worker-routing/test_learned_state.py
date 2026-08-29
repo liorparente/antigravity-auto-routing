@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -19,15 +18,17 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
+from unittest import mock
 
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
-    from . import learned_state, prompt_assembler
+    from . import learned_state, prompt_assembler, regenerate_institutional_memory
 else:
     import learned_state  # type: ignore[no-redef]
     import prompt_assembler  # type: ignore[no-redef]
+    import regenerate_institutional_memory  # type: ignore[no-redef]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -2062,71 +2063,60 @@ class GetScopedMemoryTests(unittest.TestCase):
             self.assertIn("[Multi-Harness Sync & Governance]", scoped)
 
 
-_MEMORY_RULE_LINE_RE = re.compile(r"^(\d+)\.\s")
-
-
-def _parse_institutional_memory_rules(text: str) -> list[tuple[int, str]]:
-    """Return each rule's `(id, category)` from `institutional-memory.md`.
-
-    A category is the text of the last `## `-prefixed heading seen so far
-    (skipping `## Metadata`, which precedes every rule); a rule is any line
-    starting with `N. ` at column 0 — wrapped continuation lines of a rule's
-    prose never start that way, so this only ever matches a rule's first
-    line, once each.
-    """
-    category: str | None = None
-    rules: list[tuple[int, str]] = []
-    for line in text.splitlines():
-        if line.startswith("## "):
-            heading = line[3:].strip()
-            category = None if heading == "Metadata" else heading
-            continue
-        match = _MEMORY_RULE_LINE_RE.match(line)
-        if match and category is not None:
-            rules.append((int(match.group(1)), category))
-    return rules
-
-
 class InstitutionalMemorySyncTests(unittest.TestCase):
-    def test_institutional_memory_contains_all_golden_rule_ids_and_matching_categories(
-        self,
-    ) -> None:
-        """Golden-rule IDs remain present with their matching categories.
-
-        This deliberately tests inclusion rather than total parity, so it
-        stays green while institutional memory carries unmigrated rules.
+    def test_institutional_memory_matches_rendered_golden_rules(self) -> None:
+        """knowledge/institutional-memory.md is deterministically generated
+        from prompt_assembler.GOLDEN_RULES and prompt_assembler.CATALOG_METADATA.
+        It must match render_institutional_memory() byte-for-byte.
         """
         memory_path = REPO_ROOT / "knowledge" / "institutional-memory.md"
-        parsed_categories_by_id = dict(
-            _parse_institutional_memory_rules(memory_path.read_text(encoding="utf-8"))
-        )
+        disk_content = memory_path.read_text(encoding="utf-8")
+        expected_content = prompt_assembler.render_institutional_memory()
+        self.assertEqual(disk_content, expected_content)
 
-        for rule in prompt_assembler.GOLDEN_RULES:
-            self.assertIn(rule.id, parsed_categories_by_id)
-            self.assertEqual(parsed_categories_by_id[rule.id], rule.category)
 
-    @unittest.skip(
-        "Neutralised pending spec 0014 (ticket 58) generation migration: "
-        "institutional-memory.md currently carries unmigrated rules (35 > 25); "
-        "see docs/specs/0014-generated-institutional-memory-and-single-source-rule-catalog.md"
-    )
-    def test_institutional_memory_matches_golden_rules(self) -> None:
-        """`knowledge/institutional-memory.md` is a human-readable rendering
-        of `prompt_assembler.GOLDEN_RULES` (spec 0011 ticket 03) — the two
-        must never silently drift apart: same 25 rules, same ids, same
-        categories.
-        """
-        memory_path = REPO_ROOT / "knowledge" / "institutional-memory.md"
-        parsed = _parse_institutional_memory_rules(
-            memory_path.read_text(encoding="utf-8")
-        )
+class InstitutionalMemoryRegenerationTests(unittest.TestCase):
+    def test_cli_check_reports_missing_stale_and_current_output(self) -> None:
+        script = REPO_ROOT / "skills" / "worker-routing" / "regenerate_institutional_memory.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "institutional-memory.md"
+            command = [sys.executable, str(script), "--check", "--output", str(output)]
+            self.assertEqual(subprocess.run(command, check=False).returncode, 1)
 
-        self.assertEqual(len(parsed), 25)
-        self.assertEqual(len(prompt_assembler.GOLDEN_RULES), 25)
+            write = subprocess.run(
+                [sys.executable, str(script), "--output", str(output)], check=False
+            )
+            self.assertEqual(write.returncode, 0)
+            self.assertEqual(subprocess.run(command, check=False).returncode, 0)
 
-        parsed_categories_by_id = dict(parsed)
-        golden_rules_by_id = {rule.id: rule.category for rule in prompt_assembler.GOLDEN_RULES}
-        self.assertEqual(parsed_categories_by_id, golden_rules_by_id)
+            output.write_text("stale", encoding="utf-8")
+            self.assertEqual(subprocess.run(command, check=False).returncode, 1)
+
+    def test_regeneration_replaces_an_existing_file_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "nested" / "institutional-memory.md"
+            output.parent.mkdir()
+            output.write_text("old content", encoding="utf-8")
+            original_replace = os.replace
+
+            def assert_atomic_replace(source: Path | str, destination: Path | str) -> None:
+                self.assertEqual(Path(source).parent, output.parent)
+                self.assertEqual(Path(destination), output)
+                self.assertEqual(output.read_text(encoding="utf-8"), "old content")
+                original_replace(source, destination)
+
+            with mock.patch.object(
+                regenerate_institutional_memory.os,
+                "replace",
+                side_effect=assert_atomic_replace,
+            ) as replace:
+                self.assertEqual(
+                    regenerate_institutional_memory.regenerate_institutional_memory(output), 0
+                )
+
+            replace.assert_called_once()
+            self.assertEqual(output.read_text(encoding="utf-8"), prompt_assembler.render_institutional_memory())
+            self.assertEqual(list(output.parent.glob(f".{output.name}.*")), [])
 
 
 if __name__ == "__main__":

@@ -70,7 +70,7 @@ CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 INSTALLED_FILES=(
     SKILL.md REFERENCE.md routing-audit.sh __init__.py routing_check.py
     agent_council.py dialogue_contracts.py dialogue_degradation.py
-    executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py
+    executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py regenerate_institutional_memory.py
     sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py
     consultation_policy.py debate_transport.py advisory_consultation.py
     production_invoker.py learning_journal.py learning_outcomes.py

@@ -217,4 +217,9 @@ The client-side state machine behavior that automatically resets a role's select
 ### FloatingActionPill
 A sticky glassmorphic bottom control bar in the Role Configuration Matrix dashboard that tracks uncommitted user edits (dirty state), provides a live change count with visual pulse, and exposes atomic Save, Undo, and Reset-to-Default actions. Ticket 49 / Spec 0013.
 
+### RuleCatalog
+The authoritative, strongly-typed in-code catalog of distilled engineering directives (`prompt_assembler.GOLDEN_RULES`) scored by `extract_scoped_memory` against task descriptions and target files to inject relevant institutional memory into worker prompts. Spec 0014.
+
+### InstitutionalMemoryDocument
+The human-readable Markdown build artifact (`knowledge/institutional-memory.md`) rendered deterministically from the [[RuleCatalog]] and its metadata by `prompt_assembler.render_institutional_memory()`. It is never edited directly. Spec 0014.
 
