@@ -813,9 +813,9 @@ class ProtocolSyncTests(unittest.TestCase):
                 target.parent / "council-review" for target in worker_targets
             )
             for council_target in council_targets:
-                legacy_facade = council_target / "scripts" / "council_review.py"
-                legacy_facade.parent.mkdir(parents=True, exist_ok=True)
-                legacy_facade.write_text("# retired facade\n", encoding="utf-8")
+                custom_facade = council_target / "scripts" / "council_review.py"
+                custom_facade.parent.mkdir(parents=True, exist_ok=True)
+                custom_facade.write_text("# user customization\n", encoding="utf-8")
                 legacy_policy = council_target / "references" / "council-policy.json"
                 legacy_policy.parent.mkdir(parents=True, exist_ok=True)
                 legacy_policy.write_text("{}\n", encoding="utf-8")
@@ -834,8 +834,11 @@ class ProtocolSyncTests(unittest.TestCase):
                     self.assertTrue(
                         (council_target / "scripts" / "provider_adapters.py").exists()
                     )
-                    self.assertFalse(
-                        (council_target / "scripts" / "council_review.py").exists()
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_text(encoding="utf-8"),
+                        "# user customization\n",
                     )
                     self.assertFalse(
                         (council_target / "references" / "council-policy.json").exists()

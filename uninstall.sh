@@ -327,7 +327,6 @@ for i in "${!TARGET_DIRS[@]}"; do
             )
         fi
         rm -f \
-            "$council_target_dir/scripts/council_review.py" \
             "$council_target_dir/council-policy.json" \
             "$council_target_dir/references/council-policy.json"
         while IFS= read -r -d '' council_dir; do
