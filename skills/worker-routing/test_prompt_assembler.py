@@ -207,7 +207,7 @@ class CatalogMetadataTests(unittest.TestCase):
         self.assertEqual(prompt_assembler.CATALOG_METADATA.last_reviewed, "2026-08-26")
         self.assertEqual(prompt_assembler.CATALOG_METADATA.review_interval_days, 30)
         with self.assertRaises(dataclasses.FrozenInstanceError):
-            metadata.review_interval_days = 31
+            metadata.review_interval_days = 31  # type: ignore[misc]
 
     def test_review_due_boundaries_and_future_review_date(self) -> None:
         metadata = prompt_assembler.CatalogMetadata(last_reviewed="2026-08-26")
@@ -254,7 +254,7 @@ class CatalogMetadataTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ValueError, "now must be a timezone-aware datetime, got a naive value"
         ):
-            prompt_assembler.is_catalog_review_due(now=datetime(2026, 9, 25))
+            prompt_assembler.is_catalog_review_due(now=datetime(2026, 9, 25))  # noqa: DTZ001
         with self.assertRaises(TypeError):
             prompt_assembler.is_catalog_review_due(now="2026-09-25")  # type: ignore[arg-type]
 

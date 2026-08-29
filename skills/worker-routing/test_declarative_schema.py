@@ -293,6 +293,7 @@ class TestNonRoleConfigKeysCoverage(ConfigLoadMixin, unittest.TestCase):
     treats it as a worker-role dict and mines it for "patterns"."""
 
     EXPECTED_NON_ROLE_KEYS: ClassVar[set[str]] = {
+        "_active_profile",
         "code_extensions",
         "safe_commands",
         "orchestrator",

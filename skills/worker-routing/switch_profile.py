@@ -5,8 +5,9 @@ import argparse
 import json
 import os
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import TextIO
 
 try:
     from . import routing_config
@@ -48,7 +49,7 @@ def read_profile(profile: Path) -> dict[str, object]:
     with profile.open(encoding="utf-8") as stream:
         data = json.load(stream)
     if not isinstance(data, dict):
-        raise ValueError(f"Profile must contain a JSON object: {profile}")
+        raise TypeError(f"Profile must contain a JSON object: {profile}")
     return data
 
 

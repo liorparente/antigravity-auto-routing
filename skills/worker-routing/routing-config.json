@@ -3,7 +3,6 @@
     "name": "Gemini 3.6 Flash (High/Medium/Low) / Gemini 3.1 Pro (High/Low)",
     "patterns": [
       "agy",
-      "gemini-3.7-flash",
       "gemini-3.6-flash",
       "gemini-3.5-flash",
       "gemini-3.1-pro"
@@ -58,13 +57,14 @@
   "roles": {
     "planner": {
       "capability_requirements": {
-        "reasoning_tier": "medium",
+        "reasoning_tier": "high",
         "tool_access": "read",
         "min_context": 200000,
         "local_only": false
       },
       "preferred_providers": [
         "claude_opus_5",
+        "claude_fable_5",
         "codex_sol"
       ]
     },
@@ -76,9 +76,8 @@
         "local_only": false
       },
       "preferred_providers": [
-        "gemini_flash_37",
-        "claude_opus_5",
-        "claude_sonnet_5"
+        "claude_sonnet_5",
+        "gemini_flash_high"
       ]
     },
     "builder_light": {
@@ -89,33 +88,33 @@
         "local_only": false
       },
       "preferred_providers": [
-        "qwen_local",
+        "codex_terra",
         "codex_luna",
-        "gemini_flash_37"
+        "gemini_flash_high"
       ]
     },
     "reviewer_architecture": {
       "capability_requirements": {
-        "reasoning_tier": "medium",
-        "tool_access": "read",
-        "min_context": 128000,
-        "local_only": false
-      },
-      "preferred_providers": [
-        "claude_opus_5",
-        "codex_sol"
-      ]
-    },
-    "reviewer_risk": {
-      "capability_requirements": {
-        "reasoning_tier": "medium",
+        "reasoning_tier": "high",
         "tool_access": "read",
         "min_context": 128000,
         "local_only": false
       },
       "preferred_providers": [
         "codex_sol",
-        "gemini_flash_37"
+        "claude_opus_5"
+      ]
+    },
+    "reviewer_risk": {
+      "capability_requirements": {
+        "reasoning_tier": "high",
+        "tool_access": "read",
+        "min_context": 128000,
+        "local_only": false
+      },
+      "preferred_providers": [
+        "codex_sol",
+        "gemini_pro"
       ]
     },
     "reviewer_maintainability": {
@@ -126,8 +125,8 @@
         "local_only": false
       },
       "preferred_providers": [
-        "gemini_flash_37",
-        "codex_luna"
+        "gemini_flash_high",
+        "codex_terra"
       ]
     },
     "reviewer_security": {
@@ -147,11 +146,10 @@
         "reasoning_tier": "high",
         "tool_access": "read",
         "min_context": 32000,
-        "local_only": false
+        "local_only": true
       },
       "preferred_providers": [
-        "gemini_flash_37",
-        "claude_opus_5"
+        "lm_studio_local"
       ]
     },
     "sensitive_executor": {
@@ -162,7 +160,7 @@
         "local_only": true
       },
       "preferred_providers": [
-        "qwen_local"
+        "lm_studio_local"
       ]
     }
   },
@@ -170,7 +168,12 @@
     "claude_opus_5": {
       "adapter": "claude_code_cli",
       "model": "claude-opus-5",
-      "default_reasoning_effort": "medium"
+      "default_reasoning_effort": "high"
+    },
+    "claude_fable_5": {
+      "adapter": "claude_code_cli",
+      "model": "claude-fable-5",
+      "default_reasoning_effort": "high"
     },
     "claude_sonnet_5": {
       "adapter": "claude_code_cli",
@@ -180,6 +183,11 @@
     "codex_sol": {
       "adapter": "codex_cli",
       "model": "gpt-5.6-sol",
+      "default_reasoning_effort": "high"
+    },
+    "codex_terra": {
+      "adapter": "codex_cli",
+      "model": "gpt-5.6-terra",
       "default_reasoning_effort": "medium"
     },
     "codex_luna": {
@@ -187,14 +195,19 @@
       "model": "gpt-5.6-luna",
       "default_reasoning_effort": "low"
     },
-    "gemini_flash_37": {
+    "gemini_flash_high": {
       "adapter": "antigravity_cli",
-      "model": "gemini-3.7-flash",
+      "model": "gemini-3.6-flash",
       "default_reasoning_effort": "high"
     },
-    "qwen_local": {
+    "gemini_pro": {
+      "adapter": "antigravity_cli",
+      "model": "gemini-3.1-pro",
+      "default_reasoning_effort": "high"
+    },
+    "lm_studio_local": {
       "adapter": "lm_studio_local",
-      "model": "qwen3.8-27b-mlx",
+      "model": "qwen3-coder-30b",
       "default_reasoning_effort": "medium"
     }
   },
@@ -325,8 +338,8 @@
     ],
     "adjudicators": [
       {
-        "id": "gemini-adj",
-        "model": "gemini-3.7-flash",
+        "id": "lm-studio",
+        "model": "qwen3-coder-30b",
         "effort_mapping": {
           "high": "high"
         }
@@ -395,5 +408,5 @@
     "^\\s*python3\\s+-m\\s+unittest(?:\\s+[^>|&;]+)?\\s*$",
     "^\\s*lsof(?:\\s+-[a-zA-Z0-9:]+)?(?:\\s+[^>|&;]+)?\\s*$"
   ],
-  "_active_profile": "hybrid_local_60usd"
+  "_active_profile": "baseline_cloud_default"
 }

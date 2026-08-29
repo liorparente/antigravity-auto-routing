@@ -266,6 +266,7 @@ TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 # (dicts with no "patterns" key) were already inert under the old dict-shape
 # check; they're listed explicitly now for the same documented-intent reason.
 NON_ROLE_CONFIG_KEYS = {
+    "_active_profile",
     "code_extensions",
     "safe_commands",
     "orchestrator",
