@@ -8,7 +8,6 @@ import io
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -18,32 +17,41 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 if __package__:
-    from . import critical_dialogue, dialogue_contracts, learned_state
+    from . import (
+        consultation_policy,
+        critical_dialogue,
+        debate_state_machine,
+        debate_transport,
+        dialogue_contracts,
+        learned_state,
+        prompt_assembler,
+    )
 else:
+    import consultation_policy  # type: ignore[no-redef]
     import critical_dialogue  # type: ignore[no-redef]
+    import debate_state_machine  # type: ignore[no-redef]
+    import debate_transport  # type: ignore[no-redef]
     import dialogue_contracts  # type: ignore[no-redef]
     import learned_state  # type: ignore[no-redef]
+    import prompt_assembler  # type: ignore[no-redef]
 
 
 class PanelTopologyTests(unittest.TestCase):
     def test_only_complex_reviews_use_the_panel(self) -> None:
         panel_occasions: tuple[dialogue_contracts.Occasion, ...] = ("plan-review", "code-review")
         for occasion in panel_occasions:
-            self.assertTrue(critical_dialogue.is_panel_topology(occasion, " Complex "))
+            self.assertTrue(debate_state_machine.is_panel_topology(occasion, " Complex "))
         non_panel_occasions: tuple[dialogue_contracts.Occasion, ...] = ("ambiguity", "post-mortem")
         for occasion in non_panel_occasions:
-            self.assertFalse(critical_dialogue.is_panel_topology(occasion, "complex"))
+            self.assertFalse(debate_state_machine.is_panel_topology(occasion, "complex"))
         for complexity in ("trivial", "simple", "medium", "unknown"):
-            self.assertFalse(critical_dialogue.is_panel_topology("plan-review", complexity))
+            self.assertFalse(debate_state_machine.is_panel_topology("plan-review", complexity))
 
 
 class StalemateReportTests(unittest.TestCase):
     def test_pair_report_keeps_one_critic_and_three_options(self) -> None:
-        report = critical_dialogue.build_stalemate_report("planner", "critic")
+        report = debate_state_machine.build_stalemate_report("planner", "critic")
 
         self.assertEqual(report.planner_position, "planner")
         self.assertEqual(report.critic_position, "critic")
@@ -52,7 +60,7 @@ class StalemateReportTests(unittest.TestCase):
         self.assertEqual(report.options[1].label, "Approve Critic Architecture")
 
     def test_panel_report_preserves_each_critic_and_combines_option_text(self) -> None:
-        report = critical_dialogue.build_stalemate_report("planner", "critic a", "critic b")
+        report = debate_state_machine.build_stalemate_report("planner", "critic a", "critic b")
 
         self.assertEqual(report.critic_position, "critic a")
         self.assertEqual(report.critic_b_position, "critic b")
@@ -65,10 +73,10 @@ class StalemateReportTests(unittest.TestCase):
 
 class VerdictEvaluationTests(unittest.TestCase):
     def test_single_critic_verdicts(self) -> None:
-        self.assertEqual(critical_dialogue.evaluate_round_verdicts("APPROVE"), (True, None))
-        self.assertEqual(critical_dialogue.evaluate_round_verdicts("REVISE"), (False, None))
+        self.assertEqual(debate_state_machine.evaluate_round_verdicts("APPROVE"), (True, None))
+        self.assertEqual(debate_state_machine.evaluate_round_verdicts("REVISE"), (False, None))
         self.assertEqual(
-            critical_dialogue.evaluate_round_verdicts(None),
+            debate_state_machine.evaluate_round_verdicts(None),
             (False, "unparseable verdict: None"),
         )
 
@@ -78,27 +86,27 @@ class VerdictEvaluationTests(unittest.TestCase):
         malformed = dialogue_contracts.VerdictContractResult("unparseable", 0, 0)
 
         self.assertEqual(
-            critical_dialogue.evaluate_round_verdicts(approved.verdict), (True, None)
+            debate_state_machine.evaluate_round_verdicts(approved.verdict), (True, None)
         )
         self.assertEqual(
-            critical_dialogue.evaluate_round_verdicts(revise.verdict), (False, None)
+            debate_state_machine.evaluate_round_verdicts(revise.verdict), (False, None)
         )
         self.assertEqual(
-            critical_dialogue.evaluate_round_verdicts(malformed.verdict),
+            debate_state_machine.evaluate_round_verdicts(malformed.verdict),
             (False, "unparseable verdict: unparseable"),
         )
 
     def test_panel_verdicts_require_both_approvals(self) -> None:
         self.assertEqual(
-            critical_dialogue.evaluate_round_verdicts("APPROVE", "APPROVE", is_panel=True),
+            debate_state_machine.evaluate_round_verdicts("APPROVE", "APPROVE", is_panel=True),
             (True, None),
         )
         self.assertEqual(
-            critical_dialogue.evaluate_round_verdicts("APPROVE", "REVISE", is_panel=True),
+            debate_state_machine.evaluate_round_verdicts("APPROVE", "REVISE", is_panel=True),
             (False, None),
         )
         self.assertEqual(
-            critical_dialogue.evaluate_round_verdicts("APPROVE", None, is_panel=True),
+            debate_state_machine.evaluate_round_verdicts("APPROVE", None, is_panel=True),
             (False, "unparseable verdict: critic_a=APPROVE, critic_b=None"),
         )
 
@@ -134,7 +142,7 @@ class CriticResponsePayloadTests(unittest.TestCase):
 class ScopedMemoryPromptWiringTests(unittest.TestCase):
     def test_planner_prompt_embeds_scoped_institutional_memory_by_default(self) -> None:
         task = "Fix a flaky test that leaks mocks across the CI suite"
-        expected_memory = critical_dialogue.extract_scoped_memory(task)
+        expected_memory = prompt_assembler.extract_scoped_memory(task)
 
         prompt = critical_dialogue._build_planner_prompt(task)
 
@@ -145,7 +153,7 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
 
     def test_critic_prompt_embeds_scoped_institutional_memory_by_default(self) -> None:
         task = "Fix a flaky test that leaks mocks across the CI suite"
-        expected_memory = critical_dialogue.extract_scoped_memory(task)
+        expected_memory = prompt_assembler.extract_scoped_memory(task)
 
         prompt = critical_dialogue._build_critic_prompt(task, "Proposed plan")
 
@@ -169,8 +177,8 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
                 root_dir=root,
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
-            expected_memory = critical_dialogue.get_scoped_memory(root, task)
-            default_memory = critical_dialogue.extract_scoped_memory(task)
+            expected_memory = learned_state.get_scoped_memory(root, task)
+            default_memory = prompt_assembler.extract_scoped_memory(task)
             self.assertNotEqual(expected_memory, default_memory)
 
             prompt = critical_dialogue._build_planner_prompt(task, root_dir=root)
@@ -193,8 +201,8 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
                 root_dir=root,
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
-            expected_memory = critical_dialogue.get_scoped_memory(root, task)
-            default_memory = critical_dialogue.extract_scoped_memory(task)
+            expected_memory = learned_state.get_scoped_memory(root, task)
+            default_memory = prompt_assembler.extract_scoped_memory(task)
             self.assertNotEqual(expected_memory, default_memory)
 
             prompt = critical_dialogue._build_critic_prompt(
@@ -227,8 +235,8 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
                 root_dir=root,
                 now=datetime(2026, 1, 1, tzinfo=timezone.utc),
             )
-            expected_memory = critical_dialogue.get_scoped_memory(root, task)
-            default_memory = critical_dialogue.extract_scoped_memory(task)
+            expected_memory = learned_state.get_scoped_memory(root, task)
+            default_memory = prompt_assembler.extract_scoped_memory(task)
             self.assertNotEqual(expected_memory, default_memory)
 
             planner_prompts: list[str] = []
@@ -260,10 +268,10 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
         # ranking has to come from the `target_files` file-pattern match
         # alone, not from keyword overlap with the task text.
         task = "Perform regular repository maintenance"
-        expected_memory = critical_dialogue.extract_scoped_memory(
+        expected_memory = prompt_assembler.extract_scoped_memory(
             task, target_files=["NOTES.md"]
         )
-        default_memory = critical_dialogue.extract_scoped_memory(task)
+        default_memory = prompt_assembler.extract_scoped_memory(task)
         self.assertNotEqual(expected_memory, default_memory)
 
         prompt = critical_dialogue._build_planner_prompt(task, target_files=["NOTES.md"])
@@ -273,10 +281,10 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
 
     def test_critic_prompt_scopes_by_target_files_file_pattern(self) -> None:
         task = "Perform regular repository maintenance"
-        expected_memory = critical_dialogue.extract_scoped_memory(
+        expected_memory = prompt_assembler.extract_scoped_memory(
             task, target_files=["NOTES.md"]
         )
-        default_memory = critical_dialogue.extract_scoped_memory(task)
+        default_memory = prompt_assembler.extract_scoped_memory(task)
         self.assertNotEqual(expected_memory, default_memory)
 
         prompt = critical_dialogue._build_critic_prompt(
@@ -290,10 +298,10 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
         self,
     ) -> None:
         task = "Perform regular repository maintenance"
-        expected_memory = critical_dialogue.extract_scoped_memory(
+        expected_memory = prompt_assembler.extract_scoped_memory(
             task, target_files=["NOTES.md"]
         )
-        default_memory = critical_dialogue.extract_scoped_memory(task)
+        default_memory = prompt_assembler.extract_scoped_memory(task)
         self.assertNotEqual(expected_memory, default_memory)
 
         planner_prompts: list[str] = []
@@ -320,26 +328,26 @@ class ScopedMemoryPromptWiringTests(unittest.TestCase):
 
 class DebateStateTests(unittest.TestCase):
     def test_round_and_session_state_construct_with_safe_defaults(self) -> None:
-        record = critical_dialogue.DebateRoundRecord(
+        record = debate_state_machine.DebateRoundRecord(
             1, "plan", "critic", "critic b", "REVISE", "APPROVE"
         )
-        state = critical_dialogue.DebateSessionState("plan-review", "complex", 3, True)
+        state = debate_state_machine.DebateSessionState("plan-review", "complex", 3, True)
 
         self.assertEqual(record.round_index, 1)
         self.assertFalse(record.is_consensus)
         self.assertEqual(state.rounds, ())
         self.assertFalse(state.consensus_reached)
         with self.assertRaises(FrozenInstanceError):
-            state.rounds = (record,)
+            state.rounds = (record,)  # type: ignore[misc]
 
     def test_advance_returns_a_new_pair_or_panel_state(self) -> None:
-        pair = critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False)
-        revised = critical_dialogue.advance_debate_state(
-            pair, critical_dialogue.DebateRoundRecord(1, "plan", "critique", critic_a_verdict="REVISE")
+        pair = debate_state_machine.DebateSessionState("ambiguity", "medium", 2, False)
+        revised = debate_state_machine.advance_debate_state(
+            pair, debate_state_machine.DebateRoundRecord(1, "plan", "critique", critic_a_verdict="REVISE")
         )
-        approved = critical_dialogue.advance_debate_state(
-            critical_dialogue.DebateSessionState("plan-review", "complex", 2, True),
-            critical_dialogue.DebateRoundRecord(1, "panel plan", "a", "b", "APPROVE", "APPROVE"),
+        approved = debate_state_machine.advance_debate_state(
+            debate_state_machine.DebateSessionState("plan-review", "complex", 2, True),
+            debate_state_machine.DebateRoundRecord(1, "panel plan", "a", "b", "APPROVE", "APPROVE"),
         )
         self.assertEqual(pair.rounds, ())
         self.assertIsInstance(revised.rounds, tuple)
@@ -348,10 +356,10 @@ class DebateStateTests(unittest.TestCase):
         self.assertEqual(approved.final_plan, "panel plan")
 
     def test_advance_normalizes_record_outcome_fields(self) -> None:
-        state = critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False)
-        result = critical_dialogue.advance_debate_state(
+        state = debate_state_machine.DebateSessionState("ambiguity", "medium", 2, False)
+        result = debate_state_machine.advance_debate_state(
             state,
-            critical_dialogue.DebateRoundRecord(
+            debate_state_machine.DebateRoundRecord(
                 1, "plan", "critique", critic_a_verdict="APPROVE", is_consensus=False, error="stale"
             ),
         )
@@ -361,23 +369,23 @@ class DebateStateTests(unittest.TestCase):
         self.assertIsNone(result.rounds[0].error)
 
     def test_advance_leaves_terminal_states_unchanged(self) -> None:
-        record = critical_dialogue.DebateRoundRecord(2, "new", "critic", critic_a_verdict="APPROVE")
+        record = debate_state_machine.DebateRoundRecord(2, "new", "critic", critic_a_verdict="APPROVE")
         terminal_states = (
-            critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False, consensus_reached=True),
-            critical_dialogue.DebateSessionState("ambiguity", "medium", 2, False, error="failed"),
-            critical_dialogue.DebateSessionState(
+            debate_state_machine.DebateSessionState("ambiguity", "medium", 2, False, consensus_reached=True),
+            debate_state_machine.DebateSessionState("ambiguity", "medium", 2, False, error="failed"),
+            debate_state_machine.DebateSessionState(
                 "ambiguity", "medium", 2, False,
-                stalemate_report=critical_dialogue.build_stalemate_report("plan", "critic"),
+                stalemate_report=debate_state_machine.build_stalemate_report("plan", "critic"),
             ),
-            critical_dialogue.DebateSessionState(
+            debate_state_machine.DebateSessionState(
                 "ambiguity", "medium", 1, False,
-                rounds=(critical_dialogue.DebateRoundRecord(1, "plan", "critic"),),
+                rounds=(debate_state_machine.DebateRoundRecord(1, "plan", "critic"),),
             ),
         )
 
         for state in terminal_states:
             with self.subTest(state=state):
-                self.assertIs(critical_dialogue.advance_debate_state(state, record), state)
+                self.assertIs(debate_state_machine.advance_debate_state(state, record), state)
 
 
 class ProductionOrchestrationTests(unittest.TestCase):
@@ -422,7 +430,7 @@ class ProductionOrchestrationTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), result.executive_report.budget_alert)
 
     def test_consecutive_default_path_worker_failures_alert_to_errors_md(self) -> None:
-        """debate_orchestrator's default worker path routes isolated process
+        """critical_dialogue's default worker path routes isolated process
         execution and failure alerting through its re-exported DebateTransport
         / RecurringFailureNotifier (see `run_advisory_consultation_debate`'s
         `invoke_worker is None` branch), rather than a hand-rolled notifier
@@ -435,9 +443,9 @@ class ProductionOrchestrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root_dir = Path(tmp)
-            transport = critical_dialogue.DebateTransport(
+            transport = debate_transport.DebateTransport(
                 runner=failing_runner,
-                notifier=critical_dialogue.RecurringFailureNotifier(
+                notifier=debate_transport.RecurringFailureNotifier(
                     threshold=critical_dialogue.ESCALATION_FAILURE_THRESHOLD
                 ),
                 root_dir=root_dir,
@@ -508,7 +516,7 @@ class ProductionOrchestrationTests(unittest.TestCase):
 
         def spy(
             occasion: dialogue_contracts.Occasion, complexity: str
-        ) -> critical_dialogue.ConsultationTopology:
+        ) -> debate_state_machine.ConsultationTopology:
             calls.append((occasion, complexity))
             return real_resolve_topology(occasion, complexity)
 
@@ -976,8 +984,8 @@ class _FakeProviderAdaptersModule:
 # 07, ADR 0012's 1-shot round), its unilateral security veto, and its
 # stalemate escalation. `skills/council-review/tests/test_council_review.py`
 # (`CouncilPerspectiveFastPathTests`) covers the same flow through the
-# `council_review` facade with a wider matrix of adjudicator scenarios; this
-# suite exercises `ReviewCouncil` directly, where it is actually defined.
+# `critical_dialogue` public API with a wider matrix of adjudicator scenarios;
+# this suite exercises `ReviewCouncil` directly, where it is actually defined.
 class ReviewCouncilByPerspectiveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -1141,7 +1149,7 @@ class ReviewCouncilByPerspectiveTests(unittest.TestCase):
         self.assertEqual(outcome.unresolved_blockers, 1)
 
     def test_fast_path_disabled_escalates_to_adjudicator_despite_quorum(self) -> None:
-        base = json.loads(critical_dialogue.ROUTING_CONFIG_PATH.read_text())
+        base = json.loads(consultation_policy.ROUTING_CONFIG_PATH.read_text())
         base.setdefault("consultation_policy", {})["council_policy"] = {"fast_path_enabled": False}
         with tempfile.TemporaryDirectory() as config_dir:
             config_path = Path(config_dir) / "routing-config.json"

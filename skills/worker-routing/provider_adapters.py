@@ -1,26 +1,32 @@
+"""Provider adapters owned by the consolidated worker-routing package."""
 from __future__ import annotations
 
 import dataclasses
 import hashlib
-import sys
-from pathlib import Path
 from typing import Any
 
-# Add skills/worker-routing to path if available
-WORKER_ROUTING_DIR = str(Path(__file__).resolve().parent.parent.parent / "worker-routing")
-if WORKER_ROUTING_DIR not in sys.path:
-    sys.path.insert(0, WORKER_ROUTING_DIR)
-
-from dialogue_contracts import parse_perspective_review  # type: ignore[import-not-found]
-from production_invoker import (  # type: ignore[import-not-found]
-    WORKER_MODE_TOKEN,
-    AsyncRunner,
-    WorkerExecutionResult,
-    build_worker_command,
-    extract_review_payload,
-    invoke_worker_async,
-)
-from prompt_assembler import build_perspective_reviewer_prompt  # type: ignore[import-not-found]
+if __package__:
+    from .dialogue_contracts import Occasion, parse_perspective_review
+    from .production_invoker import (
+        WORKER_MODE_TOKEN,
+        AsyncRunner,
+        WorkerExecutionResult,
+        build_worker_command,
+        extract_review_payload,
+        invoke_worker_async,
+    )
+    from .prompt_assembler import build_perspective_reviewer_prompt
+else:
+    from dialogue_contracts import Occasion, parse_perspective_review  # type: ignore[no-redef]
+    from production_invoker import (  # type: ignore[no-redef]
+        WORKER_MODE_TOKEN,
+        AsyncRunner,
+        WorkerExecutionResult,
+        build_worker_command,
+        extract_review_payload,
+        invoke_worker_async,
+    )
+    from prompt_assembler import build_perspective_reviewer_prompt  # type: ignore[no-redef]
 
 
 class ReviewerAdapter:
@@ -136,7 +142,7 @@ class PerspectiveReviewerAdapter(ReviewerAdapter):
         *,
         model: str | None = None,
         effort: str | None = None,
-        occasion: str = "plan-review",
+        occasion: Occasion = "plan-review",
         task_description: str = "",
         runner: AsyncRunner | None = None,
     ) -> None:

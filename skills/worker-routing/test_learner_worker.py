@@ -11,7 +11,6 @@ from __future__ import annotations
 import ast
 import json
 import re
-import sys
 import tempfile
 import unittest
 from collections.abc import Callable
@@ -20,9 +19,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import learned_state, learner_worker, risk_tiered_application

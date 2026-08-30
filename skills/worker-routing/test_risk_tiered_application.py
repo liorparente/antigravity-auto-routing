@@ -7,15 +7,11 @@ no-op handling when adopting unchanged documents.
 """
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import learned_state, learning_journal, risk_tiered_application

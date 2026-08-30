@@ -8,7 +8,7 @@ place that JSON is turned into validated, immutable dataclasses:
 ``load_routing_config``/``parse_routing_config`` are the only functions that
 should ever call ``json.load`` on ``routing-config.json`` — every consumer
 in this package (``production_invoker``, ``consultation_policy``,
-``dialogue_degradation``, ``debate_orchestrator``, ``routing_check``)
+``dialogue_degradation``, ``critical_dialogue``, ``routing_check``)
 delegates to a `RoutingConfig` built here instead.
 
 Validation is fail-closed and per-field: a malformed value raises
@@ -796,7 +796,7 @@ def _parse_critical_dialogue(data: Any, key_path: str) -> CriticalDialogueConfig
     """Parse the `critical_dialogue` section with per-field fallback.
 
     Unlike most sections, each of this section's two keys is independently
-    optional — mirroring `debate_orchestrator._load_code_review_risk_config`'s
+    optional — mirroring `critical_dialogue._load_code_review_risk_config`'s
     pre-ticket-42 `section.get(key, DEFAULT_*)` contract, which several of
     that module's own tests exercise with a config file specifying only one
     of the two keys. A *present* key with the wrong type/value still raises.
@@ -834,7 +834,7 @@ def _parse_roster_topology(data: Any, key_path: str) -> RosterTopologyConfig:
 def _parse_canary_cadence(data: Any, key_path: str) -> CanaryCadenceConfig:
     """Parse the `canary_cadence` section with per-field fallback — same
     independently-optional-keys contract as `_parse_critical_dialogue`,
-    mirroring `debate_orchestrator._load_canary_cadence_config`'s
+    mirroring `critical_dialogue._load_canary_cadence_config`'s
     pre-ticket-42 behavior and its tests covering a config file that sets
     only one of the two keys.
     """

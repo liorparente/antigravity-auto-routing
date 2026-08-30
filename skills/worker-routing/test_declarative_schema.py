@@ -10,13 +10,9 @@ or, from this directory:
 from __future__ import annotations
 
 import json
-import sys
 import unittest
 from pathlib import Path
 from typing import Any, ClassVar
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import routing_check

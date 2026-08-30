@@ -117,9 +117,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 DIFF_FILE_RE = re.compile(r"^\+\+\+\s+b/(.+)$", re.MULTILINE)
 
 
@@ -1402,7 +1399,7 @@ def _journalable_session_id(session_id: str) -> tuple[str, str | None]:
     audits of the same conversation derive the same id, so the session stays
     one session and `ComplianceRecord`'s per-session reduction still works.
 
-    This is `critical_dialogue._default_task_id`'s precedent, applied to
+    This is `dialogue_transcript._default_task_id`'s precedent, applied to
     the other identifier: a digest, never the text it came from. The halt
     exception that governs *task* text does not reach here — a conversation's
     directory name is not halted task text, and no redaction boundary

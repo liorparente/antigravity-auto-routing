@@ -1,12 +1,7 @@
 """Hermetic coverage for pure sensitivity scanning and safe identities."""
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import sensitivity_redactor
@@ -15,6 +10,22 @@ else:
 
 
 class SensitivityRedactorTests(unittest.TestCase):
+    def test_classification_distinguishes_credentials_from_other_sensitive_text(
+        self,
+    ) -> None:
+        self.assertEqual(
+            sensitivity_redactor.classify_sensitivity("contains secret"),
+            (True, False),
+        )
+        self.assertEqual(
+            sensitivity_redactor.classify_sensitivity("contains API_KEY"),
+            (True, True),
+        )
+        self.assertEqual(
+            sensitivity_redactor.classify_sensitivity("ordinary task"),
+            (False, False),
+        )
+
     def test_scan_returns_marker_not_surrounding_sensitive_text(self) -> None:
         marker = sensitivity_redactor.scan_sensitivity_markers("never print API_KEY=top-secret")
 

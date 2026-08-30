@@ -2,14 +2,10 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import dialogue_degradation

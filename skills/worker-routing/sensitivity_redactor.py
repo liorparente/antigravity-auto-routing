@@ -12,6 +12,7 @@ from dataclasses import dataclass
 __all__ = [
     "SENSITIVITY_MARKERS",
     "TaskIdentity",
+    "classify_sensitivity",
     "derive_safe_task_identity",
     "detect_sensitivity_marker",
     "scan_sensitivity_markers",
@@ -20,6 +21,14 @@ __all__ = [
 SENSITIVITY_MARKERS: tuple[str, ...] = (
     "AGY_CALIBRATION_SECRET", "api_key", "sk-", "bearer ",
     "BEGIN PRIVATE KEY", "password", "secret", "[SENSITIVE]",
+)
+
+_CREDENTIAL_MARKERS: tuple[str, ...] = (
+    "api_key",
+    "sk-",
+    "bearer ",
+    "private key",
+    "password",
 )
 
 
@@ -44,6 +53,14 @@ def scan_sensitivity_markers(text: str, markers: Sequence[str] = SENSITIVITY_MAR
         if marker.lower() in lowered:
             return marker
     return None
+
+
+def classify_sensitivity(text: str) -> tuple[bool, bool]:
+    """Return whether text is sensitive and whether it contains credentials."""
+    return (
+        scan_sensitivity_markers(text) is not None,
+        scan_sensitivity_markers(text, markers=_CREDENTIAL_MARKERS) is not None,
+    )
 
 
 def derive_safe_task_identity(

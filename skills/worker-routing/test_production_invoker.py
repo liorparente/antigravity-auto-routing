@@ -9,15 +9,11 @@ import io
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import critical_dialogue, learning_journal, production_invoker

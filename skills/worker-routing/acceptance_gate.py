@@ -10,7 +10,7 @@ applies (`docs/specs/0004-learning-loop.md`'s "Risk-tiered application").
 **The third and final test seam.** `learning_journal.py`'s own docstring
 names its one seam (`root_dir`) and defers the other two — "the worker
 callable and the benchmark runner — [that] belong to later modules." The
-worker callable is `advisory_consultation.InvokeWorker`/
+worker callable is `critical_dialogue.InvokeWorker`/
 `production_invoker.make_journaled_invoke_worker`. `evaluate_proposal`'s
 `runner` parameter is the last one: a zero-argument callable that returns one
 trial's score in production (driving the real evaluator) and a scripted

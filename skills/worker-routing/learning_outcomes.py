@@ -18,7 +18,7 @@ internal invariant-carrier — the thing that makes "a halted task carries no
 tag" unexpressible — and it is built at the seam, by the code that owns the
 schema, never assembled by a caller who came for something else. The two
 surfaces disagreed for one ticket (this one took an id, the factory demanded
-a built label), which is precisely why `advisory_consultation` had grown an
+a built label), which is precisely why the orchestration seam had grown an
 `import learning_journal` it did not otherwise need. Any future entry point
 added to this loop takes the id.
 
@@ -39,7 +39,7 @@ strictly worse than attaching it to the task — so these functions pass
 governs `task_id` two paragraphs down, applied to the other identifier:
 nothing here invents an identity it was not given.
 
-**No caller ever gets a synthetic `task_id`.** `advisory_consultation`'s
+**No caller ever gets a synthetic `task_id`.** `critical_dialogue`'s
 `_resolve_task_id` invents one when a *decision* needs an identity and the
 caller supplied none — that is correct there because some identity has to
 exist before a decision can be journaled at all. An *outcome* is the
@@ -78,12 +78,12 @@ construction path in `learning_journal`.
 
 **The stalemate function is wired to the real stalemate path, not a stand-in
 for one.** `record_stalemate_resolution` takes the actual
-`advisory_consultation.AdvisoryStalemateReport` a stalemate produced and the
+`dialogue_contracts.AdvisoryStalemateReport` a stalemate produced and the
 actual `AdvisoryResolutionOption` the human chose from `report.options` —
 not a bare integer a caller could mistype — and verifies the option genuinely
 belongs to that report before mapping it to the `stalemate_resolution`
 verdict `learning_journal` already reserved for it (`"planner"`, `"critic"`,
-or `"human"`, in the same order `advisory_consultation._build_stalemate_report`
+or `"human"`, in the same order `debate_state_machine.build_stalemate_report`
 builds its three options). As of this ticket nothing in the codebase captures
 which option a human actually picked — `run_advisory_consultation_debate`
 returns the report and stops, and no interactive prompt exists anywhere in
@@ -104,17 +104,17 @@ else:
 
 if TYPE_CHECKING:
     # Annotation-only under `from __future__ import annotations`:
-    # `record_stalemate_resolution` names two of this module's types in its
+    # `record_stalemate_resolution` names two `dialogue_contracts` types in its
     # signature and touches neither at runtime (`chosen not in
     # report.options` and `chosen.id` are plain attribute access). Importing
     # it for real would make every caller of `record_test_result` pay for
-    # `critical_dialogue` and the `production_invoker` chain behind it.
+    # dependencies needed only by static analysis.
     if __package__:
-        from . import critical_dialogue
+        from . import dialogue_contracts
     else:
-        import critical_dialogue  # type: ignore[no-redef]
+        import dialogue_contracts  # type: ignore[no-redef]
 
-# Mirrors `advisory_consultation._build_stalemate_report`'s three options, in
+# Mirrors `debate_state_machine.build_stalemate_report`'s three options, in
 # order: (1) approve the Planner's architecture, (2) approve the Critic's,
 # (3) escalate to a human. `learning_journal.OUTCOME_VERDICTS` already
 # documents this alignment on `stalemate_resolution` — keep both in step; a
@@ -228,8 +228,8 @@ def record_plan_outcome(
 
 def record_stalemate_resolution(
     task_id: str,
-    report: critical_dialogue.AdvisoryStalemateReport,
-    chosen: critical_dialogue.AdvisoryResolutionOption,
+    report: dialogue_contracts.AdvisoryStalemateReport,
+    chosen: dialogue_contracts.AdvisoryResolutionOption,
     *,
     root_dir: Path,
     run_id: str | None = None,

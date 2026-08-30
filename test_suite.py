@@ -1,6 +1,5 @@
 """Repository test suite discovery loader for standard unittest runners."""
 
-import sys
 import unittest
 from pathlib import Path
 
@@ -14,11 +13,7 @@ def load_tests(
 ) -> unittest.TestSuite:
     suite = unittest.TestSuite()
     worker_routing_dir = str(REPO_ROOT / "skills" / "worker-routing")
-    council_dir = str(REPO_ROOT / "skills" / "council-review")
     council_tests_dir = str(REPO_ROOT / "skills" / "council-review" / "tests")
-
-    if council_dir not in sys.path:
-        sys.path.insert(0, council_dir)
 
     suite.addTests(
         loader.discover(

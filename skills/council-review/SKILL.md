@@ -15,7 +15,7 @@ The Council Review skill implements a formalized multi-agent peer review system.
 
 ## Architecture
 - `skills/worker-routing/critical_dialogue.py`: Canonical dialogue and council-review engine.
-- `scripts/provider_adapters.py`: CLI adapters for Claude, Codex, and Antigravity.
+- `skills/worker-routing/provider_adapters.py`: CLI adapters for Claude, Codex, and Antigravity.
 - `skills/worker-routing/routing-config.json`: The shared rules and timeouts the council must follow.
 - `agents/openai.yaml`: Standard agent manifest format.
 

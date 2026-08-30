@@ -2,7 +2,7 @@
 
 ## Problem Statement
 
-When an orchestrating AI agent or a developer seeks to deliberate ambiguous task complexity, review implementation plans, audit pull request diffs, or execute multi-agent council reviews, the codebase presents multiple competing, shallow entry points. 
+When an orchestrating AI agent or a developer seeks to deliberate ambiguous task complexity, review implementation plans, audit pull request diffs, or execute multi-agent council reviews, the codebase presents multiple competing, shallow entry points.
 
 Historically, the system evolved from early binary advisory debates into a multi-perspective critical dialogue and council review architecture. However, during this evolution, legacy pass-through facades were preserved:
 - A legacy consultation facade (`advisory_consultation.py`, 289 lines) that does not contain debate logic, but merely imports from eight sibling modules and re-exports over 60 aliased symbols.
@@ -13,7 +13,7 @@ These shallow wrappers create architectural friction, cause AI navigability conf
 
 ## Solution
 
-Consolidate all advisory debate, critical dialogue, and multi-model council review capabilities into a single, cohesive, deep module (`CriticalDialogue`). 
+Consolidate all advisory debate, critical dialogue, and multi-model council review capabilities into a single, cohesive, deep module (`CriticalDialogue`).
 
 This deep module presents a compact, high-leverage interface for all dialogue occasions (ambiguity deliberation, plan review, code review, post-mortems, and council panel reviews), while hiding internal state machine transitions, verdict quote verifications, transcript rendering, and budget degradation rungs behind its seam.
 

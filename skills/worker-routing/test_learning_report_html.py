@@ -15,16 +15,12 @@ import math
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest import mock
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import learning_journal, learning_report_html, learning_scoreboard, routing_config

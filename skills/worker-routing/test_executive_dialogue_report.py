@@ -1,13 +1,8 @@
 """Hermetic tests for executive dialogue reporting helpers."""
 from __future__ import annotations
 
-import sys
 import unittest
-from pathlib import Path
 from typing import Literal
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import executive_dialogue_report

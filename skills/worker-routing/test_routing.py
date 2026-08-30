@@ -9,10 +9,11 @@ or, from this directory:
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import hmac
-import importlib.util
+import io
 import json
 import os
 import re
@@ -21,36 +22,42 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tokenize
 import unittest
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import get_args
+from typing import ClassVar, get_args
 from unittest import mock
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import (
         agent_council,
         critical_dialogue,
+        dialogue_contracts,
+        dialogue_degradation,
+        dialogue_transcript,
         learned_state,
         learning_journal,
         learning_outcomes,
         production_invoker,
         routing_check,
+        sensitivity_redactor,
     )
     from .critical_dialogue import CanaryFixture, IsFamilyReachable
     from .learning_journal import OutcomeRecord
 else:
     import agent_council  # type: ignore[no-redef]
     import critical_dialogue  # type: ignore[no-redef]
+    import dialogue_contracts  # type: ignore[no-redef]
+    import dialogue_degradation  # type: ignore[no-redef]
+    import dialogue_transcript  # type: ignore[no-redef]
     import learned_state  # type: ignore[no-redef]
     import learning_journal  # type: ignore[no-redef]
     import learning_outcomes  # type: ignore[no-redef]
     import production_invoker  # type: ignore[no-redef]
     import routing_check  # type: ignore[no-redef]
+    import sensitivity_redactor  # type: ignore[no-redef]
     from critical_dialogue import CanaryFixture, IsFamilyReachable  # type: ignore[no-redef]
     from learning_journal import OutcomeRecord  # type: ignore[no-redef]
 
@@ -87,6 +94,16 @@ UNINSTALL_SH = REPO_ROOT / "uninstall.sh"
 # Same versionless sentinel markers install.sh/uninstall.sh write/look for.
 PROTOCOL_START = "# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END = "# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
+
+
+def assert_repository_root_is_clean(
+    test_case: unittest.TestCase, repo_root: Path
+) -> None:
+    """Assert that transient type-checking aliases do not occupy the root."""
+    test_case.assertFalse(
+        os.path.lexists(repo_root / "worker_routing"),
+        "repository root contains the transient worker_routing package alias",
+    )
 
 
 def _bash_array(script: Path, name: str) -> list[str]:
@@ -469,39 +486,18 @@ class RoutingCheckFixtureTests(unittest.TestCase):
         result = run_check("--strict", str(FIXTURES_DIR / "clean_log.txt"))
         self.assertEqual(result.returncode, 0)
 
-    def test_routing_check_bootstrap_enables_path_based_loading_from_foreign_cwd(self) -> None:
-        """The bootstrap's `sys.path.insert(0, ...)` in `routing_check.py` is
-        what keeps sibling imports (`agent_council`) resolving when the
-        module is loaded by path from a caller that has no reason to already
-        have `skills/worker-routing` on `sys.path` — e.g. an audit script
-        elsewhere using `importlib.util.spec_from_file_location`.
-
-        Running `routing_check.py` directly as a script (the previous form
-        of this test) proves nothing about that line: Python always
-        prepends a run script's own directory to `sys.path[0]`, so the
-        sibling import would resolve even with the bootstrap deleted. Only
-        `spec_from_file_location`, invoked from an unrelated `cwd` with
-        nothing pre-populating `sys.path`, actually exercises it.
-        """
-        child_script = (
-            "import importlib.util, sys\n"
-            f"spec = importlib.util.spec_from_file_location('routing_check', {str(ROUTING_CHECK)!r})\n"
-            "module = importlib.util.module_from_spec(spec)\n"
-            "sys.modules['routing_check'] = module\n"
-            "spec.loader.exec_module(module)\n"
-            "module.get_calibration_secret()\n"
-            "print('sibling imports resolved')\n"
-        )
+    def test_routing_check_script_resolves_siblings_from_a_foreign_cwd(self) -> None:
+        """The script import mode relies on Python's standard script path."""
         with tempfile.TemporaryDirectory() as foreign_cwd:
             result = subprocess.run(
-                [sys.executable, "-c", child_script],
+                [sys.executable, str(ROUTING_CHECK), str(FIXTURES_DIR / "clean_log.txt")],
                 capture_output=True,
                 text=True,
                 check=False,
                 cwd=foreign_cwd,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("sibling imports resolved", result.stdout)
+        self.assertIn("No violations detected", result.stdout)
         self.assertNotIn("ModuleNotFoundError", result.stderr)
 
     def test_routing_check_resolves_in_package_execution_mode(self) -> None:
@@ -896,6 +892,7 @@ class ProtocolSyncTests(unittest.TestCase):
             )
             for council_target in council_targets:
                 legacy_facade = council_target / "scripts" / "council_review.py"
+                legacy_facade.parent.mkdir(parents=True, exist_ok=True)
                 legacy_facade.write_bytes(legacy_bytes)
 
             result = self._run(INSTALL_SH, target_dir, home=fake_home)
@@ -1138,8 +1135,17 @@ class ProtocolSyncTests(unittest.TestCase):
                             REPO_ROOT / "skills" / "council-review" / "SKILL.md"
                         ).read_text(encoding="utf-8"),
                     )
+                    self.assertFalse(
+                        (council_target / "scripts" / "provider_adapters.py").exists(),
+                        "provider adapters remain in the retired council facade",
+                    )
                     self.assertTrue(
-                        (council_target / "scripts" / "provider_adapters.py").exists()
+                        (
+                            council_target.parent
+                            / "worker-routing"
+                            / "provider_adapters.py"
+                        ).exists(),
+                        "provider adapters were not installed with their owning package",
                     )
                     self.assertEqual(
                         (
@@ -1150,6 +1156,27 @@ class ProtocolSyncTests(unittest.TestCase):
                     self.assertFalse(
                         (council_target / "references" / "council-policy.json").exists()
                     )
+
+            installed_smoke = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import critical_dialogue; "
+                        "adapters = critical_dialogue._load_provider_adapters(); "
+                        "assert adapters.__name__ == 'provider_adapters'"
+                    ),
+                ],
+                cwd=worker_targets[0],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(
+                installed_smoke.returncode,
+                0,
+                installed_smoke.stdout + installed_smoke.stderr,
+            )
 
     def test_install_sh_synchronizes_learn_session_to_every_harness(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -2565,10 +2592,8 @@ def _reachable(*families: str) -> IsFamilyReachable:
     `_reachable()` with no arguments is the "nothing is up" fake used to
     exercise `RosterResolutionError`.
 
-    The return type spells out `Callable[[str], bool]` — the definition of
-    `advisory_consultation.IsFamilyReachable` — instead of naming that alias:
-    this file loads `advisory_consultation` through `importlib` at runtime, so
-    a type checker cannot resolve an attribute of it in an annotation.
+    The return type uses the canonical `critical_dialogue.IsFamilyReachable`
+    alias imported above, so callers and the implementation share one seam.
     """
     allowed = set(families)
     return lambda family: family in allowed
@@ -2584,12 +2609,12 @@ class VerdictContractParserTests(unittest.TestCase):
     through `_approve`/`_revise` instead of hand-rolling the contract text,
     so those tests stay agnostic to exactly this syntax.
 
-    Calls `advisory_consultation._parse_critic_verdict` directly rather than
-    through the full debate loop: the loop is exercised end-to-end elsewhere
+    Calls the `critical_dialogue` compatibility seam for
+    `dialogue_contracts._parse_critic_verdict` directly rather than through
+    the full debate loop: the loop is exercised end-to-end elsewhere
     (`AdvisoryConsultationTests`), and driving every one of ticket 02's
     acceptance criteria through a full Planner/Critic round trip would
-    duplicate this file's slowest fixture for no additional coverage of the
-    parser itself.
+    duplicate this file's slowest fixture for no additional parser coverage.
     """
 
     def test_rationale_quotes_and_objections_before_approve_parses_as_approved_with_counts(
@@ -2759,9 +2784,9 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: APPROVE", "irrelevant artifact text"
         )
 
-        self.assertIsInstance(result, critical_dialogue.VerdictContractResult)
+        self.assertIsInstance(result, dialogue_contracts.VerdictContractResult)
         self.assertEqual(
-            dataclasses.fields(critical_dialogue.VerdictContractResult).__len__(),
+            dataclasses.fields(dialogue_contracts.VerdictContractResult).__len__(),
             3,
         )
 
@@ -4505,7 +4530,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             )
             transcript = (root / ".scratch" / "planning_debate.md").read_text()
 
-        self.assertIn(critical_dialogue.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertIn(dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER, transcript)
 
     def test_normal_reachable_run_carries_no_degraded_marker_in_either_artifact(
         self,
@@ -4533,7 +4558,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
 
         self.assertFalse(result.degraded_independence)
-        self.assertNotIn(critical_dialogue.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertNotIn(dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER, transcript)
         self.assertFalse(records[0]["degraded_independence"])
 
     def test_roster_resolution_error_fails_closed_as_worker_error(self) -> None:
@@ -4625,7 +4650,12 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
         occasion-in-same-prompt-out. The four occasions' round-1 Planner
         prompts, and their matching Critic prompts, are compared pairwise for
         inequality only — never for specific content."""
-        occasions = ("ambiguity", "plan-review", "code-review", "post-mortem")
+        occasions: tuple[dialogue_contracts.Occasion, ...] = (
+            "ambiguity",
+            "plan-review",
+            "code-review",
+            "post-mortem",
+        )
         planner_prompts: dict[str, str] = {}
         critic_prompts: dict[str, str] = {}
         for occasion in occasions:
@@ -4840,7 +4870,7 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         self.assertTrue(critical_dialogue.needs_post_mortem_consultation(failed=True))
 
     def test_post_mortem_fires_on_two_failure_escalation(self) -> None:
-        # Tracks `advisory_consultation.ESCALATION_FAILURE_THRESHOLD`, the
+        # Tracks `critical_dialogue.ESCALATION_FAILURE_THRESHOLD`, the
         # same named constant `agent_council.escalate_routing_effort` uses
         # for "2+ failed worker attempts" — see
         # `test_escalation_failure_threshold_matches_agent_council_constant`
@@ -4863,7 +4893,7 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         )
 
     def test_escalation_failure_threshold_matches_agent_council_constant(self) -> None:
-        """Drift guard for the deliberate duplication: `advisory_consultation`
+        """Drift guard for the deliberate duplication: `critical_dialogue`
         does not import `agent_council` (see the comment on
         `ESCALATION_FAILURE_THRESHOLD`), so this test is what keeps the two
         modules' copies of the protocol's 2-failure escalation threshold
@@ -5056,11 +5086,11 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         self.assertTrue(result.consensus_reached)
 
     def test_sensitivity_markers_are_a_superset_of_agent_council_patterns(self) -> None:
-        """Drift guard for the deliberate duplication: `advisory_consultation`
+        """Drift guard for the deliberate duplication: `critical_dialogue`
         does not import `agent_council` (see the comment on
         `SENSITIVITY_MARKERS`), so this test is what keeps the two pattern
         sets from silently diverging."""
-        advisory_markers = {marker.lower() for marker in critical_dialogue.SENSITIVITY_MARKERS}
+        advisory_markers = {marker.lower() for marker in sensitivity_redactor.SENSITIVITY_MARKERS}
         council_patterns = {pattern.lower() for pattern in agent_council.SENSITIVE_PATTERNS}
         self.assertTrue(council_patterns.issubset(advisory_markers))
 
@@ -5769,7 +5799,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
         `budget_skipped` telemetry record still discoverable after the
         thread completes (degradation is never silent, even in the
         background)."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -5804,7 +5834,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
         the same way `test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls`
         proves it for the synchronous path — six responses scripted, only
         one round's two consumed before the stalemate."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -6155,26 +6185,6 @@ class LearningJournalTests(unittest.TestCase):
     TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
 
     FIXED_TIMESTAMP = "2026-08-12T09:30:00Z"
-
-    # Checked (linted/type-checked) but deliberately never executed by CI —
-    # read by test_ci_runs_every_test_file_it_checks below. Sized to exactly
-    # one file today: test_lmstudio.py's own module docstring says "CI lints
-    # and type-checks this file, but never executes it," because it makes
-    # real `urlopen` calls to a live LM Studio server at 127.0.0.1:1234 with
-    # a 120-second timeout — no CI runner has that server, so running it in
-    # the test step would hang or fail on every run, not sometimes. That is
-    # a structural, already-documented exclusion, unlike the accidental one
-    # this whole test exists to catch — test_production_invoker.py, whose 16
-    # tests were linted and type-checked but silently never executed. Any
-    # other test file missing from PYTHON_TESTS still fails the assertion
-    # below; this exempts exactly this one file, by name, not the shape of
-    # the check.
-    _CHECKED_BUT_NOT_EXECUTED_BY_DESIGN = frozenset(
-        {
-            "skills/worker-routing/test_lmstudio.py",
-            "test_suite.py",
-        }
-    )
 
     def _worker_execution_record(
         self, **overrides: object
@@ -6720,7 +6730,7 @@ class LearningJournalTests(unittest.TestCase):
         """The journal observes work it must never be able to break: an
         unwritable `.ralph` degrades the learning loop, it does not fail the
         invocation being recorded. Same contract as
-        `advisory_consultation._write_telemetry_record`."""
+        `dialogue_transcript._write_telemetry_record`."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             learning_journal.journal_path(root).parent.write_text("not a directory")
@@ -6831,7 +6841,7 @@ class LearningJournalTests(unittest.TestCase):
         """The second gate: `sk-live-...` is shaped exactly like a valid
         identifier, so shape alone would pass it. The marker check is what
         does not — and the rejection may name the marker constant it matched
-        (as `advisory_consultation` does) but never the secret around it.
+        (as `critical_dialogue` does) but never the secret around it.
 
         The gate covers exactly the identifiers a caller *composes* for a
         record — `model_id`, `model_family`, and ticket 26's `task_set`, all
@@ -7128,7 +7138,7 @@ class LearningJournalTests(unittest.TestCase):
 
     def test_cross_spec_vocabularies_agree(self) -> None:
         """Drift guard for the incident this fix addresses: `DialogueOccasion`
-        (spec 0004, schema-only) and `advisory_consultation.Occasion` (spec
+        (spec 0004, schema-only) and `dialogue_contracts.Occasion` (spec
         0003, shipped) are two separately-declared `Literal` aliases meant to
         describe one vocabulary, but nothing in the type system keeps them in
         sync. They drifted — this alias spelled three of its four values with
@@ -7143,7 +7153,7 @@ class LearningJournalTests(unittest.TestCase):
         surface, for `DialogueTopology` against `RosterTopology`: identical
         today (`Literal["pair", "panel"]` both sides) but just as unpinned."""
         self.assertEqual(
-            set(get_args(critical_dialogue.Occasion)),
+            set(get_args(dialogue_contracts.Occasion)),
             set(get_args(learning_journal.DialogueOccasion)),
         )
         self.assertEqual(
@@ -7158,7 +7168,7 @@ class LearningJournalTests(unittest.TestCase):
         journal_markers = {marker.lower() for marker in learning_journal.SENSITIVITY_MARKERS}
         council_patterns = {pattern.lower() for pattern in agent_council.SENSITIVE_PATTERNS}
         advisory_markers = {
-            marker.lower() for marker in critical_dialogue.SENSITIVITY_MARKERS
+            marker.lower() for marker in sensitivity_redactor.SENSITIVITY_MARKERS
         }
         self.assertTrue(council_patterns.issubset(journal_markers))
         self.assertTrue(advisory_markers.issubset(journal_markers))
@@ -7494,7 +7504,31 @@ class LearningJournalTests(unittest.TestCase):
         )
         self.assertEqual(record["rounds_run"], 3)
 
-    # --- the CI contract ---
+
+class _WorkflowStructureTestBase:
+    """Shared readers and exclusions for CI workflow structure tests."""
+
+    _TYPECHECK_SCRIPT = REPO_ROOT / "skills" / "worker-routing" / "typecheck.sh"
+
+    # Checked (linted/type-checked) but deliberately never executed by CI —
+    # read by test_ci_runs_every_test_file_it_checks below. Sized to exactly
+    # one file today: test_lmstudio.py's own module docstring says "CI lints
+    # and type-checks this file, but never executes it," because it makes
+    # real `urlopen` calls to a live LM Studio server at 127.0.0.1:1234 with
+    # a 120-second timeout — no CI runner has that server, so running it in
+    # the test step would hang or fail on every run, not sometimes. That is
+    # a structural, already-documented exclusion, unlike the accidental one
+    # this whole test exists to catch — test_production_invoker.py, whose 16
+    # tests were linted and type-checked but silently never executed. Any
+    # other test file missing from PYTHON_TESTS still fails the assertion
+    # below; this exempts exactly this one file, by name, not the shape of
+    # the check.
+    _CHECKED_BUT_NOT_EXECUTED_BY_DESIGN = frozenset(
+        {
+            "skills/worker-routing/test_lmstudio.py",
+            "test_suite.py",
+        }
+    )
 
     @staticmethod
     def _workflow_list(workflow: str, name: str) -> list[str]:
@@ -7513,25 +7547,576 @@ class LearningJournalTests(unittest.TestCase):
             listed.append(stripped)
         return listed
 
+    @classmethod
+    def _checked_modules(cls) -> list[str]:
+        """Read the canonical target list through its public CLI."""
+        completed = subprocess.run(
+            [str(cls._TYPECHECK_SCRIPT), "--print-targets"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr)
+        return completed.stdout.splitlines()
+
+
+class CiWorkflowStructuralTests(_WorkflowStructureTestBase, unittest.TestCase):
+    """Mypy consumes the module list without mutating the checkout."""
+
+    def test_documentation_and_ci_use_the_same_shared_typecheck_entry_point(
+        self,
+    ) -> None:
+        """Contributors, agents, and CI invoke one public type-check command."""
+        command = "skills/worker-routing/typecheck.sh"
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
+        )
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        claude = (REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+
+        self.assertTrue((REPO_ROOT / command).is_file())
+        self.assertIn(f"run: {command}", workflow)
+        self.assertIn(command, readme)
+        self.assertIn(command, claude)
+        self.assertNotIn("mypy --config-file", workflow)
+
     def test_ci_lints_and_type_checks_one_single_sourced_module_list(self) -> None:
         """Ruff and mypy share one module list and every entry exists."""
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
             encoding="utf-8"
         )
-        listed = self._workflow_list(workflow, "PYTHON_MODULES")
+        listed = self._checked_modules()
 
         self.assertIn("skills/worker-routing/learning_journal.py", listed)
+        self.assertEqual(len(listed), 54)
         self.assertEqual(sorted(listed), sorted(set(listed)))
         for module in listed:
             with self.subTest(module=module):
                 self.assertTrue((REPO_ROOT / module).is_file())
 
-        self.assertIn("ruff check $PYTHON_MODULES", workflow)
-        self.assertIn("mypy --config-file pyproject.toml $TARGETS", workflow)
-        self.assertIn(
-            "TARGETS=$(echo \"$PYTHON_MODULES\" | sed 's|skills/worker-routing/|worker_routing/|g')",
-            workflow,
+        self.assertIn("typecheck.sh --print-targets", workflow)
+        self.assertIn("ruff check \"${python_modules[@]}\"", workflow)
+        self.assertIn("run: skills/worker-routing/typecheck.sh", workflow)
+
+    def test_ci_typecheck_step_uses_an_ephemeral_absolute_package_alias(self) -> None:
+        """Mypy never creates a package alias in the checked-out repository."""
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
         )
+        script = self._TYPECHECK_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertEqual(workflow.count("- name: Type-check with mypy"), 1)
+        self.assertNotIn("mypy --config-file", workflow)
+        self.assertNotIn("Symlink package for type-checking", workflow)
+        self.assertNotIn("Clean up type-checking symlink", workflow)
+        self.assertIn(
+            'mktemp -d "${TYPECHECK_PARENT%/}/worker-routing-mypy.XXXXXX"', script
+        )
+        self.assertIn("trap '", script)
+        self.assertIn("rm -rf", script)
+        self.assertIn("EXIT", script)
+        self.assertIn(
+            'ln -s "${REPO_ROOT}/skills/worker-routing" '
+            '"${TYPECHECK_DIR}/worker_routing"',
+            script,
+        )
+        self.assertNotRegex(script, r"ln\s+[^\n]*\sworker_routing(?:\s|$)")
+        self.assertNotRegex(workflow, r"ln\s+[^\n]*\sworker_routing(?:\s|$)")
+
+    def test_ci_mypy_receives_the_exact_single_sourced_target_set_and_always_cleans_up(
+        self,
+    ) -> None:
+        """Run the workflow program with a fake mypy and inspect its argv.
+
+        This checks the Bash array at its observable boundary: every
+        `PYTHON_MODULES` entry reaches mypy exactly once and in order, skill
+        paths pass through the temporary package alias, unrelated targets do
+        not, the alias points at an absolute source path, and EXIT cleanup
+        runs for both a successful and a failing mypy process.
+        """
+        listed = self._checked_modules()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            runner_temp = root / "runner-temp"
+            bin_dir = root / "bin"
+            runner_temp.mkdir()
+            bin_dir.mkdir()
+            argv_log = root / "mypy-argv"
+            alias_log = root / "mypy-alias"
+            fake_mypy = bin_dir / "mypy"
+            fake_mypy.write_text(
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$@\" > \"$MYPY_ARGV_LOG\"\n"
+                "for argument in \"$@\"; do\n"
+                "  case \"$argument\" in\n"
+                "    */worker_routing/*)\n"
+                "      alias_path=\"${argument%%/worker_routing/*}/worker_routing\"\n"
+                "      printf '%s\\n%s\\n' \"$alias_path\" \"$(readlink \"$alias_path\")\" > \"$MYPY_ALIAS_LOG\"\n"
+                "      break\n"
+                "      ;;\n"
+                "  esac\n"
+                "done\n"
+                "exit \"$MYPY_EXIT_CODE\"\n",
+                encoding="utf-8",
+            )
+            fake_mypy.chmod(0o755)
+
+            for exit_code in (0, 23):
+                with self.subTest(mypy_exit_code=exit_code):
+                    argv_log.unlink(missing_ok=True)
+                    alias_log.unlink(missing_ok=True)
+                    env = dict(os.environ)
+                    env.update(
+                        {
+                            "RUNNER_TEMP": str(runner_temp),
+                            "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+                            "MYPY_ARGV_LOG": str(argv_log),
+                            "MYPY_ALIAS_LOG": str(alias_log),
+                            "MYPY_EXIT_CODE": str(exit_code),
+                        }
+                    )
+                    completed = subprocess.run(
+                        [str(self._TYPECHECK_SCRIPT)],
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        check=False,
+                        text=True,
+                    )
+
+                    self.assertEqual(completed.returncode, exit_code, completed.stderr)
+                    alias_path_text, alias_target_text = alias_log.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    alias_path = Path(alias_path_text)
+                    self.assertEqual(alias_path.parent.parent, runner_temp)
+                    self.assertEqual(
+                        Path(alias_target_text).resolve(), SKILL_DIR.resolve()
+                    )
+                    self.assertTrue(Path(alias_target_text).is_absolute())
+                    self.assertFalse(alias_path.parent.exists(), "EXIT trap left the temp directory behind")
+                    self.assertFalse(
+                        os.path.lexists(REPO_ROOT / "worker_routing"),
+                        "type-checking created a root-level package alias",
+                    )
+
+                    expected_targets = [
+                        str(alias_path / path.removeprefix("skills/worker-routing/"))
+                        if path.startswith("skills/worker-routing/")
+                        else path
+                        for path in listed
+                    ]
+                    self.assertEqual(
+                        argv_log.read_text(encoding="utf-8").splitlines(),
+                        ["--config-file", "pyproject.toml", *expected_targets],
+                    )
+
+
+class LiveOwnershipClosureTests(unittest.TestCase):
+    """Live production and test prose names current module owners."""
+
+    _INTERNAL_LEAF_MODULES = frozenset(
+        {
+            "debate_state_machine",
+            "dialogue_contracts",
+            "dialogue_degradation",
+            "dialogue_transcript",
+        }
+    )
+    _REQUIRED_LEAF_ALIASES: ClassVar[Mapping[str, tuple[str, str]]] = {
+        "_parse_critic_verdict": ("dialogue_contracts", "_parse_critic_verdict"),
+        "_load_dialogue_budget_config": (
+            "dialogue_degradation",
+            "_load_dialogue_budget_config",
+        ),
+        "_default_task_id": ("dialogue_transcript", "_default_task_id"),
+        "_reduce_dialogue_round": (
+            "dialogue_transcript",
+            "_reduce_dialogue_round",
+        ),
+        "_write_telemetry_record": (
+            "dialogue_transcript",
+            "_write_telemetry_record",
+        ),
+        "_write_dialogue_quality_record": (
+            "dialogue_transcript",
+            "_write_dialogue_quality_record",
+        ),
+        "_write_plan_outcome_record": (
+            "dialogue_transcript",
+            "_write_plan_outcome_record",
+        ),
+        "Occasion": ("dialogue_contracts", "Occasion"),
+        "AdvisoryStalemateReport": (
+            "dialogue_contracts",
+            "AdvisoryStalemateReport",
+        ),
+        "AdvisoryResolutionOption": (
+            "dialogue_contracts",
+            "AdvisoryResolutionOption",
+        ),
+        "_build_stalemate_report": (
+            "debate_state_machine",
+            "build_stalemate_report",
+        ),
+    }
+    _COMPATIBILITY_PROSE_LABEL = re.compile(
+        r"\bcompatibility\s+(?:re-export|seam)\b", re.IGNORECASE
+    )
+
+    @classmethod
+    def _critical_dialogue_leaf_aliases(cls) -> dict[str, tuple[str, str]]:
+        """Resolve module-level compatibility aliases to their leaf owners."""
+        tree = ast.parse(
+            (SKILL_DIR / "critical_dialogue.py").read_text(encoding="utf-8")
+        )
+        imported_modules: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for imported in node.names:
+                    module = imported.name.rsplit(".", maxsplit=1)[-1]
+                    if module in cls._INTERNAL_LEAF_MODULES:
+                        imported_modules[imported.asname or imported.name] = module
+            elif isinstance(node, ast.ImportFrom):
+                for imported in node.names:
+                    module = (node.module or imported.name).rsplit(".", maxsplit=1)[-1]
+                    if module in cls._INTERNAL_LEAF_MODULES:
+                        imported_modules[imported.asname or imported.name] = module
+
+        def module_assignments(
+            statements: Sequence[ast.stmt],
+        ) -> Iterator[ast.Assign]:
+            for statement in statements:
+                if isinstance(statement, ast.Assign):
+                    yield statement
+                elif isinstance(statement, ast.If):
+                    yield from module_assignments(statement.body)
+                    yield from module_assignments(statement.orelse)
+
+        assignments = tuple(module_assignments(tree.body))
+        aliases: dict[str, tuple[str, str]] = {}
+        unresolved = list(assignments)
+        while unresolved:
+            next_unresolved: list[ast.Assign] = []
+            made_progress = False
+            for assignment in unresolved:
+                if len(assignment.targets) != 1 or not isinstance(
+                    assignment.targets[0], ast.Name
+                ):
+                    continue
+                target = assignment.targets[0].id
+                value = assignment.value
+                owner: tuple[str, str] | None = None
+                if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+                    owner_module = imported_modules.get(value.value.id)
+                    if owner_module is not None:
+                        owner = (owner_module, value.attr)
+                elif isinstance(value, ast.Name):
+                    owner = aliases.get(value.id)
+                if owner is None:
+                    next_unresolved.append(assignment)
+                    continue
+                aliases[target] = owner
+                made_progress = True
+            if not made_progress:
+                break
+            unresolved = next_unresolved
+        return aliases
+
+    @staticmethod
+    def _python_prose(source: str) -> Iterator[tuple[int, str]]:
+        """Yield physical comment and module/class/function docstring lines."""
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                yield token.start[0], token.string
+
+        source_lines = source.splitlines()
+        tree = ast.parse(source)
+        docstring_owners = (
+            ast.Module,
+            ast.ClassDef,
+            ast.FunctionDef,
+            ast.AsyncFunctionDef,
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, docstring_owners) or not node.body:
+                continue
+            statement = node.body[0]
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            ):
+                end_line_number = statement.value.end_lineno or statement.value.lineno
+                for line_number in range(
+                    statement.value.lineno, end_line_number + 1
+                ):
+                    yield line_number, source_lines[line_number - 1]
+
+    @classmethod
+    def _leaf_owned_prose_violations(
+        cls, source: str, relative_path: str
+    ) -> list[str]:
+        """Report required leaf aliases presented as compatibility owners."""
+        compatibility_module = "critical_" + "dialogue"
+        alias_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){compatibility_module}\."
+            rf"({'|'.join(re.escape(name) for name in sorted(cls._REQUIRED_LEAF_ALIASES, key=len, reverse=True))})"
+            r"(?![A-Za-z0-9_])"
+        )
+        stale: list[str] = []
+        for line_number, prose in cls._python_prose(source):
+            for reference in alias_pattern.finditer(prose):
+                if cls._COMPATIBILITY_PROSE_LABEL.search(prose):
+                    continue
+                alias = reference.group(1)
+                module, symbol = cls._REQUIRED_LEAF_ALIASES[alias]
+                stale.append(
+                    f"{relative_path}:{line_number}: {reference.group(0)} is owned "
+                    f"by {module}.{symbol}"
+                )
+        return stale
+
+    def test_leaf_owned_public_aliases_are_absent_from_critical_dialogue(
+        self,
+    ) -> None:
+        """Leaf contracts are imported from their owners, not the deep seam."""
+        public_aliases = {
+            name for name in self._REQUIRED_LEAF_ALIASES if not name.startswith("_")
+        }
+        self.assertEqual(
+            {name for name in public_aliases if hasattr(critical_dialogue, name)},
+            set(),
+        )
+
+        stale: list[str] = []
+        live_paths = sorted(SKILL_DIR.glob("*.py"))
+        live_paths.extend(
+            sorted(
+                (REPO_ROOT / "skills" / "council-review" / "scripts").glob("*.py")
+            )
+        )
+        live_paths.extend(
+            sorted(
+                (REPO_ROOT / "skills" / "council-review" / "tests").rglob("*.py")
+            )
+        )
+        for path in live_paths:
+            relative_path = str(path.relative_to(REPO_ROOT))
+            source = path.read_text(encoding="utf-8")
+            stale.extend(self._leaf_owned_prose_violations(source, relative_path))
+
+        self.assertEqual(
+            stale,
+            [],
+            "prose attributes leaf-owned symbols to compatibility aliases:\n"
+            + "\n".join(stale),
+        )
+
+    def test_leaf_owned_compatibility_alias_may_be_documented_as_a_seam(
+        self,
+    ) -> None:
+        """Supported compatibility references are truthful, not ownership."""
+        for label in ("compatibility re-export", "compatibility seam"):
+            with self.subTest(label=label):
+                source = (
+                    '"""`critical_dialogue._parse_critic_verdict` remains a '
+                    f"supported {label}." + '\n"""\n'
+                )
+                self.assertEqual(
+                    self._leaf_owned_prose_violations(source, "fixture.py"), []
+                )
+
+    def test_unlabeled_leaf_owned_compatibility_alias_is_rejected(self) -> None:
+        """A compatibility-path reference cannot imply definition ownership."""
+        source = (
+            '"""`critical_dialogue._parse_critic_verdict` owns verdict parsing.\n'
+            '"""\n'
+        )
+
+        self.assertEqual(
+            self._leaf_owned_prose_violations(source, "fixture.py"),
+            [
+                (
+                    "fixture.py:1: critical_dialogue._parse_critic_verdict is owned "
+                    "by dialogue_contracts._parse_critic_verdict"
+                )
+            ],
+        )
+
+    def test_compatibility_label_only_exempts_its_physical_docstring_line(
+        self,
+    ) -> None:
+        """A truthful seam label cannot mask ownership prose on another line."""
+        source = (
+            '"""`critical_dialogue._parse_critic_verdict` remains a supported '
+            "compatibility seam.\n"
+            "`critical_dialogue._parse_critic_verdict` owns verdict parsing.\n"
+            '"""\n'
+        )
+
+        self.assertEqual(
+            self._leaf_owned_prose_violations(source, "fixture.py"),
+            [
+                (
+                    "fixture.py:2: critical_dialogue._parse_critic_verdict is owned "
+                    "by dialogue_contracts._parse_critic_verdict"
+                )
+            ],
+        )
+
+    def test_live_prose_has_no_retired_module_ownership(self) -> None:
+        """Retired orchestration modules cannot remain today's named owners.
+
+        The pattern is intentionally module-shaped, not a broad substring
+        ban: public functions such as `run_advisory_consultation_debate` and
+        the wire kind `"advisory_consultation"` remain valid. Explicitly
+        historical comparisons are allowed by path, phrase, and category;
+        every allowlist entry must still be consumed so it cannot become a
+        quiet dumping ground after its source is removed.
+        """
+        retired_reference = re.compile(
+            r"(?<![A-Za-z0-9_])"
+            r"(?:advisory_consultation|debate_orchestrator|council_review)"
+            r"(?:\.py|\.[A-Za-z_][A-Za-z0-9_]*|`{1,2}|['’]s\b)"
+        )
+        advisory_module = "advisory_" + "consultation"
+        debate_module = "debate_" + "orchestrator"
+        council_module = "council_" + "review"
+        allowed_history = {
+            (
+                "skills/worker-routing/dialogue_transcript.py",
+                f"then-owner ``{advisory_module}``",
+            ): "historical extraction provenance",
+            (
+                "skills/worker-routing/production_invoker.py",
+                "grew an",
+            ): "historical boundary-type comparison",
+            (
+                "skills/worker-routing/routing_config.py",
+                "each shipped before this ticket",
+            ): "historical default-source comparison",
+            (
+                "skills/worker-routing/prompt_assembler.py",
+                "Historical or domain-event names",
+            ): "institutional facade-retirement rule",
+        }
+        consumed_history: set[tuple[str, str]] = set()
+        allowed_categories = {
+            "quoted installer migration or deleted-facade fixture filename": 0,
+        }
+        retired_filenames = {
+            f"{advisory_module}.py",
+            f"{debate_module}.py",
+            f"{council_module}.py",
+        }
+        stale: list[str] = []
+        live_paths = sorted(
+            path
+            for path in SKILL_DIR.glob("*.py")
+            if not path.name.startswith("test_")
+        )
+        live_paths.extend(sorted(SKILL_DIR.glob("test_*.py")))
+        live_paths.extend(
+            sorted(
+                path
+                for path in (REPO_ROOT / "skills" / "council-review" / "scripts").glob("*.py")
+                if not path.name.startswith("test_")
+            )
+        )
+        live_paths.extend(
+            sorted(
+                (REPO_ROOT / "skills" / "council-review" / "tests").rglob("*.py")
+            )
+        )
+
+        for path in live_paths:
+            relative_path = str(path.relative_to(REPO_ROOT))
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                for reference in retired_reference.finditer(line):
+                    allowed_key = next(
+                        (
+                            key
+                            for key in allowed_history
+                            if key[0] == relative_path and key[1] in line
+                        ),
+                        None,
+                    )
+                    if allowed_key is not None:
+                        consumed_history.add(allowed_key)
+                        continue
+                    matched_filename = reference.group(0)
+                    if (
+                        relative_path == "skills/worker-routing/test_routing.py"
+                        and matched_filename in retired_filenames
+                        and (
+                            f'"{matched_filename}"' in line
+                            or f"'{matched_filename}'" in line
+                        )
+                    ):
+                        allowed_categories[
+                            "quoted installer migration or deleted-facade fixture filename"
+                        ] += 1
+                        continue
+                    stale.append(
+                        f"{relative_path}:{line_number}: {line.strip()}"
+                    )
+
+        self.assertEqual(
+            stale,
+            [],
+            "live prose still names a retired orchestration module as its owner:\n"
+            + "\n".join(stale),
+        )
+        self.assertEqual(
+            consumed_history,
+            set(allowed_history),
+            "historical ownership allowlist entries no longer match live source",
+        )
+        self.assertTrue(
+            all(allowed_categories.values()),
+            f"ownership allow-categories were not consumed: {allowed_categories}",
+        )
+
+
+class RepositoryRootHygieneTests(unittest.TestCase):
+    """Machine-local type-checking and installer state stays outside Git."""
+
+    def test_root_hygiene_check_rejects_a_broken_package_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "worker_routing").symlink_to(root / "missing-package")
+
+            with self.assertRaises(AssertionError):
+                assert_repository_root_is_clean(self, root)
+
+    def test_repository_root_has_no_python_package_alias(self) -> None:
+        self.assertFalse(
+            os.path.lexists(REPO_ROOT / "worker_routing"),
+            "repository root contains the transient worker_routing package alias",
+        )
+
+    def test_repository_root_has_no_legacy_project_receipt(self) -> None:
+        legacy_receipt = REPO_ROOT / ".auto-routing-python-modules.receipt"
+        ignore_lines = (REPO_ROOT / ".gitignore").read_text(
+            encoding="utf-8"
+        ).splitlines()
+
+        self.assertFalse(os.path.lexists(legacy_receipt), str(legacy_receipt))
+        self.assertIn(
+            "/.auto-routing-python-modules.receipt",
+            ignore_lines,
+            "legacy root installer receipt is not explicitly ignored",
+        )
+
+
+class CiModuleClosureTests(_WorkflowStructureTestBase, unittest.TestCase):
+    """CI checks and runs every intended Python module."""
 
     def test_ci_checks_every_python_file_in_the_skill_directory(self) -> None:
         """The other direction, and the one that actually goes missing.
@@ -7550,10 +8135,7 @@ class LearningJournalTests(unittest.TestCase):
         were guarded in this direction. Test files are included: CI lints and
         type-checks them too, and `PYTHON_MODULES` already names every one.
         """
-        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
-            encoding="utf-8"
-        )
-        listed = set(self._workflow_list(workflow, "PYTHON_MODULES"))
+        listed = set(self._checked_modules())
         present = {
             f"skills/worker-routing/{path.name}" for path in SKILL_DIR.glob("*.py")
         }
@@ -7584,7 +8166,7 @@ class LearningJournalTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
             encoding="utf-8"
         )
-        checked = self._workflow_list(workflow, "PYTHON_MODULES")
+        checked = self._checked_modules()
         executed = self._workflow_list(workflow, "PYTHON_TESTS")
 
         checked_tests = {
@@ -7607,6 +8189,51 @@ class LearningJournalTests(unittest.TestCase):
             "$PYTHON_TESTS",
             workflow,
             "the test-running step no longer reads the single-sourced list",
+        )
+
+
+class StandardPackageImportTests(unittest.TestCase):
+    """Package and test imports never mutate the interpreter search path."""
+
+    def test_python_sources_do_not_mutate_sys_path(self) -> None:
+        sources = sorted(SKILL_DIR.glob("*.py"))
+        sources.extend(
+            sorted((REPO_ROOT / "skills" / "council-review").rglob("*.py"))
+        )
+        sources.append(REPO_ROOT / "test_suite.py")
+        violations: list[str] = []
+
+        for source_path in sources:
+            tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and re.search(r"sys\.path\.(?:append|insert)\s*\(", node.value)
+                ):
+                    relative_path = source_path.relative_to(REPO_ROOT)
+                    violations.append(f"{relative_path}:{node.lineno} (string payload)")
+                    continue
+                if not isinstance(node, ast.Call):
+                    continue
+                function = node.func
+                if not (
+                    isinstance(function, ast.Attribute)
+                    and function.attr in {"append", "insert"}
+                    and isinstance(function.value, ast.Attribute)
+                    and function.value.attr == "path"
+                    and isinstance(function.value.value, ast.Name)
+                    and function.value.value.id == "sys"
+                ):
+                    continue
+                relative_path = source_path.relative_to(REPO_ROOT)
+                violations.append(f"{relative_path}:{node.lineno}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "runtime sys.path mutations violate the standard package seam:\n"
+            + "\n".join(violations),
         )
 
 
@@ -7826,7 +8453,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
     def test_an_unjournalable_task_id_is_refused_at_wiring_time(self) -> None:
         """The factory takes an id, so the id is validated where the label is
         built — once, before any worker runs — rather than once per
-        invocation afterwards. `advisory_consultation` already wraps this call
+        invocation afterwards. `critical_dialogue` already wraps this call
         in the try that degrades to "journaling disabled for this run", which
         is why raising here costs the run its instrumentation and nothing
         else (see `ConsultationSurvivesJournalWiringFailureTests`)."""
@@ -7910,7 +8537,7 @@ class OutcomeRecordingTests(unittest.TestCase):
     (ground_truth, verdict) pairing; these tests exercise the public surface a
     caller far from that schema actually calls — `learning_outcomes`'s four
     `record_*` functions — and the one path (the stalemate resolution) that
-    is wired into the real `advisory_consultation` flow rather than tested
+    is wired into the real `critical_dialogue` flow rather than tested
     against a hand-built stand-in.
     """
 
@@ -8062,7 +8689,7 @@ class OutcomeRecordingTests(unittest.TestCase):
             root = Path(tmp)
             result = self._run_to_stalemate(root)
             assert result.stalemate is not None
-            foreign_option = critical_dialogue.AdvisoryResolutionOption(
+            foreign_option = dialogue_contracts.AdvisoryResolutionOption(
                 1, "Approve Planner Architecture", "a hand-built, non-matching position"
             )
 
@@ -9212,69 +9839,40 @@ class WorkerRoutingPackageContractTests(unittest.TestCase):
     """The installable package facade exposes its canonical public contract."""
 
     def test_package_import_exports_version_symbols_and_core_contracts(self) -> None:
+        program = """
+import importlib
+package = importlib.import_module("worker_routing")
+assert package.__version__ == "3.6.0"
+assert tuple(sorted(package.__all__)) == package.__all__
+assert package.LearningJournal is importlib.import_module("worker_routing.learning_journal")
+assert package.LearnedState is importlib.import_module("worker_routing.learned_state")
+critical_dialogue = importlib.import_module("worker_routing.critical_dialogue")
+assert package.ReviewCouncil is critical_dialogue.ReviewCouncil
+assert package.run_critical_dialogue is critical_dialogue.run_critical_dialogue
+assert package.request_council_review is critical_dialogue.request_council_review
+assert "request_council_review" in package.__all__
+assert package.resolve_model_name("Codex 5.6 Sol") == "gpt-5.6-sol"
+assert package.classify_complexity(" SIMPLE ") == "simple"
+production_invoker = importlib.import_module("worker_routing.production_invoker")
+assert package.LocalModelCapabilities is production_invoker.LocalModelCapabilities
+assert package.probe_local_model_availability is production_invoker.probe_local_model_availability
+assert package.prompt_local_fallback_decision is production_invoker.prompt_local_fallback_decision
+for symbol in (
+    "LocalModelCapabilities",
+    "probe_local_model_availability",
+    "prompt_local_fallback_decision",
+):
+    assert symbol in package.__all__
+"""
         with tempfile.TemporaryDirectory() as temporary_dir:
-            package_root = Path(temporary_dir)
-            os.symlink(SKILL_DIR, package_root / "worker_routing")
-            sys.path.insert(0, str(package_root))
-            try:
-                package = importlib.import_module("worker_routing")
-                self.assertEqual(package.__version__, "3.6.0")
-                self.assertEqual(tuple(sorted(package.__all__)), package.__all__)
-
-                self.assertIs(
-                    package.LearningJournal,
-                    importlib.import_module("worker_routing.learning_journal"),
-                )
-                self.assertIs(
-                    package.LearnedState,
-                    importlib.import_module("worker_routing.learned_state"),
-                )
-                critical_dialogue = importlib.import_module(
-                    "worker_routing.critical_dialogue"
-                )
-                self.assertIs(package.ReviewCouncil, critical_dialogue.ReviewCouncil)
-                self.assertIs(
-                    package.run_critical_dialogue,
-                    critical_dialogue.run_critical_dialogue,
-                )
-                self.assertIs(
-                    package.request_council_review,
-                    critical_dialogue.request_council_review,
-                )
-                self.assertIn("request_council_review", package.__all__)
-                self.assertEqual(
-                    package.resolve_model_name("Codex 5.6 Sol"),
-                    "gpt-5.6-sol",
-                )
-                self.assertEqual(package.classify_complexity(" SIMPLE "), "simple")
-
-                production_invoker = importlib.import_module(
-                    "worker_routing.production_invoker"
-                )
-                self.assertIs(
-                    package.LocalModelCapabilities,
-                    production_invoker.LocalModelCapabilities,
-                )
-                self.assertIs(
-                    package.probe_local_model_availability,
-                    production_invoker.probe_local_model_availability,
-                )
-                self.assertIs(
-                    package.prompt_local_fallback_decision,
-                    production_invoker.prompt_local_fallback_decision,
-                )
-                for symbol in (
-                    "LocalModelCapabilities",
-                    "probe_local_model_availability",
-                    "prompt_local_fallback_decision",
-                ):
-                    with self.subTest(symbol=symbol):
-                        self.assertIn(symbol, package.__all__)
-            finally:
-                sys.path.remove(str(package_root))
-                for name in list(sys.modules):
-                    if name == "worker_routing" or name.startswith("worker_routing."):
-                        del sys.modules[name]
+            result = subprocess.run(
+                [sys.executable, "-c", program],
+                capture_output=True,
+                check=False,
+                text=True,
+                cwd=temporary_dir,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class ManagedFileClosureTests(unittest.TestCase):
@@ -9284,7 +9882,7 @@ class ManagedFileClosureTests(unittest.TestCase):
     that is invisible in a checkout by construction: every module sits in one
     directory there, so every import resolves regardless of what the
     installer copies. On an installed harness the same import raises
-    `ModuleNotFoundError` — and `advisory_consultation` catches exactly that
+    `ModuleNotFoundError` — and `critical_dialogue` catches exactly that
     when it lazily imports `production_invoker`, so the symptom was not a
     crash but *every* production consultation returning `worker_error` before
     a worker ever ran.
@@ -9463,7 +10061,7 @@ class ManagedFileClosureTests(unittest.TestCase):
         without being executed, and so imports inside functions
         (`routing_check._persist_compliance_record`'s deliberately local
         `import learning_journal`) and under `if TYPE_CHECKING`
-        (`learning_outcomes`' `advisory_consultation`) are found too — a
+        (`learning_outcomes`' `dialogue_contracts`) are found too — a
         lazily-imported sibling is exactly as absent on an installed harness
         as an eagerly-imported one.
         """
@@ -10412,7 +11010,7 @@ class ManagedFileClosureTests(unittest.TestCase):
         Before `MANAGED_FILES` was fixed this exited non-zero with
         `ModuleNotFoundError: No module named 'learning_journal'`, raised from
         `production_invoker`'s module-level import — the import
-        `advisory_consultation` performs the moment a caller does not inject
+        `critical_dialogue` performs the moment a caller does not inject
         its own worker.
         """
         with _InstalledHarness() as harness:
@@ -10560,7 +11158,7 @@ class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
     """
 
     # Unannotated return for the reason `_audit_report`
-    # gives: `advisory_consultation.AdvisoryDebateResult` is not a name mypy
+    # gives: `critical_dialogue.AdvisoryDebateResult` is not a name mypy
     # can resolve through a path-loaded module.
     def _run(self, task_id: str, root: Path):
         with mock.patch.object(
@@ -10892,7 +11490,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             )
             transcript = (root / ".scratch" / "planning_debate.md").read_text()
 
-        self.assertIn(critical_dialogue.CANARY_MARKER, transcript)
+        self.assertIn(dialogue_transcript.CANARY_MARKER, transcript)
         self.assertIn(fixture.id, transcript)
         self.assertIn("Outcome:** canary", transcript)
         self.assertIn(fixture.plan_text, transcript)
@@ -11086,34 +11684,34 @@ class DialogueBudgetLadderTests(unittest.TestCase):
     """
 
     def test_well_under_the_cap_is_rung_zero(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(0), 0)
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(cap // 2), 0)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(0), 0)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(cap // 2), 0)
 
     def test_fires_rung_one_exactly_at_the_cap_boundary(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(cap - 1), 0)
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(cap), 1)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(cap - 1), 0)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(cap), 1)
 
     def test_rung_one_holds_up_to_but_not_including_twice_the_cap(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(2 * cap - 1), 1)
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(2 * cap), 2)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(2 * cap - 1), 1)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(2 * cap), 2)
 
     def test_rung_two_holds_up_to_but_not_including_three_times_the_cap(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(3 * cap - 1), 2)
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(3 * cap), 3)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(3 * cap - 1), 2)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(3 * cap), 3)
 
     def test_rung_three_holds_for_any_spend_at_or_beyond_three_times_the_cap(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(3 * cap), 3)
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(100 * cap), 3)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(3 * cap), 3)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(100 * cap), 3)
 
     def test_negative_spend_is_always_rung_zero(self) -> None:
         """A caller passing a negative spend is under budget by construction —
         `resolve_degradation_rung` never raises for it (see its docstring)."""
-        self.assertEqual(critical_dialogue.resolve_degradation_rung(-5), 0)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(-5), 0)
 
     def test_cap_is_read_from_injected_config_not_hardcoded(self) -> None:
         """Same proof style as
@@ -11131,10 +11729,10 @@ class DialogueBudgetLadderTests(unittest.TestCase):
                 json.dumps({"dialogue_budget": {"session_dialogue_cap": 2000}})
             )
 
-            rung_low = critical_dialogue.resolve_degradation_rung(
+            rung_low = dialogue_degradation.resolve_degradation_rung(
                 5, config_path=low_config
             )
-            rung_high = critical_dialogue.resolve_degradation_rung(
+            rung_high = dialogue_degradation.resolve_degradation_rung(
                 5, config_path=high_config
             )
 
@@ -11151,11 +11749,11 @@ class DialogueBudgetLadderTests(unittest.TestCase):
                 json.dumps({"dialogue_budget": {"session_dialogue_cap": 0}})
             )
             self.assertEqual(
-                critical_dialogue.resolve_degradation_rung(0, config_path=zero_config),
+                dialogue_degradation.resolve_degradation_rung(0, config_path=zero_config),
                 3,
             )
             self.assertEqual(
-                critical_dialogue.resolve_degradation_rung(5, config_path=zero_config),
+                dialogue_degradation.resolve_degradation_rung(5, config_path=zero_config),
                 3,
             )
 
@@ -11252,7 +11850,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
 
         self.assertEqual(result.degradation_rung, 0)
         self.assertTrue(result.consensus_reached)
-        self.assertNotIn(critical_dialogue.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertNotIn(dialogue_degradation.BUDGET_DEGRADATION_MARKER, transcript)
         self.assertEqual(records[0]["degradation_rung"], 0)
 
     def test_sensitivity_halt_takes_priority_over_the_budget_ladder(self) -> None:
@@ -11262,7 +11860,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         report no degradation for a dialogue that never ran, exactly like
         `AdvisoryRosterIntegrationTests` already proves for roster
         resolution."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11282,7 +11880,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     def test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls(
         self,
     ) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11311,13 +11909,13 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertLess(result.rounds_run, 3)
         self.assertEqual(len(invoker.calls), 2)
         self.assertEqual(result.outcome, "stalemate")
-        self.assertIn(critical_dialogue.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertIn(dialogue_degradation.BUDGET_DEGRADATION_MARKER, transcript)
 
     def test_rung_one_reduces_rounds_in_panel_topology_too(self) -> None:
         """The round reduction is a plain `max_rounds` reassignment the
         round loop already reads regardless of topology — proves it holds
         for the panel loop (spec 0003 ticket 05) as well as the pair loop."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11345,7 +11943,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(result.outcome, "stalemate")
 
     def test_rung_two_cheapens_effort_observable_in_invoker_calls(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11379,7 +11977,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         `_load_degraded_roster_model`'s substitute (drawn from
         `routing-config.json`'s `light_doer` block), never the caller's own
         explicit `planner_model`/`critic_model`."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         expected_model = critical_dialogue._load_degraded_roster_model(
             critical_dialogue._CONFIG_PATH
         )
@@ -11424,7 +12022,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         construction, so `degraded_independence` must read True (spec
         0003 story 14) even though `resolve_roster` itself had three
         distinct reachable families to work with."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         expected_model = critical_dialogue._load_degraded_roster_model(
             critical_dialogue._CONFIG_PATH
         )
@@ -11454,7 +12052,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     ) -> None:
         """Degradation limits retries, it does not block a genuine consensus
         that arrives on the first (and, at this rung, only) round."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11476,7 +12074,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     def test_rung_three_skips_the_dialogue_entirely_with_zero_worker_calls(
         self,
     ) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11497,14 +12095,14 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertFalse(result.consensus_reached)
         self.assertEqual(result.final_plan, "")
         self.assertFalse((root / "implementation_plan.md").exists())
-        self.assertIn(critical_dialogue.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertIn(dialogue_degradation.BUDGET_DEGRADATION_MARKER, transcript)
         self.assertIn("Outcome:** budget_skipped", transcript)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["outcome"], "budget_skipped")
         self.assertEqual(records[0]["degradation_rung"], 3)
 
     def test_rung_three_removes_a_pre_existing_stale_plan_artifact(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11531,7 +12129,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         specifically to guarantee zero worker contact this call. See this
         ticket's report for why the two seams compose this way rather than
         canaries bypassing the budget ladder."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11587,7 +12185,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         observes the rung climb the ladder exactly as
         `resolve_degradation_rung` documents, all the way to the rung-3
         skip."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         spends_and_expected_rungs = [
             (0, 0),
             (cap - 1, 0),
@@ -11633,7 +12231,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         `reachability_check` was supplied at all (mirrors
         `test_degraded_independence_surfaces_in_telemetry_record`, the
         ticket-07 roster-path version of this same assertion)."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11660,7 +12258,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         `DEGRADED_INDEPENDENCE_MARKER` already gates on, never a second,
         rung-2-only rendering (mirrors
         `test_degraded_independence_surfaces_in_transcript_text`)."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11675,7 +12273,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
             )
             transcript = (root / ".scratch" / "planning_debate.md").read_text()
 
-        self.assertIn(critical_dialogue.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertIn(dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER, transcript)
 
     def test_rung_two_reports_degraded_independence_in_panel_topology_too(
         self,
@@ -11685,7 +12283,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         construction argument holds there identically: both Critics are the
         same model as the Planner whose plan they judge, and the flag must
         say so."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -11725,7 +12323,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         canary records are mandatorily filtered out of mission aggregation
         (`outcome != "canary"`, per `AdvisoryTelemetryRecord`'s own
         WARNING) — the flag rides only where the canary auditor looks."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         fixture = critical_dialogue.CANARY_FIXTURES[0]
         degraded_model = critical_dialogue._load_degraded_roster_model(
             critical_dialogue._CONFIG_PATH
@@ -11768,7 +12366,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         is a REAL result's artifact, still accurately described by that real
         result. A scheduled probe that happens to arrive while the session
         is exhausted has no business destroying it."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         fixture = critical_dialogue.CANARY_FIXTURES[0]
         real_plan = "Real mission's consensus plan — still current.\n"
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -12026,7 +12624,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
         self.assertEqual(result.topology, "pair")
         self.assertEqual(result.round_verdicts, ())
 
-        record = critical_dialogue.AdvisoryTelemetryRecord(
+        record = dialogue_transcript.AdvisoryTelemetryRecord(
             timestamp="2026-01-01T00:00:00Z",
             task_id="abc123",
             rounds_run=1,
@@ -12198,7 +12796,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
     (`claude`/`codex-gpt`/`gemini`) as reachable ALONGSIDE both local
     families this repo's own default roster fallback chains actually offer
     (`gemma`, `qwen` — see `DEFAULT_ROSTER_FALLBACK_CHAINS` in
-    advisory_consultation.py). Scripting the cloud families as reachable
+    critical_dialogue.py). Scripting the cloud families as reachable
     too, rather than simply omitting them, is what actually proves the
     local-only gate is doing the filtering: a test where nothing cloud was
     ever "up" in the first place would pass even if the gate did nothing at
@@ -12304,7 +12902,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
         `roster_topology.role_fallback_chains` offer exactly two distinct
         local families across all three roles (`gemma` for planner and
         critic_b, `qwen` for critic_a — see `DEFAULT_ROSTER_FALLBACK_CHAINS`
-        in advisory_consultation.py), so "two distinct, not one" is the
+        in critical_dialogue.py), so "two distinct, not one" is the
         strongest claim provable against the real production config without
         hand-rolling a custom one for this test.
 
@@ -12364,7 +12962,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
         dialogue's effort, but must never launder it onto
         `_load_degraded_roster_model`'s substitute, which resolves to a
         CLOUD model (`light_doer.name` in routing-config.json)."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         cloud_light_doer_model = critical_dialogue._load_degraded_roster_model(
             critical_dialogue._CONFIG_PATH
         )
@@ -12614,8 +13212,8 @@ class SensitiveTaskDispatchPathTests(unittest.TestCase):
 # branches, so an insertion anywhere but the end is a merge conflict for
 # everyone.
 class DialogueQualityRecordWriterTests(unittest.TestCase):
-    """`advisory_consultation._write_dialogue_quality_record` /
-    `_reduce_dialogue_round`: one `learning_journal.DialogueQualityRecord`
+    """`dialogue_transcript._write_dialogue_quality_record` /
+    `dialogue_transcript._reduce_dialogue_round`: one journal record
     per dialogue, written at the `_result` choke point, reduced from the
     `AdvisoryRoundVerdict`s a consultation already computes and discards
     nowhere else. Organized 1:1 against
@@ -12733,7 +13331,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         while the result names one for its unhealthy state
         (`degraded_independence`). A rung-2 run must read `degraded=True`,
         `independent=False`; a rung-0 run must read the mirror image."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -12779,8 +13377,8 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
     # --- AC3: reduction rule, stated once, never recomputed from text ---
 
     def test_reduce_dialogue_round_counts_verified_quotes_not_objections(self) -> None:
-        entry = critical_dialogue.AdvisoryRoundVerdict(
-            critic_a=critical_dialogue.VerdictContractResult("revise", 0, 3)
+        entry = dialogue_contracts.AdvisoryRoundVerdict(
+            critic_a=dialogue_contracts.VerdictContractResult("revise", 0, 3)
         )
         self.assertEqual(
             critical_dialogue._reduce_dialogue_round(entry), ("revise", 0)
@@ -12792,18 +13390,18 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         the round's count must be zero, never five (`sum`/`max` would both
         report five, indistinguishable from a pair round's sole Critic
         having verified five)."""
-        entry = critical_dialogue.AdvisoryRoundVerdict(
-            critic_a=critical_dialogue.VerdictContractResult("approved", 5, 0),
-            critic_b=critical_dialogue.VerdictContractResult("approved", 0, 0),
+        entry = dialogue_contracts.AdvisoryRoundVerdict(
+            critic_a=dialogue_contracts.VerdictContractResult("approved", 5, 0),
+            critic_b=dialogue_contracts.VerdictContractResult("approved", 0, 0),
         )
         _verdict, count = critical_dialogue._reduce_dialogue_round(entry)
         self.assertEqual(count, 0)
         self.assertNotEqual(count, 5, "min must govern the count, never sum or max")
 
     def test_reduce_dialogue_round_verdicts_follow_the_panel_control_flow(self) -> None:
-        approved = critical_dialogue.VerdictContractResult("approved", 1, 0)
-        revise = critical_dialogue.VerdictContractResult("revise", 0, 1)
-        unparseable = critical_dialogue.VerdictContractResult("unparseable", 0, 0)
+        approved = dialogue_contracts.VerdictContractResult("approved", 1, 0)
+        revise = dialogue_contracts.VerdictContractResult("revise", 0, 1)
+        unparseable = dialogue_contracts.VerdictContractResult("unparseable", 0, 0)
         cases = (
             (approved, approved, "approved"),
             (approved, revise, "revise"),
@@ -12812,7 +13410,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         )
         for critic_a, critic_b, expected in cases:
             with self.subTest(critic_a=critic_a.verdict, critic_b=critic_b.verdict):
-                entry = critical_dialogue.AdvisoryRoundVerdict(
+                entry = dialogue_contracts.AdvisoryRoundVerdict(
                     critic_a=critic_a, critic_b=critic_b
                 )
                 verdict, _count = critical_dialogue._reduce_dialogue_round(entry)
@@ -12926,7 +13524,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         self,
     ) -> None:
         """Pins §2.4's anti-rework-inflation rule: when the caller owns the
-        journal wiring, `advisory_consultation` cannot see that factory's run
+        journal wiring, `critical_dialogue` cannot see that factory's run
         identity, so it must not mint a second one — the dialogue record
         carries no `run_id` key at all, and `_countable_runs` still reports
         exactly one run for the task."""
@@ -13152,7 +13750,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
     # --- pinned decisions with no direct acceptance criterion ---
 
     def test_a_budget_skipped_dialogue_writes_a_zero_round_record(self) -> None:
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -13255,7 +13853,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         returns a bare string that must be a valid `learning_journal.RoundVerdict`
         for `DialogueRound.__post_init__` to accept it."""
         self.assertEqual(
-            set(get_args(critical_dialogue.CriticVerdict)),
+            set(get_args(dialogue_contracts.CriticVerdict)),
             set(get_args(learning_journal.RoundVerdict)),
         )
 
@@ -13286,7 +13884,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
 # concurrently on other branches, so an insertion anywhere but the end is a
 # merge conflict for everyone.
 class PlanOutcomeRecordWriterTests(unittest.TestCase):
-    """`advisory_consultation._write_plan_outcome_record`: the `_result`
+    """`dialogue_transcript._write_plan_outcome_record`: the `_result`
     choke point's fifth write, grading whether the consultation's own plan
     was accepted.
 
@@ -13475,7 +14073,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
         """`budget_skipped` still writes a `dialogue_quality` record (ticket
         24 excludes only `sensitivity_halt`), so the journal file itself
         exists — the assertion here is that no `outcome` record joins it."""
-        cap = critical_dialogue.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):

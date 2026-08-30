@@ -29,8 +29,10 @@ eval = [
 "Issues" = "https://github.com/liorparente/antigravity-auto-routing/issues"
 
 [tool.setuptools]
-package-dir = {"worker_routing" = "skills/worker-routing"}
 packages = ["worker_routing"]
+
+[tool.setuptools.package-dir]
+worker_routing = "skills/worker-routing"
 
 [tool.pytest.ini_options]
 testpaths = ["skills/worker-routing", "skills/council-review/tests"]

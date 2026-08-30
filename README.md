@@ -26,8 +26,6 @@ antigravity-auto-routing/
 └── skills/
     ├── council-review/               # Multi-agent peer review skill
     │   ├── SKILL.md                  # Council Review specification and trigger rules
-    │   ├── scripts/
-    │   │   └── provider_adapters.py  # Transport adapters for Claude, Codex, agy, LM Studio
     │   ├── references/               # Manifest schemas & member review contracts
     │   └── tests/                    # Council review test suite
     └── worker-routing/               # Core routing, debate, and learning engine
@@ -55,6 +53,7 @@ antigravity-auto-routing/
         ├── acceptance_gate.py        # Anti-ratchet acceptance gate for proposed learning lessons
         ├── probe_models.py           # Live model catalog probe & CLI capability audit
         ├── production_invoker.py     # Subprocess runner, timeout wrapper & prompt assemblers
+        ├── provider_adapters.py      # Transport adapters for Claude, Codex, agy, LM Studio
         ├── prompt_assembler.py       # Prompt templates for planners, critics, and adjudicators
         ├── risk_tiered_application.py# Atomic memory lesson accumulation & risk tiering
         ├── routing_config.py         # Typed parser and validator for routing-config.json
@@ -244,15 +243,15 @@ Run audit on a specific conversation with strict warning enforcement:
 
 ### Test Suite
 
-Run the complete 900+ test suite:
+Run the complete test suite:
 ```bash
-python3 test_suite.py
+.venv/bin/python -m unittest test_suite.py
 ```
 
 Run linter and type-checker:
 ```bash
 ruff check skills/worker-routing/ test_suite.py
-mypy --config-file pyproject.toml skills/worker-routing/ test_suite.py
+skills/worker-routing/typecheck.sh
 ```
 
 ---

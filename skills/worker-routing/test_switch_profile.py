@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 import io
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-import switch_profile
+if __package__:
+    from . import switch_profile
+else:
+    import switch_profile  # type: ignore[no-redef]
 
 
 class SwitchProfileTests(unittest.TestCase):

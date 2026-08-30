@@ -1,6 +1,7 @@
 """Direct contract tests for the consolidated CriticalDialogue boundary."""
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import io
@@ -63,6 +64,51 @@ class _StubCouncil:
 
 
 class CriticalDialogueTests(unittest.TestCase):
+    def test_public_surface_contains_only_unified_dialogue_entry_points(self) -> None:
+        self.assertEqual(
+            critical_dialogue.__all__,
+            (
+                "request_council_review",
+                "run_canary_dialogue",
+                "run_critical_dialogue",
+            ),
+        )
+
+    def test_internal_leaf_mechanics_have_no_public_pass_through_aliases(self) -> None:
+        tree = ast.parse(
+            Path(critical_dialogue.__file__).read_text(encoding="utf-8")
+        )
+        leaf_bindings = {
+            "_consultation_policy",
+            "_debate_state_machine",
+            "_debate_transport",
+            "_dialogue_contracts",
+            "_dialogue_degradation",
+            "_dialogue_transcript",
+            "_executive_dialogue_report",
+            "_learned_state",
+            "_prompt_assembler",
+            "_sensitivity_redactor",
+        }
+        violations: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assign) or not isinstance(
+                node.value, ast.Attribute
+            ):
+                continue
+            owner = node.value.value
+            if not isinstance(owner, ast.Name) or owner.id not in leaf_bindings:
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name) and not target.id.startswith("_"):
+                    violations.append(f"{target.id}:{node.lineno}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "leaf mechanics leak through public aliases:\n" + "\n".join(violations),
+        )
+
     def test_run_critical_dialogue_handles_blocking_occasions_and_approval(self) -> None:
         for occasion in ("ambiguity", "plan-review", "code-review", "post-mortem"):
             with self.subTest(occasion=occasion), tempfile.TemporaryDirectory() as tmp:

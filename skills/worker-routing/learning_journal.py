@@ -21,7 +21,7 @@ reason `task_id` here is validated against the exact pattern
 
 **Two identifier vocabularies, and a record is keyed on both.**
 `task_id` names *what* was worked on and is deliberately stable across
-repeats of the same task (`advisory_consultation._default_task_id` digests
+repeats of the same task (`dialogue_transcript._default_task_id` digests
 the task text). `run_id` names *which attempt* a record belongs to, and is
 fresh per execution. Without the second, two runs of one task collapse into
 one identity: their costs sum as if one run, and an outcome grading the
@@ -59,7 +59,7 @@ Two deliberately different failure modes live here:
   in exactly the spirit of `run_advisory_consultation_debate`'s `max_rounds`
   check.
 - A failed **write** returns an error string and never raises, matching
-  `advisory_consultation._write_telemetry_record`. A broken disk must never
+  `dialogue_transcript._write_telemetry_record`. A broken disk must never
   take down the operation the journal was merely observing.
 
 **What "loud" means for a writer that is observing something else.** Two of
@@ -104,10 +104,8 @@ JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
 # Mirrors `agent_council.TASK_ID_RE` character-for-character rather than
 # importing it: importing `agent_council` drags in `urllib.request` and
 # `asyncio`, and these files are loaded by path rather than as a package, so
-# the import would need a `sys.path` hack — the same reasoning
-# `advisory_consultation` documents on its `SENSITIVITY_MARKERS` and
-# `_append_jsonl_locked`. `test_routing.py` asserts the two patterns are
-# identical, so they cannot drift.
+# the import would need a `sys.path` hack. `test_routing.py` asserts the two
+# patterns are identical, so they cannot drift.
 #
 # Matching that pattern exactly is not cosmetic: every `task_id` the council
 # accepts must be journal-writable, or the cross-stream join silently loses
@@ -126,7 +124,7 @@ JOURNAL_RELATIVE_PATH = Path(".ralph") / "learning_journal.jsonl"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 # The wire timestamp format `agent_council.log_routing_telemetry` and
-# `advisory_consultation._build_telemetry_record` both emit. Pinned as a
+# `dialogue_transcript._build_telemetry_record` both emit. Pinned as a
 # pattern so `timestamp` is a constrained field like every other string here,
 # and so a journal record and a telemetry record for the same moment sort and
 # compare identically.
@@ -144,10 +142,11 @@ ISSUE_CODE_RE = re.compile(r"^[A-Z]{2,6}-\d{2}$")
 # rather than by substring.
 _TOKEN_SEPARATOR_RE = re.compile(r"[^A-Za-z0-9]+")
 
-# Mirrors `advisory_consultation.SENSITIVITY_MARKERS`, which itself mirrors
-# `agent_council.SENSITIVE_PATTERNS`, for the same by-path-not-by-package
-# reason given on `TASK_ID_RE`. `test_routing.py` asserts this tuple is a
-# superset of both, so the three cannot silently diverge.
+# Mirrors `sensitivity_redactor.SENSITIVITY_MARKERS`, the canonical marker
+# source also exposed as `agent_council.SENSITIVE_PATTERNS`, for the same
+# by-path-not-by-package reason given on `TASK_ID_RE`. `test_routing.py`
+# asserts this tuple is a superset of both, so the three cannot silently
+# diverge.
 #
 # Here the markers guard identifiers rather than task text, and they are
 # matched on token boundaries — see `_identifier_sensitivity_marker`, and do
@@ -239,7 +238,7 @@ OutcomeVerdict = Literal[
 # truths is what makes that unconstructible.
 #
 # The `stalemate_resolution` verdicts are exactly
-# `advisory_consultation._build_stalemate_report`'s three options, in order:
+# `debate_state_machine.build_stalemate_report`'s three options, in order:
 # approve the Planner's architecture, approve the Critic's, escalate to a
 # human. Keep them aligned; a fourth option there needs a fourth verdict here.
 OUTCOME_VERDICTS: Mapping[GroundTruth, frozenset[str]] = {
@@ -252,7 +251,7 @@ OUTCOME_VERDICTS: Mapping[GroundTruth, frozenset[str]] = {
 # Spec 0003's four dialogue occasions. Schema only in this ticket — spec
 # 0003's machinery is what will write these records.
 #
-# **Must stay byte-identical to `advisory_consultation.Occasion`, hyphens and
+# **Must stay byte-identical to `dialogue_contracts.Occasion`, hyphens and
 # all.** These are two separately-declared `Literal` aliases in two different
 # files describing what is supposed to be one vocabulary; nothing in the type
 # system ties them together, so nothing stops them from drifting apart. They
@@ -272,14 +271,14 @@ DIALOGUE_OCCASIONS: frozenset[str] = frozenset(get_args(DialogueOccasion))
 # families.
 #
 # Same cross-file agreement risk as `DialogueOccasion` above, against
-# `advisory_consultation.RosterTopology`: currently identical
+# `critical_dialogue.RosterTopology`: currently identical
 # (`Literal["pair", "panel"]` on both sides), and just as unguarded by the
 # type system if one side ever grows a third topology.
 # `test_cross_spec_vocabularies_agree` pins this pair too.
 DialogueTopology = Literal["pair", "panel"]
 DIALOGUE_TOPOLOGIES: frozenset[str] = frozenset(get_args(DialogueTopology))
 
-# One resolved verdict per round. Mirrors `advisory_consultation.CriticVerdict`
+# One resolved verdict per round. Mirrors `dialogue_contracts.CriticVerdict`
 # — including "unparseable" staying distinct from "revise", since a malformed
 # response is a broken Critic, not a reasoned objection, and a learner that
 # conflated the two would read parser breakage as healthy disagreement.
@@ -301,8 +300,8 @@ def _identifier_sensitivity_marker(value: str) -> str | None:
     """Return the `SENSITIVITY_MARKERS` entry `value` embeds, or None.
 
     **Token-boundary matching, not the substring scan its counterparts in
-    `advisory_consultation` and `agent_council` use — deliberately.** Those
-    two scan free-form task text, where a substring hit is the right call.
+    `sensitivity_redactor` uses for free-form task text — deliberately.** Its
+    task scanner accepts substring hits, which is the right call for prose.
     This one scans identifiers, where it is actively wrong: `"task-1"`
     contains `"sk-"`, so a substring check condemns an ordinary identifier —
     including `task-<digest>`, the form `agent_council._task_id` generates —
@@ -653,7 +652,7 @@ class TaskLabel:
        `dataclasses.replace` that adds a tag to a halted label — fails too.
 
     Why the rule exists: a tag is derived from the task text, and the standing
-    boundary around a halt (see `advisory_consultation._resolve_task_id` and
+    boundary around a halt (see `critical_dialogue._resolve_task_id` and
     `_render_sensitivity_halt_transcript`) is that *nothing* derived from
     halted task text surfaces anywhere. "bugfix" looks harmless in isolation,
     but a halted task's tag plus its timestamp is a confirmation oracle over
@@ -824,7 +823,7 @@ class WorkerExecutionRecord:
     The spec asks efficiency for "escalation rate, rework counts, cost per
     completed task". `task_id` alone cannot answer any of the three across
     repeats: it is a stable digest of the task text
-    (`advisory_consultation._default_task_id`), deliberately identical for
+    (`dialogue_transcript._default_task_id`), deliberately identical for
     two consultations of the same task, so their invocations pile into one
     identity — cost sums as though one run happened, and the second run's
     rework reads as the first run's. `run_id` separates them:
@@ -923,7 +922,7 @@ class DialogueRound:
     """One round of a CriticalDialogue: its verdict and how much it engaged.
 
     A type per concept, following `AdvisoryDebateRound` in
-    `advisory_consultation`, and replacing the pair of synchronized tuples
+    `critical_dialogue`, and replacing the pair of synchronized tuples
     (`round_verdicts`, `engagement_counts`) this record used to carry. Those
     needed an equal-length check to stay meaningful, which is the tell: a
     check that has to be written can be forgotten, mis-ordered, or defeated by
@@ -945,7 +944,7 @@ class DialogueRound:
     the objections themselves: the units are quoted from the reviewed artifact,
     so carrying them would carry the artifact.
 
-    **Quotes, not objections.** `advisory_consultation` counts two things per
+    **Quotes, not objections.** `critical_dialogue` counts two things per
     Critic — verified quotes, each checked byte-for-byte against the reviewed
     artifact, and numbered objections, which are unverified free text. That
     module already refuses to let the second substitute for the first: an
@@ -956,7 +955,7 @@ class DialogueRound:
     fabricated approval with three objections and no quotes would journal
     `engagement_count=3` for a response the parser classified `unparseable` for
     carrying no engagement at all. Objections are not discarded from the system;
-    `advisory_consultation.AdvisoryTelemetryRecord.round_verdicts` keeps both
+    `dialogue_transcript.AdvisoryTelemetryRecord.round_verdicts` keeps both
     integers per Critic. They are simply not what this field counts.
 
     **`min` across a panel's Critics, never `sum` or `max`.** With Critic A at
@@ -1004,12 +1003,13 @@ def _validate_rounds(value: object, field_name: str) -> None:
 class DialogueQualityRecord:
     """How a CriticalDialogue behaved.
 
-    The writer is `advisory_consultation._write_dialogue_quality_record`, one
-    record per dialogue, appended at that module's `_result` choke point —
-    the same single exit every `AdvisoryTelemetryRecord` already passes
-    through. Ownership returned to spec 0004 on 2026-08-13 (spec 0004 ticket
-    24): this module owns the contract, `advisory_consultation` owns the one
-    caller that fills it in from a real dialogue's result.
+    The writer helper is
+    `dialogue_transcript._write_dialogue_quality_record`, invoked once per
+    dialogue at `critical_dialogue`'s `_result` choke point — the same single
+    exit every `AdvisoryTelemetryRecord` already passes through. Ownership
+    returned to spec 0004 on 2026-08-13 (spec 0004 ticket 24): this module
+    owns the contract, `critical_dialogue` owns the one caller that fills it
+    in from a real dialogue's result.
 
     `rounds` is a tuple of `DialogueRound` — one value per round, not parallel
     arrays; see that class for why. It serializes as a list of objects
@@ -1044,7 +1044,7 @@ class DialogueQualityRecord:
     `canaries_planted >= 1` marks a probe whose single round's verdict was
     forced by a fixture. An aggregation that skips that filter blends a probe's
     engagement count into real-mission statistics — the identical silent-blend
-    `advisory_consultation.AdvisoryTelemetryRecord` warns about for
+    `dialogue_transcript.AdvisoryTelemetryRecord` warns about for
     `round_verdicts`. A second discriminator field would be a second thing to
     keep in step with the first; this record already carries the answer.
     """
@@ -1303,7 +1303,7 @@ def journal_path(root_dir: Path) -> Path:
 def _append_jsonl_locked(path: Path, record: dict[str, object]) -> None:
     """Append one JSON record to `path` under an exclusive advisory lock.
 
-    Duplicates `advisory_consultation._append_jsonl_locked`, which itself
+    Duplicates `dialogue_transcript._append_jsonl_locked`, which itself
     duplicates `agent_council.append_jsonl_locked`, and for the same reason
     both of them document: these files are loaded by path rather than as a
     package, so importing either would need a `sys.path` hack, and importing
@@ -1330,7 +1330,7 @@ def append_journal_record(record: JournalRecord, *, root_dir: Path) -> str | Non
     """Append one record to the journal. Failure is reported, never raised.
 
     Returns `None` on success and an error message on failure, matching
-    `advisory_consultation._write_telemetry_record` exactly. The journal
+    `dialogue_transcript._write_telemetry_record` exactly. The journal
     observes work it must never be able to break: an unwritable `.ralph`
     directory has to degrade the learning loop, not fail the worker
     invocation, test run, or audit that was merely being recorded. Callers

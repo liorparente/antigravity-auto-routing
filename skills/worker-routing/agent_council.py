@@ -61,7 +61,6 @@ CALIBRATION_FIELDS = ("task_id", "task", "complexity", "effort", "decision", "no
 HMAC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
 SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 SENSITIVE_PATTERNS = SENSITIVITY_MARKERS
-_CREDENTIAL_MARKERS = ("api_key", "sk-", "bearer ", "private key", "password")
 
 
 def detect_sensitive_data(text: str) -> bool:
@@ -71,14 +70,7 @@ def detect_sensitive_data(text: str) -> bool:
 
 def evaluate_sensitivity(task_text: str) -> tuple[bool, bool]:
     """Return whether a task is sensitive and whether it includes credentials."""
-    is_sensitive = _sensitivity_redactor.scan_sensitivity_markers(task_text) is not None
-    contains_credentials = (
-        _sensitivity_redactor.scan_sensitivity_markers(
-            task_text, markers=_CREDENTIAL_MARKERS
-        )
-        is not None
-    )
-    return is_sensitive, contains_credentials
+    return _sensitivity_redactor.classify_sensitivity(task_text)
 
 
 def check_local_model_endpoint(

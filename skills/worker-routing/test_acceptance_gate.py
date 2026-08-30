@@ -2,16 +2,12 @@
 """Unit tests for `acceptance_gate` (spec 0004 ticket 18)."""
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import acceptance_gate, learning_journal, learning_scoreboard

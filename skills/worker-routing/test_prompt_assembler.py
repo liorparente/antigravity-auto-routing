@@ -3,13 +3,9 @@ from __future__ import annotations
 
 import ast
 import dataclasses
-import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import prompt_assembler
