@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 import tempfile
 from pathlib import Path
 
 if __package__:
     from . import prompt_assembler
 else:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
     import prompt_assembler  # type: ignore[no-redef]
 
 

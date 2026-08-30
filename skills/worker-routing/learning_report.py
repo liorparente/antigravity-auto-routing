@@ -46,7 +46,7 @@ guarantee, and enforced by the same AST guard test.
 second call on the same UTC date supersedes the first — the journal grows
 between runs, so a later call's report is a more complete one, not a
 duplicate of the same output. The write itself is atomic and durable,
-mirroring `advisory_consultation._atomic_text_write` and
+mirroring `dialogue_transcript._atomic_text_write` and
 `agent_council._atomic_json_write`'s shape (not imported — the helper is
 private, and importing across those modules would point the dependency
 arrow backwards across `learning_report -> learning_scoreboard ->
@@ -398,7 +398,7 @@ def render_weekly_report(
 def _atomic_text_write(path: Path, content: str) -> None:
     """Write text without exposing a partially-written report.
 
-    Replicates `advisory_consultation._atomic_text_write`'s and
+    Replicates `dialogue_transcript._atomic_text_write`'s and
     `agent_council._atomic_json_write`'s shape locally rather than importing
     either — the helper is private, and importing across those modules would
     point the dependency arrow backwards across `learning_report ->
@@ -472,7 +472,7 @@ def _model_key(provider: str, model_id: str) -> str:
     `<option>` values, kept as a second one-line function rather than an
     import across modules. `_atomic_text_write` is the precedent: a
     one-liner duplicated locally in every module that needs it rather than
-    imported from `advisory_consultation` or `agent_council`. The rule is
+    imported from `dialogue_transcript` or `agent_council`. The rule is
     about *one-liners not worth coupling two modules over*, not a blanket
     ban on cross-module private access — `routing_config.py` deliberately
     reads `probe_models._CROSS_PROVIDER_EFFORT_LADDERS` where the shared

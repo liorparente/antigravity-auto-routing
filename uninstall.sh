@@ -61,44 +61,228 @@ GEMINI_MD="$HOME/.gemini/GEMINI.md"
 AGENTS_MD="$TARGET_PROJECT_DIR/AGENTS.md"
 CLAUDE_MD="$TARGET_PROJECT_DIR/CLAUDE.md"
 
-# Mirrors install.sh's MANAGED_FILES, plus the routing-config.json install.sh
-# writes separately (it installs only the default and preserves a customized
-# one, but it did put the file there, so uninstall removes it). Kept as an
-# array rather than one long `rm -f` line so a module added to install.sh and
-# forgotten here is visible; `test_routing.py`'s `ManagedFileClosureTests`
-# additionally asserts this list covers every managed file, so the drift that
-# left `learning_journal.py` behind cannot recur silently in either script.
+# Mirrors install.sh's non-Python artifacts, plus the routing-config.json
+# install.sh writes separately (it installs only the default and preserves a
+# customized one, but it did put the file there, so uninstall removes it).
 INSTALLED_FILES=(
-    SKILL.md REFERENCE.md routing-audit.sh __init__.py routing_check.py
-    agent_council.py dialogue_contracts.py dialogue_degradation.py
-    executive_dialogue_report.py dialogue_transcript.py prompt_assembler.py regenerate_institutional_memory.py
-    sensitivity_redactor.py debate_orchestrator.py debate_state_machine.py
-    consultation_policy.py debate_transport.py advisory_consultation.py
-    production_invoker.py learning_journal.py learning_outcomes.py
-    learning_scoreboard.py learning_report.py learning_report_html.py acceptance_gate.py
-    learned_state.py risk_tiered_application.py learner_worker.py protocol.md
-    routing-config.json routing_config.py probe_models.py switch_profile.py
+    SKILL.md REFERENCE.md routing-audit.sh protocol.md routing-config.json
 )
+PYTHON_MODULE_MANIFEST=".auto-routing-python-modules"
+PYTHON_MODULE_MANIFEST_HEADER="auto-routing-python-modules-v1"
+PYTHON_MODULE_RECEIPT_NAME=".auto-routing-python-modules.receipt"
+PYTHON_MODULE_RECEIPT_HEADER="auto-routing-python-modules-receipt-v2-hmac-sha256"
+INSTALLER_STATE_DIR="${AUTO_ROUTING_STATE_DIR:-$HOME/.local/state/auto-routing}"
+PYTHON_MODULE_KEY="$INSTALLER_STATE_DIR/python-module-manifest.key"
+PROJECT_RECEIPT_ID="$(python3 - "$TARGET_PROJECT_DIR" <<'PYEOF'
+import hashlib
+import os
+import sys
 
-# Mirrors install.sh's own dynamic discovery of future production modules —
-# every non-test `.py` file in THIS repo's own skills/worker-routing/ source
-# directory is a module install.sh would have propagated, whether or not it
-# already appears in the static list above. Discovering from this script's
-# own source directory (never by globbing the target directory) is what
-# keeps removal surgical: TARGET_DIRS's own comment documents ".agents/",
-# ".agent/", and ".codex/" as convention directories other tools may also
-# populate, so only files this installer is actually responsible for are
-# ever removed from them.
+print(hashlib.sha256(os.fsencode(sys.argv[1])).hexdigest())
+PYEOF
+)"
+PYTHON_MODULE_RECEIPT="$INSTALLER_STATE_DIR/projects/$PROJECT_RECEIPT_ID/$PYTHON_MODULE_RECEIPT_NAME"
+PYTHON_MODULES=()
+
+valid_python_module_name() {
+    local module_name="$1" module_stem
+    case "$module_name" in
+        *.py) module_stem="${module_name%.py}" ;;
+        *) return 1 ;;
+    esac
+    case "$module_stem" in
+        ""|test_*|.*|*.*|*[!A-Za-z0-9_]*) return 1 ;;
+        [A-Za-z_]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+sha256_file() {
+    python3 - "$1" <<'PYEOF'
+import hashlib
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    print(hashlib.sha256(stream.read()).hexdigest())
+PYEOF
+}
+
+read_python_module_manifest() {
+    local manifest="$1" header digest module_name extra record existing
+    PARSED_PYTHON_MODULES=()
+    [ -f "$manifest" ] && [ ! -L "$manifest" ] || return 1
+    {
+        IFS= read -r header || return 1
+        [ "$header" = "$PYTHON_MODULE_MANIFEST_HEADER" ] || return 1
+        while IFS=$'\t' read -r digest module_name extra \
+            || [ -n "$digest$module_name$extra" ]; do
+            [ -z "$extra" ] || return 1
+            [ "${#digest}" -eq 64 ] || return 1
+            case "$digest" in
+                *[!0-9a-f]*) return 1 ;;
+            esac
+            valid_python_module_name "$module_name" || return 1
+            if [ "${#PARSED_PYTHON_MODULES[@]}" -gt 0 ]; then
+                for record in "${PARSED_PYTHON_MODULES[@]}"; do
+                    existing="${record#*|}"
+                    [ "$existing" != "$module_name" ] || return 1
+                done
+            fi
+            PARSED_PYTHON_MODULES+=("$digest|$module_name")
+        done
+        [ "${#PARSED_PYTHON_MODULES[@]}" -gt 0 ] || return 1
+    } < "$manifest"
+}
+
+# SECURITY INVARIANT: this function and the three helpers above are duplicated
+# in install.sh so each script remains standalone. ManagedFileClosureTests
+# compares their bodies and contract constants byte-for-byte to prevent drift.
+validate_python_module_receipt() {
+    local receipt="$1" key="$2" project="$3" output="$4"
+    [ -f "$receipt" ] && [ ! -L "$receipt" ] || return 1
+    [ -f "$key" ] && [ ! -L "$key" ] || return 1
+    python3 - "$receipt" "$key" "$project" "$output" \
+        "$PYTHON_MODULE_RECEIPT_HEADER" <<'PYEOF'
+import hashlib
+import hmac
+import os
+import sys
+
+receipt_path, key_path, project, output_path, expected_header = sys.argv[1:]
+try:
+    with open(key_path, "r", encoding="ascii") as stream:
+        key_hex = stream.read().strip()
+    if len(key_hex) != 64 or any(char not in "0123456789abcdef" for char in key_hex):
+        raise ValueError("invalid key")
+    with open(receipt_path, "rb") as stream:
+        header = stream.readline().rstrip(b"\n")
+        signature = stream.readline().rstrip(b"\n")
+        manifest = stream.read()
+    if header != expected_header.encode("ascii"):
+        raise ValueError("invalid header")
+    if len(signature) != 64 or any(byte not in b"0123456789abcdef" for byte in signature):
+        raise ValueError("invalid signature")
+    payload = os.fsencode(project) + b"\0" + manifest
+    expected = hmac.new(bytes.fromhex(key_hex), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature.decode("ascii"), expected):
+        raise ValueError("signature mismatch")
+    with open(output_path, "wb") as stream:
+        stream.write(manifest)
+except (OSError, UnicodeError, ValueError):
+    sys.exit(1)
+PYEOF
+}
+
+# Every source-side, non-test Python module is installer-managed. Never glob
+# target directories: a target may contain user tests or another tool's
+# modules, which uninstall must preserve.
 if [ -d "$SRC_DIR" ]; then
     for python_module in "$SRC_DIR"/*.py; do
         [ -e "$python_module" ] || continue
         python_module_name="$(basename "$python_module")"
         [[ "$python_module_name" == test_* ]] && continue
-        if [[ " ${INSTALLED_FILES[*]} " != *" $python_module_name "* ]]; then
-            INSTALLED_FILES+=("$python_module_name")
+        if ! valid_python_module_name "$python_module_name"; then
+            echo "❌ Unsafe Python module filename: $python_module_name" >&2
+            exit 1
         fi
+        PYTHON_MODULES+=("$python_module_name")
     done
 fi
+
+# Authenticate a canonical manifest before deleting anything. Missing target
+# copies are allowed because the signed receipt embeds the canonical bytes;
+# malformed, conflicting, or forged present copies remain fail-closed.
+UNINSTALL_STATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-uninstall.XXXXXX")"
+cleanup_uninstall_state() {
+    rm -rf "$UNINSTALL_STATE_DIR"
+}
+trap cleanup_uninstall_state EXIT
+mkdir -p "$UNINSTALL_STATE_DIR/python-modules"
+AUTHENTICATED_MANIFEST="$UNINSTALL_STATE_DIR/authenticated-manifest"
+MANIFEST_AUTHORIZED=0
+if [ -e "$PYTHON_MODULE_RECEIPT" ] || [ -L "$PYTHON_MODULE_RECEIPT" ]; then
+    if ! validate_python_module_receipt \
+        "$PYTHON_MODULE_RECEIPT" \
+        "$PYTHON_MODULE_KEY" \
+        "$TARGET_PROJECT_DIR" \
+        "$AUTHENTICATED_MANIFEST"; then
+        echo "❌ Invalid Python ownership receipt: $PYTHON_MODULE_RECEIPT" >&2
+        exit 1
+    fi
+    if ! read_python_module_manifest "$AUTHENTICATED_MANIFEST"; then
+        echo "❌ Invalid authenticated Python ownership manifest." >&2
+        exit 1
+    fi
+    MANIFEST_AUTHORIZED=1
+else
+    first_legacy_manifest=""
+    for target_dir in "${TARGET_DIRS[@]}"; do
+        manifest_path="$target_dir/$PYTHON_MODULE_MANIFEST"
+        if [ -e "$manifest_path" ] || [ -L "$manifest_path" ]; then
+            if ! read_python_module_manifest "$manifest_path"; then
+                echo "❌ Invalid or colliding Python ownership manifest: $manifest_path" >&2
+                exit 1
+            fi
+            if [ -z "$first_legacy_manifest" ]; then
+                first_legacy_manifest="$manifest_path"
+            elif ! cmp -s "$first_legacy_manifest" "$manifest_path"; then
+                echo "❌ Conflicting pre-receipt Python ownership manifests." >&2
+                exit 1
+            fi
+        fi
+    done
+    if [ -n "$first_legacy_manifest" ]; then
+        if [ "${AUTO_ROUTING_MIGRATE_PRE_RECEIPT:-0}" != "1" ]; then
+            echo "❌ Pre-receipt Python ownership requires explicit migration: set AUTO_ROUTING_MIGRATE_PRE_RECEIPT=1 after reviewing the manifests." >&2
+            exit 1
+        fi
+        cp "$first_legacy_manifest" "$AUTHENTICATED_MANIFEST"
+        MANIFEST_AUTHORIZED=1
+    fi
+fi
+
+if [ "$MANIFEST_AUTHORIZED" -eq 1 ]; then
+    read_python_module_manifest "$AUTHENTICATED_MANIFEST"
+    printf '%s\n' "${PARSED_PYTHON_MODULES[@]}" \
+        > "$UNINSTALL_STATE_DIR/authorized-python-modules"
+fi
+
+for index in "${!TARGET_DIRS[@]}"; do
+    manifest_path="${TARGET_DIRS[$index]}/$PYTHON_MODULE_MANIFEST"
+    if [ -e "$manifest_path" ] || [ -L "$manifest_path" ]; then
+        if ! read_python_module_manifest "$manifest_path"; then
+            echo "❌ Invalid or colliding Python ownership manifest: $manifest_path" >&2
+            exit 1
+        fi
+        if [ "$MANIFEST_AUTHORIZED" -eq 1 ] \
+            && ! cmp -s "$manifest_path" "$AUTHENTICATED_MANIFEST"; then
+            echo "❌ Python ownership manifest does not match authenticated provenance: $manifest_path" >&2
+            exit 1
+        fi
+    fi
+    if [ "$MANIFEST_AUTHORIZED" -eq 1 ]; then
+        cp "$UNINSTALL_STATE_DIR/authorized-python-modules" \
+            "$UNINSTALL_STATE_DIR/python-modules/$index"
+    fi
+done
+
+quarantine_and_remove_if_digest_matches() {
+    local installed_path="$1" installed_digest="$2" quarantine
+    quarantine="${installed_path}.auto-routing-quarantine.$$"
+    if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
+        echo "❌ Quarantine path collision: $quarantine" >&2
+        return 2
+    fi
+    mv "$installed_path" "$quarantine"
+    if [ "$(sha256_file "$quarantine")" = "$installed_digest" ]; then
+        rm -f "$quarantine"
+        return 0
+    fi
+    if [ ! -e "$installed_path" ] && [ ! -L "$installed_path" ]; then
+        mv "$quarantine" "$installed_path"
+    fi
+    return 1
+}
 
 # Same versionless sentinel markers install.sh writes/looks for.
 PROTOCOL_START="# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
@@ -181,6 +365,40 @@ for i in "${!TARGET_DIRS[@]}"; do
         for installed_file in "${INSTALLED_FILES[@]}"; do
             rm -f "$target_dir/$installed_file"
         done
+        # Manifest-backed installs remove exactly their recorded modules.
+        # Legacy installs have no record, so fall back to the current source
+        # set without ever globbing the target directory.
+        normalized_manifest="$UNINSTALL_STATE_DIR/python-modules/$i"
+        if [ -f "$normalized_manifest" ]; then
+            while IFS='|' read -r installed_digest python_module_name \
+                || [ -n "$installed_digest$python_module_name" ]; do
+                installed_path="$target_dir/$python_module_name"
+                if [ -f "$installed_path" ] && [ ! -L "$installed_path" ]; then
+                    quarantine_status=0
+                    quarantine_and_remove_if_digest_matches \
+                        "$installed_path" "$installed_digest" \
+                        || quarantine_status=$?
+                    if [ "$quarantine_status" -eq 1 ]; then
+                        echo "⚠️  Preserving modified Python module: $installed_path" >&2
+                    elif [ "$quarantine_status" -ne 0 ]; then
+                        exit "$quarantine_status"
+                    fi
+                elif [ -e "$installed_path" ] || [ -L "$installed_path" ]; then
+                    echo "⚠️  Preserving non-regular Python module path: $installed_path" >&2
+                fi
+            done < "$normalized_manifest"
+            rm -f "$target_dir/$PYTHON_MODULE_MANIFEST"
+        else
+            # No authenticated provenance means no Python basename is owned,
+            # even when its bytes happen to equal today's source checkout.
+            for python_module_name in "${PYTHON_MODULES[@]}"; do
+                installed_path="$target_dir/$python_module_name"
+                if [ -e "$installed_path" ] || [ -L "$installed_path" ]; then
+                    echo "⚠️  Preserving unverified legacy Python module: $installed_path" >&2
+                fi
+            done
+            rm -f "$target_dir/$PYTHON_MODULE_MANIFEST"
+        fi
         rm -rf "$target_dir/learned-state"
         rmdir "$target_dir" 2>/dev/null || true
         if [ -d "$target_dir" ]; then
@@ -209,6 +427,7 @@ for i in "${!TARGET_DIRS[@]}"; do
         echo "⏭️  $target_dir not found — skipping."
     fi
 done
+rm -f "$PYTHON_MODULE_RECEIPT"
 
 # Strip the protocol block out of a file in place (versionless or legacy
 # marker), leaving any other custom content untouched.

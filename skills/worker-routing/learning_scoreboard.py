@@ -73,7 +73,7 @@ else:
 DEFAULT_WINDOW_DAYS: int = 7
 
 # The two ground truths that complete a task (implementation_plan.md Section
-# 3.4). `plan` is excluded even on `accepted`: `advisory_consultation` writes
+# 3.4). `plan` is excluded even on `accepted`: `critical_dialogue` writes
 # that record automatically the instant a plan-producing dialogue reaches
 # consensus, before implementation exists, and admitting it would mint a
 # completed task at consensus and average the cost of work that never

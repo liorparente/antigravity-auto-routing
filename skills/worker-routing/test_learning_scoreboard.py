@@ -12,16 +12,12 @@ from __future__ import annotations
 
 import ast
 import json
-import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from unittest import mock
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import learning_journal, learning_outcomes, learning_scoreboard

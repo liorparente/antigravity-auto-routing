@@ -84,7 +84,7 @@ class CatalogMetadata:
 
 
 CATALOG_METADATA = CatalogMetadata(
-    last_reviewed="2026-08-26",
+    last_reviewed="2026-08-29",
     review_interval_days=30,
 )
 
@@ -227,7 +227,7 @@ PERSPECTIVE_PROMPTS: dict[ReviewerPerspective, str] = {
 # `knowledge/institutional-memory.md` used to carry 103 free-text, dated
 # entries (~90KB) — too large to inject into a worker's mission brief
 # without degrading attention and blowing the token budget. This module
-# instead ships a fixed, structured distillation of that history — 32 rules
+# instead ships a fixed, structured distillation of that history — 37 rules
 # across 5 categories — and `extract_scoped_memory` below picks only the
 # 3-5 rules relevant to one task, instead of the whole document. The full
 # historical record is preserved, unedited, in
@@ -512,15 +512,28 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
     GoldenRule(
         26,
         "Testing & TDD Seams",
-        "pipx run mypy needs a symlink workaround for skills/worker-routing/",
+        "Type-check the exact CI module set through a temporary package alias outside the repository",
         "A hyphenated directory name is not a valid Python package name, so mypy "
         "refuses outright (... is not a valid Python package name) rather than "
-        "type-checking anything — CI dodges this by sed-rewriting the module list to "
-        "worker_routing/ first; reproduce locally with ln -sfn worker-routing "
-        "skills/worker_routing before invoking pipx run mypy --config-file "
-        "pyproject.toml skills/worker_routing/<file>.py.",
-        ("mypy", "typecheck", "type check", "symlink", "worker-routing", "worker_routing", "pyproject.toml", "pipx"),
-        ("pyproject.toml", "*.py"),
+        "type-checking anything. Reproduce CI with a temporary directory outside "
+        "the repository whose worker_routing symlink targets the absolute "
+        "skills/worker-routing path; map only those package paths through that "
+        "alias and pass mypy the workflow's exact PYTHON_MODULES target list, "
+        "including test_suite.py and the council-review targets. Remove the "
+        "temporary directory afterward and leave the repository's worker_routing "
+        "path absent.",
+        (
+            "mypy",
+            "typecheck",
+            "type check",
+            "symlink",
+            "worker-routing",
+            "worker_routing",
+            "pyproject.toml",
+            "pipx",
+            "PYTHON_MODULES",
+        ),
+        ("pyproject.toml", ".github/workflows/*.yml", "*.py"),
     ),
     GoldenRule(
         27,
@@ -631,6 +644,246 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         "Local reasoning models in LM Studio (e.g. Qwen 27B, DeepSeek R1) emit extensive thinking tokens under delta.reasoning_content before generating delta.content. Ingestion clients must parse reasoning deltas and execute explicit sys.stdout.flush() or run with python3 -u (PYTHONUNBUFFERED=1) to prevent 0-byte pipe silence, task supervisor timeouts, and 'Last progress: never' hangs.",
         ("lm-studio", "streaming", "reasoning_content", "cot", "unbuffered", "flush", "stdout", "pipe", "progress", "qwen"),
         ("production_invoker.py", "test_lmstudio.py", "*.py", "*.sh"),
+    ),
+    GoldenRule(
+        36,
+        "Architecture & Deep Modules",
+        "Synchronize structural non-role configuration keys across routing_config and routing_check",
+        "Adding top-level configuration keys (such as _active_profile) requires updating both routing_check.NON_ROLE_CONFIG_KEYS and routing_config.STRUCTURAL_KEYS in lockstep. Because routing_check.py dynamically prioritizes routing_config.STRUCTURAL_KEYS when imported, omitting a key from STRUCTURAL_KEYS silently degrades into runtime schema drift where the key is erroneously treated as an invalid worker role.",
+        ("structural", "config", "schema", "non-role", "active_profile", "routing_config", "routing_check", "STRUCTURAL_KEYS", "NON_ROLE_CONFIG_KEYS", "drift"),
+        ("routing-config.json", "routing_config.py", "routing_check.py", "test_declarative_schema.py"),
+    ),
+    GoldenRule(
+        37,
+        "Architecture & Deep Modules",
+        "Calibrate local coding models with moderate temperature and dynamic Min-P filtering",
+        "Greedy decoding (T=0.0) locks local coding workers into local optima and repetitive self-repair loops. For local coding models (e.g. Qwen3.8-27B-MLX), configure moderate temperature (0.3) paired with dynamic Min-P (0.05), Top-P (0.95), and disabled repetition penalty (1.0) in production_invoker.py and LM Studio presets. Min-P dynamically prunes low-probability tokens below 5% relative to the leading candidate, eliminating syntax corruption while preserving algorithmic exploration.",
+        ("sampling", "temperature", "min_p", "top_p", "repetition_penalty", "lm-studio", "qwen", "coding", "greedy", "local model"),
+        ("production_invoker.py", "routing-config.json", "test_lmstudio.py", "*.py"),
+    ),
+    GoldenRule(
+        38,
+        "Architecture & Deep Modules",
+        "Consolidate multi-occasion deliberation into deep CriticalDialogue modules and eliminate shallow facades",
+        "When an orchestrator manages multi-occasion deliberations (ambiguity, plan reviews, diff audits, panel reviews), consolidate them into a single deep CriticalDialogue module rather than scattering shallow wrapper facades (e.g. advisory_consultation.py, council_review.py) with 60+ re-exported alias chains. Maintain locality and high leverage by keeping state machine transitions, contract quote verification, transcripts, and degradation rungs behind private module seams. Before deleting an obsolete facade, prove reference closure across executable code, comments, docstrings, type annotations, subprocess strings, tests, manifests, and CI. Historical or domain-event names may remain only when clearly labeled as historical rather than live module seams.",
+        (
+            "critical dialogue",
+            "advisory",
+            "council review",
+            "facade",
+            "shallow",
+            "deep module",
+            "seam",
+            "alias",
+            "re-export",
+            "consolidation",
+            "reference closure",
+            "deletion",
+            "historical name",
+        ),
+        (
+            "critical_dialogue.py",
+            "debate_*.py",
+            "council_*.py",
+            "dialogue_*.py",
+            "*.py",
+            "*.md",
+            "*.yml",
+            "*.yaml",
+            "*.json",
+        ),
+    ),
+    GoldenRule(
+        39,
+        "Architecture & Deep Modules",
+        "Bridge active event loops in synchronous convenience entry points",
+        "When exposing synchronous convenience entry points (e.g. request_council_review) over asynchronous coroutines (e.g. ReviewCouncil.review), check for an active running event loop using try: loop = asyncio.get_running_loop(). Calling asyncio.run() inside an already running loop raises RuntimeError: This event loop is already running. In active loop environments (e.g. asynchronous test runners, notebooks, or live orchestrators), bridge execution safely using concurrent.futures.ThreadPoolExecutor(max_workers=1) to isolate loop lifecycles.",
+        ("asyncio", "event loop", "asyncio.run", "threadpool", "synchronous", "request_council_review", "RuntimeError", "coroutine", "bridge", "council"),
+        ("critical_dialogue.py", "test_critical_dialogue.py", "*.py"),
+    ),
+    GoldenRule(
+        40,
+        "Testing & TDD Seams",
+        "Invoke canonical consultation aliases in background dispatch threads",
+        "When spawning a background execution thread (e.g. dispatch_post_mortem_consultation), invoke the public consultation entry point (run_advisory_consultation_debate) as the thread's target rather than a direct internal function (run_critical_dialogue). This guarantees that dynamic test patches and mock side effects applied to the public alias propagate seamlessly into the background thread's execution net without leaking unhandled thread exceptions.",
+        ("thread", "background", "dispatch_post_mortem_consultation", "run_advisory_consultation_debate", "monkeypatch", "mock", "alias", "seam", "post-mortem"),
+        ("critical_dialogue.py", "test_routing.py", "*.py"),
+    ),
+    GoldenRule(
+        41,
+        "Testing & TDD Seams",
+        "Retarget test suites and child subprocess strings directly to consolidated module seams",
+        "During facade deprecation and module consolidation, update all test imports, type annotations (under TYPE_CHECKING), and child subprocess scripts (e.g. _InstalledHarness.run_installed_python strings) to import and exercise the canonical deep module (critical_dialogue.py) directly. Relying on transitional runtime proxy aliases (such as sys.modules rebinding) obscures static type inference in mypy (generating false attr-defined errors) and creates latent test regressions when legacy facades are deleted.",
+        ("test", "seam", "facade", "consolidation", "critical_dialogue", "TYPE_CHECKING", "subprocess", "installed harness", "mypy", "proxy"),
+        ("test_*.py", "dialogue_transcript.py", "critical_dialogue.py", "*.py"),
+    ),
+    GoldenRule(
+        42,
+        "State & File Locking Hygiene",
+        "Back up symlink targets, not only symlink topology",
+        "A moved symlink preserves only its target string; it is not a backup of the "
+        "target's contents. Before declaring a configuration backup self-contained, "
+        "resolve every in-scope symlink, copy the target content into the backup when "
+        "the target may be removed independently, and record any intentionally external "
+        "dependency in the restore manifest.",
+        (
+            "backup",
+            "symlink",
+            "dangling",
+            "target",
+            "restore",
+            "manifest",
+            "configuration",
+        ),
+        ("install.sh", "uninstall.sh", "RESTORE.md", "*.sh", "*.md"),
+    ),
+    GoldenRule(
+        43,
+        "Multi-Harness Sync & Governance",
+        "Treat configuration verification as potentially state-creating",
+        "Launching Codex to list MCP servers, plugins, or other configuration can "
+        "materialize bootstrap state such as a trust-only config.toml. Capture an "
+        "immediate post-move snapshot, compare metadata before and after verification "
+        "commands, then run a final inventory. Restore scripts must refuse live-path "
+        "collisions instead of overwriting newly generated state.",
+        (
+            "codex",
+            "config.toml",
+            "verification",
+            "bootstrap",
+            "trust",
+            "collision",
+            "restore",
+        ),
+        ("install.sh", "uninstall.sh", "RESTORE.md", "*.sh", "*.md"),
+    ),
+    GoldenRule(
+        44,
+        "Multi-Harness Sync & Governance",
+        "Separate reversible configuration from protected identity and runtime state",
+        "A clean-slate reset must inventory configuration from documented global, "
+        "project, managed, plugin, skill, hook, subagent, command, and editor surfaces, "
+        "while leaving authentication, credentials, sessions, runtime databases, and "
+        "project source in place. Move configuration into a mirrored-path backup, verify "
+        "each destination immediately, and generate a collision-safe restore manifest.",
+        (
+            "clean slate",
+            "configuration",
+            "authentication",
+            "credentials",
+            "session",
+            "backup",
+            "restore",
+        ),
+        ("install.sh", "uninstall.sh", "RESTORE.md", "AGENTS.md", "*.sh", "*.md"),
+    ),
+    GoldenRule(
+        45,
+        "Multi-Harness Sync & Governance",
+        "Require pre-ticket migration authority before deleting retired cross-module artifacts",
+        "Migration cleanup may delete a retired artifact only when its bytes match a "
+        "known audited digest and an independently signed prior ownership record names "
+        "the complete module set retired in the same migration. A digest alone, a "
+        "current post-ticket receipt, or signed ownership of only part of that "
+        "simultaneously retired set is insufficient; preserve the artifact when "
+        "PreTicketMigrationAuthority is incomplete.",
+        (
+            "migration",
+            "cleanup",
+            "retired artifact",
+            "digest",
+            "signed ownership",
+            "pre-ticket",
+            "receipt",
+            "module set",
+        ),
+        ("install.sh", "uninstall.sh", "*.manifest", "*.receipt", "*.py"),
+    ),
+    GoldenRule(
+        46,
+        "State & File Locking Hygiene",
+        "Roll back the exact transaction-written inode without clobbering replacements",
+        "Before atomically publishing a file, durably record the temporary file's "
+        "device and inode as write intent. Rollback must isolate the current pathname, "
+        "verify that it is the exact transaction-written inode, and restore with an "
+        "atomic no-replace operation so a concurrent replacement is never clobbered. "
+        "When identity verification, restore, or cleanup fails, retain and report all "
+        "available original, transaction-written, and replacement bytes for recovery.",
+        (
+            "rollback",
+            "inode",
+            "device",
+            "write intent",
+            "no-replace",
+            "concurrent replacement",
+            "recovery bytes",
+            "atomic copy",
+        ),
+        ("install.sh", "uninstall.sh", "*.sh", "test_*.py"),
+    ),
+    GoldenRule(
+        47,
+        "State & File Locking Hygiene",
+        "Use durable intent and publication journals for process-death recovery",
+        "An anonymous temporary journal cleaned by an EXIT trap covers ordinary "
+        "in-process failures but cannot survive SIGKILL, process death, or power loss. "
+        "The installer still has this contract gap: place durable transaction journals "
+        "in stable installer state, persist intent before publication, persist the "
+        "publication phase afterward, and reconcile incomplete transactions on the next "
+        "run before starting new mutations.",
+        (
+            "journal",
+            "process death",
+            "SIGKILL",
+            "power loss",
+            "intent",
+            "publication",
+            "reconciliation",
+            "durable",
+            "trap",
+        ),
+        ("install.sh", "uninstall.sh", "*.sh", "test_*.py"),
+    ),
+    GoldenRule(
+        48,
+        "Testing & TDD Seams",
+        "Re-run sandbox-blocked localhost socket tests outside the sandbox before classifying failures",
+        "When a localhost socket test fails only because a restricted sandbox denies "
+        "bind, listen, or connect, obtain explicit authorization and re-run the same "
+        "test outside that sandbox. Classify it as a code failure only if the authorized "
+        "run also fails; otherwise record the restricted environment as the cause.",
+        (
+            "localhost",
+            "socket",
+            "sandbox",
+            "permission",
+            "bind",
+            "listen",
+            "connect",
+            "rerun",
+        ),
+        ("test_*.py", "*.py", "*.sh"),
+    ),
+    GoldenRule(
+        49,
+        "Multi-Harness Sync & Governance",
+        "Generate handoffs as final evidence snapshots",
+        "Create a handoff only from the final git status and the latest post-fix "
+        "verification results. Distinguish committed work from uncommitted changes, "
+        "name checks with their actual final outcomes, and preserve user-owned files, "
+        "deletions, and other boundaries so the next session does not mistake them for "
+        "agent-owned cleanup.",
+        (
+            "handoff",
+            "evidence snapshot",
+            "git status",
+            "verification",
+            "committed",
+            "uncommitted",
+            "user-owned",
+            "boundary",
+        ),
+        ("*.md", "*.txt", ".gitignore", "AGENTS.md"),
     ),
 )
 

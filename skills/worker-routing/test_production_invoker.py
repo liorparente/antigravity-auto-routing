@@ -9,21 +9,17 @@ import io
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock, patch
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 if __package__:
-    from . import advisory_consultation, learning_journal, production_invoker
+    from . import critical_dialogue, learning_journal, production_invoker
     from .test_routing import _approve
 else:
-    import advisory_consultation  # type: ignore[no-redef]
+    import critical_dialogue  # type: ignore[no-redef]
     import learning_journal  # type: ignore[no-redef]
     import production_invoker  # type: ignore[no-redef]
     from test_routing import _approve  # type: ignore[no-redef]
@@ -665,7 +661,7 @@ class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
             ),
             tempfile.TemporaryDirectory() as tmp,
         ):
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the implementation", root_dir=Path(tmp)
             )
 
@@ -684,7 +680,7 @@ class BackwardsCompatibilityAndSyncCallerTests(unittest.TestCase):
             journaled = production_invoker.make_journaled_invoke_worker(
                 "task-advisory-compat-04", root_dir=root, runner=runner
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the implementation",
                 invoke_worker=journaled,
                 root_dir=root,
@@ -1341,7 +1337,7 @@ class JournaledInvokeWorkerTests(unittest.TestCase):
     def test_an_unjournalable_task_id_is_refused_at_wiring_time(self) -> None:
         """The factory takes an id, so the id is checked once, where the label
         is built, before any worker runs — rather than once per invocation
-        afterwards. `advisory_consultation` wraps this call in the try that
+        afterwards. `critical_dialogue` wraps this call in the try that
         degrades to "journaling disabled for this run", so a bad id costs the
         run its instrumentation and nothing else.
         """

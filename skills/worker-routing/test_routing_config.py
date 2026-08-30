@@ -11,9 +11,6 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 if __package__:
     from . import probe_models, routing_config
 else:
@@ -569,14 +566,13 @@ class ModelCapabilityRegistryTests(unittest.TestCase):
         order.
         """
         script = (
-            "import sys; sys.path.insert(0, sys.argv[1]); "
-            "import probe_models; "
+            "from worker_routing import probe_models; "
             "assert probe_models.AUDITED_MODEL_CATALOG; "
-            "import routing_config; "
+            "from worker_routing import routing_config; "
             "assert routing_config.build_model_capabilities_registry()"
         )
         result = subprocess.run(
-            [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
+            [sys.executable, "-c", script],
             capture_output=True,
             text=True,
             check=False,
@@ -603,14 +599,13 @@ class ModelCapabilityRegistryTests(unittest.TestCase):
         deadlock.
         """
         script = (
-            "import sys; sys.path.insert(0, sys.argv[1]); "
-            "import routing_config; "
+            "from worker_routing import routing_config; "
             "assert routing_config.build_model_capabilities_registry(); "
-            "import probe_models; "
+            "from worker_routing import probe_models; "
             "assert probe_models.AUDITED_MODEL_CATALOG"
         )
         result = subprocess.run(
-            [sys.executable, "-c", script, str(Path(__file__).resolve().parent)],
+            [sys.executable, "-c", script],
             capture_output=True,
             text=True,
             check=False,

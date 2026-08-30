@@ -68,7 +68,7 @@ See [`protocol.md`](protocol.md) for the authoritative Quality-First complexity 
 
 ## 📓 Learning-Journal Ground-Truth Recording
 
-`advisory_consultation.py` records one fact by itself: `plan=accepted`, and only when a
+`critical_dialogue.py` records one fact by itself: `plan=accepted`, and only when a
 plan-producing dialogue (`ambiguity` or `plan-review`) reached consensus. That record says the
 dialogue's Critic approved the plan — **not** that you did. Every other ground truth in this family
 becomes known outside any process this repository controls, so the Orchestrator is the one who

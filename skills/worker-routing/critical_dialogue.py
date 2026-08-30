@@ -5,7 +5,7 @@ import asyncio
 import dataclasses
 import hashlib
 import hmac
-import importlib.util
+import importlib
 import json
 import os
 import re
@@ -17,42 +17,13 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import Any, Literal, Protocol
 
-if TYPE_CHECKING:
-    from debate_state_machine import (
-        ConsensusTable,
-        CriticResponse,
-        DebateRoundRecord,
-        DebateSessionState,
-        DebateState,
-        RoundTurnResult,
-        SecurityVeto,
-        SecurityVetoHandler,
-    )
-    from debate_transport import (
-        DebateTransport,
-        RecurringFailureNotifier,
-    )
-    from dialogue_contracts import (
-        AdvisoryOutcome,
-        AdvisoryResolutionOption,
-        AdvisoryRoundVerdict,
-        AdvisoryStalemateReport,
-        CriticVerdict,
-        Occasion,
-        VerdictContractResult,
-    )
-    from dialogue_degradation import (
-        DegradationLadderState,
-        DegradationRung,
-    )
-    from executive_dialogue_report import (
-        ExecutiveDialogueReport,
-    )
-    from prompt_assembler import MissionCopy
-    from sensitivity_redactor import TaskIdentity
-
+__all__ = (
+    "request_council_review",
+    "run_canary_dialogue",
+    "run_critical_dialogue",
+)
 
 if __package__:
     from . import consultation_policy as _consultation_policy
@@ -98,107 +69,106 @@ def _current_production_invoker() -> Any:
             return package_invoker
     return sys.modules.get("production_invoker", _production_invoker)
 
-if not TYPE_CHECKING:
-    AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
-    Occasion = _dialogue_contracts.Occasion
-    AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
-    AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
-    AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
-    CriticVerdict = _dialogue_contracts.CriticVerdict
-    VerdictContractResult = _dialogue_contracts.VerdictContractResult
-    MissionCopy = _prompt_assembler.MissionCopy
-    TaskIdentity = _sensitivity_redactor.TaskIdentity
-    DegradationLadderState = _dialogue_degradation.DegradationLadderState
-    DegradationRung = _dialogue_degradation.DegradationRung
-    ExecutiveDialogueReport = _executive_dialogue_report.ExecutiveDialogueReport
-    CriticResponse = _debate_state_machine.CriticResponse
-    SecurityVeto = _debate_state_machine.SecurityVeto
-    SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
-    ConsensusTable = _debate_state_machine.ConsensusTable
-    DebateRoundRecord = _debate_state_machine.DebateRoundRecord
-    DebateSessionState = _debate_state_machine.DebateSessionState
-    DebateState = _debate_state_machine.DebateState
-    RoundTurnResult = _debate_state_machine.RoundTurnResult
-    DebateTransport = _debate_transport.DebateTransport
-    RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
+_leaf_AdvisoryOutcome = _dialogue_contracts.AdvisoryOutcome
+_leaf_Occasion = _dialogue_contracts.Occasion
+_leaf_AdvisoryRoundVerdict = _dialogue_contracts.AdvisoryRoundVerdict
+_leaf_AdvisoryResolutionOption = _dialogue_contracts.AdvisoryResolutionOption
+_leaf_AdvisoryStalemateReport = _dialogue_contracts.AdvisoryStalemateReport
+_leaf_CriticVerdict = _dialogue_contracts.CriticVerdict
+_leaf_VerdictContractResult = _dialogue_contracts.VerdictContractResult
+_leaf_MissionCopy = _prompt_assembler.MissionCopy
+_leaf_TaskIdentity = _sensitivity_redactor.TaskIdentity
+_leaf_DegradationLadderState = _dialogue_degradation.DegradationLadderState
+_leaf_DegradationRung = _dialogue_degradation.DegradationRung
+_leaf_ExecutiveDialogueReport = _executive_dialogue_report.ExecutiveDialogueReport
+_leaf_CriticResponse = _debate_state_machine.CriticResponse
+_leaf_SecurityVeto = _debate_state_machine.SecurityVeto
+_leaf_SecurityVetoHandler = _debate_state_machine.SecurityVetoHandler
+_leaf_ConsensusTable = _debate_state_machine.ConsensusTable
+_leaf_DebateRoundRecord = _debate_state_machine.DebateRoundRecord
+_leaf_DebateSessionState = _debate_state_machine.DebateSessionState
+_leaf_DebateState = _debate_state_machine.DebateState
+_leaf_RoundTurnResult = _debate_state_machine.RoundTurnResult
+_leaf_DebateTransport = _debate_transport.DebateTransport
+_leaf_RecurringFailureNotifier = _debate_transport.RecurringFailureNotifier
 
-CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
-CRITIC_VERDICT_REVISE = _dialogue_contracts.CRITIC_VERDICT_REVISE
-extract_quotes = _dialogue_contracts.extract_quotes
-extract_objections = _dialogue_contracts.extract_objections
-verify_quotes = _dialogue_contracts.verify_quotes
-parse_verdict_contract = _dialogue_contracts.parse_verdict_contract
+_leaf_CRITIC_VERDICT_APPROVE = _dialogue_contracts.CRITIC_VERDICT_APPROVE
+_leaf_CRITIC_VERDICT_REVISE = _dialogue_contracts.CRITIC_VERDICT_REVISE
+_leaf_extract_quotes = _dialogue_contracts.extract_quotes
+_leaf_extract_objections = _dialogue_contracts.extract_objections
+_leaf_verify_quotes = _dialogue_contracts.verify_quotes
+_leaf_parse_verdict_contract = _dialogue_contracts.parse_verdict_contract
 _count_engagement_units = _dialogue_contracts._count_engagement_units
 _is_tolerant_revise = _dialogue_contracts._is_tolerant_revise
 _parse_critic_verdict = _dialogue_contracts._parse_critic_verdict
 
-MISSION_COPY = _prompt_assembler.MISSION_COPY
-build_planner_prompt = _prompt_assembler.build_planner_prompt
-build_critic_prompt = _prompt_assembler.build_critic_prompt
-build_canary_prompt = _prompt_assembler.build_canary_prompt
-build_adjudicator_prompt = _prompt_assembler.build_adjudicator_prompt
-build_stalemate_prompt = _prompt_assembler.build_stalemate_prompt
-combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
-extract_scoped_memory = _prompt_assembler.extract_scoped_memory
-get_scoped_memory = _learned_state.get_scoped_memory
+_leaf_MISSION_COPY = _prompt_assembler.MISSION_COPY
+_leaf_build_planner_prompt = _prompt_assembler.build_planner_prompt
+_leaf_build_critic_prompt = _prompt_assembler.build_critic_prompt
+_leaf_build_canary_prompt = _prompt_assembler.build_canary_prompt
+_leaf_build_adjudicator_prompt = _prompt_assembler.build_adjudicator_prompt
+_leaf_build_stalemate_prompt = _prompt_assembler.build_stalemate_prompt
+_leaf_combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
+_leaf_extract_scoped_memory = _prompt_assembler.extract_scoped_memory
+_leaf_get_scoped_memory = _learned_state.get_scoped_memory
 _MISSION_COPY = _prompt_assembler._MISSION_COPY
 _MissionCopy = _prompt_assembler._MissionCopy
 
-scan_sensitivity_markers = _sensitivity_redactor.scan_sensitivity_markers
-derive_safe_task_identity = _sensitivity_redactor.derive_safe_task_identity
-detect_sensitivity_marker = _sensitivity_redactor.detect_sensitivity_marker
-SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
+_leaf_scan_sensitivity_markers = _sensitivity_redactor.scan_sensitivity_markers
+_leaf_derive_safe_task_identity = _sensitivity_redactor.derive_safe_task_identity
+_leaf_detect_sensitivity_marker = _sensitivity_redactor.detect_sensitivity_marker
+_leaf_SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 
 # Pure state-machine API, re-exported here for the historic orchestration API.
-PANEL_TOPOLOGY_OCCASIONS = _debate_state_machine.PANEL_TOPOLOGY_OCCASIONS
-is_panel_topology = _debate_state_machine.is_panel_topology
-ConsultationTopology = _debate_state_machine.ConsultationTopology
-CONSULTATION_TOPOLOGIES = _debate_state_machine.CONSULTATION_TOPOLOGIES
-resolve_topology = _debate_state_machine.resolve_topology
-build_stalemate_report = _debate_state_machine.build_stalemate_report
-evaluate_round_verdicts = _debate_state_machine.evaluate_round_verdicts
-advance_debate_state = _debate_state_machine.advance_debate_state
-ROUTING_CONFIG_PATH = _consultation_policy.ROUTING_CONFIG_PATH
-DEFAULT_CONSULTATION_POLICY = _consultation_policy.DEFAULT_CONSULTATION_POLICY
-load_consultation_policy = _consultation_policy.load_consultation_policy
-_load_consultation_policy = load_consultation_policy
-evaluate_quorum = _debate_state_machine.evaluate_quorum
-_PANEL_TOPOLOGY_OCCASIONS = PANEL_TOPOLOGY_OCCASIONS
-_is_panel_topology = is_panel_topology
-_resolve_topology = resolve_topology
-_build_stalemate_report = build_stalemate_report
+_leaf_PANEL_TOPOLOGY_OCCASIONS = _debate_state_machine.PANEL_TOPOLOGY_OCCASIONS
+_leaf_is_panel_topology = _debate_state_machine.is_panel_topology
+_leaf_ConsultationTopology = _debate_state_machine.ConsultationTopology
+_leaf_CONSULTATION_TOPOLOGIES = _debate_state_machine.CONSULTATION_TOPOLOGIES
+_leaf_resolve_topology = _debate_state_machine.resolve_topology
+_leaf_build_stalemate_report = _debate_state_machine.build_stalemate_report
+_leaf_evaluate_round_verdicts = _debate_state_machine.evaluate_round_verdicts
+_leaf_advance_debate_state = _debate_state_machine.advance_debate_state
+_leaf_ROUTING_CONFIG_PATH = _consultation_policy.ROUTING_CONFIG_PATH
+_leaf_DEFAULT_CONSULTATION_POLICY = _consultation_policy.DEFAULT_CONSULTATION_POLICY
+_leaf_load_consultation_policy = _consultation_policy.load_consultation_policy
+_load_consultation_policy = _leaf_load_consultation_policy
+_leaf_evaluate_quorum = _debate_state_machine.evaluate_quorum
+_PANEL_TOPOLOGY_OCCASIONS = _leaf_PANEL_TOPOLOGY_OCCASIONS
+_is_panel_topology = _leaf_is_panel_topology
+_resolve_topology = _leaf_resolve_topology
+_build_stalemate_report = _leaf_build_stalemate_report
 
 
 def _resolve_task_id(
     task_description: str, task_id: str | None, outcome: str
 ) -> str:
     """Resolve task identity through the sensitivity-safe pure helper."""
-    return derive_safe_task_identity(task_description, task_id, outcome=outcome).task_id
+    return _leaf_derive_safe_task_identity(task_description, task_id, outcome=outcome).task_id
 
-BUDGET_DEGRADATION_MARKER = _dialogue_degradation.BUDGET_DEGRADATION_MARKER
-DEFAULT_SESSION_DIALOGUE_CAP = _dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+_leaf_BUDGET_DEGRADATION_MARKER = _dialogue_degradation.BUDGET_DEGRADATION_MARKER
+_leaf_DEFAULT_SESSION_DIALOGUE_CAP = _dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
 _DEFAULT_DEGRADED_ROSTER_MODEL = _dialogue_degradation._DEFAULT_DEGRADED_ROSTER_MODEL
 _DEGRADED_EFFORT = _dialogue_degradation._DEGRADED_EFFORT
 _DEGRADED_ROUND_CAP = _dialogue_degradation._DEGRADED_ROUND_CAP
 _DEGRADATION_RUNG_LABELS = _dialogue_degradation._DEGRADATION_RUNG_LABELS
 _load_degraded_roster_model = _dialogue_degradation._load_degraded_roster_model
 _load_dialogue_budget_config = _dialogue_degradation._load_dialogue_budget_config
-resolve_degradation_rung = _dialogue_degradation.resolve_degradation_rung
+_leaf_resolve_degradation_rung = _dialogue_degradation.resolve_degradation_rung
 
-format_budget_degradation_alert = _executive_dialogue_report.format_budget_degradation_alert
-render_executive_summary = _executive_dialogue_report.render_executive_summary
+_leaf_format_budget_degradation_alert = _executive_dialogue_report.format_budget_degradation_alert
+_leaf_render_executive_summary = _executive_dialogue_report.render_executive_summary
 
-ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
-DEGRADED_INDEPENDENCE_MARKER = _dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER
-CANARY_MARKER = _dialogue_transcript.CANARY_MARKER
+_leaf_ConsultationTranscript = _dialogue_transcript.ConsultationTranscript
+_leaf_DEGRADED_INDEPENDENCE_MARKER = _dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER
+_leaf_CANARY_MARKER = _dialogue_transcript.CANARY_MARKER
 _atomic_text_write = _dialogue_transcript._atomic_text_write
-AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
+_leaf_AdvisoryTelemetryRecord = _dialogue_transcript.AdvisoryTelemetryRecord
 _default_task_id = _dialogue_transcript._default_task_id
 _render_consultation_transcript = _dialogue_transcript._render_consultation_transcript
 _render_sensitivity_halt_transcript = _dialogue_transcript._render_sensitivity_halt_transcript
-render_consultation_transcript = _dialogue_transcript.render_consultation_transcript
-render_sensitivity_halt_transcript = _dialogue_transcript.render_sensitivity_halt_transcript
-format_transcript_markdown = _dialogue_transcript.format_transcript_markdown
+_leaf_render_consultation_transcript = _dialogue_transcript.render_consultation_transcript
+_leaf_render_sensitivity_halt_transcript = _dialogue_transcript.render_sensitivity_halt_transcript
+_leaf_format_transcript_markdown = _dialogue_transcript.format_transcript_markdown
 _write_transcript = _dialogue_transcript._write_transcript
 _append_jsonl_locked = _dialogue_transcript._append_jsonl_locked
 _reduce_dialogue_round = _dialogue_transcript._reduce_dialogue_round
@@ -210,7 +180,7 @@ _write_plan_outcome_record = _dialogue_transcript._write_plan_outcome_record
 MAX_DEBATE_ROUNDS = 3
 
 # Mirrors `agent_council.ESCALATION_FAILURE_THRESHOLD` rather than importing
-# it — same reasoning as `SENSITIVITY_MARKERS` below (importing
+# it — same reasoning as `_leaf_SENSITIVITY_MARKERS` below (importing
 # `agent_council` would pull `urllib.request`/`asyncio` into this module,
 # and both files are loaded by path, not as a package). This is the
 # protocol's 2-failure escalation rule: `agent_council.escalate_routing_effort`
@@ -258,7 +228,7 @@ class ReviewerAdapterProtocol(Protocol):
 # `AdvisoryDebateResult` — transcript and telemetry record both written,
 # per this module's "every outcome gets both artifacts" invariant — rather
 # than silently getting "no dialogue happened" with no trace. See
-# `resolve_degradation_rung` below for the pure decision this outcome is
+# `_leaf_resolve_degradation_rung` below for the pure decision this outcome is
 # reported for.
 
 # Spec 0004 ticket 25 (fix pass 2): the occasions whose artifact under debate
@@ -269,7 +239,7 @@ class ReviewerAdapterProtocol(Protocol):
 # consensus under those two to have accepted. This is the one place that fact
 # is declared: a fifth occasion added later must be added here, deliberately,
 # rather than silently inheriting a plan verdict it may not have earned.
-_PLAN_PRODUCING_OCCASIONS: tuple[Occasion, ...] = ("ambiguity", "plan-review")
+_PLAN_PRODUCING_OCCASIONS: tuple[_leaf_Occasion, ...] = ("ambiguity", "plan-review")
 
 # Mirrors `agent_council.SENSITIVE_PATTERNS` rather than importing it:
 # importing `agent_council` would pull `urllib.request`, `asyncio`, and
@@ -279,7 +249,7 @@ _PLAN_PRODUCING_OCCASIONS: tuple[Occasion, ...] = ("ambiguity", "plan-review")
 # already loads both modules and asserts this tuple is a superset of
 # `agent_council.SENSITIVE_PATTERNS`, so the duplication cannot silently
 # drift apart. Same precedent this module already set for `MAX_DEBATE_ROUNDS`.
-SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
+_leaf_SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 
 # Spec 0003 (CriticalDialogue) ticket 03: the code-review occasion's risk
 # signals — an oversized diff or a security-sensitive changed path — must be
@@ -287,7 +257,7 @@ SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
 # ticket's acceptance criteria. `_CONFIG_PATH` is this module's own
 # `routing-config.json`, mirroring `routing_check.CONFIG_PATH`'s
 # `SCRIPT_DIR / "routing-config.json"` pattern; it is not imported from
-# `routing_check` for the same reason `SENSITIVITY_MARKERS` above duplicates
+# `routing_check` for the same reason `_leaf_SENSITIVITY_MARKERS` above duplicates
 # rather than imports `agent_council.SENSITIVE_PATTERNS` — these files are
 # loaded by path, not as a package. `needs_code_review_consultation` accepts
 # `config_path` as a keyword argument specifically so a caller (a test, or a
@@ -356,7 +326,7 @@ def write_council_manifest(
     status: str,
     run_id: str,
     workspace_root: str | Path,
-    security_veto: SecurityVeto | None = None,
+    security_veto: _leaf_SecurityVeto | None = None,
     events: Sequence[dict[str, Any]] | None = None,
 ) -> str:
     """Atomically write an HMAC-signed CouncilPanel manifest and return its path."""
@@ -423,34 +393,23 @@ class ReviewOutcome:
     # Populated when a Council perspective review round 1 fails to reach
     # quorum (or fast path is disabled) and stalemate escalation to the
     # Adjudicator/HITL is performed (ticket 07, ADR 0012 1-shot fast path).
-    stalemate_report: AdvisoryStalemateReport | None = None
+    stalemate_report: _leaf_AdvisoryStalemateReport | None = None
 
 
 def _load_provider_adapters() -> Any:
     """Load the council-review adapters only when a council run needs them."""
-    module_name = "provider_adapters"
-    if module_name in sys.modules:
-        return sys.modules[module_name]
-    path = (
-        Path(__file__).resolve().parents[1]
-        / "council-review"
-        / "scripts"
-        / f"{module_name}.py"
+    module_name = (
+        f"{__package__}.provider_adapters" if __package__ else "provider_adapters"
     )
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module(module_name)
 
 
 class ReviewCouncil:
-    def __init__(self, policy_path: str | Path = ROUTING_CONFIG_PATH) -> None:
+    def __init__(self, policy_path: str | Path = _leaf_ROUTING_CONFIG_PATH) -> None:
         resolved_policy_path = Path(policy_path)
-        if not resolved_policy_path.exists() and ROUTING_CONFIG_PATH.exists():
-            resolved_policy_path = ROUTING_CONFIG_PATH
-        self.policy = load_consultation_policy(resolved_policy_path)
+        if not resolved_policy_path.exists() and _leaf_ROUTING_CONFIG_PATH.exists():
+            resolved_policy_path = _leaf_ROUTING_CONFIG_PATH
+        self.policy = _leaf_load_consultation_policy(resolved_policy_path)
 
     _resolve_secret = staticmethod(resolve_hmac_secret)
 
@@ -458,7 +417,7 @@ class ReviewCouncil:
         weighting = self.policy.get("weighting", {})
         weights = dict(weighting.get("initial_weights", {}))
         # Ticket 07: perspective weights live alongside provider weights in
-        # the same dict — `ConsensusTable._identity` reads a vote's
+        # the same dict — `_leaf_ConsensusTable._identity` reads a vote's
         # `perspective` field ahead of its `provider`/`critic_id`, so the two
         # key spaces (`"claude"`/`"codex"`/`"gemini"` vs.
         # `"reviewer_architecture"`/etc.) never collide.
@@ -585,7 +544,7 @@ class ReviewCouncil:
     def _check_veto_and_halt(
         self,
         votes: Sequence[dict[str, Any]],
-        veto_handler: SecurityVetoHandler,
+        veto_handler: _leaf_SecurityVetoHandler,
         run_id: str,
         workspace_root: str,
     ) -> ReviewOutcome | None:
@@ -616,12 +575,12 @@ class ReviewCouncil:
 
         weighting_policy = self.policy.get("weighting", {})
         security_policy = self.policy.get("security_veto", {})
-        veto_handler = SecurityVetoHandler(
+        veto_handler = _leaf_SecurityVetoHandler(
             veto_severities=security_policy.get("veto_severities", ["critical", "high"]),
             security_threshold=security_policy.get("security_threshold", 0.80),
             enabled=security_policy.get("enabled", True),
         )
-        table = ConsensusTable(
+        table = _leaf_ConsensusTable(
             self.policy.get("consensus_policy", []),
             weights=weights,
             quorum_threshold=weighting_policy.get("quorum_threshold", 0.60),
@@ -693,7 +652,7 @@ class ReviewCouncil:
         council_policy = self.policy.get("council_policy", {})
 
         security_policy = council_policy.get("security_veto", self.policy.get("security_veto", {}))
-        veto_handler = SecurityVetoHandler(
+        veto_handler = _leaf_SecurityVetoHandler(
             veto_severities=security_policy.get("veto_severities", ["critical", "high"]),
             security_threshold=security_policy.get("security_threshold", 0.80),
             enabled=security_policy.get("enabled", True),
@@ -701,7 +660,7 @@ class ReviewCouncil:
         quorum_threshold = council_policy.get(
             "quorum_threshold", self.policy.get("weighting", {}).get("quorum_threshold", 0.60)
         )
-        table = ConsensusTable(
+        table = _leaf_ConsensusTable(
             council_policy.get("consensus_policy", self.policy.get("consensus_policy", [])),
             weights=self._load_weights(request.workspace_root),
             quorum_threshold=quorum_threshold,
@@ -735,7 +694,7 @@ class ReviewCouncil:
         request: ReviewRequest,
         initial_hash: str,
         events: list[dict[str, Any]] | None = None,
-        stalemate_report: AdvisoryStalemateReport | None = None,
+        stalemate_report: _leaf_AdvisoryStalemateReport | None = None,
     ) -> ReviewOutcome:
         final_hash = self._hash_source(request.subject)
         source_changed = bool(request.subject) and initial_hash != final_hash
@@ -755,9 +714,9 @@ class ReviewCouncil:
     @staticmethod
     def _build_perspective_stalemate_report(
         request: ReviewRequest, votes: Sequence[dict[str, Any]]
-    ) -> AdvisoryStalemateReport:
+    ) -> _leaf_AdvisoryStalemateReport:
         """Summarize a final round's per-perspective votes into the
-        `AdvisoryStalemateReport` shape via `build_stalemate_report`'s
+        `_leaf_AdvisoryStalemateReport` shape via `_leaf_build_stalemate_report`'s
         `perspective_positions` parameter (ticket 07's addition)."""
         positions: dict[str, str] = {}
         for vote in votes:
@@ -774,7 +733,7 @@ class ReviewCouncil:
                 )
             summary = f"verdict: {verdict}" + (f"\nfinding: {first_claim}" if first_claim else "")
             positions[perspective] = summary
-        return build_stalemate_report(request.objective, perspective_positions=positions)
+        return _leaf_build_stalemate_report(request.objective, perspective_positions=positions)
 
     async def _route_perspective_stalemate(
         self,
@@ -786,7 +745,7 @@ class ReviewCouncil:
         """Panel failed to reach weighted quorum in 1-shot execution (or fast
         path disabled): escalate to the configured Adjudicator, or fail
         closed to HITL when none is configured, carrying the summarized
-        AdvisoryStalemateReport either way (ticket 07 acceptance criterion)."""
+        _leaf_AdvisoryStalemateReport either way (ticket 07 acceptance criterion)."""
         stalemate_report = self._build_perspective_stalemate_report(request, votes)
         adjudicators = self.policy.get("adjudicators", [])
 
@@ -799,7 +758,7 @@ class ReviewCouncil:
             try:
                 build_adapter = _load_provider_adapters().build_adapter
                 adjudicator_adapter = build_adapter(adjudicators[0])
-                adjudicator_prompt = build_adjudicator_prompt(
+                adjudicator_prompt = _leaf_build_adjudicator_prompt(
                     request.objective,
                     stalemate_report.planner_position,
                     stalemate_report.critic_position,
@@ -842,7 +801,7 @@ def _critic_response_from_payload(
     critic_id: str,
     raw_response: str,
     model_name: str | None = None,
-) -> CriticResponse:
+) -> _leaf_CriticResponse:
     """Build the state-machine vote used by veto and panel manifest policy."""
     payload = _current_production_invoker().extract_review_payload(
         raw_response,
@@ -856,7 +815,7 @@ def _critic_response_from_payload(
     provider_id = "codex" if model_family == "codex-gpt" else model_family
     if model_name is None and provider_id not in {"claude", "codex", "gemini"}:
         provider_id = critic_id
-    return CriticResponse(
+    return _leaf_CriticResponse(
         critic_id=provider_id,
         response=raw_response,
         verdict=str(payload.get("vote", "abstain")),
@@ -922,7 +881,7 @@ def classify_model_family(model_name: str) -> str:
     rather than a model list, and why a local model's family is derived
     from its own name rather than looked up. Matching is case-insensitive
     and substring-based (`"claude" in lowered`), same style
-    `_detect_sensitivity_marker` already uses for `SENSITIVITY_MARKERS`.
+    `_detect_sensitivity_marker` already uses for `_leaf_SENSITIVITY_MARKERS`.
 
     The local-lineage fallback uses `_LOCAL_LINEAGE_PATTERN.match`, which
     Python anchors at index 0, not `.search` — deliberately: this function's
@@ -984,7 +943,7 @@ def is_local_family(family: str) -> bool:
 # Spec 0003 (CriticalDialogue) ticket 07: the two topologies a roster can be
 # resolved for. "critic_a" doubles as pair mode's sole critic role — the
 # same "`critic_position` means Critic A in panel mode" convention
-# `AdvisoryStalemateReport`'s docstring already established (pair mode
+# `_leaf_AdvisoryStalemateReport`'s docstring already established (pair mode
 # simply never resolves a `critic_b`), rather than inventing a third,
 # pair-only role name that would need its own fallback chain in config for
 # no semantic reason: a pair's one Critic and a panel's Critic A play
@@ -1251,10 +1210,10 @@ _TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
 # `resolve_roster`'s identical `reachability_check` seam, which this mirrors).
 
 # Named exactly like this module's other reused Literal unions
-# (`AdvisoryOutcome`, `CriticVerdict`, `Occasion`, `RosterTopology`,
+# (`_leaf_AdvisoryOutcome`, `_leaf_CriticVerdict`, `_leaf_Occasion`, `RosterTopology`,
 # `RosterRole`), all factored into a top-level alias rather than spelled out
 # inline at each use site — `AdvisoryDebateResult.canary_result`,
-# `AdvisoryTelemetryRecord.canary_result`, the `_result` closure's
+# `_leaf_AdvisoryTelemetryRecord.canary_result`, the `_result` closure's
 # `canary_result` parameter, and `canary_verdict_result`'s own annotation
 # all reference this one alias instead of repeating the literal.
 CanaryResult = Literal["miss", "catch"]
@@ -1431,7 +1390,7 @@ def is_canary_dialogue(
 
 # Spec 0003 (CriticalDialogue) ticket 08: the literal substring
 # `_render_consultation_transcript` writes into a canary transcript, and
-# what a test greps for — same role `DEGRADED_INDEPENDENCE_MARKER` plays
+# what a test greps for — same role `_leaf_DEGRADED_INDEPENDENCE_MARKER` plays
 # for ticket 07's marker, and named/exported for the identical reason: a
 # caller never needs to hand-copy the marker text to check for it.
 
@@ -1464,7 +1423,7 @@ class AdvisoryDebateRound:
 
 @dataclass(frozen=True)
 class AdvisoryDebateResult:
-    """`occasion` records which of the four `Occasion` values this
+    """`occasion` records which of the four `_leaf_Occasion` values this
     consultation ran under (spec 0003 ticket 01). Defaulted to "ambiguity",
     spec 0001's sole occasion, so every pre-existing construction of this
     dataclass — in this module and in tests — that never mentions occasion
@@ -1521,7 +1480,7 @@ class AdvisoryDebateResult:
     above it already follows: every pre-ticket-09 construction of this
     dataclass — in this module and in tests — that never mentions it keeps
     meaning exactly what it meant before this field existed, defaulting to
-    `0`. Set to whatever `resolve_degradation_rung` decided for this call
+    `0`. Set to whatever `_leaf_resolve_degradation_rung` decided for this call
     (`0`-`3`), copied verbatim by `_result` from the enclosing function's
     own `degradation_rung` local — see `run_advisory_consultation_debate`'s
     budget-ladder block. `0` on every outcome that never reached the
@@ -1552,7 +1511,7 @@ class AdvisoryDebateResult:
 
     `round_verdicts` (spec 0003 ticket 10) is appended last, by the
     identical rule: defaults to `()`, an empty tuple, for every
-    pre-ticket-10 construction. Populated with one `AdvisoryRoundVerdict`
+    pre-ticket-10 construction. Populated with one `_leaf_AdvisoryRoundVerdict`
     per entry already appended to `rounds` above — same length, same order,
     appended at the same call site in the round loop, immediately after
     `_parse_critic_verdict` is called for that round, so the two sequences
@@ -1566,21 +1525,21 @@ class AdvisoryDebateResult:
 
     rounds_run: int
     final_plan: str
-    outcome: AdvisoryOutcome
+    outcome: _leaf_AdvisoryOutcome
     planner_model: str = "Claude Opus 5 (Thinking)"
     critic_model: str = "Codex 5.6 Sol"
     rounds: tuple[AdvisoryDebateRound, ...] = ()
-    stalemate: AdvisoryStalemateReport | None = None
+    stalemate: _leaf_AdvisoryStalemateReport | None = None
     error: str | None = None
-    occasion: Occasion = "ambiguity"
+    occasion: _leaf_Occasion = "ambiguity"
     degraded_independence: bool = False
     canary_result: CanaryResult | None = None
-    degradation_rung: DegradationRung = 0
+    degradation_rung: _leaf_DegradationRung = 0
     topology: RosterTopology = "pair"
-    round_verdicts: tuple[AdvisoryRoundVerdict, ...] = ()
-    executive_report: ExecutiveDialogueReport | None = None
+    round_verdicts: tuple[_leaf_AdvisoryRoundVerdict, ...] = ()
+    executive_report: _leaf_ExecutiveDialogueReport | None = None
     manifest_path: str | None = None
-    security_veto: SecurityVeto | None = None
+    security_veto: _leaf_SecurityVeto | None = None
 
     @property
     def consensus_reached(self) -> bool:
@@ -1677,7 +1636,7 @@ def needs_code_review_consultation(
     threshold, or any `changed_paths` entry matching a configured
     security-sensitive pattern (case-insensitive substring match, the same
     style `_detect_sensitivity_marker` above already uses for
-    `SENSITIVITY_MARKERS`). The threshold and patterns are read from
+    `_leaf_SENSITIVITY_MARKERS`). The threshold and patterns are read from
     `config_path` via `_load_code_review_risk_config` on every call rather
     than cached at import time, so a caller (or a test) pointing this at a
     different file always observes that file's current values.
@@ -1700,7 +1659,7 @@ def needs_code_review_consultation(
 
 def needs_post_mortem_consultation(
     *,
-    occasion: Occasion | None = None,
+    occasion: _leaf_Occasion | None = None,
     failed: bool = False,
     consecutive_failures: int = 0,
     stalemate_occurred: bool = False,
@@ -1757,7 +1716,7 @@ def _resolve_scoped_memory(
     An explicit `scoped_memory` always wins — a caller supplying one has
     already decided what the Planner/Critic should see. Otherwise this
     scopes against `root_dir`'s adopted `memory` document when a
-    `root_dir` is given, or `extract_scoped_memory`'s built-in
+    `root_dir` is given, or `_leaf_extract_scoped_memory`'s built-in
     `GOLDEN_RULES` catalog when not — both scored against `target_files` so
     a caller naming the files a task actually touches gets file-pattern
     matches folded into the ranking, not just keyword overlap with
@@ -1766,14 +1725,14 @@ def _resolve_scoped_memory(
     if scoped_memory is not None:
         return scoped_memory
     if root_dir is not None:
-        return get_scoped_memory(root_dir, task_description, target_files=target_files)
-    return extract_scoped_memory(task_description, target_files=target_files)
+        return _leaf_get_scoped_memory(root_dir, task_description, target_files=target_files)
+    return _leaf_extract_scoped_memory(task_description, target_files=target_files)
 
 
 def _build_planner_prompt(
     task_description: str,
     *,
-    occasion: Occasion = "ambiguity",
+    occasion: _leaf_Occasion = "ambiguity",
     previous_plan: str | None = None,
     critic_feedback: str | None = None,
     scoped_memory: str | None = None,
@@ -1781,7 +1740,7 @@ def _build_planner_prompt(
     target_files: Sequence[str] | None = None,
 ) -> str:
     scoped_memory = _resolve_scoped_memory(task_description, root_dir, target_files, scoped_memory)
-    return build_planner_prompt(
+    return _leaf_build_planner_prompt(
         task_description,
         occasion=occasion,
         previous_plan=previous_plan,
@@ -1794,7 +1753,7 @@ def _build_critic_prompt(
     task_description: str,
     planner_plan: str,
     *,
-    occasion: Occasion = "ambiguity",
+    occasion: _leaf_Occasion = "ambiguity",
     scoped_memory: str | None = None,
     root_dir: Path | None = None,
     target_files: Sequence[str] | None = None,
@@ -1826,18 +1785,18 @@ def _build_critic_prompt(
     # can never substitute for a quote in the approval decision, so the
     # prompt must not imply they can.
     scoped_memory = _resolve_scoped_memory(task_description, root_dir, target_files, scoped_memory)
-    return build_critic_prompt(
+    return _leaf_build_critic_prompt(
         task_description,
         planner_plan,
         occasion=occasion,
-        approve_verdict=CRITIC_VERDICT_APPROVE,
-        revise_verdict=CRITIC_VERDICT_REVISE,
+        approve_verdict=_leaf_CRITIC_VERDICT_APPROVE,
+        revise_verdict=_leaf_CRITIC_VERDICT_REVISE,
         scoped_memory=scoped_memory,
     )
 
 
 def _detect_sensitivity_marker(text: str) -> str | None:
-    """Return the first `SENSITIVITY_MARKERS` entry found in `text`, or None.
+    """Return the first `_leaf_SENSITIVITY_MARKERS` entry found in `text`, or None.
 
     Returns the marker constant itself, never the surrounding text it
     matched against — the caller reports this back as the reason a
@@ -1845,7 +1804,7 @@ def _detect_sensitivity_marker(text: str) -> str | None:
     the halt without ever repeating the task text or the secret value that
     tripped it.
     """
-    return scan_sensitivity_markers(text, SENSITIVITY_MARKERS)
+    return _leaf_scan_sensitivity_markers(text, _leaf_SENSITIVITY_MARKERS)
 
 
 def _remove_stale_plan_artifact(plan_path: Path) -> str | None:
@@ -1895,16 +1854,16 @@ def _fold_error(existing: str | None, addition: str | None) -> str | None:
 
 
 
-combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
+_leaf_combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
 _combine_panel_critic_feedback = _prompt_assembler.combine_panel_critic_feedback
 
 
-def run_advisory_consultation_debate(
+def run_critical_dialogue(
     task_description: str,
     invoke_worker: InvokeWorker | None = None,
     *,
     root_dir: Path,
-    occasion: Occasion = "ambiguity",
+    occasion: _leaf_Occasion = "ambiguity",
     complexity: str = "medium",
     max_rounds: int = MAX_DEBATE_ROUNDS,
     target_files: Sequence[str] | None = None,
@@ -1968,7 +1927,7 @@ def run_advisory_consultation_debate(
 
     Two further endings are deliberately not listed among those four,
     because each is an orthogonal case, not another flavor of "no
-    consensus" (see ``AdvisoryOutcome``'s own comment for the taxonomy):
+    consensus" (see ``_leaf_AdvisoryOutcome``'s own comment for the taxonomy):
 
     - Canary: ``is_canary=True`` runs a seeded-flaw measurement probe of
       the Critic — there is no Planner proposal to agree or disagree
@@ -2009,7 +1968,7 @@ def run_advisory_consultation_debate(
     Critic was contacted; a ``canary`` run's single transcript round shows
     the fixture's flawed plan text under a fixture-labeled header rather
     than a Planner exchange — no Planner was invoked — alongside a
-    ``CANARY_MARKER`` note naming the fixture and its seeded flaw (see
+    ``_leaf_CANARY_MARKER`` note naming the fixture and its seeded flaw (see
     ``_render_consultation_transcript`` for both). The telemetry record
     never carries task text or a matched secret value on any path — its
     complete field set is ``timestamp``, ``task_id``, ``rounds_run``,
@@ -2017,7 +1976,7 @@ def run_advisory_consultation_debate(
     ``degraded_independence``, ``canary_result``, ``degradation_rung``,
     ``occasion``, ``topology``, and ``round_verdicts`` (verdict labels and
     engagement-unit counts only, never plan or critique prose) — see
-    ``AdvisoryTelemetryRecord`` for each field's own contract.
+    ``_leaf_AdvisoryTelemetryRecord`` for each field's own contract.
     ``task_id`` is the ``task_id`` keyword argument when supplied; otherwise
     it defaults to a truncated SHA-256 digest of ``task_description`` for
     every outcome except ``sensitivity_halt`` and ``canary``, and to a
@@ -2078,7 +2037,7 @@ def run_advisory_consultation_debate(
     Critics' own last responses kept separate (spec 0003 ticket 06): the
     report's ``critic_position`` carries Critic A's final position and its
     ``critic_b_position`` carries Critic B's, never a folded combination of
-    the two — see ``AdvisoryStalemateReport``'s docstring.
+    the two — see ``_leaf_AdvisoryStalemateReport``'s docstring.
 
     ``reachability_check`` (spec 0003 ticket 07) is the opt-in seam for
     family-aware roster resolution: ``None`` by default, which leaves every
@@ -2164,7 +2123,7 @@ def run_advisory_consultation_debate(
     is a **catch**. The result is reported on ``AdvisoryDebateResult.canary_result``
     (``"miss"`` or ``"catch"``) and the outcome is always ``"canary"``,
     never ``"consensus"`` or ``"stalemate"`` — see that field's and
-    ``AdvisoryOutcome``'s own docstrings for why a canary is deliberately
+    ``_leaf_AdvisoryOutcome``'s own docstrings for why a canary is deliberately
     not folded into either. A canary round never writes
     ``implementation_plan.md`` and never calls ``_remove_stale_plan_artifact``
     either — not even on the rung-3 budget-preemption path, whose
@@ -2175,7 +2134,7 @@ def run_advisory_consultation_debate(
     is what keeps a canary from ever contaminating a real mission's
     outcome. It still reaches the
     same ``_result`` choke point as every other exit path, so it still
-    writes a transcript (carrying ``CANARY_MARKER`` and the fixture's id
+    writes a transcript (carrying ``_leaf_CANARY_MARKER`` and the fixture's id
     and flaw summary — see ``_render_consultation_transcript``) and exactly
     one telemetry record (carrying ``canary_result``) — the module's
     "every outcome gets both artifacts" invariant holds for canaries too.
@@ -2196,14 +2155,14 @@ def run_advisory_consultation_debate(
     ``session_spend_so_far`` (spec 0003 ticket 09) is the opt-in seam for
     the per-session dialogue budget's degradation ladder: ``0`` by default,
     which leaves every pre-ticket-09 call site's behaviour completely
-    unchanged, since ``resolve_degradation_rung(0, ...)`` always reads rung
+    unchanged, since ``_leaf_resolve_degradation_rung(0, ...)`` always reads rung
     0 for any positive configured cap. This module holds no session state
     (same philosophy as ``reachability_check`` and ``is_canary``/
     ``is_canary_dialogue`` above): the caller tracks how many dialogues its
     own session has already run and passes that count in here, fresh, on
-    every call — see ``resolve_degradation_rung``'s own docstring for the
+    every call — see ``_leaf_resolve_degradation_rung``'s own docstring for the
     exact unit and thresholds. ``budget_config_path`` threads through to
-    ``resolve_degradation_rung`` unchanged, defaulting to this module's own
+    ``_leaf_resolve_degradation_rung`` unchanged, defaulting to this module's own
     ``routing-config.json``, exactly like ``roster_config_path`` above.
 
     The resolved rung is checked immediately after the sensitivity gate,
@@ -2233,7 +2192,7 @@ def run_advisory_consultation_debate(
     model in every seat, it collapses the roster to a single family by
     construction, and a rung-2 result therefore also reports
     ``degraded_independence`` — in the result, the telemetry record, and
-    the transcript's ``DEGRADED_INDEPENDENCE_MARKER`` line, the same
+    the transcript's ``_leaf_DEGRADED_INDEPENDENCE_MARKER`` line, the same
     reporting path the roster-resolution case uses (spec 0003 story 14: a
     same-family fallback is never silent, whatever mechanism caused it).
     This override is applied *after* the
@@ -2261,7 +2220,7 @@ def run_advisory_consultation_debate(
     degraded, never only infer it from the outcome value.
 
     Raises ``ValueError`` if ``max_rounds`` is not at least 1, or if
-    ``occasion`` is not one of the four ``Occasion`` values: both are
+    ``occasion`` is not one of the four ``_leaf_Occasion`` values: both are
     programming errors at the call site, not a genuine Planner-Critic
     disagreement, and must not be reported back as a fabricated stalemate.
     Validation deliberately precedes the sensitivity gate, so a sensitive
@@ -2290,7 +2249,7 @@ def run_advisory_consultation_debate(
     security_policy = effective_consultation_policy.get("security_veto", {})
     if not isinstance(security_policy, dict):
         security_policy = {}
-    veto_handler = SecurityVetoHandler(
+    veto_handler = _leaf_SecurityVetoHandler(
         veto_severities=security_policy.get("veto_severities"),
         security_threshold=security_policy.get("security_threshold", 0.80),
         enabled=security_policy.get("enabled", True),
@@ -2298,7 +2257,7 @@ def run_advisory_consultation_debate(
     weighting_policy = effective_consultation_policy.get("weighting", {})
     if not isinstance(weighting_policy, dict):
         weighting_policy = {}
-    panel_consensus_table = ConsensusTable(
+    panel_consensus_table = _leaf_ConsensusTable(
         policy=effective_consultation_policy.get("consensus_policy"),
         weights=weighting_policy.get("initial_weights"),
         quorum_threshold=weighting_policy.get("quorum_threshold", 0.60),
@@ -2350,19 +2309,19 @@ def run_advisory_consultation_debate(
     # than raising `UnboundLocalError` — a halted task never reaches the
     # budget check at all, and correctly reports no degradation for a
     # dialogue that never ran.
-    degradation_rung: DegradationRung = 0
+    degradation_rung: _leaf_DegradationRung = 0
     # `_result` must never perform configuration I/O. Early outcomes use the
     # safe policy default; normal dialogue paths replace it once below.
-    budget_cap = DEFAULT_SESSION_DIALOGUE_CAP
+    budget_cap = _leaf_DEFAULT_SESSION_DIALOGUE_CAP
 
     rounds: list[AdvisoryDebateRound] = []
     # Spec 0003 (CriticalDialogue) ticket 10: kept parallel with `rounds`
-    # above — one `AdvisoryRoundVerdict` appended at the identical call site
+    # above — one `_leaf_AdvisoryRoundVerdict` appended at the identical call site
     # every `rounds.append(...)` above already has, immediately after
     # `_parse_critic_verdict` is called for that round, so the two
     # sequences can never drift out of sync (same length, same order, every
     # outcome). See `AdvisoryDebateResult.round_verdicts`'s docstring.
-    round_verdicts: list[AdvisoryRoundVerdict] = []
+    round_verdicts: list[_leaf_AdvisoryRoundVerdict] = []
     previous_plan: str | None = None
     previous_critique: str | None = None
     # Panel mode only (spec 0003 ticket 06): each Critic's own last response,
@@ -2398,16 +2357,16 @@ def run_advisory_consultation_debate(
     dialogue_run_id: str | None = None
 
     def _result(
-        outcome: AdvisoryOutcome,
+        outcome: _leaf_AdvisoryOutcome,
         *,
         final_plan: str = "",
-        stalemate: AdvisoryStalemateReport | None = None,
+        stalemate: _leaf_AdvisoryStalemateReport | None = None,
         error: str | None = None,
         sensitivity_marker: str | None = None,
         canary_result: CanaryResult | None = None,
         resolved_canary_fixture: CanaryFixture | None = None,
         manifest_path: str | None = None,
-        security_veto: SecurityVeto | None = None,
+        security_veto: _leaf_SecurityVeto | None = None,
     ) -> AdvisoryDebateResult:
         """The single choke point every return passes through.
 
@@ -2444,7 +2403,7 @@ def run_advisory_consultation_debate(
         # before the write happens — so a renderer must never read `.error`
         # off this object; neither renderer does today, but nothing enforces
         # that beyond this comment.
-        executive_report = ExecutiveDialogueReport(
+        executive_report = _leaf_ExecutiveDialogueReport(
             _executive_dialogue_report.render_executive_summary(
                 outcome,
                 occasion,
@@ -2585,7 +2544,7 @@ def run_advisory_consultation_debate(
         return dataclasses.replace(provisional_result, error=folded_error)
 
     def _write_panel_manifest(
-        status: str, security_veto: SecurityVeto | None = None
+        status: str, security_veto: _leaf_SecurityVeto | None = None
     ) -> str:
         """Write a terminal panel manifest, removing any plan if signing fails."""
         try:
@@ -2638,11 +2597,11 @@ def run_advisory_consultation_debate(
     # budget's degradation ladder. The rung is decided here, right after
     # the sensitivity gate (a halted task never needs a budget decision)
     # and before roster resolution, the canary branch, or any
-    # `invoke_worker` call: `resolve_degradation_rung` is pure and reads no
+    # `invoke_worker` call: `_leaf_resolve_degradation_rung` is pure and reads no
     # session state of its own; `session_spend_so_far` is entirely
     # caller-tracked, exactly like ticket 07's `reachability_check` and
     # ticket 08's `is_canary_dialogue` seams — see this function's own
-    # docstring and `resolve_degradation_rung`'s for the full contract.
+    # docstring and `_leaf_resolve_degradation_rung`'s for the full contract.
     #
     # Only rung 3 and rung 1 are actually applied here, though. Rung 3 must
     # end the call before roster resolution, the canary branch, or any
@@ -2652,7 +2611,7 @@ def run_advisory_consultation_debate(
     # NOT applied here — see the block below the roster-resolution block
     # further down for why it has to run after roster resolution instead.
     budget_cap = _load_dialogue_budget_config(budget_config_path)
-    degradation_rung = resolve_degradation_rung(
+    degradation_rung = _leaf_resolve_degradation_rung(
         session_spend_so_far, config_path=budget_config_path
     )
     if degradation_rung == 3:
@@ -2661,7 +2620,7 @@ def run_advisory_consultation_debate(
         # call. `_result` still fires (this is a normal `return` through
         # the module's one choke point, not a shortcut around it), so the
         # caller still gets a transcript and a telemetry record — see the
-        # `"budget_skipped"` outcome's own comment on `AdvisoryOutcome` for
+        # `"budget_skipped"` outcome's own comment on `_leaf_AdvisoryOutcome` for
         # why that is exactly what "degradation is never silent" requires
         # even at the ladder's harshest rung.
         #
@@ -2791,7 +2750,7 @@ def run_advisory_consultation_debate(
     # `planner_model`/`critic_model` arguments when `reachability_check` is
     # not supplied at all. Compounds on rung 1's round reduction above
     # rather than replacing it (see the module comment above
-    # `DegradationRung`). `result_critic_model` is recomputed the same way
+    # `_leaf_DegradationRung`). `result_critic_model` is recomputed the same way
     # the roster-resolution block above computes it, so a panel run's
     # reported critic model stays consistent with what this rung actually
     # invokes.
@@ -2855,7 +2814,7 @@ def run_advisory_consultation_debate(
             # the probe measured the degraded cheap Critic, not the production
             # Critic. Mission-level aggregation never sees it, because canary
             # records are mandatorily filtered out (`outcome != "canary"`, per
-            # `AdvisoryTelemetryRecord`'s own WARNING). None of this applies on
+            # `_leaf_AdvisoryTelemetryRecord`'s own WARNING). None of this applies on
             # a sensitive task, whose roster (and therefore whose
             # `degraded_independence` value) this `if` leaves completely
             # alone — see this block's own comment above for why.
@@ -2865,7 +2824,7 @@ def run_advisory_consultation_debate(
     # state machine. Presentation-oriented round lists remain in parallel for
     # the established result/transcript contract, while consensus, malformed
     # verdict, and terminal stalemate decisions all flow through `state`.
-    state = DebateSessionState(occasion, complexity, max_rounds, panel_mode)
+    state = _leaf_DebateSessionState(occasion, complexity, max_rounds, panel_mode)
 
     # Spec 0003 (CriticalDialogue) ticket 08: the seeded-flaw canary round.
     # Placed after the sensitivity gate and (if opted into) roster
@@ -2903,12 +2862,12 @@ def run_advisory_consultation_debate(
         result_topology = "pair"
 
         if invoke_worker is None:
-            invoke_worker = DebateTransport(
+            invoke_worker = _leaf_DebateTransport(
                 root_dir=root_dir,
-                notifier=RecurringFailureNotifier(threshold=ESCALATION_FAILURE_THRESHOLD),
+                notifier=_leaf_RecurringFailureNotifier(threshold=ESCALATION_FAILURE_THRESHOLD),
             ).invoke_worker
 
-        canary_critic_prompt = build_canary_prompt(
+        canary_critic_prompt = _leaf_build_canary_prompt(
             task_description, fixture.plan_text, occasion=occasion
         )
         try:
@@ -2942,7 +2901,7 @@ def run_advisory_consultation_debate(
         # Spec 0003 ticket 10: kept parallel with the `rounds.append` just
         # above, `critic_b=None` since a canary never invokes a second
         # Critic — see `AdvisoryDebateResult.round_verdicts`'s docstring.
-        round_verdicts.append(AdvisoryRoundVerdict(critic_a=canary_verdict))
+        round_verdicts.append(_leaf_AdvisoryRoundVerdict(critic_a=canary_verdict))
         return _result(
             "canary",
             canary_result=canary_verdict_result,
@@ -2950,10 +2909,10 @@ def run_advisory_consultation_debate(
         )
 
     if invoke_worker is None:
-        # `DebateTransport` (re-exported above but previously never
+        # `_leaf_DebateTransport` (re-exported above but previously never
         # instantiated from this loop) is now the single source of truth for
         # isolated default-path process execution and for the failure
-        # alerting `RecurringFailureNotifier` provides: it tracks consecutive
+        # alerting `_leaf_RecurringFailureNotifier` provides: it tracks consecutive
         # per-model failures and appends a durable `ERRORS.md` alert once
         # `ESCALATION_FAILURE_THRESHOLD` is reached -- the same escalation
         # rule this module's own `ESCALATION_FAILURE_THRESHOLD` constant
@@ -2963,8 +2922,8 @@ def run_advisory_consultation_debate(
         # wrapper (which needs to time the raw subprocess call itself) but
         # shares this exact `_transport.notifier` instance for alerting, so
         # there is never more than one notifier tracking this run's failures.
-        _transport = DebateTransport(
-            notifier=RecurringFailureNotifier(threshold=ESCALATION_FAILURE_THRESHOLD),
+        _transport = _leaf_DebateTransport(
+            notifier=_leaf_RecurringFailureNotifier(threshold=ESCALATION_FAILURE_THRESHOLD),
             root_dir=root_dir,
         )
         invoke_worker = _transport.invoke_worker
@@ -2974,7 +2933,7 @@ def run_advisory_consultation_debate(
             # ruled that outcome out for this call, so resolving here is
             # exactly the id `_result` will resolve again for whichever
             # outcome this run actually reaches — the journal record and
-            # this run's telemetry record stay correlated by TaskIdentity.
+            # this run's telemetry record stay correlated by _leaf_TaskIdentity.
             journaled_task_id = _resolve_task_id(task_description, task_id, "consensus")
             journal_run_id = secrets.token_hex(8)
             journaled_invoke_worker = _current_production_invoker().make_journaled_invoke_worker(
@@ -2983,7 +2942,7 @@ def run_advisory_consultation_debate(
             dialogue_run_id = journal_run_id
 
             def invoke_worker(model: str, effort: str, prompt: str) -> str:
-                """Journal via production_invoker, alerting through DebateTransport's shared notifier."""
+                """Journal via production_invoker, alerting through _leaf_DebateTransport's shared notifier."""
                 try:
                     output = journaled_invoke_worker(model, effort, prompt)
                 except Exception as exc:  # re-raised untouched below; only tracked here.
@@ -3065,8 +3024,8 @@ def run_advisory_consultation_debate(
             # Spec 0003 ticket 10: kept parallel with the `rounds.append`
             # just above — both Critics' verdicts retained together, in one
             # entry, rather than as two separately-indexed lists that could
-            # drift out of sync. See `AdvisoryRoundVerdict`'s docstring.
-            round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_a, critic_b=verdict_b))
+            # drift out of sync. See `_leaf_AdvisoryRoundVerdict`'s docstring.
+            round_verdicts.append(_leaf_AdvisoryRoundVerdict(critic_a=verdict_a, critic_b=verdict_b))
             security_veto = veto_handler.check((critic_a_resp, critic_b_resp))
             if security_veto is not None:
                 cleanup_error = _remove_stale_plan_artifact(plan_path)
@@ -3079,9 +3038,9 @@ def run_advisory_consultation_debate(
                     manifest_path=manifest_path,
                     error=_fold_error(str(security_veto), cleanup_error),
                 )
-            state = advance_debate_state(
+            state = _leaf_advance_debate_state(
                 state,
-                DebateRoundRecord(
+                _leaf_DebateRoundRecord(
                     _round_number,
                     planner_plan,
                     critic_a_response,
@@ -3092,7 +3051,7 @@ def run_advisory_consultation_debate(
             )
 
             # An unparseable verdict from either Critic ends the panel
-            # immediately; `advance_debate_state` is the authoritative
+            # immediately; `_leaf_advance_debate_state` is the authoritative
             # verdict transition for this decision.
             if state.error:
                 cleanup_error = _remove_stale_plan_artifact(plan_path)
@@ -3168,7 +3127,7 @@ def run_advisory_consultation_debate(
         # Spec 0003 ticket 10: kept parallel with the `rounds.append` just
         # above, `critic_b=None` since this is a pair-mode round. See
         # `AdvisoryDebateResult.round_verdicts`'s docstring.
-        round_verdicts.append(AdvisoryRoundVerdict(critic_a=verdict_result))
+        round_verdicts.append(_leaf_AdvisoryRoundVerdict(critic_a=verdict_result))
         security_veto = veto_handler.check((critic_resp,))
         if security_veto is not None:
             cleanup_error = _remove_stale_plan_artifact(plan_path)
@@ -3177,9 +3136,9 @@ def run_advisory_consultation_debate(
                 security_veto=security_veto,
                 error=_fold_error(str(security_veto), cleanup_error),
             )
-        state = advance_debate_state(
+        state = _leaf_advance_debate_state(
             state,
-            DebateRoundRecord(
+            _leaf_DebateRoundRecord(
                 _round_number,
                 planner_plan,
                 critic_response,
@@ -3284,7 +3243,7 @@ def _run_dispatched_post_mortem(
 
     The synthesized `AdvisoryDebateResult` this builds on an unexpected
     exception reuses the existing `"worker_error"` outcome rather than
-    inventing an eighth `AdvisoryOutcome` value: `AdvisoryOutcome` is a closed
+    inventing an eighth `_leaf_AdvisoryOutcome` value: `_leaf_AdvisoryOutcome` is a closed
     `Literal`, and every caller that branches on it today was written
     against exactly seven values, none of them "the dispatch mechanism
     itself broke." `"worker_error"` is the closest existing meaning — "the
@@ -3557,21 +3516,46 @@ def dispatch_post_mortem_consultation(
 
 def run_debate_loop(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     """Execute the production Planner/Critic state machine."""
-    return run_advisory_consultation_debate(*args, **kwargs)
+    return run_critical_dialogue(*args, **kwargs)
 
 
 # Historic name retained as an exact alias, rather than a forwarding wrapper:
 # callers inspecting the public API receive the complete production signature.
-run_critical_dialogue = run_advisory_consultation_debate
+run_advisory_consultation_debate = run_critical_dialogue
 
 
 def run_canary_dialogue(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     """Execute one seeded-flaw Critic probe through the production loop."""
     kwargs["is_canary"] = True
-    return run_advisory_consultation_debate(*args, **kwargs)
+    return run_critical_dialogue(*args, **kwargs)
 
 
 def run_post_mortem_loop(*args: Any, **kwargs: Any) -> AdvisoryDebateResult:
     """Execute a post-mortem through the ordinary production loop."""
     kwargs.setdefault("occasion", "post-mortem")
-    return run_advisory_consultation_debate(*args, **kwargs)
+    return run_critical_dialogue(*args, **kwargs)
+
+
+def request_council_review(
+    request: ReviewRequest, policy_path: str | Path = _leaf_ROUTING_CONFIG_PATH
+) -> ReviewOutcome:
+    """Run a multi-model council review and return the consolidated outcome.
+
+    ``ReviewCouncil.review`` is asynchronous because it executes all
+    providers concurrently.  The public request helper is synchronous so a
+    normal routing decision can obtain its consolidated outcome directly.
+    When called from an already-running event loop, the review runs in an
+    isolated worker thread so this synchronous boundary never nests loops.
+    """
+    council = ReviewCouncil(policy_path=policy_path)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is not None and loop.is_running():
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, council.review(request)).result()
+    return asyncio.run(council.review(request))

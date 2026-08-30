@@ -1,9 +1,9 @@
 """Pure VerdictContract parsing for AdvisoryConsultation.
 
-The consultation facade owns worker coordination, persistence, and telemetry;
-this module owns only the critic-response contract.  Keeping the parser pure
-means quote verification and fail-closed verdict decisions can be tested with
-plain strings, without a worker, filesystem, or debate state machine.
+`critical_dialogue` owns consultation orchestration; this module owns only the
+critic-response contract.  Keeping the parser pure means quote verification
+and fail-closed verdict decisions can be tested with plain strings, without a
+worker, filesystem, or debate state machine.
 
 The contract deliberately treats approval more strictly than revision.  An
 approval needs a verbatim quote verified against the reviewed artifact, while

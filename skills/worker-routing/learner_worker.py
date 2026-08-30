@@ -28,7 +28,7 @@ Two cadences:
 - **Weekly, deep** (`run_weekly_deep`). Computes the scoreboard, runs a batch
   retrospective synthesis over the week's tasks, and proposes routing-table
   updates, brief diffs, and memory lessons from the evidence. This is a
-  single one-shot `invoke_worker` call, not an `advisory_consultation`
+  single one-shot `invoke_worker` call, not an `AdvisoryConsultation`
   dialogue — settled as one-shot synthesis in ADR 0009 (Ticket 31) because
   downstream risk-tiering (Tier 2 Acceptance Gate, Tier 3 Human Review, Tier
   1 Anti-Flapping and Auto-Revert) provides appropriate protection without background
@@ -51,7 +51,7 @@ it config-sourced values before this ticket, deliberately: the gate itself
 is a leaf, and a config read inside it would be a second source for a value
 its caller already passes down. `_load_acceptance_gate_config` reads
 `routing-config.json`'s `acceptance_gate` section the same way
-`advisory_consultation._load_dialogue_budget_config` reads
+`dialogue_degradation._load_dialogue_budget_config` reads
 `dialogue_budget.session_dialogue_cap`, and `run_weekly_deep` is the first
 caller of `apply_routing_table_update` to hand it those config-loaded
 `trials`/`score_threshold` rather than leaving them at their defaults.
@@ -98,7 +98,7 @@ else:
 
 # The seam every worker invocation in this repository shares: `(model,
 # effort, prompt) -> str`. Declared locally rather than imported from
-# `advisory_consultation` — that module pulls in `asyncio` and
+# `critical_dialogue` — that module pulls in `asyncio` and
 # `urllib.request` for reasons that have nothing to do with this one type
 # alias, and these files are loaded by path rather than as a package (see
 # `learning_journal.py`'s own note on `TASK_ID_RE` for why a cross-module
@@ -333,7 +333,7 @@ def _load_acceptance_gate_config(config_path: Path) -> tuple[int, float]:
     `DEFAULT_TRIAL_COUNT`/`DEFAULT_SCORE_THRESHOLD`) when the section is
     absent, and raises `routing_config.ConfigValidationError` for a
     malformed *present* value or a missing/malformed `config_path` — the
-    same no-try/except contract `advisory_consultation
+    same no-try/except contract `dialogue_degradation
     ._load_dialogue_budget_config` uses for the latter, since production
     always calls this with the default `_CONFIG_PATH`, which is checked
     into the repo.

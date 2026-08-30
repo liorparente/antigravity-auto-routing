@@ -711,7 +711,10 @@ def build_worker_command(
                 {
                     "model": effective_model,
                     "messages": [{"role": "user", "content": routed_prompt}],
-                    "temperature": 0,
+                    "temperature": 0.3,
+                    "top_p": 0.95,
+                    "min_p": 0.05,
+                    "repetition_penalty": 1.0,
                 }
             )
             return [
@@ -770,7 +773,10 @@ def build_worker_command(
             {
                 "model": normalized_model,
                 "messages": [{"role": "user", "content": routed_prompt}],
-                "temperature": 0,
+                "temperature": 0.3,
+                "top_p": 0.95,
+                "min_p": 0.05,
+                "repetition_penalty": 1.0,
             }
         )
         return [
@@ -1217,7 +1223,7 @@ def make_journaled_invoke_worker(
 
     An unjournalable `task_id` therefore raises **here**, at wiring time,
     before any worker runs — not once per invocation afterwards.
-    `advisory_consultation` already wraps this call in the try that degrades
+    `critical_dialogue` already wraps this call in the try that degrades
     to "journaling disabled for this run", so a bad id costs the run its
     instrumentation and nothing else. `TaskLabel.for_halted_task` has no
     counterpart parameter on purpose: a sensitivity halt returns before any

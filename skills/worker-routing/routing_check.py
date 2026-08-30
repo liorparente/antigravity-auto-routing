@@ -117,9 +117,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 DIFF_FILE_RE = re.compile(r"^\+\+\+\s+b/(.+)$", re.MULTILINE)
 
 
@@ -251,12 +248,12 @@ TOOL_CALL_RE = re.compile(r"Tool call:\s*(\w+)\(")
 
 # Non-role keys that may appear at the top level of routing-config.json
 # alongside the worker-role dicts. "critical_dialogue" (spec 0003 ticket 03)
-# is a config namespace consumed by advisory_consultation.py's trigger
+# is a config namespace consumed by critical_dialogue.py's trigger
 # predicates, not a worker role — its dict shape has no "patterns" key and
 # would silently contribute nothing to `load_patterns` even unlisted, but it
 # belongs here for the same documented reason "code_extensions" and
 # "safe_commands" do. "roster_topology" (spec 0003 ticket 07) is the same
-# kind of namespace, consumed by `advisory_consultation.resolve_roster`'s
+# kind of namespace, consumed by `critical_dialogue.resolve_roster`'s
 # `_load_roster_fallback_chains`, not a worker role either.
 # "roles", "providers", and "council_policy" (ADR 0012 / spec 0012 ticket 02)
 # are the declarative Role-Capability-Provider schema — nested role/provider
@@ -1402,7 +1399,7 @@ def _journalable_session_id(session_id: str) -> tuple[str, str | None]:
     audits of the same conversation derive the same id, so the session stays
     one session and `ComplianceRecord`'s per-session reduction still works.
 
-    This is `advisory_consultation._default_task_id`'s precedent, applied to
+    This is `dialogue_transcript._default_task_id`'s precedent, applied to
     the other identifier: a digest, never the text it came from. The halt
     exception that governs *task* text does not reach here — a conversation's
     directory name is not halted task text, and no redaction boundary

@@ -26,19 +26,23 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+if __package__:
+    from . import sensitivity_redactor as _sensitivity_redactor
+else:
+    import sensitivity_redactor as _sensitivity_redactor  # type: ignore[no-redef]
+
 CACHE_TTL_SECONDS = 24 * 60 * 60
 CACHE_VERSION = 2
 MAX_DEBATE_ROUNDS = 3
 # The protocol's 2-failure escalation rule: `escalate_routing_effort` below
 # treats `attempts < ESCALATION_FAILURE_THRESHOLD` as "not yet escalated"
-# and anything at or past it as "escalate". `advisory_consultation.py`'s
+# and anything at or past it as "escalate". `critical_dialogue.py`'s
 # `needs_post_mortem_consultation` (spec 0003 ticket 03) mirrors this exact
 # constant under the same name rather than importing it — importing
-# `agent_council` from `advisory_consultation` would pull `urllib.request`
+# `agent_council` from `critical_dialogue` would pull `urllib.request`
 # and `asyncio` into a module whose docstring promises none, and both files
-# are loaded by path rather than as an installed package (see the identical
-# `SENSITIVE_PATTERNS`/`SENSITIVITY_MARKERS` precedent below). The two
-# constants are kept from drifting apart by
+# are loaded by path rather than as an installed package. The two constants
+# are kept from drifting apart by
 # `test_escalation_failure_threshold_matches_agent_council_constant` in
 # `test_routing.py`, not by a shared import.
 ESCALATION_FAILURE_THRESHOLD = 2
@@ -55,33 +59,18 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 UNSAFE_LEXEMES = ("$(", "`", ";", "&&", "||", "|", ">", "<")
 CALIBRATION_FIELDS = ("task_id", "task", "complexity", "effort", "decision", "nonce")
 HMAC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$", re.IGNORECASE)
-SENSITIVE_PATTERNS = (
-    "AGY_CALIBRATION_SECRET",
-    "api_key",
-    "sk-",
-    "bearer ",
-    "BEGIN PRIVATE KEY",
-    "password",
-    "secret",
-    "[SENSITIVE]",
-)
+SENSITIVITY_MARKERS = _sensitivity_redactor.SENSITIVITY_MARKERS
+SENSITIVE_PATTERNS = SENSITIVITY_MARKERS
 
 
 def detect_sensitive_data(text: str) -> bool:
     """Return True if text contains sensitive security patterns or flags."""
-    lowered = text.lower()
-    return any(pattern.lower() in lowered for pattern in SENSITIVE_PATTERNS)
+    return _sensitivity_redactor.scan_sensitivity_markers(text) is not None
 
 
 def evaluate_sensitivity(task_text: str) -> tuple[bool, bool]:
     """Return whether a task is sensitive and whether it includes credentials."""
-    lowered = task_text.lower()
-    is_sensitive = detect_sensitive_data(task_text)
-    contains_credentials = any(
-        keyword in lowered
-        for keyword in ("api_key", "sk-", "bearer ", "private key", "password")
-    )
-    return is_sensitive, contains_credentials
+    return _sensitivity_redactor.classify_sensitivity(task_text)
 
 
 def check_local_model_endpoint(

@@ -73,7 +73,7 @@ which the journal cannot verify and the caller therefore owns. Spec 0004.
 An action the orchestrator performs itself rather than routing to a worker. The set is closed and enumerated: everything outside it is a routing violation. Membership is decided by whether a worker *can* do the work, not by whether the orchestrator finds it convenient — version control is a member because worker sandboxes cannot perform it at all.
 
 ### CriticalDialogue
-The upgraded [[AdvisoryConsultation]] machinery serving four occasions — ambiguity, plan review, post-execution code review, and post-mortem — under one round/contract/transcript/telemetry infrastructure. Tiered topology: a cross-family Planner–Critic pair by default; for Complex tasks, a panel of one Planner and two Critics from two other model families, where consensus requires an explicit approval from both. Stalemates halt to the human in every mode. Spec 0003.
+The consolidated, deep deliberation module in `skills/worker-routing/critical_dialogue.py` unifying Planner/Critic debates, multi-perspective council reviews, quorum reductions, HMAC signing, transcript rendering, and degradation ladder transitions behind a single canonical execution boundary. Supersedes fragmented legacy facades. Spec 0015.
 
 ### VerdictContract
 The response contract a Critic must satisfy for its approval to count: rationale before the verdict line, quotes from the reviewed artifact that verify mechanically, and enumerable atomic objections. An approval carrying zero engagement units parses as "not approved" — the structural defense against rubber-stamping, extending spec 0001's rule that absence of rejection is not agreement.
@@ -161,13 +161,13 @@ A pure voting aggregation rule evaluated over arbitrary sequences of critic resp
 The deliberate normalization of `"abstain"` / timeout critic responses into valid non-approval votes without triggering unparseable verdict errors or terminating the debate. Abstentions increment total participant count without contributing to affirmative approvals, allowing quorum policies to evaluate gracefully under partial panel availability.
 
 ### Dyad
-A binary turn-based deliberation exchange between a single Planner and a single Critic across up to three revision rounds, orchestrated within `debate_orchestrator.py` for Medium-complexity tasks. Spec 0009.
+A binary turn-based deliberation exchange between a single Planner and a single Critic across up to three revision rounds, orchestrated within `critical_dialogue.py` for Medium-complexity tasks. Spec 0009 / Spec 0015.
 
 ### CouncilPanel
-A concurrent multi-model review ensemble evaluated under weighted scoring, soft confidence metrics, and selective HMAC-SHA256 manifest signing, orchestrated within `debate_orchestrator.py`. Spec 0009.
+A concurrent multi-model review ensemble evaluated under weighted scoring, soft confidence metrics, and selective HMAC-SHA256 manifest signing, orchestrated within `critical_dialogue.py`. Spec 0009 / Spec 0015.
 
 ### ReviewCouncilFacade
-The lightweight, backward-compatible 19-line delegating module in `skills/council-review/scripts/council_review.py` that routes external CLI and library callers directly to `debate_orchestrator.ReviewCouncil` without duplicating state machines or policy files. Spec 0009.
+The retired compatibility seam formerly provided by `skills/council-review/scripts/council_review.py`. Spec 0015 removed the facade; callers now use `critical_dialogue.ReviewCouncil` directly.
 
 ### SecurityVetoHandler
 The universal fail-closed circuit breaker in `production_invoker.py` and `debate_state_machine.py` combining domain-agnostic finding severity/confidence evaluation (Trigger 1: any perspective with Critical/High finding at confidence $\ge 0.80$ halts debate) with perspective-exclusive unilateral block evaluation (Trigger 2: `reviewer_security` explicit `BLOCK` verdict halts debate unconditionally, while non-security `BLOCK` votes participate in weighted quorum reduction). Spec 0009, Spec 0012.
@@ -229,3 +229,17 @@ An execution failure mode where an SSE streaming client listens only to `delta.c
 ### UnbufferedInferenceTransport
 A process execution standard requiring explicit `sys.stdout.flush()` on every streaming token and the use of unbuffered execution (`python3 -u` / `PYTHONUNBUFFERED=1`) when dispatching background Python scripts or CLI sub-processes over non-TTY pipes.
 
+### StructuralConfigDrift
+A runtime schema drift failure where a top-level configuration key (e.g. `_active_profile`) is registered only in `routing_check.NON_ROLE_CONFIG_KEYS` but omitted from `routing_config.STRUCTURAL_KEYS`, causing the dispatcher to parse top-level configuration metadata as invalid worker role definitions.
+
+### MinPSampling
+A local-model decoding strategy that keeps tokens whose probability is at least a fixed fraction of the leading candidate's probability. For local coding workers, a Min-P threshold of `0.05` paired with `temperature=0.3`, `top_p=0.95`, and `repetition_penalty=1.0` limits low-confidence syntax corruption while preserving enough exploration to avoid greedy-decoding local optima and repetitive self-repair loops.
+
+### MLXMetalAttention
+The Apple-silicon inference path used by MLX-backed local models, where transformer attention is executed through Metal on the GPU. Its model-serving configuration, including sampling controls, is managed through LM Studio-compatible presets and the local invocation contract rather than through cloud-provider reasoning-effort settings.
+
+### CriticalDialogueConsolidation
+The unification of ambiguity deliberation, plan review, code review, post-mortem, and multi-model council review into a single deep module (`CriticalDialogue`), eliminating legacy pass-through facades (`advisory_consultation.py`, `council_review.py`) and duplicate security checks in `agent_council.py` to maximize locality and testability. Spec 0015 / ADR 0015.
+
+### PreTicketMigrationAuthority
+The conjunctive proof required before an installer may delete a retired artifact that spans module boundaries: the artifact's current bytes match a known audited digest, and an independently signed ownership record from before the migration names the complete set of modules retired simultaneously with it. A matching digest, a current post-migration receipt, or signed ownership of only a subset is insufficient; absent the complete proof, cleanup preserves the artifact.

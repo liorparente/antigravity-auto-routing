@@ -3,27 +3,24 @@ import hashlib
 import json
 import math
 import os
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent / "scripts")
-if SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, SCRIPTS_DIR)
-
-from council_review import (
+from worker_routing.consultation_policy import (
     DEFAULT_CONSULTATION_POLICY,
+    load_consultation_policy,
+)
+from worker_routing.critical_dialogue import (
     PrivacyMode,
     ReviewCouncil,
     ReviewOutcome,
     ReviewRequest,
-    SecurityVetoHandler,
-    load_consultation_policy,
 )
-from provider_adapters import (
+from worker_routing.debate_state_machine import SecurityVetoHandler
+from worker_routing.provider_adapters import (
     AgyAdapter,
     ClaudeAdapter,
     CLIReviewerAdapter,
@@ -461,7 +458,10 @@ class CouncilPerspectiveFastPathTests(unittest.TestCase):
         approving_adjudicator = FakeReviewerAdapter(
             "lm-studio", [{"provider": "lm-studio", "vote": "approve", "confidence": 1.0}]
         )
-        with patch("provider_adapters.build_adapter", return_value=approving_adjudicator):
+        with patch(
+            "worker_routing.provider_adapters.build_adapter",
+            return_value=approving_adjudicator,
+        ):
             outcome = asyncio.run(council.review(req, custom_adapters=adapters))
 
         self.assertEqual(outcome.status, "QUALIFIED")

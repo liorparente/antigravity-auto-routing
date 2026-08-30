@@ -32,6 +32,10 @@ __pycache__/
 /CLAUDE.md
 *.bak
 
+# Legacy project-bound installer receipt. Authoritative receipts live under
+# AUTO_ROUTING_STATE_DIR/projects/<id>.
+/.auto-routing-python-modules.receipt
+
 # learned_state.py's cross-process mutex (see `_exclusive_store_lock`). The
 # directory around it stays tracked on purpose — that is what "git-tracked
 # version" means for ticket 19 — but this one file is process coordination

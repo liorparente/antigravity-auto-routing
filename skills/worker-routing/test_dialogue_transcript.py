@@ -2,18 +2,14 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 if __package__:
-    from . import advisory_consultation, dialogue_contracts, dialogue_transcript
+    from . import critical_dialogue, dialogue_contracts, dialogue_transcript
 else:
-    import advisory_consultation  # type: ignore[no-redef]
+    import critical_dialogue  # type: ignore[no-redef]
     import dialogue_contracts  # type: ignore[no-redef]
     import dialogue_transcript  # type: ignore[no-redef]
 
@@ -21,17 +17,17 @@ else:
 class DialogueTranscriptTests(unittest.TestCase):
     """Pin the extraction's redaction, identity, rendering, and write contracts."""
 
-    def _result(self, **overrides: object) -> advisory_consultation.AdvisoryDebateResult:
+    def _result(self, **overrides: object) -> critical_dialogue.AdvisoryDebateResult:
         values: dict[str, object] = {
             "rounds_run": 1,
             "final_plan": "safe proposal",
             "outcome": "consensus",
             "planner_model": "Planner",
             "critic_model": "Critic",
-            "rounds": (advisory_consultation.AdvisoryDebateRound("safe proposal", "VERDICT: APPROVE"),),
+            "rounds": (critical_dialogue.AdvisoryDebateRound("safe proposal", "VERDICT: APPROVE"),),
         }
         values.update(overrides)
-        return advisory_consultation.AdvisoryDebateResult(**values)  # type: ignore[arg-type]
+        return critical_dialogue.AdvisoryDebateResult(**values)  # type: ignore[arg-type]
 
     def test_default_task_id_is_stable_16_hex_sha256(self) -> None:
         task = "Plan a release"
@@ -76,7 +72,7 @@ class DialogueTranscriptTests(unittest.TestCase):
             canary_result="catch",
             degradation_rung=1,
         )
-        fixture = advisory_consultation.CanaryFixture("bad-fixture", "missing rollback", "safe proposal")
+        fixture = critical_dialogue.CanaryFixture("bad-fixture", "missing rollback", "safe proposal")
         rendered = dialogue_transcript._render_consultation_transcript("task", result, canary_fixture=fixture)
         self.assertIn("**Outcome:** canary", rendered)
         self.assertIn("Planner", rendered)

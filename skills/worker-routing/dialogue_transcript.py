@@ -2,9 +2,9 @@
 
 This module owns the artifacts emitted after a Planner--Critic dialogue:
 human-readable transcripts, structured telemetry, and LearningJournal
-records.  It deliberately accepts result-shaped objects instead of importing
-``advisory_consultation``; that keeps the extraction acyclic and makes the
-redaction boundary independently testable when siblings are loaded by path.
+records. Historically, its extraction accepted result-shaped objects instead
+of importing the then-owner ``advisory_consultation``; that keeps the current
+boundary acyclic and independently testable when siblings are loaded by path.
 """
 from __future__ import annotations
 
@@ -24,9 +24,9 @@ from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     if __package__:
-        from .debate_orchestrator import AdvisoryDebateResult, CanaryFixture
+        from .critical_dialogue import AdvisoryDebateResult, CanaryFixture
     else:
-        from debate_orchestrator import (  # type: ignore[no-redef]
+        from critical_dialogue import (  # type: ignore[no-redef]
             AdvisoryDebateResult,
             CanaryFixture,
         )

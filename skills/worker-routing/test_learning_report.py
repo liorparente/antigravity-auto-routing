@@ -15,7 +15,6 @@ from __future__ import annotations
 import ast
 import http.client
 import json
-import sys
 import tempfile
 import threading
 import unittest
@@ -23,9 +22,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest import mock
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import (

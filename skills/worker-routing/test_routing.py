@@ -9,10 +9,11 @@ or, from this directory:
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import hmac
-import importlib.util
+import io
 import json
 import os
 import re
@@ -21,37 +22,43 @@ import subprocess
 import sys
 import tempfile
 import threading
+import tokenize
 import unittest
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import get_args
+from typing import ClassVar, get_args
 from unittest import mock
-
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 if __package__:
     from . import (
-        advisory_consultation,
         agent_council,
+        critical_dialogue,
+        dialogue_contracts,
+        dialogue_degradation,
+        dialogue_transcript,
         learned_state,
         learning_journal,
         learning_outcomes,
         production_invoker,
         routing_check,
+        sensitivity_redactor,
     )
-    from .advisory_consultation import CanaryFixture, IsFamilyReachable
+    from .critical_dialogue import CanaryFixture, IsFamilyReachable
     from .learning_journal import OutcomeRecord
 else:
-    import advisory_consultation  # type: ignore[no-redef]
     import agent_council  # type: ignore[no-redef]
+    import critical_dialogue  # type: ignore[no-redef]
+    import dialogue_contracts  # type: ignore[no-redef]
+    import dialogue_degradation  # type: ignore[no-redef]
+    import dialogue_transcript  # type: ignore[no-redef]
     import learned_state  # type: ignore[no-redef]
     import learning_journal  # type: ignore[no-redef]
     import learning_outcomes  # type: ignore[no-redef]
     import production_invoker  # type: ignore[no-redef]
     import routing_check  # type: ignore[no-redef]
-    from advisory_consultation import CanaryFixture, IsFamilyReachable  # type: ignore[no-redef]
+    import sensitivity_redactor  # type: ignore[no-redef]
+    from critical_dialogue import CanaryFixture, IsFamilyReachable  # type: ignore[no-redef]
     from learning_journal import OutcomeRecord  # type: ignore[no-redef]
 
 _COUNCIL_SECRET_PATCHER: object | None = None
@@ -61,7 +68,7 @@ def setUpModule() -> None:
     """Give legacy panel tests the signing secret CouncilPanel now requires."""
     global _COUNCIL_SECRET_PATCHER
     _COUNCIL_SECRET_PATCHER = mock.patch.object(
-        advisory_consultation._debate_orchestrator,
+        critical_dialogue,
         "resolve_hmac_secret",
         return_value=b"worker-routing-test-secret",
     )
@@ -76,6 +83,7 @@ def tearDownModule() -> None:
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent
 FIXTURES_DIR = SKILL_DIR / "tests" / "fixtures"
+LEGACY_COUNCIL_REVIEW_FACADE = FIXTURES_DIR / "legacy_council_review.py.txt"
 ROUTING_CHECK = SKILL_DIR / "routing_check.py"
 ROUTING_AUDIT = SKILL_DIR / "routing-audit.sh"
 SKILL_MD = SKILL_DIR / "SKILL.md"
@@ -88,6 +96,16 @@ PROTOCOL_START = "# === ANTIGRAVITY WORKER ROUTING PROTOCOL START ==="
 PROTOCOL_END = "# === ANTIGRAVITY WORKER ROUTING PROTOCOL END ==="
 
 
+def assert_repository_root_is_clean(
+    test_case: unittest.TestCase, repo_root: Path
+) -> None:
+    """Assert that transient type-checking aliases do not occupy the root."""
+    test_case.assertFalse(
+        os.path.lexists(repo_root / "worker_routing"),
+        "repository root contains the transient worker_routing package alias",
+    )
+
+
 def _bash_array(script: Path, name: str) -> list[str]:
     """Parse a `NAME=(a b c)` bash array literal out of `script`'s source.
 
@@ -98,6 +116,17 @@ def _bash_array(script: Path, name: str) -> list[str]:
     match = re.search(rf"^{name}=\(([^)]*)\)", text, re.MULTILINE)
     assert match is not None, f"{name} not found in {script}"
     return match.group(1).split()
+
+
+def _production_python_modules(skill_dir: Path = SKILL_DIR) -> list[str]:
+    """Return the source-side Python files installer scripts own."""
+    valid_module = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\.py\Z")
+    return sorted(
+        path.name
+        for path in skill_dir.glob("*.py")
+        if valid_module.fullmatch(path.name)
+        and not path.name.startswith("test_")
+    )
 
 
 def _target_dirs(script: Path, *, home: str, target_project_dir: str) -> tuple[Path, ...]:
@@ -116,6 +145,23 @@ def _target_dirs(script: Path, *, home: str, target_project_dir: str) -> tuple[P
             .replace("$TARGET_PROJECT_DIR", target_project_dir)
         )
         for raw in _bash_array(script, "TARGET_DIRS")
+    )
+
+
+def _installer_receipt(*, home: str, target_project_dir: str) -> Path:
+    # Match install.sh's `cd "$TARGET_PROJECT_DIR" && pwd`: normalize an
+    # incoming relative path without resolving symlinks that participate in
+    # the installer receipt's project identity.
+    project = os.path.abspath(target_project_dir)
+    project_id = hashlib.sha256(os.fsencode(project)).hexdigest()
+    return (
+        Path(home)
+        / ".local"
+        / "state"
+        / "auto-routing"
+        / "projects"
+        / project_id
+        / ".auto-routing-python-modules.receipt"
     )
 
 
@@ -440,39 +486,18 @@ class RoutingCheckFixtureTests(unittest.TestCase):
         result = run_check("--strict", str(FIXTURES_DIR / "clean_log.txt"))
         self.assertEqual(result.returncode, 0)
 
-    def test_routing_check_bootstrap_enables_path_based_loading_from_foreign_cwd(self) -> None:
-        """The bootstrap's `sys.path.insert(0, ...)` in `routing_check.py` is
-        what keeps sibling imports (`agent_council`) resolving when the
-        module is loaded by path from a caller that has no reason to already
-        have `skills/worker-routing` on `sys.path` — e.g. an audit script
-        elsewhere using `importlib.util.spec_from_file_location`.
-
-        Running `routing_check.py` directly as a script (the previous form
-        of this test) proves nothing about that line: Python always
-        prepends a run script's own directory to `sys.path[0]`, so the
-        sibling import would resolve even with the bootstrap deleted. Only
-        `spec_from_file_location`, invoked from an unrelated `cwd` with
-        nothing pre-populating `sys.path`, actually exercises it.
-        """
-        child_script = (
-            "import importlib.util, sys\n"
-            f"spec = importlib.util.spec_from_file_location('routing_check', {str(ROUTING_CHECK)!r})\n"
-            "module = importlib.util.module_from_spec(spec)\n"
-            "sys.modules['routing_check'] = module\n"
-            "spec.loader.exec_module(module)\n"
-            "module.get_calibration_secret()\n"
-            "print('sibling imports resolved')\n"
-        )
+    def test_routing_check_script_resolves_siblings_from_a_foreign_cwd(self) -> None:
+        """The script import mode relies on Python's standard script path."""
         with tempfile.TemporaryDirectory() as foreign_cwd:
             result = subprocess.run(
-                [sys.executable, "-c", child_script],
+                [sys.executable, str(ROUTING_CHECK), str(FIXTURES_DIR / "clean_log.txt")],
                 capture_output=True,
                 text=True,
                 check=False,
                 cwd=foreign_cwd,
             )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("sibling imports resolved", result.stdout)
+        self.assertIn("No violations detected", result.stdout)
         self.assertNotIn("ModuleNotFoundError", result.stderr)
 
     def test_routing_check_resolves_in_package_execution_mode(self) -> None:
@@ -676,9 +701,12 @@ class ProtocolSyncTests(unittest.TestCase):
     Sandboxed under a fake $HOME so the tests never touch the real
     ~/.gemini or ~/.codex."""
 
-    def _run(self, script: Path, *args: str, home: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, script: Path, *args: str, home: str, **env_overrides: str
+    ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env["HOME"] = str(home)
+        env.update(env_overrides)
         return subprocess.run(
             ["bash", str(script), *args],
             capture_output=True,
@@ -686,6 +714,41 @@ class ProtocolSyncTests(unittest.TestCase):
             text=True,
             env=env,
         )
+
+    def _pre_ticket_installer_tree(
+        self,
+        legacy_bytes: bytes,
+        *,
+        retired_modules: tuple[str, ...] = (
+            "advisory_consultation.py",
+            "debate_orchestrator.py",
+        ),
+    ) -> tuple[Path, Path, Path]:
+        """Build one signed-install-capable pre-ticket source fixture."""
+        source_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, source_root, ignore_errors=True)
+        shutil.copy(INSTALL_SH, source_root / "install.sh")
+        for skill_name in ("worker-routing", "council-review", "learn-session"):
+            shutil.copytree(
+                REPO_ROOT / "skills" / skill_name,
+                source_root / "skills" / skill_name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        source_worker = source_root / "skills" / "worker-routing"
+        for retired_module in retired_modules:
+            (source_worker / retired_module).write_text(
+                "# retired pre-ticket worker module\n", encoding="utf-8"
+            )
+        source_facade = (
+            source_root
+            / "skills"
+            / "council-review"
+            / "scripts"
+            / "council_review.py"
+        )
+        source_facade.parent.mkdir(parents=True, exist_ok=True)
+        source_facade.write_bytes(legacy_bytes)
+        return source_root / "install.sh", source_worker, source_facade
 
     def test_install_sh_injects_exact_protocol_block_into_all_docs(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -769,7 +832,277 @@ class ProtocolSyncTests(unittest.TestCase):
                 self.assertTrue(installed_init.exists(), str(installed_init))
                 self.assertEqual(installed_init.read_text(), init_text)
 
-    def test_install_sh_synchronizes_council_review_and_removes_legacy_policy(
+    def test_install_sh_removes_an_exact_repository_legacy_council_facade(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(legacy_bytes).hexdigest(),
+            "47c761b9dd228580ff9148ca50df32e874719fdcdac3ac6767a00a9378c58618",
+        )
+        source_install, source_worker, source_facade = self._pre_ticket_installer_tree(
+            legacy_bytes
+        )
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+            installed = self._run(source_install, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    source_install,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            source_facade.unlink()
+            for retired_module in (
+                "advisory_consultation.py",
+                "debate_orchestrator.py",
+            ):
+                (source_worker / retired_module).unlink()
+
+            result = self._run(source_install, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertFalse(
+                        (council_target / "scripts" / "council_review.py").exists()
+                    )
+
+    def test_install_sh_preserves_a_later_facade_despite_a_current_receipt(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+            installed = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    INSTALL_SH,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            for council_target in council_targets:
+                legacy_facade = council_target / "scripts" / "council_review.py"
+                legacy_facade.parent.mkdir(parents=True, exist_ok=True)
+                legacy_facade.write_bytes(legacy_bytes)
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "Preserving retired council-review facade without pre-ticket migration authority",
+                result.stderr,
+            )
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_bytes(),
+                        legacy_bytes,
+                    )
+
+    def test_install_sh_requires_both_retired_modules_for_facade_migration(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        source_install, _, source_facade = self._pre_ticket_installer_tree(
+            legacy_bytes, retired_modules=("advisory_consultation.py",)
+        )
+        only_retired_module = (
+            source_install.parent
+            / "skills"
+            / "worker-routing"
+            / "advisory_consultation.py"
+        )
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+
+            installed = self._run(source_install, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    source_install,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            source_facade.unlink()
+            only_retired_module.unlink()
+
+            result = self._run(source_install, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "Preserving retired council-review facade without pre-ticket migration authority",
+                result.stderr,
+            )
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_bytes(),
+                        legacy_bytes,
+                    )
+
+    def test_install_sh_preserves_an_unowned_byte_identical_legacy_facade(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    INSTALL_SH,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            for council_target in council_targets:
+                legacy_facade = council_target / "scripts" / "council_review.py"
+                legacy_facade.parent.mkdir(parents=True, exist_ok=True)
+                legacy_facade.write_bytes(legacy_bytes)
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "Preserving retired council-review facade without pre-ticket migration authority",
+                result.stderr,
+            )
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_bytes(),
+                        legacy_bytes,
+                    )
+
+    def test_legacy_council_facade_cleanup_inventory_is_the_full_audited_history(
+        self,
+    ) -> None:
+        self.assertEqual(
+            set(_bash_array(INSTALL_SH, "LEGACY_COUNCIL_REVIEW_FACADE_DIGESTS")),
+            {
+                "027da87617c84de20f7033b6c4e191093db3efda9814063f630c96757cb86630",
+                "2b7780b2a47325194e43c1b1a69adeb99db7df430597c6eacdd05f96806dfb2b",
+                "307c3b1b6747f5977b97041d47c6f2f64d975d17ed0a11f3c22ad50b8b16b7dc",
+                "43d3f97af0122d774f2ed1d2f359cbc5aac7f73e50f50374f6921b8020c8cc3d",
+                "47c761b9dd228580ff9148ca50df32e874719fdcdac3ac6767a00a9378c58618",
+                "5de22e3a7fb1584c7d59db458365ed521e8f9c95b9a094537b9608990daa352a",
+                "9b2ff8bbb3fb14d67bb3551675326def5c6fbb73641e2184ea93a2649bc9c26b",
+                "a69994ee6743285b12e635e474fa7fd9c09dfc4e2dce7e2e27b900487e09bdeb",
+                "a722b850baeb4421b4a982e09bbf3ff5e2d9420fb031cab564b33f4dde2bc380",
+                "a9d8937040dc85a2a2d0fddcf6e77a5aaf6adcf01bfc9e0db217e8398e12136f",
+                "b21d3320d8550e0a5747e998897a6dbe882eb259bf7dc712f483be698e107b8b",
+                "c55f402700a607afc0366de2ce39956fe2aaf04e2fa8a93e8112fe810fc65791",
+                "e698442453ffaaf54dbd90879f7085b500791d9802daf514a2a6c8a206ea583f",
+                "ebdecc52f7624b33928b32536f2fea191a4c1d90e6a3502f2f7e6563433adc8f",
+            },
+        )
+
+    def test_later_install_failure_restores_an_exact_removed_legacy_facade(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        retired_modules = (
+            "advisory_consultation.py",
+            "debate_orchestrator.py",
+        )
+        source_install, source_worker, source_facade = self._pre_ticket_installer_tree(
+            legacy_bytes, retired_modules=retired_modules
+        )
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+
+            installed = self._run(source_install, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            worker_targets = _target_dirs(
+                source_install,
+                home=fake_home,
+                target_project_dir=target_dir,
+            )
+            council_targets = tuple(
+                target.parent / "council-review" for target in worker_targets
+            )
+            first_council_target = council_targets[0]
+            legacy_facade = first_council_target / "scripts" / "council_review.py"
+            old_manifests = {
+                target: (target / ".auto-routing-python-modules").read_bytes()
+                for target in worker_targets
+            }
+            receipt = _installer_receipt(
+                home=fake_home, target_project_dir=target_dir
+            )
+            old_receipt = receipt.read_bytes()
+
+            source_facade.unlink()
+            for retired_module in retired_modules:
+                (source_worker / retired_module).unlink()
+
+            traced = self._run(
+                source_install,
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_TRACE_MUTATIONS="1",
+            )
+            self.assertEqual(traced.returncode, 0, traced.stdout + traced.stderr)
+            removal = re.search(
+                rf"Mutation (\d+): remove:{re.escape(str(legacy_facade))}",
+                traced.stderr,
+            )
+            self.assertIsNotNone(removal, traced.stderr)
+            assert removal is not None
+            fail_after = int(removal.group(1))
+
+            # Restore the signed pre-ticket installation state so fault
+            # injection exercises the same one-time migration again.
+            for worker_target in worker_targets:
+                for retired_module in retired_modules:
+                    (worker_target / retired_module).write_text(
+                        "# retired pre-ticket worker module\n", encoding="utf-8"
+                    )
+                (worker_target / ".auto-routing-python-modules").write_bytes(
+                    old_manifests[worker_target]
+                )
+            for council_target in council_targets:
+                (council_target / "scripts" / "council_review.py").write_bytes(
+                    legacy_bytes
+                )
+            receipt.write_bytes(old_receipt)
+
+            failed = self._run(
+                source_install,
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES=str(fail_after),
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("original files were restored", failed.stderr)
+            self.assertEqual(legacy_facade.read_bytes(), legacy_bytes)
+
+    def test_install_sh_synchronizes_council_review_preserves_custom_facade_and_removes_legacy_policy(
         self,
     ) -> None:
         with (
@@ -785,6 +1118,9 @@ class ProtocolSyncTests(unittest.TestCase):
                 target.parent / "council-review" for target in worker_targets
             )
             for council_target in council_targets:
+                custom_facade = council_target / "scripts" / "council_review.py"
+                custom_facade.parent.mkdir(parents=True, exist_ok=True)
+                custom_facade.write_text("# user customization\n", encoding="utf-8")
                 legacy_policy = council_target / "references" / "council-policy.json"
                 legacy_policy.parent.mkdir(parents=True, exist_ok=True)
                 legacy_policy.write_text("{}\n", encoding="utf-8")
@@ -800,12 +1136,48 @@ class ProtocolSyncTests(unittest.TestCase):
                             REPO_ROOT / "skills" / "council-review" / "SKILL.md"
                         ).read_text(encoding="utf-8"),
                     )
+                    self.assertFalse(
+                        (council_target / "scripts" / "provider_adapters.py").exists(),
+                        "provider adapters remain in the retired council facade",
+                    )
                     self.assertTrue(
-                        (council_target / "scripts" / "council_review.py").exists()
+                        (
+                            council_target.parent
+                            / "worker-routing"
+                            / "provider_adapters.py"
+                        ).exists(),
+                        "provider adapters were not installed with their owning package",
+                    )
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_text(encoding="utf-8"),
+                        "# user customization\n",
                     )
                     self.assertFalse(
                         (council_target / "references" / "council-policy.json").exists()
                     )
+
+            installed_smoke = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import critical_dialogue; "
+                        "adapters = critical_dialogue._load_provider_adapters(); "
+                        "assert adapters.__name__ == 'provider_adapters'"
+                    ),
+                ],
+                cwd=worker_targets[0],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(
+                installed_smoke.returncode,
+                0,
+                installed_smoke.stdout + installed_smoke.stderr,
+            )
 
     def test_install_sh_synchronizes_learn_session_to_every_harness(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -1228,17 +1600,18 @@ class LearnedStatePropagationTests(unittest.TestCase):
     """
 
     def _isolated_source_tree(self) -> Path:
-        """A scratch `install.sh` plus a minimal `skills/worker-routing`
-        holding only `MANAGED_FILES` and `routing-config.json` — what
-        `install.sh` actually reads from `SRC_DIR` — not a full copy of this
-        skill directory's caches and other test files."""
+        """A scratch installer and the source artifacts it reads."""
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         source_root = Path(tmp)
         shutil.copy(INSTALL_SH, source_root / "install.sh")
         worker_routing_dir = source_root / "skills" / "worker-routing"
         worker_routing_dir.mkdir(parents=True)
-        for name in [*_bash_array(INSTALL_SH, "MANAGED_FILES"), "routing-config.json"]:
+        for name in [
+            *_bash_array(INSTALL_SH, "MANAGED_FILES"),
+            *_production_python_modules(),
+            "routing-config.json",
+        ]:
             shutil.copy(SKILL_DIR / name, worker_routing_dir / name)
         shutil.copytree(
             REPO_ROOT / "skills" / "council-review",
@@ -1431,13 +1804,17 @@ class LearnedStatePropagationTests(unittest.TestCase):
         source_root = self._isolated_source_tree()
         self._adopt(source_root, memory="memory v1", briefs="briefs v1")
 
-        # MANAGED_FILES writes land first for each target directory; the two
+        # Managed artifact writes land first for each target directory; the two
         # learned-state writes ("history.jsonl", then "briefs" — the
         # alphabetically-first adopted document) follow immediately after.
         # Failing on the second of those proves both roll back together,
         # and that a later target directory in the loop is never reached.
-        managed_files_count = len(_bash_array(INSTALL_SH, "MANAGED_FILES"))
-        fail_after = managed_files_count + 2
+        managed_files_count = len(_bash_array(INSTALL_SH, "MANAGED_FILES")) + len(
+            _production_python_modules()
+        ) + 1  # install-owned dynamic Python module manifest
+        # Generated key copy+chmod precede the target; routing config and two
+        # executable chmods sit between its managed files and learned state.
+        fail_after = 2 + managed_files_count + 1 + 2 + 2
 
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
             result = self._run_install(
@@ -2216,10 +2593,8 @@ def _reachable(*families: str) -> IsFamilyReachable:
     `_reachable()` with no arguments is the "nothing is up" fake used to
     exercise `RosterResolutionError`.
 
-    The return type spells out `Callable[[str], bool]` — the definition of
-    `advisory_consultation.IsFamilyReachable` — instead of naming that alias:
-    this file loads `advisory_consultation` through `importlib` at runtime, so
-    a type checker cannot resolve an attribute of it in an annotation.
+    The return type uses the canonical `critical_dialogue.IsFamilyReachable`
+    alias imported above, so callers and the implementation share one seam.
     """
     allowed = set(families)
     return lambda family: family in allowed
@@ -2235,12 +2610,12 @@ class VerdictContractParserTests(unittest.TestCase):
     through `_approve`/`_revise` instead of hand-rolling the contract text,
     so those tests stay agnostic to exactly this syntax.
 
-    Calls `advisory_consultation._parse_critic_verdict` directly rather than
-    through the full debate loop: the loop is exercised end-to-end elsewhere
+    Calls the `critical_dialogue` compatibility seam for
+    `dialogue_contracts._parse_critic_verdict` directly rather than through
+    the full debate loop: the loop is exercised end-to-end elsewhere
     (`AdvisoryConsultationTests`), and driving every one of ticket 02's
     acceptance criteria through a full Planner/Critic round trip would
-    duplicate this file's slowest fixture for no additional coverage of the
-    parser itself.
+    duplicate this file's slowest fixture for no additional parser coverage.
     """
 
     def test_rationale_quotes_and_objections_before_approve_parses_as_approved_with_counts(
@@ -2258,7 +2633,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: APPROVE"
         )
 
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             critic_response, artifact_text
         )
 
@@ -2269,7 +2644,7 @@ class VerdictContractParserTests(unittest.TestCase):
     def test_bare_approve_with_zero_engagement_units_parses_as_not_approved(
         self,
     ) -> None:
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             "VERDICT: APPROVE", "The reviewed artifact text."
         )
 
@@ -2287,7 +2662,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: APPROVE"
         )
 
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             critic_response, artifact_text
         )
 
@@ -2306,7 +2681,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: APPROVE"
         )
 
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             critic_response, artifact_text
         )
 
@@ -2322,7 +2697,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: APPROVE"
         )
 
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             critic_response, artifact_text
         )
 
@@ -2339,7 +2714,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: APPROVE"
         )
 
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             critic_response, artifact_text
         )
 
@@ -2365,7 +2740,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: APPROVE"
         )
 
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             critic_response, artifact_text
         )
 
@@ -2382,7 +2757,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "This plan looks fine to me, no verdict line at all.",
         ):
             with self.subTest(critic_response=repr(critic_response)):
-                result = advisory_consultation._parse_critic_verdict(
+                result = critical_dialogue._parse_critic_verdict(
                     critic_response, "The reviewed artifact text."
                 )
 
@@ -2398,7 +2773,7 @@ class VerdictContractParserTests(unittest.TestCase):
             "VERDICT: REVISE"
         )
 
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             critic_response, artifact_text
         )
 
@@ -2406,13 +2781,13 @@ class VerdictContractParserTests(unittest.TestCase):
         self.assertEqual(result.objection_count, 2)
 
     def test_result_is_a_verdict_contract_result_with_all_three_fields(self) -> None:
-        result = advisory_consultation._parse_critic_verdict(
+        result = critical_dialogue._parse_critic_verdict(
             "VERDICT: APPROVE", "irrelevant artifact text"
         )
 
-        self.assertIsInstance(result, advisory_consultation.VerdictContractResult)
+        self.assertIsInstance(result, dialogue_contracts.VerdictContractResult)
         self.assertEqual(
-            dataclasses.fields(advisory_consultation.VerdictContractResult).__len__(),
+            dataclasses.fields(dialogue_contracts.VerdictContractResult).__len__(),
             3,
         )
 
@@ -2434,7 +2809,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -2468,7 +2843,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     _revise("Not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertFalse((root / "implementation_plan.md").exists())
@@ -2494,7 +2869,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     invoker = _RecordingInvoker(
                         ["Planner's proposed plan.", critic_response]
                     )
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
                     )
                     self.assertFalse(result.consensus_reached)
@@ -2516,7 +2891,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertTrue((root / "implementation_plan.md").exists())
@@ -2548,7 +2923,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertEqual(
@@ -2564,7 +2939,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -2586,7 +2961,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     _approve("Planner's revised plan.", "Rollback strategy addressed."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -2613,7 +2988,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     _approve("Planner's third plan.", "This works."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             plan_path = root / "implementation_plan.md"
@@ -2638,7 +3013,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     _approve("Planner's second plan.", "Good now."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -2668,7 +3043,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                         responses.append(f"Planner's plan #{i + 1}.")
                         responses.append(_revise(f"Still not good enough #{i + 1}."))
                     invoker = _RecordingInvoker(responses)
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite",
                         invoker,
                         root_dir=root,
@@ -2696,7 +3071,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     _approve("Planner's third plan.", "This works."),
                 ]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -2719,7 +3094,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     _revise("Not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertFalse((root / "implementation_plan.md").exists())
@@ -2744,7 +3119,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     _revise("Still not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, max_rounds=2
             )
 
@@ -2786,7 +3161,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                 plan_path = root / "implementation_plan.md"
                 plan_path.write_text("stale plan from an earlier run")
 
-                result = advisory_consultation.run_advisory_consultation_debate(
+                result = critical_dialogue.run_advisory_consultation_debate(
                     "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
                 )
 
@@ -2801,7 +3176,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", "This plan looks fine to me."]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, max_rounds=3
             )
 
@@ -2819,7 +3194,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([RuntimeError("worker unreachable")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertFalse((root / "implementation_plan.md").exists())
@@ -2845,7 +3220,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     RuntimeError("worker unreachable"),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -2871,7 +3246,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     os.environ, {}, clear=True
                 ):
                     root = Path(tmp)
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
                     )
                 self.assertFalse(result.consensus_reached)
@@ -2888,7 +3263,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                 with self.subTest(max_rounds=bad_max_rounds):
                     invoker = _RecordingInvoker([])
                     with self.assertRaises(ValueError):
-                        advisory_consultation.run_advisory_consultation_debate(
+                        critical_dialogue.run_advisory_consultation_debate(
                             "Plan the auth rewrite",
                             invoker,
                             root_dir=root,
@@ -2904,7 +3279,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             root = Path(tmp)
             (root / "implementation_plan.md").mkdir()
             invoker = _RecordingInvoker([RuntimeError("worker unreachable")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -2924,7 +3299,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
             root = Path(tmp)
             (root / "implementation_plan.md").mkdir()
             invoker = _RecordingInvoker(["Planner's plan.", "garbled response"])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
             )
 
@@ -2958,7 +3333,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                             _approve("Planner's revised plan.", "Good now."),
                         ]
                     )
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite", invoker, root_dir=root
                     )
 
@@ -2984,7 +3359,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     invoker = _RecordingInvoker(
                         ["Planner's proposed plan.", critic_response]
                     )
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite", invoker, root_dir=root, max_rounds=3
                     )
 
@@ -3010,7 +3385,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                     invoker = _RecordingInvoker(
                         ["Planner's proposed plan.", critic_response]
                     )
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite", invoker, root_dir=root, max_rounds=1
                     )
                     self.assertFalse((root / "implementation_plan.md").exists())
@@ -3036,7 +3411,7 @@ class AdvisoryConsultationTests(unittest.TestCase):
                             _approve("Planner's revised plan.", "Good now."),
                         ]
                     )
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite", invoker, root_dir=root
                     )
 
@@ -3046,16 +3421,16 @@ class AdvisoryConsultationTests(unittest.TestCase):
     def test_consensus_reached_is_derived_from_outcome_and_cannot_be_mutated(
         self,
     ) -> None:
-        consensus_result = advisory_consultation.AdvisoryDebateResult(
+        consensus_result = critical_dialogue.AdvisoryDebateResult(
             rounds_run=1, final_plan="A plan.", outcome="consensus"
         )
-        stalemate_result = advisory_consultation.AdvisoryDebateResult(
+        stalemate_result = critical_dialogue.AdvisoryDebateResult(
             rounds_run=1, final_plan="", outcome="stalemate"
         )
-        unparseable_result = advisory_consultation.AdvisoryDebateResult(
+        unparseable_result = critical_dialogue.AdvisoryDebateResult(
             rounds_run=1, final_plan="", outcome="unparseable_verdict"
         )
-        worker_error_result = advisory_consultation.AdvisoryDebateResult(
+        worker_error_result = critical_dialogue.AdvisoryDebateResult(
             rounds_run=0, final_plan="", outcome="worker_error"
         )
         self.assertTrue(consensus_result.consensus_reached)
@@ -3101,7 +3476,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     "Test Critic B": [_approve(plan, "Critic B: solid.")],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3139,7 +3514,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     "Test Critic B": [_approve(plan)],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Review the diff",
                 invoker,
                 root_dir=root,
@@ -3178,7 +3553,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     ],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3220,7 +3595,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     ],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3234,7 +3609,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
 
         self.assertEqual(result.outcome, "stalemate")
         self.assertFalse(result.consensus_reached)
-        self.assertEqual(result.rounds_run, advisory_consultation.MAX_DEBATE_ROUNDS)
+        self.assertEqual(result.rounds_run, critical_dialogue.MAX_DEBATE_ROUNDS)
         self.assertEqual(result.rounds_run, 3)
         self.assertEqual(len(invoker.calls), 9)
         self.assertIsNotNone(result.stalemate)
@@ -3258,7 +3633,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     "Test Critic B": [f"B objects #{i}.\nVERDICT: REVISE" for i in range(1, 4)],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3271,7 +3646,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
 
         self.assertEqual(result.rounds_run, 3)
         self.assertEqual(len(invoker.calls), 9)
-        self.assertEqual(advisory_consultation.MAX_DEBATE_ROUNDS, 3)
+        self.assertEqual(critical_dialogue.MAX_DEBATE_ROUNDS, 3)
 
     def test_non_complex_plan_review_stays_pair_mode_with_exactly_two_workers(
         self,
@@ -3287,7 +3662,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     root = Path(tmp)
                     plan = "Planner's plan."
                     invoker = _RecordingInvoker([plan, _approve(plan)])
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite",
                         invoker,
                         root_dir=root,
@@ -3312,7 +3687,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     root = Path(tmp)
                     plan = "Planner's plan."
                     invoker = _RecordingInvoker([plan, _approve(plan)])
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite",
                         invoker,
                         root_dir=root,
@@ -3333,7 +3708,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3359,7 +3734,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     "Test Critic B": [b_response],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3383,7 +3758,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -3422,7 +3797,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                 ):
                     root = Path(tmp)
                     invoker = _RoleKeyedInvoker(responses)
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite",
                         invoker,
                         root_dir=root,
@@ -3449,7 +3824,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     "Test Critic B": [_approve(plan)],
                 }
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3477,7 +3852,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
                     "Test Critic B": [_approve(plan, "Critic B verbatim note.")],
                 }
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3506,7 +3881,7 @@ class AdvisoryPanelTopologyTests(unittest.TestCase):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3560,7 +3935,7 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
                     ],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3614,7 +3989,7 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
                     ],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3663,7 +4038,7 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
                     ],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3708,7 +4083,7 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
                     "Test Critic B": [_approve(plan)],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -3742,7 +4117,7 @@ class AdvisoryPanelStalemateReportTests(unittest.TestCase):
                     _revise("Still not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, max_rounds=2
             )
 
@@ -3758,8 +4133,8 @@ class ModelFamilyClassifierTests(unittest.TestCase):
 
     def test_claude_models_share_one_family(self) -> None:
         self.assertEqual(
-            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
-            advisory_consultation.classify_model_family("Claude Fable 5"),
+            critical_dialogue.classify_model_family("Claude Opus 5 (Thinking)"),
+            critical_dialogue.classify_model_family("Claude Fable 5"),
         )
 
     def test_codex_and_gpt_share_one_family(self) -> None:
@@ -3768,21 +4143,21 @@ class ModelFamilyClassifierTests(unittest.TestCase):
         already lists "Codex 5.6 Sol" and "GPT-OSS 120B (Medium)" as
         interchangeable alternatives within one role."""
         self.assertEqual(
-            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
-            advisory_consultation.classify_model_family("GPT-OSS 120B (Medium)"),
+            critical_dialogue.classify_model_family("Codex 5.6 Sol"),
+            critical_dialogue.classify_model_family("GPT-OSS 120B (Medium)"),
         )
 
     def test_gemini_models_share_one_family(self) -> None:
         self.assertEqual(
-            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
-            advisory_consultation.classify_model_family("Gemini 3.1 Pro (High)"),
+            critical_dialogue.classify_model_family("Gemini 3.6 Flash (High)"),
+            critical_dialogue.classify_model_family("Gemini 3.1 Pro (High)"),
         )
 
     def test_the_four_cloud_families_are_pairwise_distinct(self) -> None:
         families = {
-            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
-            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
-            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+            critical_dialogue.classify_model_family("Claude Opus 5 (Thinking)"),
+            critical_dialogue.classify_model_family("Codex 5.6 Sol"),
+            critical_dialogue.classify_model_family("Gemini 3.6 Flash (High)"),
         }
         self.assertEqual(len(families), 3)
 
@@ -3790,27 +4165,27 @@ class ModelFamilyClassifierTests(unittest.TestCase):
         """The spec's own phrase: "each local model lineage counts as its
         own family" — two different local checkpoints must classify to two
         different families, and neither may collide with a cloud family."""
-        gemma = advisory_consultation.classify_model_family("Gemma 4 E4B")
-        qwen = advisory_consultation.classify_model_family("Qwen3.8-27B-MLX-6bit")
+        gemma = critical_dialogue.classify_model_family("Gemma 4 E4B")
+        qwen = critical_dialogue.classify_model_family("Qwen3.8-27B-MLX-6bit")
         self.assertNotEqual(gemma, qwen)
         cloud_families = {
-            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
-            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
-            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+            critical_dialogue.classify_model_family("Claude Opus 5 (Thinking)"),
+            critical_dialogue.classify_model_family("Codex 5.6 Sol"),
+            critical_dialogue.classify_model_family("Gemini 3.6 Flash (High)"),
         }
         self.assertNotIn(gemma, cloud_families)
         self.assertNotIn(qwen, cloud_families)
 
     def test_same_local_lineage_different_checkpoint_is_one_family(self) -> None:
         self.assertEqual(
-            advisory_consultation.classify_model_family("Gemma 4 E4B"),
-            advisory_consultation.classify_model_family("Gemma 2 9B"),
+            critical_dialogue.classify_model_family("Gemma 4 E4B"),
+            critical_dialogue.classify_model_family("Gemma 2 9B"),
         )
 
     def test_classification_is_case_insensitive_for_cloud_families(self) -> None:
         self.assertEqual(
-            advisory_consultation.classify_model_family("claude opus 5"),
-            advisory_consultation.classify_model_family("CLAUDE OPUS 5"),
+            critical_dialogue.classify_model_family("claude opus 5"),
+            critical_dialogue.classify_model_family("CLAUDE OPUS 5"),
         )
 
     def test_digit_leading_local_model_names_do_not_collide_on_a_middle_fragment(
@@ -3828,13 +4203,13 @@ class ModelFamilyClassifierTests(unittest.TestCase):
         at all; both fall through to the full-lowered-name fallback
         instead, which keeps them distinct without merging on a fragment.
         """
-        seventy_b = advisory_consultation.classify_model_family("70B-Instruct")
-        four_b = advisory_consultation.classify_model_family("4B-Mixtral")
+        seventy_b = critical_dialogue.classify_model_family("70B-Instruct")
+        four_b = critical_dialogue.classify_model_family("4B-Mixtral")
         self.assertNotEqual(seventy_b, four_b)
         cloud_families = {
-            advisory_consultation.classify_model_family("Claude Opus 5 (Thinking)"),
-            advisory_consultation.classify_model_family("Codex 5.6 Sol"),
-            advisory_consultation.classify_model_family("Gemini 3.6 Flash (High)"),
+            critical_dialogue.classify_model_family("Claude Opus 5 (Thinking)"),
+            critical_dialogue.classify_model_family("Codex 5.6 Sol"),
+            critical_dialogue.classify_model_family("Gemini 3.6 Flash (High)"),
         }
         self.assertNotIn(seventy_b, cloud_families)
         self.assertNotIn(four_b, cloud_families)
@@ -3848,7 +4223,7 @@ class ModelFamilyClassifierTests(unittest.TestCase):
         or all-punctuation name), and not a fragment `.search` would have
         found anywhere else in the string."""
         self.assertEqual(
-            advisory_consultation.classify_model_family("70B-Instruct"),
+            critical_dialogue.classify_model_family("70B-Instruct"),
             "70b-instruct",
         )
 
@@ -3866,7 +4241,7 @@ class RosterResolutionTests(unittest.TestCase):
     def test_pair_roster_spans_two_distinct_families_when_reachable(self) -> None:
         """Criterion 1 (pair half): 2+ reachable families never repeat
         across roles."""
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "pair", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
         )
         families = {a.family for a in roster.assignments}
@@ -3877,7 +4252,7 @@ class RosterResolutionTests(unittest.TestCase):
     def test_panel_roster_spans_three_distinct_families_when_reachable(self) -> None:
         """Criterion 1 (panel half): 2+ (here 3) reachable families never
         repeat across roles."""
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "panel", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
         )
         families = {a.family for a in roster.assignments}
@@ -3892,7 +4267,7 @@ class RosterResolutionTests(unittest.TestCase):
         "Codex 5.6 Sol") is unreachable; the resolver must move to the next
         family in `critic_a`'s own configured fallback chain rather than
         immediately reusing the Planner's family."""
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "pair", is_family_reachable=_reachable("claude", "gemini")
         )
         critic_a = next(a for a in roster.assignments if a.role == "critic_a")
@@ -3905,7 +4280,7 @@ class RosterResolutionTests(unittest.TestCase):
     ) -> None:
         """Criterion 3 (pair half): the fallback chain exhausted to one
         remaining family forces same-family and sets the marker."""
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "pair", is_family_reachable=_reachable("claude")
         )
         families = {a.family for a in roster.assignments}
@@ -3916,7 +4291,7 @@ class RosterResolutionTests(unittest.TestCase):
         self,
     ) -> None:
         """Criterion 3 (panel half): same as above, for a three-role panel."""
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "panel", is_family_reachable=_reachable("claude")
         )
         families = {a.family for a in roster.assignments}
@@ -3935,7 +4310,7 @@ class RosterResolutionTests(unittest.TestCase):
         the full reasoning — which is true here even though two distinct
         families are reachable overall, so this must still degrade rather
         than silently running a two-out-of-three-independent panel."""
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "panel", is_family_reachable=_reachable("claude", "codex-gpt")
         )
         families = [a.family for a in roster.assignments]
@@ -3947,26 +4322,26 @@ class RosterResolutionTests(unittest.TestCase):
         """Criterion 5: a normal (non-degraded) run never carries the marker."""
         for topology in ("pair", "panel"):
             with self.subTest(topology=topology):
-                roster = advisory_consultation.resolve_roster(
+                roster = critical_dialogue.resolve_roster(
                     topology,
                     is_family_reachable=_reachable("claude", "codex-gpt", "gemini"),
                 )
                 self.assertFalse(roster.degraded_independence)
 
     def test_model_for_raises_key_error_outside_the_topology(self) -> None:
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "pair", is_family_reachable=_reachable("claude", "codex-gpt")
         )
         with self.assertRaises(KeyError):
             roster.model_for("critic_b")
 
     def test_no_reachable_family_at_all_raises_roster_resolution_error(self) -> None:
-        with self.assertRaises(advisory_consultation.RosterResolutionError):
-            advisory_consultation.resolve_roster("pair", is_family_reachable=_reachable())
+        with self.assertRaises(critical_dialogue.RosterResolutionError):
+            critical_dialogue.resolve_roster("pair", is_family_reachable=_reachable())
 
     def test_unknown_topology_raises_value_error(self) -> None:
         with self.assertRaises(ValueError):
-            advisory_consultation.resolve_roster(
+            critical_dialogue.resolve_roster(
                 "trio",  # type: ignore[arg-type]
                 is_family_reachable=_reachable("claude"),
             )
@@ -3977,7 +4352,7 @@ class RosterResolutionTests(unittest.TestCase):
         shipped before this ticket existed — this ticket adds a resolution
         *path*, it does not change what "everything is up" already looked
         like."""
-        roster = advisory_consultation.resolve_roster(
+        roster = critical_dialogue.resolve_roster(
             "panel", is_family_reachable=_reachable("claude", "codex-gpt", "gemini")
         )
         self.assertEqual(roster.model_for("planner"), "Claude Opus 5 (Thinking)")
@@ -4004,7 +4379,7 @@ class RosterResolutionTests(unittest.TestCase):
                     }
                 )
             )
-            roster = advisory_consultation.resolve_roster(
+            roster = critical_dialogue.resolve_roster(
                 "pair",
                 is_family_reachable=_reachable("qwen", "gemma"),
                 config_path=config_path,
@@ -4018,7 +4393,7 @@ class RosterResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "routing-config.json"
             config_path.write_text(json.dumps({}))
-            roster = advisory_consultation.resolve_roster(
+            roster = critical_dialogue.resolve_roster(
                 "pair",
                 is_family_reachable=_reachable("claude", "codex-gpt"),
                 config_path=config_path,
@@ -4050,7 +4425,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -4076,7 +4451,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
                     "Codex 5.6 Sol": [_approve(plan)],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -4101,7 +4476,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
                     "Gemini 3.6 Flash": [_approve(plan, "Critic B: solid.")],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -4113,7 +4488,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
         self.assertTrue(result.consensus_reached)
         self.assertEqual(len(invoker.calls), 3)
         called_families = {
-            advisory_consultation.classify_model_family(model)
+            critical_dialogue.classify_model_family(model)
             for model, _e, _p in invoker.calls
         }
         self.assertEqual(len(called_families), 3)
@@ -4127,7 +4502,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -4148,7 +4523,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -4156,7 +4531,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             )
             transcript = (root / ".scratch" / "planning_debate.md").read_text()
 
-        self.assertIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertIn(dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER, transcript)
 
     def test_normal_reachable_run_carries_no_degraded_marker_in_either_artifact(
         self,
@@ -4174,7 +4549,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
                     "Codex 5.6 Sol": [_approve(plan)],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -4184,7 +4559,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
 
         self.assertFalse(result.degraded_independence)
-        self.assertNotIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertNotIn(dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER, transcript)
         self.assertFalse(records[0]["degraded_independence"])
 
     def test_roster_resolution_error_fails_closed_as_worker_error(self) -> None:
@@ -4192,7 +4567,7 @@ class AdvisoryRosterIntegrationTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -4221,7 +4596,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -4241,7 +4616,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
                     invoker = _RecordingInvoker(
                         ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
                     )
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Review the change",
                         invoker,
                         root_dir=root,
@@ -4262,7 +4637,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
             root = Path(tmp)
             invoker = _RecordingInvoker([])
             with self.assertRaises(ValueError):
-                advisory_consultation.run_advisory_consultation_debate(
+                critical_dialogue.run_advisory_consultation_debate(
                     "Plan the auth rewrite",
                     invoker,
                     root_dir=root,
@@ -4276,7 +4651,12 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
         occasion-in-same-prompt-out. The four occasions' round-1 Planner
         prompts, and their matching Critic prompts, are compared pairwise for
         inequality only — never for specific content."""
-        occasions = ("ambiguity", "plan-review", "code-review", "post-mortem")
+        occasions: tuple[dialogue_contracts.Occasion, ...] = (
+            "ambiguity",
+            "plan-review",
+            "code-review",
+            "post-mortem",
+        )
         planner_prompts: dict[str, str] = {}
         critic_prompts: dict[str, str] = {}
         for occasion in occasions:
@@ -4287,7 +4667,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
                 invoker = _RecordingInvoker(
                     ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
                 )
-                advisory_consultation.run_advisory_consultation_debate(
+                critical_dialogue.run_advisory_consultation_debate(
                     "Plan the auth rewrite", invoker, root_dir=root, occasion=occasion
                 )
             planner_prompts[occasion] = invoker.calls[0][2]
@@ -4302,7 +4682,7 @@ class AdvisoryOccasionParameterizationTests(unittest.TestCase):
         that never mention `occasion` — in this test file and in production
         code — must keep working and must mean "ambiguity", not break on a
         newly-required positional/keyword argument."""
-        result = advisory_consultation.AdvisoryDebateResult(
+        result = critical_dialogue.AdvisoryDebateResult(
             rounds_run=1, final_plan="A plan.", outcome="consensus"
         )
         self.assertEqual(result.occasion, "ambiguity")
@@ -4320,20 +4700,20 @@ class AdvisoryAmbiguityTriggerUnchangedTests(unittest.TestCase):
     """
 
     def test_ambiguous_complexity_always_needs_consultation(self) -> None:
-        self.assertTrue(advisory_consultation.needs_advisory_consultation("ambiguous"))
-        self.assertTrue(advisory_consultation.needs_advisory_consultation("Ambiguous", 1.0))
+        self.assertTrue(critical_dialogue.needs_advisory_consultation("ambiguous"))
+        self.assertTrue(critical_dialogue.needs_advisory_consultation("Ambiguous", 1.0))
 
     def test_low_confidence_needs_consultation_regardless_of_complexity(self) -> None:
-        self.assertTrue(advisory_consultation.needs_advisory_consultation("trivial", 0.5))
-        self.assertTrue(advisory_consultation.needs_advisory_consultation("complex", 0.69))
+        self.assertTrue(critical_dialogue.needs_advisory_consultation("trivial", 0.5))
+        self.assertTrue(critical_dialogue.needs_advisory_consultation("complex", 0.69))
 
     def test_high_confidence_non_ambiguous_complexity_does_not_need_consultation(self) -> None:
-        self.assertFalse(advisory_consultation.needs_advisory_consultation("medium", 0.9))
-        self.assertFalse(advisory_consultation.needs_advisory_consultation("complex"))
+        self.assertFalse(critical_dialogue.needs_advisory_consultation("medium", 0.9))
+        self.assertFalse(critical_dialogue.needs_advisory_consultation("complex"))
 
     def test_confidence_boundary_is_exclusive_at_0_7(self) -> None:
-        self.assertFalse(advisory_consultation.needs_advisory_consultation("simple", 0.7))
-        self.assertTrue(advisory_consultation.needs_advisory_consultation("simple", 0.6999))
+        self.assertFalse(critical_dialogue.needs_advisory_consultation("simple", 0.7))
+        self.assertTrue(critical_dialogue.needs_advisory_consultation("simple", 0.6999))
 
 
 class AdvisoryTriggerWiringTests(unittest.TestCase):
@@ -4351,31 +4731,31 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
     # -- plan-review ---------------------------------------------------
 
     def test_plan_review_fires_at_medium_and_complex(self) -> None:
-        self.assertTrue(advisory_consultation.needs_plan_review_consultation("medium"))
-        self.assertTrue(advisory_consultation.needs_plan_review_consultation("complex"))
+        self.assertTrue(critical_dialogue.needs_plan_review_consultation("medium"))
+        self.assertTrue(critical_dialogue.needs_plan_review_consultation("complex"))
         # Case/whitespace tolerance mirrors `needs_advisory_consultation`'s
         # own `.lower().strip()` normalization, not a coincidence — both
         # predicates read the same caller-supplied complexity string.
-        self.assertTrue(advisory_consultation.needs_plan_review_consultation(" Medium "))
-        self.assertTrue(advisory_consultation.needs_plan_review_consultation("COMPLEX"))
+        self.assertTrue(critical_dialogue.needs_plan_review_consultation(" Medium "))
+        self.assertTrue(critical_dialogue.needs_plan_review_consultation("COMPLEX"))
 
     def test_plan_review_does_not_fire_at_simple_or_trivial(self) -> None:
-        self.assertFalse(advisory_consultation.needs_plan_review_consultation("simple"))
-        self.assertFalse(advisory_consultation.needs_plan_review_consultation("trivial"))
+        self.assertFalse(critical_dialogue.needs_plan_review_consultation("simple"))
+        self.assertFalse(critical_dialogue.needs_plan_review_consultation("trivial"))
 
     # -- code-review -----------------------------------------------------
 
     def test_code_review_fires_at_medium_and_complex_with_zero_risk_signals(self) -> None:
-        self.assertTrue(advisory_consultation.needs_code_review_consultation("medium"))
-        self.assertTrue(advisory_consultation.needs_code_review_consultation("complex"))
+        self.assertTrue(critical_dialogue.needs_code_review_consultation("medium"))
+        self.assertTrue(critical_dialogue.needs_code_review_consultation("complex"))
 
     def test_code_review_does_not_fire_at_trivial_or_simple_with_no_risk_signal(self) -> None:
-        self.assertFalse(advisory_consultation.needs_code_review_consultation("trivial"))
-        self.assertFalse(advisory_consultation.needs_code_review_consultation("simple"))
+        self.assertFalse(critical_dialogue.needs_code_review_consultation("trivial"))
+        self.assertFalse(critical_dialogue.needs_code_review_consultation("simple"))
 
     def test_code_review_fires_at_trivial_when_tests_are_failing(self) -> None:
         self.assertTrue(
-            advisory_consultation.needs_code_review_consultation(
+            critical_dialogue.needs_code_review_consultation(
                 "trivial", tests_failing=True
             )
         )
@@ -4390,12 +4770,12 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         # read from config rather than a Python-side literal that happens to
         # match it today.
         self.assertFalse(
-            advisory_consultation.needs_code_review_consultation(
+            critical_dialogue.needs_code_review_consultation(
                 "simple", diff_line_count=300
             )
         )
         self.assertTrue(
-            advisory_consultation.needs_code_review_consultation(
+            critical_dialogue.needs_code_review_consultation(
                 "simple", diff_line_count=301
             )
         )
@@ -4404,7 +4784,7 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertTrue(
-            advisory_consultation.needs_code_review_consultation(
+            critical_dialogue.needs_code_review_consultation(
                 "trivial", changed_paths=["src/auth/login.py"]
             )
         )
@@ -4413,7 +4793,7 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertFalse(
-            advisory_consultation.needs_code_review_consultation(
+            critical_dialogue.needs_code_review_consultation(
                 "trivial", changed_paths=["src/widgets/button.py"]
             )
         )
@@ -4437,10 +4817,10 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
                 )
             )
 
-            fires_low = advisory_consultation.needs_code_review_consultation(
+            fires_low = critical_dialogue.needs_code_review_consultation(
                 "trivial", diff_line_count=10, config_path=low_threshold_config
             )
-            fires_high = advisory_consultation.needs_code_review_consultation(
+            fires_high = critical_dialogue.needs_code_review_consultation(
                 "trivial", diff_line_count=10, config_path=high_threshold_config
             )
 
@@ -4466,13 +4846,13 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
                 )
             )
 
-            fires_on_custom_pattern = advisory_consultation.needs_code_review_consultation(
+            fires_on_custom_pattern = critical_dialogue.needs_code_review_consultation(
                 "trivial",
                 changed_paths=["src/quux_only_here/module.py"],
                 config_path=custom_config,
             )
             does_not_fire_on_real_config_pattern = (
-                advisory_consultation.needs_code_review_consultation(
+                critical_dialogue.needs_code_review_consultation(
                     "trivial",
                     changed_paths=["src/auth/login.py"],
                     config_path=custom_config,
@@ -4485,36 +4865,36 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
     # -- post-mortem -------------------------------------------------------
 
     def test_post_mortem_does_not_fire_with_no_signal(self) -> None:
-        self.assertFalse(advisory_consultation.needs_post_mortem_consultation())
+        self.assertFalse(critical_dialogue.needs_post_mortem_consultation())
 
     def test_post_mortem_fires_on_failure(self) -> None:
-        self.assertTrue(advisory_consultation.needs_post_mortem_consultation(failed=True))
+        self.assertTrue(critical_dialogue.needs_post_mortem_consultation(failed=True))
 
     def test_post_mortem_fires_on_two_failure_escalation(self) -> None:
-        # Tracks `advisory_consultation.ESCALATION_FAILURE_THRESHOLD`, the
+        # Tracks `critical_dialogue.ESCALATION_FAILURE_THRESHOLD`, the
         # same named constant `agent_council.escalate_routing_effort` uses
         # for "2+ failed worker attempts" — see
         # `test_escalation_failure_threshold_matches_agent_council_constant`
         # below for the drift guard between the two modules' copies of it.
-        threshold = advisory_consultation.ESCALATION_FAILURE_THRESHOLD
+        threshold = critical_dialogue.ESCALATION_FAILURE_THRESHOLD
         self.assertFalse(
-            advisory_consultation.needs_post_mortem_consultation(
+            critical_dialogue.needs_post_mortem_consultation(
                 consecutive_failures=threshold - 1
             )
         )
         self.assertTrue(
-            advisory_consultation.needs_post_mortem_consultation(
+            critical_dialogue.needs_post_mortem_consultation(
                 consecutive_failures=threshold
             )
         )
         self.assertTrue(
-            advisory_consultation.needs_post_mortem_consultation(
+            critical_dialogue.needs_post_mortem_consultation(
                 consecutive_failures=threshold + 1
             )
         )
 
     def test_escalation_failure_threshold_matches_agent_council_constant(self) -> None:
-        """Drift guard for the deliberate duplication: `advisory_consultation`
+        """Drift guard for the deliberate duplication: `critical_dialogue`
         does not import `agent_council` (see the comment on
         `ESCALATION_FAILURE_THRESHOLD`), so this test is what keeps the two
         modules' copies of the protocol's 2-failure escalation threshold
@@ -4522,7 +4902,7 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         `test_sensitivity_markers_are_a_superset_of_agent_council_patterns`'s
         role for `SENSITIVITY_MARKERS`/`SENSITIVE_PATTERNS`."""
         self.assertEqual(
-            advisory_consultation.ESCALATION_FAILURE_THRESHOLD,
+            critical_dialogue.ESCALATION_FAILURE_THRESHOLD,
             agent_council.ESCALATION_FAILURE_THRESHOLD,
         )
 
@@ -4532,7 +4912,7 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         for occasion in ("ambiguity", "plan-review", "code-review"):
             with self.subTest(occasion=occasion):
                 self.assertTrue(
-                    advisory_consultation.needs_post_mortem_consultation(
+                    critical_dialogue.needs_post_mortem_consultation(
                         occasion=occasion, stalemate_occurred=True
                     )
                 )
@@ -4541,7 +4921,7 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertFalse(
-            advisory_consultation.needs_post_mortem_consultation(
+            critical_dialogue.needs_post_mortem_consultation(
                 occasion="post-mortem", stalemate_occurred=True
             )
         )
@@ -4556,12 +4936,12 @@ class AdvisoryTriggerWiringTests(unittest.TestCase):
         that is somehow read as its own second consecutive failure, must not
         chain into a further post-mortem either."""
         self.assertFalse(
-            advisory_consultation.needs_post_mortem_consultation(
+            critical_dialogue.needs_post_mortem_consultation(
                 occasion="post-mortem", failed=True
             )
         )
         self.assertFalse(
-            advisory_consultation.needs_post_mortem_consultation(
+            critical_dialogue.needs_post_mortem_consultation(
                 occasion="post-mortem", consecutive_failures=5
             )
         )
@@ -4583,7 +4963,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite using api_key=sk-abc123 for the test fixture",
                 invoker,
                 root_dir=root,
@@ -4602,7 +4982,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "[SENSITIVE] Plan the customer PII migration",
                 invoker,
                 root_dir=root,
@@ -4617,7 +4997,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite, password=hunter2",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -4639,7 +5019,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Rotate the api_key before the migration",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -4656,7 +5036,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         ):
             root = Path(tmp)
             task = "Plan the rollout; api_key=sk-supersecretvalue-do-not-print"
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 task, _RecordingInvoker([]), root_dir=root
             )
 
@@ -4674,7 +5054,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
             plan_path = root / "implementation_plan.md"
             plan_path.write_text("stale plan from an earlier run")
 
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the rollout, secret=whatever",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -4698,7 +5078,7 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
                     _approve("Planner's plan mentions api_key rotation as a step."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
 
@@ -4707,11 +5087,11 @@ class AdvisorySensitivityGateTests(unittest.TestCase):
         self.assertTrue(result.consensus_reached)
 
     def test_sensitivity_markers_are_a_superset_of_agent_council_patterns(self) -> None:
-        """Drift guard for the deliberate duplication: `advisory_consultation`
+        """Drift guard for the deliberate duplication: `critical_dialogue`
         does not import `agent_council` (see the comment on
         `SENSITIVITY_MARKERS`), so this test is what keeps the two pattern
         sets from silently diverging."""
-        advisory_markers = {marker.lower() for marker in advisory_consultation.SENSITIVITY_MARKERS}
+        advisory_markers = {marker.lower() for marker in sensitivity_redactor.SENSITIVITY_MARKERS}
         council_patterns = {pattern.lower() for pattern in agent_council.SENSITIVE_PATTERNS}
         self.assertTrue(council_patterns.issubset(advisory_markers))
 
@@ -4736,7 +5116,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
@@ -4763,7 +5143,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
                     _revise("Not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
@@ -4793,7 +5173,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", "This plan looks fine to me."]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, max_rounds=3
             )
             transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
@@ -4815,7 +5195,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
                     RuntimeError("worker unreachable"),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
@@ -4830,7 +5210,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the rollout, password=hunter2",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -4855,7 +5235,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             task = "Plan the rollout; api_key=sk-supersecretvalue-do-not-print"
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 task, _RecordingInvoker([]), root_dir=root
             )
             transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
@@ -4894,7 +5274,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
                     _approve("Planner's revised plan.", "Good now."),
                 ]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -4921,7 +5301,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", _approve("Planner's plan.")]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
@@ -4937,7 +5317,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
                 invoker = _RecordingInvoker(
                     ["Planner's plan.", _approve("Planner's plan.")]
                 )
-                advisory_consultation.run_advisory_consultation_debate(
+                critical_dialogue.run_advisory_consultation_debate(
                     "Plan the auth rewrite", invoker, root_dir=root
                 )
             records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
@@ -4954,7 +5334,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             with self.assertRaises(ValueError):
-                advisory_consultation.run_advisory_consultation_debate(
+                critical_dialogue.run_advisory_consultation_debate(
                     "Plan the auth rewrite",
                     _RecordingInvoker([]),
                     root_dir=root,
@@ -4971,13 +5351,13 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             first_invoker = _RecordingInvoker(
                 ["First run's plan.", _approve("First run's plan.", "First run approved.")]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the first task", first_invoker, root_dir=root
             )
             second_invoker = _RecordingInvoker(
                 ["Second run's plan.", _approve("Second run's plan.", "Second run approved.")]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the second task", second_invoker, root_dir=root
             )
             transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
@@ -4995,7 +5375,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", _approve("Planner's plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertTrue((root / "implementation_plan.md").exists())
@@ -5016,7 +5396,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", _approve("Planner's plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertTrue((root / "implementation_plan.md").exists())
@@ -5048,7 +5428,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", _approve("Planner's plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             transcript = (root / self.TRANSCRIPT_RELATIVE_PATH).read_text()
@@ -5075,7 +5455,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", _approve("Planner's plan.")]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             council = agent_council.AgentCouncil(root_dir=root)
@@ -5103,7 +5483,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             advisory_path = Path(tmp) / "advisory.jsonl"
             council_path = Path(tmp) / "council.jsonl"
-            advisory_consultation._append_jsonl_locked(advisory_path, record)
+            critical_dialogue._append_jsonl_locked(advisory_path, record)
             agent_council.append_jsonl_locked(council_path, record)
             self.assertEqual(advisory_path.read_bytes(), council_path.read_bytes())
 
@@ -5124,7 +5504,7 @@ class AdvisoryTranscriptAndTelemetryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.", "Good.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -5223,7 +5603,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
                 ):
                     root = Path(tmp)
                     order.append("before_call")
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Review the change",
                         fake_invoke_worker,
                         root_dir=root,
@@ -5263,7 +5643,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
                 called_event=called_event,
             )
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 "Post-mortem for the auth rewrite failure",
                 invoker,
                 root_dir=root,
@@ -5309,7 +5689,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
                 called_event=called_event,
             )
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 "Post-mortem for the auth rewrite failure",
                 invoker,
                 root_dir=root,
@@ -5353,13 +5733,13 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ), mock.patch.object(
-            advisory_consultation,
+            critical_dialogue,
             "run_advisory_consultation_debate",
             side_effect=RuntimeError("unexpected bug: sentinel-oops"),
         ):
             root = Path(tmp)
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 "Post-mortem for a mystery failure",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -5397,7 +5777,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
             invoker = _RecordingInvoker([])
 
             with self.assertRaises(ValueError):
-                advisory_consultation.dispatch_post_mortem_consultation(
+                critical_dialogue.dispatch_post_mortem_consultation(
                     "Post-mortem for a stalemate",
                     invoker,
                     root_dir=root,
@@ -5420,14 +5800,14 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
         `budget_skipped` telemetry record still discoverable after the
         thread completes (degradation is never silent, even in the
         background)."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([])
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 "Post-mortem for the auth rewrite failure",
                 invoker,
                 root_dir=root,
@@ -5455,7 +5835,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
         the same way `test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls`
         proves it for the synchronous path — six responses scripted, only
         one round's two consumed before the stalemate."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -5471,7 +5851,7 @@ class AdvisoryBlockingStanceTests(unittest.TestCase):
                 ]
             )
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 "Post-mortem for the auth rewrite failure",
                 invoker,
                 root_dir=root,
@@ -5806,26 +6186,6 @@ class LearningJournalTests(unittest.TestCase):
     TELEMETRY_RELATIVE_PATH = Path(".ralph") / "routing_telemetry.jsonl"
 
     FIXED_TIMESTAMP = "2026-08-12T09:30:00Z"
-
-    # Checked (linted/type-checked) but deliberately never executed by CI —
-    # read by test_ci_runs_every_test_file_it_checks below. Sized to exactly
-    # one file today: test_lmstudio.py's own module docstring says "CI lints
-    # and type-checks this file, but never executes it," because it makes
-    # real `urlopen` calls to a live LM Studio server at 127.0.0.1:1234 with
-    # a 120-second timeout — no CI runner has that server, so running it in
-    # the test step would hang or fail on every run, not sometimes. That is
-    # a structural, already-documented exclusion, unlike the accidental one
-    # this whole test exists to catch — test_production_invoker.py, whose 16
-    # tests were linted and type-checked but silently never executed. Any
-    # other test file missing from PYTHON_TESTS still fails the assertion
-    # below; this exempts exactly this one file, by name, not the shape of
-    # the check.
-    _CHECKED_BUT_NOT_EXECUTED_BY_DESIGN = frozenset(
-        {
-            "skills/worker-routing/test_lmstudio.py",
-            "test_suite.py",
-        }
-    )
 
     def _worker_execution_record(
         self, **overrides: object
@@ -6303,7 +6663,7 @@ class LearningJournalTests(unittest.TestCase):
             )
 
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.", "Good.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, task_id="shared-task"
             )
             telemetry_before = (root / self.TELEMETRY_RELATIVE_PATH).read_bytes()
@@ -6371,7 +6731,7 @@ class LearningJournalTests(unittest.TestCase):
         """The journal observes work it must never be able to break: an
         unwritable `.ralph` degrades the learning loop, it does not fail the
         invocation being recorded. Same contract as
-        `advisory_consultation._write_telemetry_record`."""
+        `dialogue_transcript._write_telemetry_record`."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             learning_journal.journal_path(root).parent.write_text("not a directory")
@@ -6395,7 +6755,7 @@ class LearningJournalTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.", "Good.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -6482,7 +6842,7 @@ class LearningJournalTests(unittest.TestCase):
         """The second gate: `sk-live-...` is shaped exactly like a valid
         identifier, so shape alone would pass it. The marker check is what
         does not — and the rejection may name the marker constant it matched
-        (as `advisory_consultation` does) but never the secret around it.
+        (as `critical_dialogue` does) but never the secret around it.
 
         The gate covers exactly the identifiers a caller *composes* for a
         record — `model_id`, `model_family`, and ticket 26's `task_set`, all
@@ -6779,7 +7139,7 @@ class LearningJournalTests(unittest.TestCase):
 
     def test_cross_spec_vocabularies_agree(self) -> None:
         """Drift guard for the incident this fix addresses: `DialogueOccasion`
-        (spec 0004, schema-only) and `advisory_consultation.Occasion` (spec
+        (spec 0004, schema-only) and `dialogue_contracts.Occasion` (spec
         0003, shipped) are two separately-declared `Literal` aliases meant to
         describe one vocabulary, but nothing in the type system keeps them in
         sync. They drifted — this alias spelled three of its four values with
@@ -6794,11 +7154,11 @@ class LearningJournalTests(unittest.TestCase):
         surface, for `DialogueTopology` against `RosterTopology`: identical
         today (`Literal["pair", "panel"]` both sides) but just as unpinned."""
         self.assertEqual(
-            set(get_args(advisory_consultation.Occasion)),
+            set(get_args(dialogue_contracts.Occasion)),
             set(get_args(learning_journal.DialogueOccasion)),
         )
         self.assertEqual(
-            set(get_args(advisory_consultation.RosterTopology)),
+            set(get_args(critical_dialogue.RosterTopology)),
             set(get_args(learning_journal.DialogueTopology)),
         )
 
@@ -6809,7 +7169,7 @@ class LearningJournalTests(unittest.TestCase):
         journal_markers = {marker.lower() for marker in learning_journal.SENSITIVITY_MARKERS}
         council_patterns = {pattern.lower() for pattern in agent_council.SENSITIVE_PATTERNS}
         advisory_markers = {
-            marker.lower() for marker in advisory_consultation.SENSITIVITY_MARKERS
+            marker.lower() for marker in sensitivity_redactor.SENSITIVITY_MARKERS
         }
         self.assertTrue(council_patterns.issubset(journal_markers))
         self.assertTrue(advisory_markers.issubset(journal_markers))
@@ -7145,7 +7505,31 @@ class LearningJournalTests(unittest.TestCase):
         )
         self.assertEqual(record["rounds_run"], 3)
 
-    # --- the CI contract ---
+
+class _WorkflowStructureTestBase:
+    """Shared readers and exclusions for CI workflow structure tests."""
+
+    _TYPECHECK_SCRIPT = REPO_ROOT / "skills" / "worker-routing" / "typecheck.sh"
+
+    # Checked (linted/type-checked) but deliberately never executed by CI —
+    # read by test_ci_runs_every_test_file_it_checks below. Sized to exactly
+    # one file today: test_lmstudio.py's own module docstring says "CI lints
+    # and type-checks this file, but never executes it," because it makes
+    # real `urlopen` calls to a live LM Studio server at 127.0.0.1:1234 with
+    # a 120-second timeout — no CI runner has that server, so running it in
+    # the test step would hang or fail on every run, not sometimes. That is
+    # a structural, already-documented exclusion, unlike the accidental one
+    # this whole test exists to catch — test_production_invoker.py, whose 16
+    # tests were linted and type-checked but silently never executed. Any
+    # other test file missing from PYTHON_TESTS still fails the assertion
+    # below; this exempts exactly this one file, by name, not the shape of
+    # the check.
+    _CHECKED_BUT_NOT_EXECUTED_BY_DESIGN = frozenset(
+        {
+            "skills/worker-routing/test_lmstudio.py",
+            "test_suite.py",
+        }
+    )
 
     @staticmethod
     def _workflow_list(workflow: str, name: str) -> list[str]:
@@ -7164,25 +7548,577 @@ class LearningJournalTests(unittest.TestCase):
             listed.append(stripped)
         return listed
 
+    @classmethod
+    def _checked_modules(cls) -> list[str]:
+        """Read the canonical target list through its public CLI."""
+        completed = subprocess.run(
+            [str(cls._TYPECHECK_SCRIPT), "--print-targets"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if completed.returncode != 0:
+            raise AssertionError(completed.stderr)
+        return completed.stdout.splitlines()
+
+
+class CiWorkflowStructuralTests(_WorkflowStructureTestBase, unittest.TestCase):
+    """Mypy consumes the module list without mutating the checkout."""
+
+    def test_documentation_and_ci_use_the_same_shared_typecheck_entry_point(
+        self,
+    ) -> None:
+        """Contributors, agents, and CI invoke one public type-check command."""
+        command = "skills/worker-routing/typecheck.sh"
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
+        )
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertTrue((REPO_ROOT / command).is_file())
+        self.assertIn(f"run: {command}", workflow)
+        self.assertIn(command, readme)
+        claude_path = REPO_ROOT / "CLAUDE.md"
+        if claude_path.exists():
+            self.assertIn(command, claude_path.read_text(encoding="utf-8"))
+        self.assertNotIn("mypy --config-file", workflow)
+
     def test_ci_lints_and_type_checks_one_single_sourced_module_list(self) -> None:
         """Ruff and mypy share one module list and every entry exists."""
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
             encoding="utf-8"
         )
-        listed = self._workflow_list(workflow, "PYTHON_MODULES")
+        listed = self._checked_modules()
 
         self.assertIn("skills/worker-routing/learning_journal.py", listed)
+        self.assertEqual(len(listed), 54)
         self.assertEqual(sorted(listed), sorted(set(listed)))
         for module in listed:
             with self.subTest(module=module):
                 self.assertTrue((REPO_ROOT / module).is_file())
 
-        self.assertIn("ruff check $PYTHON_MODULES", workflow)
-        self.assertIn("mypy --config-file pyproject.toml $TARGETS", workflow)
-        self.assertIn(
-            "TARGETS=$(echo \"$PYTHON_MODULES\" | sed 's|skills/worker-routing/|worker_routing/|g')",
-            workflow,
+        self.assertIn("typecheck.sh --print-targets", workflow)
+        self.assertIn("ruff check \"${python_modules[@]}\"", workflow)
+        self.assertIn("run: skills/worker-routing/typecheck.sh", workflow)
+
+    def test_ci_typecheck_step_uses_an_ephemeral_absolute_package_alias(self) -> None:
+        """Mypy never creates a package alias in the checked-out repository."""
+        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
+            encoding="utf-8"
         )
+        script = self._TYPECHECK_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertEqual(workflow.count("- name: Type-check with mypy"), 1)
+        self.assertNotIn("mypy --config-file", workflow)
+        self.assertNotIn("Symlink package for type-checking", workflow)
+        self.assertNotIn("Clean up type-checking symlink", workflow)
+        self.assertIn(
+            'mktemp -d "${TYPECHECK_PARENT%/}/worker-routing-mypy.XXXXXX"', script
+        )
+        self.assertIn("trap '", script)
+        self.assertIn("rm -rf", script)
+        self.assertIn("EXIT", script)
+        self.assertIn(
+            'ln -s "${REPO_ROOT}/skills/worker-routing" '
+            '"${TYPECHECK_DIR}/worker_routing"',
+            script,
+        )
+        self.assertNotRegex(script, r"ln\s+[^\n]*\sworker_routing(?:\s|$)")
+        self.assertNotRegex(workflow, r"ln\s+[^\n]*\sworker_routing(?:\s|$)")
+
+    def test_ci_mypy_receives_the_exact_single_sourced_target_set_and_always_cleans_up(
+        self,
+    ) -> None:
+        """Run the workflow program with a fake mypy and inspect its argv.
+
+        This checks the Bash array at its observable boundary: every
+        `PYTHON_MODULES` entry reaches mypy exactly once and in order, skill
+        paths pass through the temporary package alias, unrelated targets do
+        not, the alias points at an absolute source path, and EXIT cleanup
+        runs for both a successful and a failing mypy process.
+        """
+        listed = self._checked_modules()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            runner_temp = root / "runner-temp"
+            bin_dir = root / "bin"
+            runner_temp.mkdir()
+            bin_dir.mkdir()
+            argv_log = root / "mypy-argv"
+            alias_log = root / "mypy-alias"
+            fake_mypy = bin_dir / "mypy"
+            fake_mypy.write_text(
+                "#!/bin/bash\n"
+                "printf '%s\\n' \"$@\" > \"$MYPY_ARGV_LOG\"\n"
+                "for argument in \"$@\"; do\n"
+                "  case \"$argument\" in\n"
+                "    */worker_routing/*)\n"
+                "      alias_path=\"${argument%%/worker_routing/*}/worker_routing\"\n"
+                "      printf '%s\\n%s\\n' \"$alias_path\" \"$(readlink \"$alias_path\")\" > \"$MYPY_ALIAS_LOG\"\n"
+                "      break\n"
+                "      ;;\n"
+                "  esac\n"
+                "done\n"
+                "exit \"$MYPY_EXIT_CODE\"\n",
+                encoding="utf-8",
+            )
+            fake_mypy.chmod(0o755)
+
+            for exit_code in (0, 23):
+                with self.subTest(mypy_exit_code=exit_code):
+                    argv_log.unlink(missing_ok=True)
+                    alias_log.unlink(missing_ok=True)
+                    env = dict(os.environ)
+                    env.update(
+                        {
+                            "RUNNER_TEMP": str(runner_temp),
+                            "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+                            "MYPY_ARGV_LOG": str(argv_log),
+                            "MYPY_ALIAS_LOG": str(alias_log),
+                            "MYPY_EXIT_CODE": str(exit_code),
+                        }
+                    )
+                    completed = subprocess.run(
+                        [str(self._TYPECHECK_SCRIPT)],
+                        cwd=root,
+                        env=env,
+                        capture_output=True,
+                        check=False,
+                        text=True,
+                    )
+
+                    self.assertEqual(completed.returncode, exit_code, completed.stderr)
+                    alias_path_text, alias_target_text = alias_log.read_text(
+                        encoding="utf-8"
+                    ).splitlines()
+                    alias_path = Path(alias_path_text)
+                    self.assertEqual(alias_path.parent.parent, runner_temp)
+                    self.assertEqual(
+                        Path(alias_target_text).resolve(), SKILL_DIR.resolve()
+                    )
+                    self.assertTrue(Path(alias_target_text).is_absolute())
+                    self.assertFalse(alias_path.parent.exists(), "EXIT trap left the temp directory behind")
+                    self.assertFalse(
+                        os.path.lexists(REPO_ROOT / "worker_routing"),
+                        "type-checking created a root-level package alias",
+                    )
+
+                    expected_targets = [
+                        str(alias_path / path.removeprefix("skills/worker-routing/"))
+                        if path.startswith("skills/worker-routing/")
+                        else path
+                        for path in listed
+                    ]
+                    self.assertEqual(
+                        argv_log.read_text(encoding="utf-8").splitlines(),
+                        ["--config-file", "pyproject.toml", *expected_targets],
+                    )
+
+
+class LiveOwnershipClosureTests(unittest.TestCase):
+    """Live production and test prose names current module owners."""
+
+    _INTERNAL_LEAF_MODULES = frozenset(
+        {
+            "debate_state_machine",
+            "dialogue_contracts",
+            "dialogue_degradation",
+            "dialogue_transcript",
+        }
+    )
+    _REQUIRED_LEAF_ALIASES: ClassVar[Mapping[str, tuple[str, str]]] = {
+        "_parse_critic_verdict": ("dialogue_contracts", "_parse_critic_verdict"),
+        "_load_dialogue_budget_config": (
+            "dialogue_degradation",
+            "_load_dialogue_budget_config",
+        ),
+        "_default_task_id": ("dialogue_transcript", "_default_task_id"),
+        "_reduce_dialogue_round": (
+            "dialogue_transcript",
+            "_reduce_dialogue_round",
+        ),
+        "_write_telemetry_record": (
+            "dialogue_transcript",
+            "_write_telemetry_record",
+        ),
+        "_write_dialogue_quality_record": (
+            "dialogue_transcript",
+            "_write_dialogue_quality_record",
+        ),
+        "_write_plan_outcome_record": (
+            "dialogue_transcript",
+            "_write_plan_outcome_record",
+        ),
+        "Occasion": ("dialogue_contracts", "Occasion"),
+        "AdvisoryStalemateReport": (
+            "dialogue_contracts",
+            "AdvisoryStalemateReport",
+        ),
+        "AdvisoryResolutionOption": (
+            "dialogue_contracts",
+            "AdvisoryResolutionOption",
+        ),
+        "_build_stalemate_report": (
+            "debate_state_machine",
+            "build_stalemate_report",
+        ),
+    }
+    _COMPATIBILITY_PROSE_LABEL = re.compile(
+        r"\bcompatibility\s+(?:re-export|seam)\b", re.IGNORECASE
+    )
+
+    @classmethod
+    def _critical_dialogue_leaf_aliases(cls) -> dict[str, tuple[str, str]]:
+        """Resolve module-level compatibility aliases to their leaf owners."""
+        tree = ast.parse(
+            (SKILL_DIR / "critical_dialogue.py").read_text(encoding="utf-8")
+        )
+        imported_modules: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for imported in node.names:
+                    module = imported.name.rsplit(".", maxsplit=1)[-1]
+                    if module in cls._INTERNAL_LEAF_MODULES:
+                        imported_modules[imported.asname or imported.name] = module
+            elif isinstance(node, ast.ImportFrom):
+                for imported in node.names:
+                    module = (node.module or imported.name).rsplit(".", maxsplit=1)[-1]
+                    if module in cls._INTERNAL_LEAF_MODULES:
+                        imported_modules[imported.asname or imported.name] = module
+
+        def module_assignments(
+            statements: Sequence[ast.stmt],
+        ) -> Iterator[ast.Assign]:
+            for statement in statements:
+                if isinstance(statement, ast.Assign):
+                    yield statement
+                elif isinstance(statement, ast.If):
+                    yield from module_assignments(statement.body)
+                    yield from module_assignments(statement.orelse)
+
+        assignments = tuple(module_assignments(tree.body))
+        aliases: dict[str, tuple[str, str]] = {}
+        unresolved = list(assignments)
+        while unresolved:
+            next_unresolved: list[ast.Assign] = []
+            made_progress = False
+            for assignment in unresolved:
+                if len(assignment.targets) != 1 or not isinstance(
+                    assignment.targets[0], ast.Name
+                ):
+                    continue
+                target = assignment.targets[0].id
+                value = assignment.value
+                owner: tuple[str, str] | None = None
+                if isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name):
+                    owner_module = imported_modules.get(value.value.id)
+                    if owner_module is not None:
+                        owner = (owner_module, value.attr)
+                elif isinstance(value, ast.Name):
+                    owner = aliases.get(value.id)
+                if owner is None:
+                    next_unresolved.append(assignment)
+                    continue
+                aliases[target] = owner
+                made_progress = True
+            if not made_progress:
+                break
+            unresolved = next_unresolved
+        return aliases
+
+    @staticmethod
+    def _python_prose(source: str) -> Iterator[tuple[int, str]]:
+        """Yield physical comment and module/class/function docstring lines."""
+        for token in tokenize.generate_tokens(io.StringIO(source).readline):
+            if token.type == tokenize.COMMENT:
+                yield token.start[0], token.string
+
+        source_lines = source.splitlines()
+        tree = ast.parse(source)
+        docstring_owners = (
+            ast.Module,
+            ast.ClassDef,
+            ast.FunctionDef,
+            ast.AsyncFunctionDef,
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, docstring_owners) or not node.body:
+                continue
+            statement = node.body[0]
+            if (
+                isinstance(statement, ast.Expr)
+                and isinstance(statement.value, ast.Constant)
+                and isinstance(statement.value.value, str)
+            ):
+                end_line_number = statement.value.end_lineno or statement.value.lineno
+                for line_number in range(
+                    statement.value.lineno, end_line_number + 1
+                ):
+                    yield line_number, source_lines[line_number - 1]
+
+    @classmethod
+    def _leaf_owned_prose_violations(
+        cls, source: str, relative_path: str
+    ) -> list[str]:
+        """Report required leaf aliases presented as compatibility owners."""
+        compatibility_module = "critical_" + "dialogue"
+        alias_pattern = re.compile(
+            rf"(?<![A-Za-z0-9_]){compatibility_module}\."
+            rf"({'|'.join(re.escape(name) for name in sorted(cls._REQUIRED_LEAF_ALIASES, key=len, reverse=True))})"
+            r"(?![A-Za-z0-9_])"
+        )
+        stale: list[str] = []
+        for line_number, prose in cls._python_prose(source):
+            for reference in alias_pattern.finditer(prose):
+                if cls._COMPATIBILITY_PROSE_LABEL.search(prose):
+                    continue
+                alias = reference.group(1)
+                module, symbol = cls._REQUIRED_LEAF_ALIASES[alias]
+                stale.append(
+                    f"{relative_path}:{line_number}: {reference.group(0)} is owned "
+                    f"by {module}.{symbol}"
+                )
+        return stale
+
+    def test_leaf_owned_public_aliases_are_absent_from_critical_dialogue(
+        self,
+    ) -> None:
+        """Leaf contracts are imported from their owners, not the deep seam."""
+        public_aliases = {
+            name for name in self._REQUIRED_LEAF_ALIASES if not name.startswith("_")
+        }
+        self.assertEqual(
+            {name for name in public_aliases if hasattr(critical_dialogue, name)},
+            set(),
+        )
+
+        stale: list[str] = []
+        live_paths = sorted(SKILL_DIR.glob("*.py"))
+        live_paths.extend(
+            sorted(
+                (REPO_ROOT / "skills" / "council-review" / "scripts").glob("*.py")
+            )
+        )
+        live_paths.extend(
+            sorted(
+                (REPO_ROOT / "skills" / "council-review" / "tests").rglob("*.py")
+            )
+        )
+        for path in live_paths:
+            relative_path = str(path.relative_to(REPO_ROOT))
+            source = path.read_text(encoding="utf-8")
+            stale.extend(self._leaf_owned_prose_violations(source, relative_path))
+
+        self.assertEqual(
+            stale,
+            [],
+            "prose attributes leaf-owned symbols to compatibility aliases:\n"
+            + "\n".join(stale),
+        )
+
+    def test_leaf_owned_compatibility_alias_may_be_documented_as_a_seam(
+        self,
+    ) -> None:
+        """Supported compatibility references are truthful, not ownership."""
+        for label in ("compatibility re-export", "compatibility seam"):
+            with self.subTest(label=label):
+                source = (
+                    '"""`critical_dialogue._parse_critic_verdict` remains a '
+                    f"supported {label}." + '\n"""\n'
+                )
+                self.assertEqual(
+                    self._leaf_owned_prose_violations(source, "fixture.py"), []
+                )
+
+    def test_unlabeled_leaf_owned_compatibility_alias_is_rejected(self) -> None:
+        """A compatibility-path reference cannot imply definition ownership."""
+        source = (
+            '"""`critical_dialogue._parse_critic_verdict` owns verdict parsing.\n'
+            '"""\n'
+        )
+
+        self.assertEqual(
+            self._leaf_owned_prose_violations(source, "fixture.py"),
+            [
+                (
+                    "fixture.py:1: critical_dialogue._parse_critic_verdict is owned "
+                    "by dialogue_contracts._parse_critic_verdict"
+                )
+            ],
+        )
+
+    def test_compatibility_label_only_exempts_its_physical_docstring_line(
+        self,
+    ) -> None:
+        """A truthful seam label cannot mask ownership prose on another line."""
+        source = (
+            '"""`critical_dialogue._parse_critic_verdict` remains a supported '
+            "compatibility seam.\n"
+            "`critical_dialogue._parse_critic_verdict` owns verdict parsing.\n"
+            '"""\n'
+        )
+
+        self.assertEqual(
+            self._leaf_owned_prose_violations(source, "fixture.py"),
+            [
+                (
+                    "fixture.py:2: critical_dialogue._parse_critic_verdict is owned "
+                    "by dialogue_contracts._parse_critic_verdict"
+                )
+            ],
+        )
+
+    def test_live_prose_has_no_retired_module_ownership(self) -> None:
+        """Retired orchestration modules cannot remain today's named owners.
+
+        The pattern is intentionally module-shaped, not a broad substring
+        ban: public functions such as `run_advisory_consultation_debate` and
+        the wire kind `"advisory_consultation"` remain valid. Explicitly
+        historical comparisons are allowed by path, phrase, and category;
+        every allowlist entry must still be consumed so it cannot become a
+        quiet dumping ground after its source is removed.
+        """
+        retired_reference = re.compile(
+            r"(?<![A-Za-z0-9_])"
+            r"(?:advisory_consultation|debate_orchestrator|council_review)"
+            r"(?:\.py|\.[A-Za-z_][A-Za-z0-9_]*|`{1,2}|['’]s\b)"
+        )
+        advisory_module = "advisory_" + "consultation"
+        debate_module = "debate_" + "orchestrator"
+        council_module = "council_" + "review"
+        allowed_history = {
+            (
+                "skills/worker-routing/dialogue_transcript.py",
+                f"then-owner ``{advisory_module}``",
+            ): "historical extraction provenance",
+            (
+                "skills/worker-routing/production_invoker.py",
+                "grew an",
+            ): "historical boundary-type comparison",
+            (
+                "skills/worker-routing/routing_config.py",
+                "each shipped before this ticket",
+            ): "historical default-source comparison",
+            (
+                "skills/worker-routing/prompt_assembler.py",
+                "Historical or domain-event names",
+            ): "institutional facade-retirement rule",
+        }
+        consumed_history: set[tuple[str, str]] = set()
+        allowed_categories = {
+            "quoted installer migration or deleted-facade fixture filename": 0,
+        }
+        retired_filenames = {
+            f"{advisory_module}.py",
+            f"{debate_module}.py",
+            f"{council_module}.py",
+        }
+        stale: list[str] = []
+        live_paths = sorted(
+            path
+            for path in SKILL_DIR.glob("*.py")
+            if not path.name.startswith("test_")
+        )
+        live_paths.extend(sorted(SKILL_DIR.glob("test_*.py")))
+        live_paths.extend(
+            sorted(
+                path
+                for path in (REPO_ROOT / "skills" / "council-review" / "scripts").glob("*.py")
+                if not path.name.startswith("test_")
+            )
+        )
+        live_paths.extend(
+            sorted(
+                (REPO_ROOT / "skills" / "council-review" / "tests").rglob("*.py")
+            )
+        )
+
+        for path in live_paths:
+            relative_path = str(path.relative_to(REPO_ROOT))
+            for line_number, line in enumerate(
+                path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                for reference in retired_reference.finditer(line):
+                    allowed_key = next(
+                        (
+                            key
+                            for key in allowed_history
+                            if key[0] == relative_path and key[1] in line
+                        ),
+                        None,
+                    )
+                    if allowed_key is not None:
+                        consumed_history.add(allowed_key)
+                        continue
+                    matched_filename = reference.group(0)
+                    if (
+                        relative_path == "skills/worker-routing/test_routing.py"
+                        and matched_filename in retired_filenames
+                        and (
+                            f'"{matched_filename}"' in line
+                            or f"'{matched_filename}'" in line
+                        )
+                    ):
+                        allowed_categories[
+                            "quoted installer migration or deleted-facade fixture filename"
+                        ] += 1
+                        continue
+                    stale.append(
+                        f"{relative_path}:{line_number}: {line.strip()}"
+                    )
+
+        self.assertEqual(
+            stale,
+            [],
+            "live prose still names a retired orchestration module as its owner:\n"
+            + "\n".join(stale),
+        )
+        self.assertEqual(
+            consumed_history,
+            set(allowed_history),
+            "historical ownership allowlist entries no longer match live source",
+        )
+        self.assertTrue(
+            all(allowed_categories.values()),
+            f"ownership allow-categories were not consumed: {allowed_categories}",
+        )
+
+
+class RepositoryRootHygieneTests(unittest.TestCase):
+    """Machine-local type-checking and installer state stays outside Git."""
+
+    def test_root_hygiene_check_rejects_a_broken_package_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "worker_routing").symlink_to(root / "missing-package")
+
+            with self.assertRaises(AssertionError):
+                assert_repository_root_is_clean(self, root)
+
+    def test_repository_root_has_no_python_package_alias(self) -> None:
+        self.assertFalse(
+            os.path.lexists(REPO_ROOT / "worker_routing"),
+            "repository root contains the transient worker_routing package alias",
+        )
+
+    def test_repository_root_has_no_legacy_project_receipt(self) -> None:
+        legacy_receipt = REPO_ROOT / ".auto-routing-python-modules.receipt"
+        ignore_lines = (REPO_ROOT / ".gitignore").read_text(
+            encoding="utf-8"
+        ).splitlines()
+
+        self.assertFalse(os.path.lexists(legacy_receipt), str(legacy_receipt))
+        self.assertIn(
+            "/.auto-routing-python-modules.receipt",
+            ignore_lines,
+            "legacy root installer receipt is not explicitly ignored",
+        )
+
+
+class CiModuleClosureTests(_WorkflowStructureTestBase, unittest.TestCase):
+    """CI checks and runs every intended Python module."""
 
     def test_ci_checks_every_python_file_in_the_skill_directory(self) -> None:
         """The other direction, and the one that actually goes missing.
@@ -7201,10 +8137,7 @@ class LearningJournalTests(unittest.TestCase):
         were guarded in this direction. Test files are included: CI lints and
         type-checks them too, and `PYTHON_MODULES` already names every one.
         """
-        workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
-            encoding="utf-8"
-        )
-        listed = set(self._workflow_list(workflow, "PYTHON_MODULES"))
+        listed = set(self._checked_modules())
         present = {
             f"skills/worker-routing/{path.name}" for path in SKILL_DIR.glob("*.py")
         }
@@ -7235,7 +8168,7 @@ class LearningJournalTests(unittest.TestCase):
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text(
             encoding="utf-8"
         )
-        checked = self._workflow_list(workflow, "PYTHON_MODULES")
+        checked = self._checked_modules()
         executed = self._workflow_list(workflow, "PYTHON_TESTS")
 
         checked_tests = {
@@ -7258,6 +8191,51 @@ class LearningJournalTests(unittest.TestCase):
             "$PYTHON_TESTS",
             workflow,
             "the test-running step no longer reads the single-sourced list",
+        )
+
+
+class StandardPackageImportTests(unittest.TestCase):
+    """Package and test imports never mutate the interpreter search path."""
+
+    def test_python_sources_do_not_mutate_sys_path(self) -> None:
+        sources = sorted(SKILL_DIR.glob("*.py"))
+        sources.extend(
+            sorted((REPO_ROOT / "skills" / "council-review").rglob("*.py"))
+        )
+        sources.append(REPO_ROOT / "test_suite.py")
+        violations: list[str] = []
+
+        for source_path in sources:
+            tree = ast.parse(source_path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and re.search(r"sys\.path\.(?:append|insert)\s*\(", node.value)
+                ):
+                    relative_path = source_path.relative_to(REPO_ROOT)
+                    violations.append(f"{relative_path}:{node.lineno} (string payload)")
+                    continue
+                if not isinstance(node, ast.Call):
+                    continue
+                function = node.func
+                if not (
+                    isinstance(function, ast.Attribute)
+                    and function.attr in {"append", "insert"}
+                    and isinstance(function.value, ast.Attribute)
+                    and function.value.attr == "path"
+                    and isinstance(function.value.value, ast.Name)
+                    and function.value.value.id == "sys"
+                ):
+                    continue
+                relative_path = source_path.relative_to(REPO_ROOT)
+                violations.append(f"{relative_path}:{node.lineno}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "runtime sys.path mutations violate the standard package seam:\n"
+            + "\n".join(violations),
         )
 
 
@@ -7294,7 +8272,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             records = _read_jsonl(learning_journal.journal_path(root))
@@ -7330,7 +8308,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
                 task_type="feature",
                 runner=runner,
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 journaled_invoker,
                 root_dir=root,
@@ -7399,7 +8377,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
         ):
             root = Path(tmp)
             for _attempt in range(2):
-                advisory_consultation.run_advisory_consultation_debate(
+                critical_dialogue.run_advisory_consultation_debate(
                     "Plan the auth rewrite",
                     production_invoker.make_journaled_invoke_worker(
                         "task-reworked-1", root_dir=root, runner=_runner()
@@ -7477,7 +8455,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
     def test_an_unjournalable_task_id_is_refused_at_wiring_time(self) -> None:
         """The factory takes an id, so the id is validated where the label is
         built — once, before any worker runs — rather than once per
-        invocation afterwards. `advisory_consultation` already wraps this call
+        invocation afterwards. `critical_dialogue` already wraps this call
         in the try that degrades to "journaling disabled for this run", which
         is why raising here costs the run its instrumentation and nothing
         else (see `ConsultationSurvivesJournalWiringFailureTests`)."""
@@ -7533,7 +8511,7 @@ class WorkerExecutionJournalingTests(unittest.TestCase):
             ],
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 root_dir=root,
                 planner_model="Claude Opus 5 (Thinking)",
@@ -7561,7 +8539,7 @@ class OutcomeRecordingTests(unittest.TestCase):
     (ground_truth, verdict) pairing; these tests exercise the public surface a
     caller far from that schema actually calls — `learning_outcomes`'s four
     `record_*` functions — and the one path (the stalemate resolution) that
-    is wired into the real `advisory_consultation` flow rather than tested
+    is wired into the real `critical_dialogue` flow rather than tested
     against a hand-built stand-in.
     """
 
@@ -7627,7 +8605,7 @@ class OutcomeRecordingTests(unittest.TestCase):
                 _revise("Not convinced."),
             ]
         )
-        return advisory_consultation.run_advisory_consultation_debate(
+        return critical_dialogue.run_advisory_consultation_debate(
             "Plan the auth rewrite", invoker, root_dir=root, task_id="task-stalemate-1"
         )
 
@@ -7713,7 +8691,7 @@ class OutcomeRecordingTests(unittest.TestCase):
             root = Path(tmp)
             result = self._run_to_stalemate(root)
             assert result.stalemate is not None
-            foreign_option = advisory_consultation.AdvisoryResolutionOption(
+            foreign_option = dialogue_contracts.AdvisoryResolutionOption(
                 1, "Approve Planner Architecture", "a hand-built, non-matching position"
             )
 
@@ -8859,97 +9837,54 @@ class _InstalledHarness:
         )
 
 
-class CriticalDialogueFacadeCompatibilityTests(unittest.TestCase):
-    """The historic facade exposes the full production entry-point surface."""
-
-    def test_run_critical_dialogue_is_exported_with_the_production_signature(self) -> None:
-        import importlib
-        import inspect
-
-        debate_orchestrator = importlib.import_module("debate_orchestrator")
-        self.assertIn("run_critical_dialogue", advisory_consultation.__all__)
-        for module in (advisory_consultation, debate_orchestrator):
-            with self.subTest(module=module.__name__):
-                self.assertEqual(
-                    inspect.signature(module.run_critical_dialogue),
-                    inspect.signature(module.run_advisory_consultation_debate),
-                )
-
-
 class WorkerRoutingPackageContractTests(unittest.TestCase):
     """The installable package facade exposes its canonical public contract."""
 
     def test_package_import_exports_version_symbols_and_core_contracts(self) -> None:
+        program = """
+import importlib
+package = importlib.import_module("worker_routing")
+assert package.__version__ == "3.6.0"
+assert tuple(sorted(package.__all__)) == package.__all__
+assert package.LearningJournal is importlib.import_module("worker_routing.learning_journal")
+assert package.LearnedState is importlib.import_module("worker_routing.learned_state")
+critical_dialogue = importlib.import_module("worker_routing.critical_dialogue")
+assert package.ReviewCouncil is critical_dialogue.ReviewCouncil
+assert package.run_critical_dialogue is critical_dialogue.run_critical_dialogue
+assert package.request_council_review is critical_dialogue.request_council_review
+assert "request_council_review" in package.__all__
+assert package.resolve_model_name("Codex 5.6 Sol") == "gpt-5.6-sol"
+assert package.classify_complexity(" SIMPLE ") == "simple"
+production_invoker = importlib.import_module("worker_routing.production_invoker")
+assert package.LocalModelCapabilities is production_invoker.LocalModelCapabilities
+assert package.probe_local_model_availability is production_invoker.probe_local_model_availability
+assert package.prompt_local_fallback_decision is production_invoker.prompt_local_fallback_decision
+for symbol in (
+    "LocalModelCapabilities",
+    "probe_local_model_availability",
+    "prompt_local_fallback_decision",
+):
+    assert symbol in package.__all__
+"""
         with tempfile.TemporaryDirectory() as temporary_dir:
-            package_root = Path(temporary_dir)
-            os.symlink(SKILL_DIR, package_root / "worker_routing")
-            sys.path.insert(0, str(package_root))
-            try:
-                package = importlib.import_module("worker_routing")
-                self.assertEqual(package.__version__, "3.6.0")
-                self.assertEqual(tuple(sorted(package.__all__)), package.__all__)
-
-                self.assertIs(
-                    package.LearningJournal,
-                    importlib.import_module("worker_routing.learning_journal"),
-                )
-                self.assertIs(
-                    package.LearnedState,
-                    importlib.import_module("worker_routing.learned_state"),
-                )
-                self.assertIs(
-                    package.ReviewCouncil,
-                    importlib.import_module("worker_routing.advisory_consultation").ReviewCouncil,
-                )
-                self.assertIs(
-                    package.run_critical_dialogue,
-                    importlib.import_module(
-                        "worker_routing.advisory_consultation"
-                    ).run_critical_dialogue,
-                )
-                self.assertEqual(
-                    package.resolve_model_name("Codex 5.6 Sol"),
-                    "gpt-5.6-sol",
-                )
-                self.assertEqual(package.classify_complexity(" SIMPLE "), "simple")
-
-                production_invoker = importlib.import_module(
-                    "worker_routing.production_invoker"
-                )
-                self.assertIs(
-                    package.LocalModelCapabilities,
-                    production_invoker.LocalModelCapabilities,
-                )
-                self.assertIs(
-                    package.probe_local_model_availability,
-                    production_invoker.probe_local_model_availability,
-                )
-                self.assertIs(
-                    package.prompt_local_fallback_decision,
-                    production_invoker.prompt_local_fallback_decision,
-                )
-                for symbol in (
-                    "LocalModelCapabilities",
-                    "probe_local_model_availability",
-                    "prompt_local_fallback_decision",
-                ):
-                    with self.subTest(symbol=symbol):
-                        self.assertIn(symbol, package.__all__)
-            finally:
-                sys.path.remove(str(package_root))
-                for name in list(sys.modules):
-                    if name == "worker_routing" or name.startswith("worker_routing."):
-                        del sys.modules[name]
+            result = subprocess.run(
+                [sys.executable, "-c", program],
+                capture_output=True,
+                check=False,
+                text=True,
+                cwd=temporary_dir,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class ManagedFileClosureTests(unittest.TestCase):
-    """`install.sh`'s `MANAGED_FILES` must be closed under sibling imports.
+    """Source-discovered installer modules must be closed under sibling imports.
 
     A managed module importing an unmanaged sibling is the one defect class
     that is invisible in a checkout by construction: every module sits in one
     directory there, so every import resolves regardless of what the
     installer copies. On an installed harness the same import raises
-    `ModuleNotFoundError` — and `advisory_consultation` catches exactly that
+    `ModuleNotFoundError` — and `critical_dialogue` catches exactly that
     when it lazily imports `production_invoker`, so the symptom was not a
     crash but *every* production consultation returning `worker_error` before
     a worker ever ran.
@@ -8968,7 +9903,156 @@ class ManagedFileClosureTests(unittest.TestCase):
         return match.group(1).split()
 
     def _managed(self) -> list[str]:
-        return self._bash_array(INSTALL_SH, "MANAGED_FILES")
+        return [*_bash_array(INSTALL_SH, "MANAGED_FILES"), *_production_python_modules()]
+
+    def _isolated_installer_tree(self) -> Path:
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        shutil.copy(INSTALL_SH, root / "install.sh")
+        shutil.copy(UNINSTALL_SH, root / "uninstall.sh")
+        shutil.copytree(
+            SKILL_DIR,
+            root / "skills" / "worker-routing",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+        )
+        for skill_name in ("council-review", "learn-session"):
+            shutil.copytree(
+                REPO_ROOT / "skills" / skill_name,
+                root / "skills" / skill_name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        return root
+
+    @staticmethod
+    def _rollback_race_python_shim(shim_dir: str) -> Path:
+        """Replace one rollback target immediately before identity handling."""
+        shim = Path(shim_dir) / "python3"
+        shim.write_text(
+            "#!/bin/bash\n"
+            "if [ \"${2:-}\" = rollback ] "
+            "&& [ \"${5:-}\" = \"$RACE_TARGET\" ] "
+            "&& [ ! -e \"$RACE_MARKER\" ]; then\n"
+            "  : > \"$RACE_MARKER\"\n"
+            "  replacement=\"${5}.racing.$$\"\n"
+            "  printf 'concurrent replacement\\n' > \"$replacement\"\n"
+            "  mv -f \"$replacement\" \"${5}\"\n"
+            "fi\n"
+            "exec \"$REAL_PYTHON\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+        return shim
+
+    def _schedule_retained_transaction_cleanup(self, stderr: str) -> Path:
+        match = re.search(r"Retained transaction directory: (.+)", stderr)
+        self.assertIsNotNone(match, stderr)
+        assert match is not None
+        transaction = Path(match.group(1))
+        self.addCleanup(shutil.rmtree, transaction, ignore_errors=True)
+        return transaction
+
+    @staticmethod
+    def _run_installer_script(
+        script: Path,
+        target_dir: str,
+        *,
+        home: str,
+        **env_overrides: str,
+    ) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ)
+        env["HOME"] = home
+        env.update(env_overrides)
+        return subprocess.run(
+            ["bash", str(script), target_dir],
+            capture_output=True,
+            check=False,
+            text=True,
+            env=env,
+        )
+
+    @staticmethod
+    def _manifest_modules(manifest: Path) -> list[str]:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0] != "auto-routing-python-modules-v1":
+            raise AssertionError(f"invalid manifest header in {manifest}")
+        modules: list[str] = []
+        for record in lines[1:]:
+            digest, separator, module_name = record.partition("\t")
+            if separator != "\t" or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise AssertionError(f"invalid manifest record: {record!r}")
+            modules.append(module_name)
+        return modules
+
+    @staticmethod
+    def _shell_function(script: Path, name: str) -> str:
+        text = script.read_text(encoding="utf-8")
+        match = re.search(
+            rf"^{re.escape(name)}\(\) \{{\n(?P<body>.*?)^\}}$",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        assert match is not None, f"{name} not found in {script}"
+        return match.group("body")
+
+    def test_manifest_contract_cannot_drift_between_install_and_uninstall(self) -> None:
+        """The standalone scripts deliberately mirror this security boundary."""
+        for variable in (
+            "PYTHON_MODULE_MANIFEST",
+            "PYTHON_MODULE_MANIFEST_HEADER",
+            "PYTHON_MODULE_RECEIPT_NAME",
+            "PYTHON_MODULE_RECEIPT_HEADER",
+        ):
+            with self.subTest(variable=variable):
+                install_match = re.search(
+                    rf'^{variable}=("[^"\n]+")$',
+                    INSTALL_SH.read_text(encoding="utf-8"),
+                    re.MULTILINE,
+                )
+                uninstall_match = re.search(
+                    rf'^{variable}=("[^"\n]+")$',
+                    UNINSTALL_SH.read_text(encoding="utf-8"),
+                    re.MULTILINE,
+                )
+                self.assertIsNotNone(install_match)
+                self.assertIsNotNone(uninstall_match)
+                assert install_match is not None and uninstall_match is not None
+                self.assertEqual(install_match.group(1), uninstall_match.group(1))
+
+        for function in (
+            "valid_python_module_name",
+            "sha256_file",
+            "read_python_module_manifest",
+            "validate_python_module_receipt",
+        ):
+            with self.subTest(function=function):
+                self.assertEqual(
+                    self._shell_function(INSTALL_SH, function),
+                    self._shell_function(UNINSTALL_SH, function),
+                )
+
+    def test_atomic_copy_records_write_identity_before_publication(self) -> None:
+        """A crash after publication must leave enough identity to roll back."""
+        atomic_copy = self._shell_function(INSTALL_SH, "atomic_copy")
+
+        ledger_record = atomic_copy.index('>> "$TRANSACTION_DIR/writes"')
+        publication = atomic_copy.index('mv -f "$temporary" "$target"')
+
+        self.assertLess(ledger_record, publication)
+
+    def test_python_filename_policy_matches_installer_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            skill_dir = Path(tmp_dir)
+            expected = {"_private.py", "alpha.py", "Alpha_2.py"}
+            rejected = {
+                "test_alpha.py",
+                ".hidden.py",
+                "two.parts.py",
+                "9numeric.py",
+                "hyphen-name.py",
+            }
+            for name in expected | rejected:
+                (skill_dir / name).write_text("pass\n", encoding="utf-8")
+            self.assertEqual(set(_production_python_modules(skill_dir)), expected)
 
     @staticmethod
     def _sibling_imports(module_path: Path) -> set[str]:
@@ -8979,7 +10063,7 @@ class ManagedFileClosureTests(unittest.TestCase):
         without being executed, and so imports inside functions
         (`routing_check._persist_compliance_record`'s deliberately local
         `import learning_journal`) and under `if TYPE_CHECKING`
-        (`learning_outcomes`' `advisory_consultation`) are found too — a
+        (`learning_outcomes`' `dialogue_contracts`) are found too — a
         lazily-imported sibling is exactly as absent on an installed harness
         as an eagerly-imported one.
         """
@@ -9087,11 +10171,11 @@ class ManagedFileClosureTests(unittest.TestCase):
                 )
 
     def test_uninstall_removes_every_file_install_manages(self) -> None:
-        """The mirror image, and the same drift in the other direction: a
-        module added to `MANAGED_FILES` and forgotten in `uninstall.sh` is
-        left behind on every uninstall, where a stale copy goes on being
-        imported by whatever else remains."""
-        removed = set(self._bash_array(UNINSTALL_SH, "INSTALLED_FILES"))
+        """Uninstall owns the same static artifacts and source modules."""
+        removed = {
+            *self._bash_array(UNINSTALL_SH, "INSTALLED_FILES"),
+            *_production_python_modules(),
+        }
 
         for name in self._managed():
             with self.subTest(managed_file=name):
@@ -9101,18 +10185,839 @@ class ManagedFileClosureTests(unittest.TestCase):
                     f"install.sh installs {name} but uninstall.sh never removes it",
                 )
 
+    def test_dynamic_modules_sync_to_all_harnesses_and_uninstall_preserves_user_python(
+        self,
+    ) -> None:
+        """A future module needs no manifest edit, while target-only files stay put."""
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            source_root = self._isolated_installer_tree()
+            source_skill = source_root / "skills" / "worker-routing"
+            future_module = source_skill / "future_production_module.py"
+            future_module.write_text("VALUE = 'installed dynamically'\n", encoding="utf-8")
+
+            install = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
+
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / future_module.name).read_text(encoding="utf-8"),
+                        "VALUE = 'installed dynamically'\n",
+                    )
+                    self.assertEqual(
+                        self._manifest_modules(
+                            installed_dir / ".auto-routing-python-modules"
+                        ),
+                        _production_python_modules(source_skill),
+                    )
+                    self.assertFalse((installed_dir / "test_routing.py").exists())
+                    (installed_dir / "test_user_extension.py").write_text("keep test\n")
+                    (installed_dir / "user_extension.py").write_text("keep module\n")
+
+            # A later source cleanup must not strand this installed module.
+            future_module.unlink()
+
+            uninstall = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(uninstall.returncode, 0, uninstall.stdout + uninstall.stderr)
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertFalse((installed_dir / future_module.name).exists())
+                    self.assertFalse(
+                        (installed_dir / ".auto-routing-python-modules").exists()
+                    )
+                    self.assertEqual(
+                        (installed_dir / "test_user_extension.py").read_text(encoding="utf-8"),
+                        "keep test\n",
+                    )
+                    self.assertEqual(
+                        (installed_dir / "user_extension.py").read_text(encoding="utf-8"),
+                        "keep module\n",
+                    )
+
+    def test_reinstall_removes_stale_owned_modules_from_every_harness(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "removed_after_install.py"
+        stale_source.write_text("VALUE = 'owned'\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            first = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            stale_source.unlink()
+
+            second = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertFalse((installed_dir / stale_source.name).exists())
+                    self.assertNotIn(
+                        stale_source.name,
+                        self._manifest_modules(
+                            installed_dir / ".auto-routing-python-modules"
+                        ),
+                    )
+
+    def test_manifest_ownership_beats_later_source_addition_on_uninstall(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        later_source = source_skill / "added_after_install.py"
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            later_source.write_text("SOURCE = True\n", encoding="utf-8")
+            for installed_dir in targets:
+                (installed_dir / later_source.name).write_text(
+                    "user-owned\n", encoding="utf-8"
+                )
+
+            removed = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(removed.returncode, 0, removed.stdout + removed.stderr)
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / later_source.name).read_text(encoding="utf-8"),
+                        "user-owned\n",
+                    )
+
+    def test_modified_stale_module_is_preserved_and_released_on_reinstall(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "customized_before_removal.py"
+        stale_source.write_text("owned = True\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            stale_source.unlink()
+            for installed_dir in targets:
+                (installed_dir / stale_source.name).write_text(
+                    "user-modified\n", encoding="utf-8"
+                )
+
+            reinstalled = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(
+                reinstalled.returncode, 0, reinstalled.stdout + reinstalled.stderr
+            )
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / stale_source.name).read_text(encoding="utf-8"),
+                        "user-modified\n",
+                    )
+                    self.assertNotIn(
+                        stale_source.name,
+                        self._manifest_modules(
+                            installed_dir / ".auto-routing-python-modules"
+                        ),
+                    )
+
+    def test_malformed_manifest_aborts_install_and_uninstall_before_mutation(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            manifest = targets[0] / ".auto-routing-python-modules"
+            manifest.write_text(
+                "auto-routing-python-modules-v1\n"
+                f"{'0' * 64}\t../../user_file.py\n",
+                encoding="utf-8",
+            )
+            sentinel = targets[-1] / "SKILL.md"
+            original_sentinel = sentinel.read_bytes()
+
+            reinstall = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(reinstall.returncode, 0)
+            self.assertIn("ownership manifest", reinstall.stderr)
+            self.assertEqual(sentinel.read_bytes(), original_sentinel)
+
+            uninstall = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(uninstall.returncode, 0)
+            self.assertIn("ownership manifest", uninstall.stderr)
+            self.assertEqual(sentinel.read_bytes(), original_sentinel)
+            self.assertTrue(manifest.exists())
+
+    def test_manifest_path_collisions_fail_closed(self) -> None:
+        source_root = self._isolated_installer_tree()
+        for collision_kind in ("file", "directory", "symlink"):
+            with self.subTest(collision_kind=collision_kind), tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+                first_target = _target_dirs(
+                    source_root / "install.sh",
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )[0]
+                first_target.mkdir(parents=True)
+                collision = first_target / ".auto-routing-python-modules"
+                if collision_kind == "file":
+                    collision.write_text("user-owned\n", encoding="utf-8")
+                elif collision_kind == "directory":
+                    collision.mkdir()
+                else:
+                    destination = Path(fake_home) / "user-owned-manifest"
+                    destination.write_text("user-owned\n", encoding="utf-8")
+                    collision.symlink_to(destination)
+
+                result = self._run_installer_script(
+                    source_root / "install.sh", target_dir, home=fake_home
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("ownership manifest", result.stderr)
+                self.assertTrue(collision.exists() or collision.is_symlink())
+                self.assertFalse((first_target / "SKILL.md").exists())
+
+    def test_manifest_digest_preserves_injected_safe_basename(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            for installed_dir in targets:
+                user_module = installed_dir / "user_extension.py"
+                user_module.write_text("user-owned\n", encoding="utf-8")
+                manifest = installed_dir / ".auto-routing-python-modules"
+                with manifest.open("a", encoding="utf-8") as stream:
+                    stream.write(
+                        f"{hashlib.sha256(user_module.read_bytes()).hexdigest()}"
+                        f"\t{user_module.name}\n"
+                    )
+            # Jointly forge every target manifest and recompute the old,
+            # unkeyed checksum receipt. The v2 verifier must still reject it.
+            forged_manifest = targets[0] / ".auto-routing-python-modules"
+            receipt = _installer_receipt(home=fake_home, target_project_dir=target_dir)
+            receipt.write_text(
+                "auto-routing-python-modules-receipt-v1\n"
+                f"{hashlib.sha256(forged_manifest.read_bytes()).hexdigest()}\n",
+                encoding="utf-8",
+            )
+
+            uninstalled = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(uninstalled.returncode, 0)
+            self.assertIn("ownership receipt", uninstalled.stderr)
+            for installed_dir in targets:
+                with self.subTest(installed_dir=installed_dir):
+                    self.assertEqual(
+                        (installed_dir / "user_extension.py").read_text(encoding="utf-8"),
+                        "user-owned\n",
+                    )
+
+    def test_reinstall_rejects_new_source_basename_colliding_with_unowned_module(
+        self,
+    ) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        future_source = source_skill / "future_collision.py"
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            future_source.write_text("SOURCE = True\n", encoding="utf-8")
+            collision = targets[0] / future_source.name
+            collision.write_text("USER = True\n", encoding="utf-8")
+            untouched = targets[-1] / "SKILL.md"
+            before = untouched.read_bytes()
+
+            reinstalled = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(reinstalled.returncode, 0)
+            self.assertIn("Unowned Python module collision", reinstalled.stderr)
+            self.assertEqual(collision.read_text(encoding="utf-8"), "USER = True\n")
+            self.assertEqual(untouched.read_bytes(), before)
+
+    def test_legacy_uninstall_removes_only_source_identical_python_modules(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            preserved_name = _production_python_modules(
+                source_root / "skills" / "worker-routing"
+            )[0]
+            preserved = targets[0] / preserved_name
+            preserved.write_text("# user-modified legacy module\n", encoding="utf-8")
+            for installed_dir in targets:
+                (installed_dir / ".auto-routing-python-modules").unlink()
+            _installer_receipt(home=fake_home, target_project_dir=target_dir).unlink()
+
+            uninstalled = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(
+                uninstalled.returncode, 0, uninstalled.stdout + uninstalled.stderr
+            )
+            self.assertEqual(
+                preserved.read_text(encoding="utf-8"),
+                "# user-modified legacy module\n",
+            )
+            self.assertTrue((targets[1] / preserved_name).exists())
+
+    def test_identical_unowned_module_is_an_install_collision(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        module_name = _production_python_modules(source_skill)[0]
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            first_target.mkdir(parents=True)
+            shutil.copyfile(source_skill / module_name, first_target / module_name)
+
+            result = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unowned Python module collision", result.stderr)
+            self.assertEqual(
+                (first_target / module_name).read_bytes(),
+                (source_skill / module_name).read_bytes(),
+            )
+
+    def test_missing_target_and_manifest_are_healed_and_uninstall_is_idempotent(
+        self,
+    ) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            shutil.rmtree(targets[0])
+            (targets[1] / ".auto-routing-python-modules").unlink()
+
+            healed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(healed.returncode, 0, healed.stdout + healed.stderr)
+            for installed_dir in targets[:2]:
+                self.assertTrue((installed_dir / ".auto-routing-python-modules").is_file())
+
+            shutil.rmtree(targets[0])
+            (targets[1] / ".auto-routing-python-modules").unlink()
+            first_uninstall = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(
+                first_uninstall.returncode,
+                0,
+                first_uninstall.stdout + first_uninstall.stderr,
+            )
+            second_uninstall = self._run_installer_script(
+                source_root / "uninstall.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(
+                second_uninstall.returncode,
+                0,
+                second_uninstall.stdout + second_uninstall.stderr,
+            )
+
+    def test_pre_receipt_migration_is_explicit_and_cleans_source_deleted_module(
+        self,
+    ) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "pre_receipt_stale.py"
+        stale_source.write_text("owned = True\n", encoding="utf-8")
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            _installer_receipt(home=fake_home, target_project_dir=target_dir).unlink()
+            stale_source.unlink()
+
+            refused = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("AUTO_ROUTING_MIGRATE_PRE_RECEIPT=1", refused.stderr)
+            self.assertTrue((targets[0] / "pre_receipt_stale.py").exists())
+
+            migrated = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_MIGRATE_PRE_RECEIPT="1",
+            )
+            self.assertEqual(migrated.returncode, 0, migrated.stdout + migrated.stderr)
+            for installed_dir in targets:
+                self.assertFalse((installed_dir / "pre_receipt_stale.py").exists())
+            self.assertTrue(
+                _installer_receipt(home=fake_home, target_project_dir=target_dir).is_file()
+            )
+
+    def test_uninstall_quarantines_exact_object_before_digest_decision(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        module_name = _production_python_modules(source_skill)[0]
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir, tempfile.TemporaryDirectory() as shim_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            targets = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )
+            shim = Path(shim_dir) / "python3"
+            shim.write_text(
+                "#!/bin/bash\n"
+                "case \"${2:-}\" in\n"
+                "  *.auto-routing-quarantine.*)\n"
+                "    original=${2%%.auto-routing-quarantine.*}\n"
+                "    printf 'racing replacement\\n' > \"$original\"\n"
+                "    ;;\n"
+                "esac\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+
+            uninstalled = self._run_installer_script(
+                source_root / "uninstall.sh",
+                target_dir,
+                home=fake_home,
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+            )
+            self.assertEqual(
+                uninstalled.returncode, 0, uninstalled.stdout + uninstalled.stderr
+            )
+            self.assertEqual(
+                (targets[0] / module_name).read_text(encoding="utf-8"),
+                "racing replacement\n",
+            )
+
+    def test_install_mismatch_never_overwrites_a_racing_replacement(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "racing_stale_module.py"
+        stale_source.write_text("installer-owned\n", encoding="utf-8")
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            stale_installed = first_target / stale_source.name
+            stale_installed.write_text("quarantined user bytes\n", encoding="utf-8")
+            stale_source.unlink()
+
+            shim = Path(shim_dir) / "python3"
+            shim.write_text(
+                "#!/bin/bash\n"
+                "case \"${2:-}\" in\n"
+                "  *.auto-routing-quarantine.*)\n"
+                "    original=${2%%.auto-routing-quarantine.*}\n"
+                "    printf 'racing replacement\\n' > \"$original\"\n"
+                "    ;;\n"
+                "esac\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+
+            reinstalled = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+            )
+
+            self.assertNotEqual(reinstalled.returncode, 0)
+            self.assertIn("Concurrent replacement detected", reinstalled.stderr)
+            self.assertIn("partial recovery", reinstalled.stderr)
+            self.assertNotIn("original files were restored", reinstalled.stderr)
+            self._schedule_retained_transaction_cleanup(reinstalled.stderr)
+            self.assertEqual(
+                stale_installed.read_text(encoding="utf-8"),
+                "racing replacement\n",
+            )
+            quarantines = list(
+                stale_installed.parent.glob(
+                    f"{stale_installed.name}.auto-routing-quarantine.*"
+                )
+            )
+            self.assertEqual(len(quarantines), 1, quarantines)
+            self.assertEqual(
+                quarantines[0].read_text(encoding="utf-8"),
+                "quarantined user bytes\n",
+            )
+            self.assertIn(str(quarantines[0]), reinstalled.stderr)
+
+    def test_install_hash_failure_restores_bytes_and_is_fatal(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "hash_failure_stale_module.py"
+        stale_source.write_text("installer-owned\n", encoding="utf-8")
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            stale_installed = first_target / stale_source.name
+            customized_bytes = b"customized bytes that must survive\n"
+            stale_installed.write_bytes(customized_bytes)
+            stale_source.unlink()
+
+            failure_marker = Path(shim_dir) / "hash-failed"
+            shim = Path(shim_dir) / "python3"
+            shim.write_text(
+                "#!/bin/bash\n"
+                "case \"${2:-}\" in\n"
+                "  *.auto-routing-quarantine.*)\n"
+                "    if [ ! -e \"$HASH_FAILURE_MARKER\" ]; then\n"
+                "      : > \"$HASH_FAILURE_MARKER\"\n"
+                "      exit 73\n"
+                "    fi\n"
+                "    ;;\n"
+                "esac\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+
+            reinstalled = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+                HASH_FAILURE_MARKER=str(failure_marker),
+            )
+
+            self.assertNotEqual(reinstalled.returncode, 0)
+            self.assertIn("Could not verify quarantined managed file", reinstalled.stderr)
+            self.assertEqual(stale_installed.read_bytes(), customized_bytes)
+            self.assertEqual(
+                list(
+                    stale_installed.parent.glob(
+                        f"{stale_installed.name}.auto-routing-quarantine.*"
+                    )
+                ),
+                [],
+            )
+
+    def test_stale_cleanup_rolls_back_with_fault_injection(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "rollback_stale_module.py"
+        stale_source.write_text("owned = True\n", encoding="utf-8")
+
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            stale_installed = first_target / stale_source.name
+            manifest = first_target / ".auto-routing-python-modules"
+            original_manifest = manifest.read_bytes()
+            original_skill = (first_target / "SKILL.md").read_bytes()
+            stale_source.unlink()
+            (source_skill / "SKILL.md").write_text(
+                "changed after stale deletion\n", encoding="utf-8"
+            )
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("AUTO_ROUTING_FAIL_AFTER_WRITES", failed.stderr)
+            self.assertEqual(stale_installed.read_text(encoding="utf-8"), "owned = True\n")
+            self.assertEqual(manifest.read_bytes(), original_manifest)
+            self.assertEqual((first_target / "SKILL.md").read_bytes(), original_skill)
+
+    def test_present_snapshot_rollback_preserves_a_concurrent_replacement(
+        self,
+    ) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0] / "SKILL.md"
+            original = target.read_bytes()
+            (source_skill / "SKILL.md").write_text(
+                "transaction replacement\n", encoding="utf-8"
+            )
+            marker = Path(shim_dir) / "raced"
+            self._rollback_race_python_shim(shim_dir)
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+                RACE_TARGET=str(target),
+                RACE_MARKER=str(marker),
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Concurrent replacement detected", failed.stderr)
+            self.assertIn("partial recovery", failed.stderr)
+            self._schedule_retained_transaction_cleanup(failed.stderr)
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent replacement\n")
+            snapshot_match = re.search(
+                r"Retained original snapshot: (.+)", failed.stderr
+            )
+            self.assertIsNotNone(snapshot_match, failed.stderr)
+            assert snapshot_match is not None
+            snapshot = Path(snapshot_match.group(1))
+            self.assertEqual(snapshot.read_bytes(), original)
+
+    def test_absent_entry_rollback_preserves_a_concurrent_replacement(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0] / "SKILL.md"
+            target.unlink()
+            marker = Path(shim_dir) / "raced"
+            self._rollback_race_python_shim(shim_dir)
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+                RACE_TARGET=str(target),
+                RACE_MARKER=str(marker),
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Concurrent replacement detected", failed.stderr)
+            self.assertIn("partial recovery", failed.stderr)
+            self._schedule_retained_transaction_cleanup(failed.stderr)
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent replacement\n")
+            self.assertNotIn("Retained original snapshot", failed.stderr)
+
+    def test_failed_snapshot_restore_retains_transaction_backup(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0] / "SKILL.md"
+            original = target.read_bytes()
+            (source_skill / "SKILL.md").write_text(
+                "transaction replacement\n", encoding="utf-8"
+            )
+            (Path(shim_dir) / "sitecustomize.py").write_text(
+                "import shutil\n"
+                "_real_copy2 = shutil.copy2\n"
+                "def _fail_snapshot_copy(src, dst, *args, **kwargs):\n"
+                "    if dst.endswith('/original'):\n"
+                "        raise OSError('deterministic snapshot restore failure')\n"
+                "    return _real_copy2(src, dst, *args, **kwargs)\n"
+                "shutil.copy2 = _fail_snapshot_copy\n",
+                encoding="utf-8",
+            )
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+                PYTHONPATH=shim_dir,
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Could not restore the original snapshot", failed.stderr)
+            transaction = self._schedule_retained_transaction_cleanup(failed.stderr)
+            snapshot_match = re.search(
+                r"Retained original snapshot: (.+)", failed.stderr
+            )
+            self.assertIsNotNone(snapshot_match, failed.stderr)
+            assert snapshot_match is not None
+            snapshot = Path(snapshot_match.group(1))
+            self.assertTrue(transaction.is_dir(), transaction)
+            self.assertEqual(snapshot.read_bytes(), original)
+            self.assertTrue(snapshot.is_relative_to(transaction))
+
+    def test_fault_injection_removes_directories_created_by_first_managed_write(
+        self,
+    ) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("AUTO_ROUTING_FAIL_AFTER_WRITES", failed.stderr)
+            self.assertFalse(first_target.exists())
+            self.assertFalse((Path(fake_home) / ".gemini").exists())
+
+    def test_later_failure_retries_shared_ancestor_directory_rollback(self) -> None:
+        source_root = self._isolated_installer_tree()
+        managed_count = len(_bash_array(source_root / "install.sh", "MANAGED_FILES")) + len(
+            _production_python_modules(source_root / "skills" / "worker-routing")
+        )
+        # key copy+chmod, worker files+manifest, routing config, two chmods,
+        # then the first council-review copy (a sibling under skills/).
+        fail_after = 2 + managed_count + 1 + 1 + 2 + 1
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES=str(fail_after),
+            )
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("AUTO_ROUTING_FAIL_AFTER_WRITES", failed.stderr)
+            self.assertFalse((Path(fake_home) / ".gemini").exists())
+            self.assertFalse((Path(fake_home) / ".local").exists())
+
+    def test_total_mutation_hook_traces_all_ticket_relevant_mutation_kinds(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            legacy_policy = first_target.parent / "council-review" / "council-policy.json"
+            legacy_policy.parent.mkdir(parents=True)
+            legacy_policy.write_text("legacy\n", encoding="utf-8")
+
+            result = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_TRACE_MUTATIONS="1",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            trace = result.stderr
+            self.assertIn(f"copy:{first_target / 'routing-config.json'}", trace)
+            self.assertIn(f"chmod:{first_target / 'routing-audit.sh'}", trace)
+            self.assertIn(f"remove:{legacy_policy}", trace)
+            self.assertIn(
+                f"copy:{Path(target_dir) / '.claude/rules/worker-routing.md'}",
+                trace,
+            )
+            self.assertIn(f"copy:{Path(target_dir) / 'AGENTS.md'}", trace)
+            self.assertIn(f"copy:{Path(target_dir) / 'CLAUDE.md'}", trace)
+            self.assertIn(f"copy:{Path(fake_home) / '.gemini/GEMINI.md'}", trace)
+
     def test_an_installed_harness_can_import_the_production_path(self) -> None:
         """The failure itself, reproduced end to end.
 
         Before `MANAGED_FILES` was fixed this exited non-zero with
         `ModuleNotFoundError: No module named 'learning_journal'`, raised from
         `production_invoker`'s module-level import — the import
-        `advisory_consultation` performs the moment a caller does not inject
+        `critical_dialogue` performs the moment a caller does not inject
         its own worker.
         """
         with _InstalledHarness() as harness:
             result = harness.run_installed_python(
-                "import advisory_consultation, learning_outcomes, "
+                "import critical_dialogue, learning_outcomes, "
                 "production_invoker, routing_check\n"
                 "print('imports ok')"
             )
@@ -9139,12 +11044,12 @@ class ManagedFileClosureTests(unittest.TestCase):
         program = (
             "import sys\n"
             "from pathlib import Path\n"
-            "import advisory_consultation, production_invoker\n"
+            "import critical_dialogue, production_invoker\n"
             f"replies = iter([{plan!r}, {_approve(plan)!r}])\n"
             "production_invoker.invoke_worker = (\n"
             "    lambda model, effort, prompt, **kwargs: next(replies)\n"
             ")\n"
-            "result = advisory_consultation.run_advisory_consultation_debate(\n"
+            "result = critical_dialogue.run_advisory_consultation_debate(\n"
             "    'Plan the auth rewrite', root_dir=Path(sys.argv[1]),\n"
             "    task_id='installed-consultation-1',\n"
             ")\n"
@@ -9255,7 +11160,7 @@ class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
     """
 
     # Unannotated return for the reason `_audit_report`
-    # gives: `advisory_consultation.AdvisoryDebateResult` is not a name mypy
+    # gives: `critical_dialogue.AdvisoryDebateResult` is not a name mypy
     # can resolve through a path-loaded module.
     def _run(self, task_id: str, root: Path):
         with mock.patch.object(
@@ -9266,7 +11171,7 @@ class ConsultationSurvivesJournalWiringFailureTests(unittest.TestCase):
                 _approve("Planner's proposed plan."),
             ],
         ):
-            return advisory_consultation.run_advisory_consultation_debate(
+            return critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", root_dir=root, task_id=task_id
             )
 
@@ -9350,30 +11255,30 @@ class CanaryCadencePredicateTests(unittest.TestCase):
     """
 
     def test_fires_exactly_at_the_dialogue_count_boundary(self) -> None:
-        threshold = advisory_consultation.DEFAULT_CANARY_DIALOGUES_PER_CANARY
+        threshold = critical_dialogue.DEFAULT_CANARY_DIALOGUES_PER_CANARY
         self.assertFalse(
-            advisory_consultation.is_canary_dialogue(threshold - 1, 0.0)
+            critical_dialogue.is_canary_dialogue(threshold - 1, 0.0)
         )
-        self.assertTrue(advisory_consultation.is_canary_dialogue(threshold, 0.0))
+        self.assertTrue(critical_dialogue.is_canary_dialogue(threshold, 0.0))
 
     def test_fires_exactly_at_the_weekly_time_boundary(self) -> None:
-        threshold = advisory_consultation.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES
+        threshold = critical_dialogue.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES
         self.assertFalse(
-            advisory_consultation.is_canary_dialogue(0, threshold - 1)
+            critical_dialogue.is_canary_dialogue(0, threshold - 1)
         )
-        self.assertTrue(advisory_consultation.is_canary_dialogue(0, threshold))
+        self.assertTrue(critical_dialogue.is_canary_dialogue(0, threshold))
 
     def test_fires_when_both_boundaries_are_met(self) -> None:
         self.assertTrue(
-            advisory_consultation.is_canary_dialogue(
-                advisory_consultation.DEFAULT_CANARY_DIALOGUES_PER_CANARY,
-                advisory_consultation.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES,
+            critical_dialogue.is_canary_dialogue(
+                critical_dialogue.DEFAULT_CANARY_DIALOGUES_PER_CANARY,
+                critical_dialogue.DEFAULT_CANARY_SECONDS_BETWEEN_CANARIES,
             )
         )
 
     def test_does_not_fire_when_neither_boundary_is_met(self) -> None:
-        self.assertFalse(advisory_consultation.is_canary_dialogue(1, 1.0))
-        self.assertFalse(advisory_consultation.is_canary_dialogue(5, 12345.0))
+        self.assertFalse(critical_dialogue.is_canary_dialogue(1, 1.0))
+        self.assertFalse(critical_dialogue.is_canary_dialogue(5, 12345.0))
 
     def test_dialogue_count_threshold_is_read_from_injected_config_not_hardcoded(
         self,
@@ -9392,10 +11297,10 @@ class CanaryCadencePredicateTests(unittest.TestCase):
                 json.dumps({"canary_cadence": {"dialogues_per_canary": 3000}})
             )
 
-            fires_low = advisory_consultation.is_canary_dialogue(
+            fires_low = critical_dialogue.is_canary_dialogue(
                 5, 0.0, config_path=low_config
             )
-            fires_high = advisory_consultation.is_canary_dialogue(
+            fires_high = critical_dialogue.is_canary_dialogue(
                 5, 0.0, config_path=high_config
             )
 
@@ -9415,10 +11320,10 @@ class CanaryCadencePredicateTests(unittest.TestCase):
                 json.dumps({"canary_cadence": {"seconds_between_canaries": 10_000_000}})
             )
 
-            fires_low = advisory_consultation.is_canary_dialogue(
+            fires_low = critical_dialogue.is_canary_dialogue(
                 0, 100.0, config_path=low_config
             )
-            fires_high = advisory_consultation.is_canary_dialogue(
+            fires_high = critical_dialogue.is_canary_dialogue(
                 0, 100.0, config_path=high_config
             )
 
@@ -9438,13 +11343,13 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
     def test_canary_shows_the_critic_the_fixture_text_and_never_invokes_the_planner(
         self,
     ) -> None:
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         invoker = _RecordingInvoker([_approve_fixture(fixture)])
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -9461,13 +11366,13 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         self.assertEqual(result.outcome, "canary")
 
     def test_canary_approval_is_recorded_as_a_miss(self) -> None:
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         invoker = _RecordingInvoker([_approve_fixture(fixture)])
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
             )
 
@@ -9483,7 +11388,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
             )
 
@@ -9500,7 +11405,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
             )
 
@@ -9508,7 +11413,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         self.assertEqual(result.canary_result, "catch")
 
     def test_canary_never_writes_implementation_plan_on_miss_or_catch(self) -> None:
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         for critic_response, expected_canary_result in (
             (_approve_fixture(fixture), "miss"),
             (_revise("Objection."), "catch"),
@@ -9519,7 +11424,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
                     os.environ, {}, clear=True
                 ):
                     root = Path(tmp)
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         "Plan the auth rewrite",
                         invoker,
                         root_dir=root,
@@ -9534,14 +11439,14 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         writes `implementation_plan.md`), then run a canary against the
         same root, and confirm the real plan file survives untouched — a
         canary must neither write NOR delete a mission's plan artifact."""
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             real_plan = "The real mission's agreed plan."
             real_invoker = _RecordingInvoker([real_plan, _approve(real_plan)])
-            real_result = advisory_consultation.run_advisory_consultation_debate(
+            real_result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", real_invoker, root_dir=root
             )
             self.assertTrue(real_result.consensus_reached)
@@ -9549,7 +11454,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             self.assertEqual(plan_path.read_text(), real_plan)
 
             canary_invoker = _RecordingInvoker([_approve_fixture(fixture)])
-            canary_result = advisory_consultation.run_advisory_consultation_debate(
+            canary_result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the checkout rewrite",
                 canary_invoker,
                 root_dir=root,
@@ -9565,7 +11470,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([RuntimeError("critic unreachable")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
             )
             self.assertFalse((root / "implementation_plan.md").exists())
@@ -9576,18 +11481,18 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
     def test_canary_transcript_is_clearly_marked_and_not_read_as_a_normal_round(
         self,
     ) -> None:
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([_approve_fixture(fixture)])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
             )
             transcript = (root / ".scratch" / "planning_debate.md").read_text()
 
-        self.assertIn(advisory_consultation.CANARY_MARKER, transcript)
+        self.assertIn(dialogue_transcript.CANARY_MARKER, transcript)
         self.assertIn(fixture.id, transcript)
         self.assertIn("Outcome:** canary", transcript)
         self.assertIn(fixture.plan_text, transcript)
@@ -9598,7 +11503,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([_revise("Objection.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
             )
             records = _read_jsonl(root / ".ralph" / "routing_telemetry.jsonl")
@@ -9611,7 +11516,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         """Proves the fixture shown is genuinely injectable — the caller
         can assert 'the Critic was shown THIS specific known-flawed text'
         rather than merely 'some canary ran'."""
-        custom_fixture = advisory_consultation.CanaryFixture(
+        custom_fixture = critical_dialogue.CanaryFixture(
             id="test-custom-fixture",
             flaw_summary="A deliberately planted test-only flaw.",
             plan_text="Custom fixture plan text unique to this test.",
@@ -9621,7 +11526,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -9643,7 +11548,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite using api_key=sk-abc123",
                 invoker,
                 root_dir=root,
@@ -9663,13 +11568,13 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         normally select the panel topology (`plan-review` + `complex`), a
         canary run invokes only `critic_model`, never `critic_b_model`, and
         reports `critic_model` (not `critic_a_model`) on the result."""
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         invoker = _RecordingInvoker([_approve_fixture(fixture)])
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -9688,19 +11593,19 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
 
     def test_default_fixture_used_when_no_fixture_is_explicitly_supplied(self) -> None:
         invoker = _RecordingInvoker(
-            [_approve_fixture(advisory_consultation.CANARY_FIXTURES[0])]
+            [_approve_fixture(critical_dialogue.CANARY_FIXTURES[0])]
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, is_canary=True
             )
 
         self.assertEqual(len(invoker.calls), 1)
         self.assertEqual(
-            invoker.calls[0][2].count(advisory_consultation.CANARY_FIXTURES[0].plan_text),
+            invoker.calls[0][2].count(critical_dialogue.CANARY_FIXTURES[0].plan_text),
             1,
         )
 
@@ -9716,7 +11621,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             self.assertEqual(
@@ -9749,12 +11654,12 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
             root = Path(tmp)
             real_plan = "The real mission's agreed plan."
             real_invoker = _RecordingInvoker([real_plan, _approve(real_plan)])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 task_description, real_invoker, root_dir=root
             )
 
             canary_invoker = _RecordingInvoker([_revise("Objection.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 task_description, canary_invoker, root_dir=root, is_canary=True
             )
 
@@ -9763,7 +11668,7 @@ class AdvisorySeededFlawCanaryTests(unittest.TestCase):
         self.assertEqual(len(records), 2)
         real_task_id = records[0]["task_id"]
         canary_task_id = records[1]["task_id"]
-        expected_real_digest = advisory_consultation._default_task_id(task_description)
+        expected_real_digest = critical_dialogue._default_task_id(task_description)
         self.assertEqual(real_task_id, expected_real_digest)
         self.assertNotEqual(canary_task_id, expected_real_digest)
         self.assertNotEqual(canary_task_id, real_task_id)
@@ -9781,34 +11686,34 @@ class DialogueBudgetLadderTests(unittest.TestCase):
     """
 
     def test_well_under_the_cap_is_rung_zero(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(0), 0)
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap // 2), 0)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(0), 0)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(cap // 2), 0)
 
     def test_fires_rung_one_exactly_at_the_cap_boundary(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap - 1), 0)
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(cap), 1)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(cap - 1), 0)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(cap), 1)
 
     def test_rung_one_holds_up_to_but_not_including_twice_the_cap(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(2 * cap - 1), 1)
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(2 * cap), 2)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(2 * cap - 1), 1)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(2 * cap), 2)
 
     def test_rung_two_holds_up_to_but_not_including_three_times_the_cap(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap - 1), 2)
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap), 3)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(3 * cap - 1), 2)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(3 * cap), 3)
 
     def test_rung_three_holds_for_any_spend_at_or_beyond_three_times_the_cap(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(3 * cap), 3)
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(100 * cap), 3)
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(3 * cap), 3)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(100 * cap), 3)
 
     def test_negative_spend_is_always_rung_zero(self) -> None:
         """A caller passing a negative spend is under budget by construction —
         `resolve_degradation_rung` never raises for it (see its docstring)."""
-        self.assertEqual(advisory_consultation.resolve_degradation_rung(-5), 0)
+        self.assertEqual(dialogue_degradation.resolve_degradation_rung(-5), 0)
 
     def test_cap_is_read_from_injected_config_not_hardcoded(self) -> None:
         """Same proof style as
@@ -9826,10 +11731,10 @@ class DialogueBudgetLadderTests(unittest.TestCase):
                 json.dumps({"dialogue_budget": {"session_dialogue_cap": 2000}})
             )
 
-            rung_low = advisory_consultation.resolve_degradation_rung(
+            rung_low = dialogue_degradation.resolve_degradation_rung(
                 5, config_path=low_config
             )
-            rung_high = advisory_consultation.resolve_degradation_rung(
+            rung_high = dialogue_degradation.resolve_degradation_rung(
                 5, config_path=high_config
             )
 
@@ -9846,11 +11751,11 @@ class DialogueBudgetLadderTests(unittest.TestCase):
                 json.dumps({"dialogue_budget": {"session_dialogue_cap": 0}})
             )
             self.assertEqual(
-                advisory_consultation.resolve_degradation_rung(0, config_path=zero_config),
+                dialogue_degradation.resolve_degradation_rung(0, config_path=zero_config),
                 3,
             )
             self.assertEqual(
-                advisory_consultation.resolve_degradation_rung(5, config_path=zero_config),
+                dialogue_degradation.resolve_degradation_rung(5, config_path=zero_config),
                 3,
             )
 
@@ -9872,7 +11777,7 @@ class DegradedRosterModelTests(unittest.TestCase):
                 json.dumps({"light_doer": {"name": "Model A / Model B / Model C"}})
             )
             self.assertEqual(
-                advisory_consultation._load_degraded_roster_model(config_path),
+                critical_dialogue._load_degraded_roster_model(config_path),
                 "Model A",
             )
 
@@ -9881,8 +11786,8 @@ class DegradedRosterModelTests(unittest.TestCase):
             config_path = Path(tmp) / "config.json"
             config_path.write_text(json.dumps({}))
             self.assertEqual(
-                advisory_consultation._load_degraded_roster_model(config_path),
-                advisory_consultation._DEFAULT_DEGRADED_ROSTER_MODEL,
+                critical_dialogue._load_degraded_roster_model(config_path),
+                critical_dialogue._DEFAULT_DEGRADED_ROSTER_MODEL,
             )
 
     def test_falls_back_to_default_when_the_first_alternative_is_blank(self) -> None:
@@ -9892,8 +11797,8 @@ class DegradedRosterModelTests(unittest.TestCase):
                 json.dumps({"light_doer": {"name": " / Model B"}})
             )
             self.assertEqual(
-                advisory_consultation._load_degraded_roster_model(config_path),
-                advisory_consultation._DEFAULT_DEGRADED_ROSTER_MODEL,
+                critical_dialogue._load_degraded_roster_model(config_path),
+                critical_dialogue._DEFAULT_DEGRADED_ROSTER_MODEL,
             )
 
     def test_checked_in_config_resolves_to_codex_terra(self) -> None:
@@ -9901,8 +11806,8 @@ class DegradedRosterModelTests(unittest.TestCase):
         `light_doer.name` value so a future edit to that block is caught
         here rather than silently changing what rung 2 substitutes."""
         self.assertEqual(
-            advisory_consultation._load_degraded_roster_model(
-                advisory_consultation._CONFIG_PATH
+            critical_dialogue._load_degraded_roster_model(
+                critical_dialogue._CONFIG_PATH
             ),
             "Codex 5.6 Terra",
         )
@@ -9936,7 +11841,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", _approve("Planner's plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -9947,7 +11852,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
 
         self.assertEqual(result.degradation_rung, 0)
         self.assertTrue(result.consensus_reached)
-        self.assertNotIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertNotIn(dialogue_degradation.BUDGET_DEGRADATION_MARKER, transcript)
         self.assertEqual(records[0]["degradation_rung"], 0)
 
     def test_sensitivity_halt_takes_priority_over_the_budget_ladder(self) -> None:
@@ -9957,13 +11862,13 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         report no degradation for a dialogue that never ran, exactly like
         `AdvisoryRosterIntegrationTests` already proves for roster
         resolution."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite using api_key=sk-abc123",
                 invoker,
                 root_dir=root,
@@ -9977,7 +11882,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     def test_rung_one_reduces_effective_round_cap_observable_via_fewer_invoker_calls(
         self,
     ) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -9992,7 +11897,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
                     _revise("Not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10006,13 +11911,13 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertLess(result.rounds_run, 3)
         self.assertEqual(len(invoker.calls), 2)
         self.assertEqual(result.outcome, "stalemate")
-        self.assertIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertIn(dialogue_degradation.BUDGET_DEGRADATION_MARKER, transcript)
 
     def test_rung_one_reduces_rounds_in_panel_topology_too(self) -> None:
         """The round reduction is a plain `max_rounds` reassignment the
         round loop already reads regardless of topology — proves it holds
         for the panel loop (spec 0003 ticket 05) as well as the pair loop."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -10024,7 +11929,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
                     "Gemini 3.6 Flash": [_revise("Critic B objects.")],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10040,13 +11945,13 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(result.outcome, "stalemate")
 
     def test_rung_two_cheapens_effort_observable_in_invoker_calls(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10061,7 +11966,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(result.rounds_run, 1)
         self.assertEqual(len(invoker.calls), 2)
         efforts = {effort for _model, effort, _prompt in invoker.calls}
-        self.assertEqual(efforts, {advisory_consultation._DEGRADED_EFFORT})
+        self.assertEqual(efforts, {critical_dialogue._DEGRADED_EFFORT})
         self.assertNotIn("high", efforts)
 
     def test_rung_two_changes_both_effort_and_model_sent_to_invoke_worker(
@@ -10074,16 +11979,16 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         `_load_degraded_roster_model`'s substitute (drawn from
         `routing-config.json`'s `light_doer` block), never the caller's own
         explicit `planner_model`/`critic_model`."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        expected_model = advisory_consultation._load_degraded_roster_model(
-            advisory_consultation._CONFIG_PATH
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        expected_model = critical_dialogue._load_degraded_roster_model(
+            critical_dialogue._CONFIG_PATH
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10101,7 +12006,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertEqual(len(invoker.calls), 2)
         for model, effort, _prompt in invoker.calls:
             self.assertEqual(model, expected_model)
-            self.assertEqual(effort, advisory_consultation._DEGRADED_EFFORT)
+            self.assertEqual(effort, critical_dialogue._DEGRADED_EFFORT)
         self.assertEqual(result.planner_model, expected_model)
         self.assertEqual(result.critic_model, expected_model)
 
@@ -10119,16 +12024,16 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         construction, so `degraded_independence` must read True (spec
         0003 story 14) even though `resolve_roster` itself had three
         distinct reachable families to work with."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        expected_model = advisory_consultation._load_degraded_roster_model(
-            advisory_consultation._CONFIG_PATH
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        expected_model = critical_dialogue._load_degraded_roster_model(
+            critical_dialogue._CONFIG_PATH
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10149,14 +12054,14 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     ) -> None:
         """Degradation limits retries, it does not block a genuine consensus
         that arrives on the first (and, at this rung, only) round."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10171,13 +12076,13 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
     def test_rung_three_skips_the_dialogue_entirely_with_zero_worker_calls(
         self,
     ) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10192,14 +12097,14 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         self.assertFalse(result.consensus_reached)
         self.assertEqual(result.final_plan, "")
         self.assertFalse((root / "implementation_plan.md").exists())
-        self.assertIn(advisory_consultation.BUDGET_DEGRADATION_MARKER, transcript)
+        self.assertIn(dialogue_degradation.BUDGET_DEGRADATION_MARKER, transcript)
         self.assertIn("Outcome:** budget_skipped", transcript)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["outcome"], "budget_skipped")
         self.assertEqual(records[0]["degradation_rung"], 3)
 
     def test_rung_three_removes_a_pre_existing_stale_plan_artifact(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -10207,7 +12112,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
             plan_path = root / "implementation_plan.md"
             plan_path.write_text("stale plan from an earlier run")
 
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -10226,13 +12131,13 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         specifically to guarantee zero worker contact this call. See this
         ticket's report for why the two seams compose this way rather than
         canaries bypassing the budget ladder."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10259,7 +12164,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
                 json.dumps({"dialogue_budget": {"session_dialogue_cap": 1}})
             )
             invoker = _RecordingInvoker([])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10282,7 +12187,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         observes the rung climb the ladder exactly as
         `resolve_degradation_rung` documents, all the way to the rung-3
         skip."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         spends_and_expected_rungs = [
             (0, 0),
             (cap - 1, 0),
@@ -10305,7 +12210,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
                     )
                 else:
                     invoker = _RecordingInvoker([])
-                result = advisory_consultation.run_advisory_consultation_debate(
+                result = critical_dialogue.run_advisory_consultation_debate(
                     "Plan the auth rewrite",
                     invoker,
                     root_dir=root,
@@ -10328,14 +12233,14 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         `reachability_check` was supplied at all (mirrors
         `test_degraded_independence_surfaces_in_telemetry_record`, the
         ticket-07 roster-path version of this same assertion)."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10355,14 +12260,14 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         `DEGRADED_INDEPENDENCE_MARKER` already gates on, never a second,
         rung-2-only rendering (mirrors
         `test_degraded_independence_surfaces_in_transcript_text`)."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10370,7 +12275,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
             )
             transcript = (root / ".scratch" / "planning_debate.md").read_text()
 
-        self.assertIn(advisory_consultation.DEGRADED_INDEPENDENCE_MARKER, transcript)
+        self.assertIn(dialogue_transcript.DEGRADED_INDEPENDENCE_MARKER, transcript)
 
     def test_rung_two_reports_degraded_independence_in_panel_topology_too(
         self,
@@ -10380,7 +12285,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         construction argument holds there identically: both Critics are the
         same model as the Planner whose plan they judge, and the flag must
         say so."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
@@ -10393,7 +12298,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
                     _approve(plan, "Critic B: solid."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10420,17 +12325,17 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         canary records are mandatorily filtered out of mission aggregation
         (`outcome != "canary"`, per `AdvisoryTelemetryRecord`'s own
         WARNING) — the flag rides only where the canary auditor looks."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
-        degraded_model = advisory_consultation._load_degraded_roster_model(
-            advisory_consultation._CONFIG_PATH
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
+        degraded_model = critical_dialogue._load_degraded_roster_model(
+            critical_dialogue._CONFIG_PATH
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([_approve_fixture(fixture)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10463,8 +12368,8 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
         is a REAL result's artifact, still accurately described by that real
         result. A scheduled probe that happens to arrive while the session
         is exhausted has no business destroying it."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         real_plan = "Real mission's consensus plan — still current.\n"
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
@@ -10474,7 +12379,7 @@ class AdvisoryBudgetDegradationTests(unittest.TestCase):
             plan_path.write_text(real_plan)
 
             invoker = _RecordingInvoker([])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10512,7 +12417,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
             root = Path(tmp)
             plan = "Planner's plan."
             invoker = _RecordingInvoker([plan, _approve(plan)])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10538,7 +12443,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
                     "Test Critic B": [_approve(plan, "Critic B: solid.")],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10575,7 +12480,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
                     _approve(second_plan, "Good now."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root
             )
             records = _read_jsonl(root / self.TELEMETRY_RELATIVE_PATH)
@@ -10622,7 +12527,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
                     ],
                 }
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10667,7 +12572,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([_revise("Objection.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10700,7 +12605,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            halt_result = advisory_consultation.run_advisory_consultation_debate(
+            halt_result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the rollout, password=hunter2",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -10715,13 +12620,13 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
         a pre-ticket-10 direct `AdvisoryDebateResult(...)`/`AdvisoryTelemetryRecord(...)`
         construction that never mentions `topology` or `round_verdicts` must
         keep meaning exactly what it meant before those fields existed."""
-        result = advisory_consultation.AdvisoryDebateResult(
+        result = critical_dialogue.AdvisoryDebateResult(
             rounds_run=1, final_plan="A plan.", outcome="consensus"
         )
         self.assertEqual(result.topology, "pair")
         self.assertEqual(result.round_verdicts, ())
 
-        record = advisory_consultation.AdvisoryTelemetryRecord(
+        record = dialogue_transcript.AdvisoryTelemetryRecord(
             timestamp="2026-01-01T00:00:00Z",
             task_id="abc123",
             rounds_run=1,
@@ -10760,7 +12665,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
                     _approve(second_plan, "ZEBRA-QUASAR-77 rollback looks good now."),
                 ]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 distinctive_task, invoker, root_dir=root
             )
             telemetry_text = (root / self.TELEMETRY_RELATIVE_PATH).read_text()
@@ -10792,7 +12697,7 @@ class AdvisoryTelemetryExtensionsTests(unittest.TestCase):
                     _approve("Planner's revised plan.", "Good now."),
                 ]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -10832,17 +12737,17 @@ class IsLocalFamilyTests(unittest.TestCase):
         change to that vocabulary is visible here too."""
         cloud_families = {
             family
-            for _substring, family in advisory_consultation._CLOUD_FAMILY_SUBSTRINGS
+            for _substring, family in critical_dialogue._CLOUD_FAMILY_SUBSTRINGS
         }
         self.assertEqual(cloud_families, {"claude", "gemini", "codex-gpt"})
         for family in cloud_families:
             with self.subTest(family=family):
-                self.assertFalse(advisory_consultation.is_local_family(family))
+                self.assertFalse(critical_dialogue.is_local_family(family))
 
     def test_local_lineages_read_as_local(self) -> None:
         for family in ("gemma", "qwen", "llama", "mistral", "unknown"):
             with self.subTest(family=family):
-                self.assertTrue(advisory_consultation.is_local_family(family))
+                self.assertTrue(critical_dialogue.is_local_family(family))
 
     def test_agrees_with_classify_model_family_for_every_default_roster_model(
         self,
@@ -10866,15 +12771,15 @@ class IsLocalFamilyTests(unittest.TestCase):
         for model in cloud_models:
             with self.subTest(model=model):
                 self.assertFalse(
-                    advisory_consultation.is_local_family(
-                        advisory_consultation.classify_model_family(model)
+                    critical_dialogue.is_local_family(
+                        critical_dialogue.classify_model_family(model)
                     )
                 )
         for model in local_models:
             with self.subTest(model=model):
                 self.assertTrue(
-                    advisory_consultation.is_local_family(
-                        advisory_consultation.classify_model_family(model)
+                    critical_dialogue.is_local_family(
+                        critical_dialogue.classify_model_family(model)
                     )
                 )
 
@@ -10893,7 +12798,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
     (`claude`/`codex-gpt`/`gemini`) as reachable ALONGSIDE both local
     families this repo's own default roster fallback chains actually offer
     (`gemma`, `qwen` — see `DEFAULT_ROSTER_FALLBACK_CHAINS` in
-    advisory_consultation.py). Scripting the cloud families as reachable
+    critical_dialogue.py). Scripting the cloud families as reachable
     too, rather than simply omitting them, is what actually proves the
     local-only gate is doing the filtering: a test where nothing cloud was
     ever "up" in the first place would pass even if the gate did nothing at
@@ -10941,7 +12846,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
                     else:
                         responses = [plan, _approve(plan)]
                     invoker = _RecordingInvoker(responses)
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         self._SENSITIVE_TASK,
                         invoker,
                         root_dir=root,
@@ -10953,12 +12858,12 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
                 self.assertTrue(result.consensus_reached)
                 self.assertTrue(invoker.calls)
                 called_families = {
-                    advisory_consultation.classify_model_family(model)
+                    critical_dialogue.classify_model_family(model)
                     for model, _effort, _prompt in invoker.calls
                 }
                 for family in called_families:
                     self.assertTrue(
-                        advisory_consultation.is_local_family(family),
+                        critical_dialogue.is_local_family(family),
                         f"occasion {occasion!r} invoked cloud family {family!r}",
                     )
 
@@ -10978,7 +12883,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
                 ):
                     root = Path(tmp)
                     invoker = _RecordingInvoker([])
-                    result = advisory_consultation.run_advisory_consultation_debate(
+                    result = critical_dialogue.run_advisory_consultation_debate(
                         self._SENSITIVE_TASK,
                         invoker,
                         root_dir=root,
@@ -10999,7 +12904,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
         `roster_topology.role_fallback_chains` offer exactly two distinct
         local families across all three roles (`gemma` for planner and
         critic_b, `qwen` for critic_a — see `DEFAULT_ROSTER_FALLBACK_CHAINS`
-        in advisory_consultation.py), so "two distinct, not one" is the
+        in critical_dialogue.py), so "two distinct, not one" is the
         strongest claim provable against the real production config without
         hand-rolling a custom one for this test.
 
@@ -11023,7 +12928,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
                     _approve(plan, "Critic B: solid."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 self._SENSITIVE_TASK,
                 invoker,
                 root_dir=root,
@@ -11035,7 +12940,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
         self.assertTrue(result.consensus_reached)
         self.assertEqual(len(invoker.calls), 3)
         called_families = [
-            advisory_consultation.classify_model_family(model)
+            critical_dialogue.classify_model_family(model)
             for model, _effort, _prompt in invoker.calls
         ]
         distinct_families = set(called_families)
@@ -11045,7 +12950,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
             f"panel reused one local family for all three roles: {called_families!r}",
         )
         for family in distinct_families:
-            self.assertTrue(advisory_consultation.is_local_family(family))
+            self.assertTrue(critical_dialogue.is_local_family(family))
         self.assertTrue(
             result.degraded_independence,
             "planner and critic_b both resolve to gemma against the real "
@@ -11059,16 +12964,16 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
         dialogue's effort, but must never launder it onto
         `_load_degraded_roster_model`'s substitute, which resolves to a
         CLOUD model (`light_doer.name` in routing-config.json)."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
-        cloud_light_doer_model = advisory_consultation._load_degraded_roster_model(
-            advisory_consultation._CONFIG_PATH
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
+        cloud_light_doer_model = critical_dialogue._load_degraded_roster_model(
+            critical_dialogue._CONFIG_PATH
         )
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 self._SENSITIVE_TASK,
                 invoker,
                 root_dir=root,
@@ -11082,13 +12987,13 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
         self.assertEqual(result.rounds_run, 1)
         self.assertEqual(len(invoker.calls), 2)
         efforts = {effort for _model, effort, _prompt in invoker.calls}
-        self.assertEqual(efforts, {advisory_consultation._DEGRADED_EFFORT})
+        self.assertEqual(efforts, {critical_dialogue._DEGRADED_EFFORT})
         called_models = {model for model, _effort, _prompt in invoker.calls}
         self.assertNotIn(cloud_light_doer_model, called_models)
         for model in called_models:
-            family = advisory_consultation.classify_model_family(model)
+            family = critical_dialogue.classify_model_family(model)
             self.assertTrue(
-                advisory_consultation.is_local_family(family),
+                critical_dialogue.is_local_family(family),
                 f"rung 2 invoked non-local model {model!r} (family {family!r}) "
                 "on a sensitive task",
             )
@@ -11111,7 +13016,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", _approve("Planner's plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 self._SENSITIVE_TASK, invoker, root_dir=root
             )
 
@@ -11133,7 +13038,7 @@ class SensitiveTaskLocalOnlyDialogueTests(unittest.TestCase):
         ):
             root = Path(tmp)
             task = "Plan the rollout; api_key=sk-supersecretvalue-do-not-print"
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 task,
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -11203,7 +13108,7 @@ class SensitiveTaskDispatchPathTests(unittest.TestCase):
             plan = "Planner's post-mortem lesson for the sensitive task."
             invoker = _RecordingInvoker([plan, _approve(plan)])
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 self._SENSITIVE_TASK,
                 invoker,
                 root_dir=root,
@@ -11220,12 +13125,12 @@ class SensitiveTaskDispatchPathTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["outcome"], "consensus")
         called_families = {
-            advisory_consultation.classify_model_family(model)
+            critical_dialogue.classify_model_family(model)
             for model, _effort, _prompt in invoker.calls
         }
         for family in called_families:
             self.assertTrue(
-                advisory_consultation.is_local_family(family),
+                critical_dialogue.is_local_family(family),
                 f"dispatched sensitive post-mortem invoked cloud family {family!r}",
             )
 
@@ -11248,7 +13153,7 @@ class SensitiveTaskDispatchPathTests(unittest.TestCase):
             root = Path(tmp)
             invoker = _RecordingInvoker([])
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 self._SENSITIVE_TASK,
                 invoker,
                 root_dir=root,
@@ -11286,7 +13191,7 @@ class SensitiveTaskDispatchPathTests(unittest.TestCase):
             root = Path(tmp)
             invoker = _RecordingInvoker([])
 
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 self._SENSITIVE_TASK,
                 invoker,
                 root_dir=root,
@@ -11309,8 +13214,8 @@ class SensitiveTaskDispatchPathTests(unittest.TestCase):
 # branches, so an insertion anywhere but the end is a merge conflict for
 # everyone.
 class DialogueQualityRecordWriterTests(unittest.TestCase):
-    """`advisory_consultation._write_dialogue_quality_record` /
-    `_reduce_dialogue_round`: one `learning_journal.DialogueQualityRecord`
+    """`dialogue_transcript._write_dialogue_quality_record` /
+    `dialogue_transcript._reduce_dialogue_round`: one journal record
     per dialogue, written at the `_result` choke point, reduced from the
     `AdvisoryRoundVerdict`s a consultation already computes and discards
     nowhere else. Organized 1:1 against
@@ -11337,7 +13242,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
                     _approve(second_plan, "Good now."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11366,7 +13271,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
                     _revise("Not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11396,7 +13301,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
                     "Test Critic B": [_approve(plan, "Critic B: solid.")],
                 }
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11428,13 +13333,13 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         while the result names one for its unhealthy state
         (`degraded_independence`). A rung-2 run must read `degraded=True`,
         `independent=False`; a rung-0 run must read the mirror image."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Planner's plan.", _revise("Not convinced.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11453,7 +13358,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Planner's plan.", _approve("Planner's plan.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11474,11 +13379,11 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
     # --- AC3: reduction rule, stated once, never recomputed from text ---
 
     def test_reduce_dialogue_round_counts_verified_quotes_not_objections(self) -> None:
-        entry = advisory_consultation.AdvisoryRoundVerdict(
-            critic_a=advisory_consultation.VerdictContractResult("revise", 0, 3)
+        entry = dialogue_contracts.AdvisoryRoundVerdict(
+            critic_a=dialogue_contracts.VerdictContractResult("revise", 0, 3)
         )
         self.assertEqual(
-            advisory_consultation._reduce_dialogue_round(entry), ("revise", 0)
+            critical_dialogue._reduce_dialogue_round(entry), ("revise", 0)
         )
 
     def test_reduce_dialogue_round_takes_the_minimum_across_a_panel(self) -> None:
@@ -11487,18 +13392,18 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         the round's count must be zero, never five (`sum`/`max` would both
         report five, indistinguishable from a pair round's sole Critic
         having verified five)."""
-        entry = advisory_consultation.AdvisoryRoundVerdict(
-            critic_a=advisory_consultation.VerdictContractResult("approved", 5, 0),
-            critic_b=advisory_consultation.VerdictContractResult("approved", 0, 0),
+        entry = dialogue_contracts.AdvisoryRoundVerdict(
+            critic_a=dialogue_contracts.VerdictContractResult("approved", 5, 0),
+            critic_b=dialogue_contracts.VerdictContractResult("approved", 0, 0),
         )
-        _verdict, count = advisory_consultation._reduce_dialogue_round(entry)
+        _verdict, count = critical_dialogue._reduce_dialogue_round(entry)
         self.assertEqual(count, 0)
         self.assertNotEqual(count, 5, "min must govern the count, never sum or max")
 
     def test_reduce_dialogue_round_verdicts_follow_the_panel_control_flow(self) -> None:
-        approved = advisory_consultation.VerdictContractResult("approved", 1, 0)
-        revise = advisory_consultation.VerdictContractResult("revise", 0, 1)
-        unparseable = advisory_consultation.VerdictContractResult("unparseable", 0, 0)
+        approved = dialogue_contracts.VerdictContractResult("approved", 1, 0)
+        revise = dialogue_contracts.VerdictContractResult("revise", 0, 1)
+        unparseable = dialogue_contracts.VerdictContractResult("unparseable", 0, 0)
         cases = (
             (approved, approved, "approved"),
             (approved, revise, "revise"),
@@ -11507,10 +13412,10 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         )
         for critic_a, critic_b, expected in cases:
             with self.subTest(critic_a=critic_a.verdict, critic_b=critic_b.verdict):
-                entry = advisory_consultation.AdvisoryRoundVerdict(
+                entry = dialogue_contracts.AdvisoryRoundVerdict(
                     critic_a=critic_a, critic_b=critic_b
                 )
-                verdict, _count = advisory_consultation._reduce_dialogue_round(entry)
+                verdict, _count = critical_dialogue._reduce_dialogue_round(entry)
                 self.assertEqual(verdict, expected)
 
     def test_an_engaged_critic_cannot_mask_a_silent_one_end_to_end(self) -> None:
@@ -11534,7 +13439,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
                     "Test Critic B": [_revise("No quotes, just a concern.")],
                 }
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11569,7 +13474,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
                 "the word QUOTE: in passing.\nVERDICT: REVISE"
             )
             invoker = _RecordingInvoker([plan, critic_response])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11600,7 +13505,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
             ],
         ):
             root = Path(tmp)
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 root_dir=root,
                 planner_model="Claude Opus 5 (Thinking)",
@@ -11621,7 +13526,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         self,
     ) -> None:
         """Pins §2.4's anti-rework-inflation rule: when the caller owns the
-        journal wiring, `advisory_consultation` cannot see that factory's run
+        journal wiring, `critical_dialogue` cannot see that factory's run
         identity, so it must not mint a second one — the dialogue record
         carries no `run_id` key at all, and `_countable_runs` still reports
         exactly one run for the task."""
@@ -11642,7 +13547,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
             journaled_invoker = production_invoker.make_journaled_invoke_worker(
                 "dq-caller-run-1", root_dir=root, runner=runner
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 journaled_invoker,
                 root_dir=root,
@@ -11659,7 +13564,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
     # --- AC5: a canary probe's record is distinguishable ---
 
     def test_a_canary_catch_and_miss_are_marked_and_a_real_dialogue_is_not(self) -> None:
-        fixture = advisory_consultation.CANARY_FIXTURES[0]
+        fixture = critical_dialogue.CANARY_FIXTURES[0]
         task_description = "Plan the auth rewrite"
 
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
@@ -11667,7 +13572,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             catch_invoker = _RecordingInvoker([_revise("Objection.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 task_description, catch_invoker, root_dir=root, is_canary=True
             )
             catch_record = next(
@@ -11681,7 +13586,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             miss_invoker = _RecordingInvoker([_approve_fixture(fixture)])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 task_description, miss_invoker, root_dir=root, is_canary=True
             )
             miss_record = next(
@@ -11695,7 +13600,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             real_invoker = _RecordingInvoker(["Real plan.", _approve("Real plan.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 task_description, real_invoker, root_dir=root
             )
             real_record = next(
@@ -11713,7 +13618,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         self.assertEqual(
             (real_record["canaries_planted"], real_record["canaries_caught"]), (0, 0)
         )
-        expected_real_digest = advisory_consultation._default_task_id(task_description)
+        expected_real_digest = critical_dialogue._default_task_id(task_description)
         self.assertEqual(real_record["task_id"], expected_real_digest)
         self.assertNotEqual(catch_record["task_id"], expected_real_digest)
 
@@ -11737,7 +13642,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
                     _approve(second_plan, "ZEBRA-QUASAR-77 rollback looks good now."),
                 ]
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 distinctive_task, invoker, root_dir=root
             )
             journal_text = learning_journal.journal_path(root).read_text()
@@ -11759,7 +13664,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, task_id="dq-keyset-1"
             )
             record = next(
@@ -11793,7 +13698,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the rollout, password=hunter2", _RecordingInvoker([]), root_dir=root
             )
             telemetry_exists = (root / ".ralph" / "routing_telemetry.jsonl").exists()
@@ -11811,7 +13716,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Rotate the api_key before the review lands",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -11832,7 +13737,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", invoker, root_dir=root, task_id="dq-scoreboard-1"
             )
             records = _read_jsonl(learning_journal.journal_path(root))
@@ -11847,12 +13752,12 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
     # --- pinned decisions with no direct acceptance criterion ---
 
     def test_a_budget_skipped_dialogue_writes_a_zero_round_record(self) -> None:
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -11874,7 +13779,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([RuntimeError("planner unreachable")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11901,7 +13806,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
             root = Path(tmp)
             learning_journal.journal_path(root).parent.write_text("not a directory")
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -11923,12 +13828,12 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ), mock.patch.object(
-            advisory_consultation,
+            critical_dialogue,
             "run_advisory_consultation_debate",
             side_effect=RuntimeError("unexpected bug: sentinel-oops"),
         ):
             root = Path(tmp)
-            thread = advisory_consultation.dispatch_post_mortem_consultation(
+            thread = critical_dialogue.dispatch_post_mortem_consultation(
                 "Post-mortem for a mystery failure",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -11950,7 +13855,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
         returns a bare string that must be a valid `learning_journal.RoundVerdict`
         for `DialogueRound.__post_init__` to accept it."""
         self.assertEqual(
-            set(get_args(advisory_consultation.CriticVerdict)),
+            set(get_args(dialogue_contracts.CriticVerdict)),
             set(get_args(learning_journal.RoundVerdict)),
         )
 
@@ -11963,7 +13868,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
             side_effect=["Plan.", _approve("Plan.")],
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite", root_dir=root, task_id="not a valid task id"
             )
             journal_exists = learning_journal.journal_path(root).exists()
@@ -11981,7 +13886,7 @@ class DialogueQualityRecordWriterTests(unittest.TestCase):
 # concurrently on other branches, so an insertion anywhere but the end is a
 # merge conflict for everyone.
 class PlanOutcomeRecordWriterTests(unittest.TestCase):
-    """`advisory_consultation._write_plan_outcome_record`: the `_result`
+    """`dialogue_transcript._write_plan_outcome_record`: the `_result`
     choke point's fifth write, grading whether the consultation's own plan
     was accepted.
 
@@ -12004,7 +13909,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -12041,7 +13946,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
                     _revise("Not convinced."),
                 ]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -12066,7 +13971,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Diff defense.", _approve("Diff defense.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Review the diff",
                 invoker,
                 root_dir=root,
@@ -12088,7 +13993,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Lesson learned.", _approve("Lesson learned.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Write the post-mortem",
                 invoker,
                 root_dir=root,
@@ -12111,7 +14016,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's proposed plan.", _approve("Planner's proposed plan.")]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -12136,7 +14041,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker([RuntimeError("worker unreachable")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -12155,7 +14060,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             invoker = _RecordingInvoker(
                 ["Planner's plan.", "This plan looks fine to me."]
             )
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -12170,12 +14075,12 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
         """`budget_skipped` still writes a `dialogue_quality` record (ticket
         24 excludes only `sensitivity_halt`), so the journal file itself
         exists — the assertion here is that no `outcome` record joins it."""
-        cap = advisory_consultation.DEFAULT_SESSION_DIALOGUE_CAP
+        cap = dialogue_degradation.DEFAULT_SESSION_DIALOGUE_CAP
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 _RecordingInvoker([]),
                 root_dir=root,
@@ -12195,7 +14100,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -12215,7 +14120,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the rollout, password=hunter2", _RecordingInvoker([]), root_dir=root
             )
             journal_exists = learning_journal.journal_path(root).exists()
@@ -12239,7 +14144,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             ],
         ):
             root = Path(tmp)
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 root_dir=root,
                 planner_model="Claude Opus 5 (Thinking)",
@@ -12280,7 +14185,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             journaled_invoker = production_invoker.make_journaled_invoke_worker(
                 "plan-outcome-caller-run-1", root_dir=root, runner=runner
             )
-            advisory_consultation.run_advisory_consultation_debate(
+            critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 journaled_invoker,
                 root_dir=root,
@@ -12319,7 +14224,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             os.environ, {}, clear=True
         ):
             root = Path(tmp)
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 _RecordingInvoker(["Planner's plan.", _approve("Planner's plan.")]),
                 root_dir=root,
@@ -12374,7 +14279,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
             root = Path(tmp)
             learning_journal.journal_path(root).parent.write_text("not a directory")
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,
@@ -12403,7 +14308,7 @@ class PlanOutcomeRecordWriterTests(unittest.TestCase):
         ):
             root = Path(tmp)
             invoker = _RecordingInvoker(["Plan.", _approve("Plan.")])
-            result = advisory_consultation.run_advisory_consultation_debate(
+            result = critical_dialogue.run_advisory_consultation_debate(
                 "Plan the auth rewrite",
                 invoker,
                 root_dir=root,

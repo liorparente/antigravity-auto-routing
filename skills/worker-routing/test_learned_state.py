@@ -20,9 +20,6 @@ from pathlib import Path
 from typing import Literal
 from unittest import mock
 
-if __package__ is None or __package__ == "":
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-
 if __package__:
     from . import learned_state, prompt_assembler, regenerate_institutional_memory
 else:
@@ -1211,8 +1208,7 @@ class ConcurrentAdoptTests(unittest.TestCase):
     """
 
     _ADOPT_SNIPPET = (
-        "import sys; sys.path.insert(0, {skill!r});\n"
-        "import learned_state as ls;\n"
+        "from worker_routing import learned_state as ls;\n"
         "from datetime import datetime, timezone;\n"
         "from pathlib import Path;\n"
         "ls.adopt([ls.DocumentChange(document={doc!r}, content={content!r})],"
@@ -1221,7 +1217,6 @@ class ConcurrentAdoptTests(unittest.TestCase):
     )
 
     def test_two_processes_adopting_different_documents_lose_neither_change(self) -> None:
-        skill_dir = str(Path(__file__).resolve().parent)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             learned_state.adopt(
@@ -1236,7 +1231,7 @@ class ConcurrentAdoptTests(unittest.TestCase):
                         sys.executable,
                         "-c",
                         self._ADOPT_SNIPPET.format(
-                            skill=skill_dir, doc=doc, content=content, root=str(root)
+                            doc=doc, content=content, root=str(root)
                         ),
                     ],
                     stdout=subprocess.PIPE,

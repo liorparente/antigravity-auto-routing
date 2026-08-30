@@ -8,67 +8,7 @@ on:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
-    # The one list of Python modules ruff and mypy both check. Single-sourced
-    # because it was duplicated across the two steps, so every new module had
-    # to be added twice — and a module added to only one of them is checked by
-    # only one of them, silently.
     env:
-      PYTHON_MODULES: >-
-        skills/worker-routing/__init__.py
-        skills/worker-routing/routing_check.py
-        skills/worker-routing/test_routing.py
-        test_suite.py
-        skills/worker-routing/agent_council.py
-        skills/worker-routing/dialogue_contracts.py
-        skills/worker-routing/dialogue_degradation.py
-        skills/worker-routing/executive_dialogue_report.py
-        skills/worker-routing/test_executive_dialogue_report.py
-        skills/worker-routing/dialogue_transcript.py
-        skills/worker-routing/prompt_assembler.py
-        skills/worker-routing/test_prompt_assembler.py
-        skills/worker-routing/sensitivity_redactor.py
-        skills/worker-routing/test_sensitivity_redactor.py
-        skills/worker-routing/debate_orchestrator.py
-        skills/worker-routing/debate_state_machine.py
-        skills/worker-routing/consultation_policy.py
-        skills/worker-routing/debate_transport.py
-        skills/worker-routing/test_debate_orchestrator.py
-        skills/worker-routing/test_debate_state_machine.py
-        skills/worker-routing/test_debate_transport.py
-        skills/worker-routing/advisory_consultation.py
-        skills/worker-routing/test_dialogue_contracts.py
-        skills/worker-routing/test_dialogue_degradation.py
-        skills/worker-routing/test_dialogue_transcript.py
-        skills/worker-routing/learning_journal.py
-        skills/worker-routing/production_invoker.py
-        skills/worker-routing/test_production_invoker.py
-        skills/worker-routing/learning_outcomes.py
-        skills/worker-routing/test_lmstudio.py
-        skills/worker-routing/learning_scoreboard.py
-        skills/worker-routing/test_learning_scoreboard.py
-        skills/worker-routing/learning_report.py
-        skills/worker-routing/test_learning_report.py
-        skills/worker-routing/learning_report_html.py
-        skills/worker-routing/test_learning_report_html.py
-        skills/worker-routing/acceptance_gate.py
-        skills/worker-routing/test_acceptance_gate.py
-        skills/worker-routing/learned_state.py
-        skills/worker-routing/test_learned_state.py
-        skills/worker-routing/risk_tiered_application.py
-        skills/worker-routing/test_risk_tiered_application.py
-        skills/worker-routing/learner_worker.py
-        skills/worker-routing/test_learner_worker.py
-        skills/worker-routing/test_declarative_schema.py
-        skills/worker-routing/routing_config.py
-        skills/worker-routing/test_routing_config.py
-        skills/worker-routing/probe_models.py
-        skills/worker-routing/test_probe_models.py
-        skills/worker-routing/switch_profile.py
-        skills/worker-routing/test_switch_profile.py
-        skills/worker-routing/regenerate_institutional_memory.py
-        skills/council-review/scripts/provider_adapters.py
-        skills/council-review/scripts/council_review.py
-        skills/council-review/tests/test_council_review.py
       # Every test file that must actually run. Listed separately from
       # PYTHON_MODULES for the same single-sourcing reason, and because the
       # two lists answer different questions: PYTHON_MODULES is "what gets
@@ -79,6 +19,7 @@ jobs:
       # one of them having executed.
       PYTHON_TESTS: >-
         skills/worker-routing/test_routing.py
+        skills/worker-routing/test_critical_dialogue.py
         skills/worker-routing/test_dialogue_contracts.py
         skills/worker-routing/test_dialogue_degradation.py
         skills/worker-routing/test_executive_dialogue_report.py
@@ -109,7 +50,7 @@ jobs:
           python-version: "3.x"
 
       - name: Install lint tooling
-        run: pip install ruff mypy
+        run: pip install -e ".[dev]"
 
       - name: Run unit and integration tests
         run: |
@@ -119,19 +60,13 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Symlink package for type-checking
-        run: ln -sfn skills/worker-routing worker_routing
-
       - name: Lint with ruff
-        run: ruff check $PYTHON_MODULES
+        run: |
+          mapfile -t python_modules < <(skills/worker-routing/typecheck.sh --print-targets)
+          ruff check "${python_modules[@]}"
 
       - name: Type-check with mypy
-        run: |
-          TARGETS=$(echo "$PYTHON_MODULES" | sed 's|skills/worker-routing/|worker_routing/|g')
-          mypy --config-file pyproject.toml $TARGETS
-
-      - name: Clean up type-checking symlink
-        run: rm -f worker_routing
+        run: skills/worker-routing/typecheck.sh
 
       - name: Shellcheck installer and audit scripts
-        run: shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh
+        run: shellcheck install.sh uninstall.sh skills/worker-routing/routing-audit.sh skills/worker-routing/typecheck.sh
