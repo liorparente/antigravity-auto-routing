@@ -5,6 +5,12 @@
 
 ## Active Entries
 
+### ERR-0007: Atomic Copy Published Before Recording Rollback Identity
+- **Date:** 2026-08-30
+- **Root Cause:** `atomic_copy` appended the transaction-written file identity to its write ledger after `mv -f` published the inode. A failure or process interruption in that ordering left rollback unable to prove which inode the transaction had installed.
+- **Verified TDD Reproduction:** `skills/worker-routing/test_routing.py::ManagedFileClosureTests::test_atomic_copy_records_write_identity_before_publication` failed structurally while the ledger append followed `mv -f "$temporary" "$target"`, then passed after the append moved ahead of publication.
+- **Actionable Prevention Rule (Golden Rule 46):** Persist the transaction-written device/inode identity before atomic publication, then roll back only that exact inode with no-replace restoration and retained recovery bytes on failure. Persistent process-death recovery remains a separate open boundary under Golden Rule 47.
+
 ### ERR-0006: Transitional Runtime Proxying Obscuring Static Typecheck Seams
 - **Date:** 2026-08-29
 - **Root Cause:** When aliasing deprecated module facades via dynamic `sys.modules[__name__] = canonical_module`, test suites importing the legacy module name fail static analysis (`mypy`) with 96+ false `attr-defined` errors because typecheckers cannot follow runtime dynamic module replacement.

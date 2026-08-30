@@ -36,10 +36,10 @@ CACHE_VERSION = 2
 MAX_DEBATE_ROUNDS = 3
 # The protocol's 2-failure escalation rule: `escalate_routing_effort` below
 # treats `attempts < ESCALATION_FAILURE_THRESHOLD` as "not yet escalated"
-# and anything at or past it as "escalate". `advisory_consultation.py`'s
+# and anything at or past it as "escalate". `critical_dialogue.py`'s
 # `needs_post_mortem_consultation` (spec 0003 ticket 03) mirrors this exact
 # constant under the same name rather than importing it — importing
-# `agent_council` from `advisory_consultation` would pull `urllib.request`
+# `agent_council` from `critical_dialogue` would pull `urllib.request`
 # and `asyncio` into a module whose docstring promises none, and both files
 # are loaded by path rather than as an installed package. The two constants
 # are kept from drifting apart by

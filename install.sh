@@ -40,6 +40,28 @@ LEGACY_MARKER="## Worker Routing Protocol (HARD ENFORCED — v3.0)"
 MANAGED_FILES=(
     SKILL.md REFERENCE.md routing-audit.sh protocol.md
 )
+# SHA-256 identities of every source-controlled
+# skills/council-review/scripts/council_review.py blob reachable from Git
+# history when the facade was retired (16 path-touching commits, 14 unique
+# contents). These digests identify an exact retired artifact only when a
+# signed prior manifest also proves that both worker modules retired with the
+# facade belonged to the same pre-ticket installation.
+LEGACY_COUNCIL_REVIEW_FACADE_DIGESTS=(
+    027da87617c84de20f7033b6c4e191093db3efda9814063f630c96757cb86630
+    2b7780b2a47325194e43c1b1a69adeb99db7df430597c6eacdd05f96806dfb2b
+    307c3b1b6747f5977b97041d47c6f2f64d975d17ed0a11f3c22ad50b8b16b7dc
+    43d3f97af0122d774f2ed1d2f359cbc5aac7f73e50f50374f6921b8020c8cc3d
+    47c761b9dd228580ff9148ca50df32e874719fdcdac3ac6767a00a9378c58618
+    5de22e3a7fb1584c7d59db458365ed521e8f9c95b9a094537b9608990daa352a
+    9b2ff8bbb3fb14d67bb3551675326def5c6fbb73641e2184ea93a2649bc9c26b
+    a69994ee6743285b12e635e474fa7fd9c09dfc4e2dce7e2e27b900487e09bdeb
+    a722b850baeb4421b4a982e09bbf3ff5e2d9420fb031cab564b33f4dde2bc380
+    a9d8937040dc85a2a2d0fddcf6e77a5aaf6adcf01bfc9e0db217e8398e12136f
+    b21d3320d8550e0a5747e998897a6dbe882eb259bf7dc712f483be698e107b8b
+    c55f402700a607afc0366de2ce39956fe2aaf04e2fa8a93e8112fe810fc65791
+    e698442453ffaaf54dbd90879f7085b500791d9802daf514a2a6c8a206ea583f
+    ebdecc52f7624b33928b32536f2fea191a4c1d90e6a3502f2f7e6563433adc8f
+)
 PYTHON_MODULE_MANIFEST=".auto-routing-python-modules"
 PYTHON_MODULE_MANIFEST_HEADER="auto-routing-python-modules-v1"
 PYTHON_MODULE_RECEIPT_NAME=".auto-routing-python-modules.receipt"
@@ -168,27 +190,252 @@ done
 STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-stage.XXXXXX")"
 TRANSACTION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/auto-routing-rollback.XXXXXX")"
 touch "$TRANSACTION_DIR/entries"
+touch "$TRANSACTION_DIR/writes"
 touch "$TRANSACTION_DIR/directories"
 touch "$TRANSACTION_DIR/quarantines"
+touch "$TRANSACTION_DIR/recoveries"
 COMMITTED=0
+RECOVERY_RECORD_FAILED=0
+
+record_recovery() {
+    local quarantine="$1"
+    if ! grep -Fqx -- "$quarantine" "$TRANSACTION_DIR/recoveries"; then
+        if ! printf '%s\n' "$quarantine" >> "$TRANSACTION_DIR/recoveries"; then
+            RECOVERY_RECORD_FAILED=1
+            return 1
+        fi
+    fi
+}
+
+rollback_transaction_entry() {
+    local snapshot="$1" state="$2" target="$3"
+    local expected_device="$4" expected_inode="$5" number="$6"
+    python3 - rollback \
+        "$snapshot" "$state" "$target" "$expected_device" "$expected_inode" \
+        "$TRANSACTION_DIR/recoveries" "$number" <<'PYEOF'
+import ctypes
+import errno
+import os
+import shutil
+import sys
+import tempfile
+
+(
+    snapshot,
+    state,
+    target,
+    expected_device,
+    expected_inode,
+    recovery_log,
+    number,
+) = sys.argv[2:]
+expected_identity = (int(expected_device), int(expected_inode))
+
+
+def exists(path: str) -> bool:
+    return os.path.lexists(path)
+
+
+def record(path: str) -> None:
+    try:
+        with open(recovery_log, "a", encoding="utf-8") as stream:
+            stream.write(path + "\n")
+    except OSError:
+        print(f"❌ Could not index retained recovery path: {path}", file=sys.stderr)
+
+
+def retain(message: str, *paths: str) -> None:
+    print(message, file=sys.stderr)
+    for path in paths:
+        if exists(path):
+            record(path)
+            print(f"   Retained recovery: {path}", file=sys.stderr)
+
+
+def rename_no_replace(source: str, destination: str) -> None:
+    """Atomically move source only when destination is still absent."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename_exclusive = 0x00000004
+        result = libc.renamex_np(source_bytes, destination_bytes, rename_exclusive)
+    elif sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        at_fdcwd = -100
+        rename_noreplace = 1
+        result = libc.renameat2(
+            at_fdcwd,
+            source_bytes,
+            at_fdcwd,
+            destination_bytes,
+            rename_noreplace,
+        )
+    else:
+        raise OSError(errno.ENOTSUP, "atomic no-replace rename is unavailable")
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
+parent = os.path.dirname(target) or "."
+try:
+    recovery_dir = tempfile.mkdtemp(
+        prefix=f".auto-routing-recovery.{os.getpid()}.{number}.", dir=parent
+    )
+except OSError as error:
+    retain(
+        f"❌ Could not create a private recovery directory for {target}: {error}",
+        snapshot,
+    )
+    sys.exit(4)
+
+# Record the private directory before moving anything. If this process is
+# interrupted after the rename, cleanup can still name the discoverable path.
+record(recovery_dir)
+held = os.path.join(recovery_dir, "current")
+try:
+    os.rename(target, held)
+except FileNotFoundError:
+    retain(
+        f"❌ Transaction-written object disappeared from {target}; "
+        "preserved the original snapshot for manual recovery.",
+        snapshot,
+    )
+    try:
+        os.rmdir(recovery_dir)
+    except OSError:
+        pass
+    sys.exit(4)
+except OSError as error:
+    retain(
+        f"❌ Could not safely isolate the current object at {target}: {error}",
+        snapshot,
+        recovery_dir,
+    )
+    sys.exit(4)
+
+held_stat = os.lstat(held)
+held_identity = (held_stat.st_dev, held_stat.st_ino)
+if held_identity != expected_identity:
+    # The pathname no longer names the inode installed by this transaction.
+    # An exclusive rename restores the moved replacement only if the name
+    # remains absent. Otherwise it stays in the private recovery directory;
+    # neither version is overwritten and no link/unlink race is introduced.
+    try:
+        rename_no_replace(held, target)
+    except OSError:
+        pass
+    else:
+        try:
+            os.rmdir(recovery_dir)
+        except OSError:
+            pass
+    retain(
+        f"❌ Concurrent replacement detected at {target}; rollback did not "
+        "overwrite it and preserved the original version.",
+        target,
+        snapshot,
+        held,
+        recovery_dir,
+    )
+    sys.exit(4)
+
+if state == "absent":
+    try:
+        os.unlink(held)
+        os.rmdir(recovery_dir)
+    except OSError as error:
+        retain(
+            f"❌ Could not remove the isolated transaction object for {target}: {error}",
+            held,
+            recovery_dir,
+        )
+        sys.exit(4)
+    if exists(target):
+        retain(
+            f"❌ Concurrent replacement detected at {target}; preserved it "
+            "while removing the exact transaction-written object.",
+            target,
+        )
+        sys.exit(4)
+    sys.exit(0)
+
+# Copy the original snapshot into the target's filesystem, then publish it
+# with one atomic exclusive rename. If another process recreates target at any
+# point before that syscall, both that path and these recovery bytes stay.
+restored = os.path.join(recovery_dir, "original")
+try:
+    shutil.copy2(snapshot, restored, follow_symlinks=False)
+    rename_no_replace(restored, target)
+except OSError as error:
+    retain(
+        f"❌ Could not restore the original snapshot to {target} without "
+        f"clobbering a concurrent path: {error}",
+        snapshot,
+        restored,
+        held,
+        recovery_dir,
+    )
+    sys.exit(4)
+
+try:
+    os.unlink(held)
+    os.rmdir(recovery_dir)
+except OSError as error:
+    retain(
+        f"❌ Restored {target}, but could not finish recovery cleanup: {error}",
+        snapshot,
+        restored,
+        held,
+        recovery_dir,
+    )
+    sys.exit(4)
+sys.exit(0)
+PYEOF
+}
 
 rollback() {
+    local rollback_error=false partial_recovery=false restore_status
+    local expected_device expected_inode write_number write_device write_inode write_target
     [ -s "$TRANSACTION_DIR/entries" ] || [ -s "$TRANSACTION_DIR/directories" ] \
         || [ -s "$TRANSACTION_DIR/quarantines" ] || return 0
     echo "↩️  Rolling back incomplete installation..." >&2
     while IFS='|' read -r number state target; do
         [ -n "$target" ] || continue
-        if [ "$state" = "present" ]; then
-            mkdir -p "$(dirname "$target")"
-            cp -p "$TRANSACTION_DIR/$number" "$target"
-        else
-            rm -f "$target"
+        expected_device=""
+        expected_inode=""
+        while IFS='|' read -r write_number write_device write_inode write_target; do
+            if [ "$write_number" = "$number" ] && [ "$write_target" = "$target" ]; then
+                expected_device="$write_device"
+                expected_inode="$write_inode"
+            fi
+        done < "$TRANSACTION_DIR/writes"
+        if [ -z "$expected_device" ] || [ -z "$expected_inode" ]; then
+            # The snapshot was recorded but no atomic replacement completed.
+            # The original path is still authoritative and must not be touched.
+            continue
+        fi
+        restore_status=0
+        rollback_transaction_entry \
+            "$TRANSACTION_DIR/$number" "$state" "$target" \
+            "$expected_device" "$expected_inode" "$number" \
+            || restore_status=$?
+        if [ "$restore_status" -ne 0 ]; then
+            partial_recovery=true
         fi
     done < "$TRANSACTION_DIR/entries"
     while IFS='|' read -r target quarantine; do
         [ -n "$target" ] && [ -e "$quarantine" ] || continue
-        if [ ! -e "$target" ] && [ ! -L "$target" ]; then
-            mv "$quarantine" "$target"
+        if grep -Fqx -- "$quarantine" "$TRANSACTION_DIR/recoveries"; then
+            partial_recovery=true
+            continue
+        fi
+        restore_status=0
+        restore_quarantined_managed "$quarantine" "$target" \
+            || restore_status=$?
+        if [ "$restore_status" -ne 0 ]; then
+            [ "$RECOVERY_RECORD_FAILED" -eq 0 ] || rollback_error=true
+            partial_recovery=true
         fi
     done < "$TRANSACTION_DIR/quarantines"
     # Retry globally until no directory can be removed. This handles shared
@@ -203,21 +450,59 @@ rollback() {
         done < "$TRANSACTION_DIR/directories"
         [ "$removed_directory" = true ] || break
     done
+    [ "$rollback_error" = false ] || return 2
+    [ "$partial_recovery" = false ] || return 1
+    return 0
 }
 
 cleanup() {
-    status=$?
+    local status="$1" rollback_status=0 recovery target quarantine
+    local number state snapshot retained_transaction=false
     if [ "$status" -ne 0 ] && [ "$COMMITTED" -ne 1 ]; then
-        rollback || true
-        echo "❌ Installation failed; original files were restored." >&2
+        rollback || rollback_status=$?
+        if [ "$rollback_status" -eq 0 ]; then
+            echo "❌ Installation failed; original files were restored." >&2
+        elif [ "$rollback_status" -eq 1 ]; then
+            echo "❌ Installation failed with partial recovery; some originals could not be restored automatically." >&2
+        else
+            echo "❌ Installation failed; rollback encountered errors and recovery may be incomplete." >&2
+        fi
+        if [ "$rollback_status" -ne 0 ]; then
+            retained_transaction=true
+            while IFS= read -r recovery; do
+                [ -n "$recovery" ] || continue
+                if [ -e "$recovery" ] || [ -L "$recovery" ]; then
+                    echo "   Retained recovery: $recovery" >&2
+                fi
+            done < "$TRANSACTION_DIR/recoveries"
+            while IFS='|' read -r number state target; do
+                [ "$state" = "present" ] || continue
+                snapshot="$TRANSACTION_DIR/$number"
+                [ -e "$snapshot" ] || continue
+                echo "   Retained original snapshot: $snapshot" >&2
+            done < "$TRANSACTION_DIR/entries"
+            while IFS='|' read -r target quarantine; do
+                [ -e "$quarantine" ] || [ -L "$quarantine" ] || continue
+                echo "   Retained quarantined original: $quarantine" >&2
+            done < "$TRANSACTION_DIR/quarantines"
+            echo "   Retained transaction directory: $TRANSACTION_DIR" >&2
+        fi
+    fi
+    rm -rf "$STAGING_DIR"
+    if [ "$retained_transaction" = true ]; then
+        return
     fi
     while IFS='|' read -r target quarantine; do
         [ -n "$target" ] || continue
+        if grep -Fqx -- "$quarantine" "$TRANSACTION_DIR/recoveries"; then
+            continue
+        fi
+        [ "$RECOVERY_RECORD_FAILED" -eq 0 ] || continue
         rm -f "$quarantine"
     done < "$TRANSACTION_DIR/quarantines"
-    rm -rf "$STAGING_DIR" "$TRANSACTION_DIR"
+    rm -rf "$TRANSACTION_DIR"
 }
-trap cleanup EXIT
+trap 'cleanup "$?"' EXIT
 
 # The HMAC key lives in installer state, outside every writable target
 # project. It authenticates provenance against project-local joint forgery.
@@ -274,10 +559,19 @@ snapshot_created_directories() {
 snapshot_file() {
     local target="$1" number
     case "$SNAPSHOT_SEEN" in
-        *"|$target|"*) return ;;
+        *"|$target|"*)
+            while IFS='|' read -r number _ snapshot_target; do
+                if [ "$snapshot_target" = "$target" ]; then
+                    LAST_SNAPSHOT_NUMBER="$number"
+                    return
+                fi
+            done < "$TRANSACTION_DIR/entries"
+            return 1
+            ;;
     esac
     SNAPSHOT_SEEN="${SNAPSHOT_SEEN:-|}$target|"
     number=$SNAPSHOT_COUNT
+    LAST_SNAPSHOT_NUMBER="$number"
     SNAPSHOT_COUNT=$((SNAPSHOT_COUNT + 1))
     if [ -e "$target" ]; then
         cp -p "$target" "$TRANSACTION_DIR/$number"
@@ -288,12 +582,29 @@ snapshot_file() {
 }
 
 atomic_copy() {
-    local source="$1" target="$2" temporary
+    local source="$1" target="$2" temporary identity device inode
     snapshot_file "$target"
     snapshot_created_directories "$(dirname "$target")"
     mkdir -p "$(dirname "$target")"
-    temporary="${target}.auto-routing-tmp.$$"
+    temporary="$(mktemp "${target}.auto-routing-tmp.XXXXXX")"
     cp "$source" "$temporary"
+    identity="$(python3 - "$temporary" <<'PYEOF'
+import os
+import sys
+
+stat_result = os.lstat(sys.argv[1])
+print(f"{stat_result.st_dev}|{stat_result.st_ino}")
+PYEOF
+    )"
+    device="${identity%%|*}"
+    inode="${identity#*|}"
+    # The identity is captured from the temporary inode before rename and
+    # persisted as write intent before publication. A failure after rename can
+    # therefore identify and roll back the published inode. Repeated writes to
+    # one target append newer identities; rollback uses the last.
+    printf '%s|%s|%s|%s\n' \
+        "$LAST_SNAPSHOT_NUMBER" "$device" "$inode" "$target" \
+        >> "$TRANSACTION_DIR/writes"
     mv -f "$temporary" "$target"
     record_mutation "copy:$target"
 }
@@ -547,6 +858,7 @@ cp "$PROTOCOL_SRC" "$STAGING_DIR/claude-rule.md"
 mkdir -p "$STAGING_DIR/previous-python-modules"
 AUTHENTICATED_PREVIOUS_MANIFEST="$STAGING_DIR/authenticated-previous-manifest"
 PREVIOUS_MANIFEST_AUTHORIZED=0
+PREVIOUS_MANIFEST_RECEIPT_AUTHENTICATED=0
 if [ -e "$PYTHON_MODULE_RECEIPT" ] || [ -L "$PYTHON_MODULE_RECEIPT" ]; then
     if ! validate_python_module_receipt \
         "$PYTHON_MODULE_RECEIPT" \
@@ -561,6 +873,7 @@ if [ -e "$PYTHON_MODULE_RECEIPT" ] || [ -L "$PYTHON_MODULE_RECEIPT" ]; then
         exit 1
     fi
     PREVIOUS_MANIFEST_AUTHORIZED=1
+    PREVIOUS_MANIFEST_RECEIPT_AUTHENTICATED=1
 else
     first_legacy_manifest=""
     for target_dir in "${TARGET_DIRS[@]}"; do
@@ -667,21 +980,80 @@ quarantine_managed() {
     quarantine="${target}.auto-routing-quarantine.$$"
     if [ -e "$quarantine" ] || [ -L "$quarantine" ]; then
         echo "❌ Quarantine path collision: $quarantine" >&2
-        exit 1
+        return 3
     fi
-    printf '%s|%s\n' "$target" "$quarantine" >> "$TRANSACTION_DIR/quarantines"
-    mv "$target" "$quarantine"
+    if ! printf '%s|%s\n' "$target" "$quarantine" >> "$TRANSACTION_DIR/quarantines"; then
+        echo "❌ Could not record quarantine for managed path: $target" >&2
+        return 3
+    fi
+    if ! mv "$target" "$quarantine"; then
+        echo "❌ Could not quarantine managed path: $target" >&2
+        return 3
+    fi
     LAST_QUARANTINE="$quarantine"
     record_mutation "remove:$target"
 }
 
-remove_managed_digest() {
-    local target="$1" expected_digest="$2"
-    quarantine_managed "$target"
-    if [ "$(sha256_file "$LAST_QUARANTINE")" != "$expected_digest" ]; then
-        mv "$LAST_QUARANTINE" "$target"
-        return 1
+restore_quarantined_managed() {
+    local quarantine="$1" target="$2" restore_status=0 recovery_status=0
+    # A hard link creates the
+    # target only if its name is still absent; it can never replace a path that
+    # another process recreated while the quarantined bytes were being hashed.
+    python3 - "$quarantine" "$target" <<'PYEOF' || restore_status=$?
+import os
+import sys
+
+quarantine, target = sys.argv[1:]
+try:
+    os.link(quarantine, target, follow_symlinks=False)
+except FileExistsError:
+    sys.exit(2)
+except OSError:
+    sys.exit(3)
+try:
+    os.unlink(quarantine)
+except OSError:
+    sys.exit(3)
+PYEOF
+    if [ "$restore_status" -ne 0 ]; then
+        record_recovery "$quarantine" || recovery_status=$?
+        if [ "$restore_status" -eq 2 ]; then
+            echo "❌ Concurrent replacement detected at $target; preserved the quarantined original at $quarantine" >&2
+        else
+            echo "❌ Could not safely restore $target; preserved the quarantined original at $quarantine" >&2
+        fi
+        if [ "$recovery_status" -ne 0 ]; then
+            echo "❌ Could not index retained recovery path: $quarantine" >&2
+        fi
+        return 4
     fi
+    return 0
+}
+
+remove_managed_digest() {
+    local target="$1" actual_digest expected_digest quarantine_status=0
+    local hash_status=0 restore_status=0
+    shift
+    quarantine_managed "$target" || quarantine_status=$?
+    if [ "$quarantine_status" -ne 0 ]; then
+        return 3
+    fi
+    actual_digest="$(sha256_file "$LAST_QUARANTINE")" || hash_status=$?
+    if [ "$hash_status" -ne 0 ]; then
+        echo "❌ Could not verify quarantined managed file: $target" >&2
+        restore_quarantined_managed "$LAST_QUARANTINE" "$target" \
+            || restore_status=$?
+        [ "$restore_status" -eq 0 ] || return 4
+        return 2
+    fi
+    for expected_digest in "$@"; do
+        [ "$actual_digest" != "$expected_digest" ] || return 0
+    done
+
+    restore_quarantined_managed "$LAST_QUARANTINE" "$target" \
+        || restore_status=$?
+    [ "$restore_status" -eq 0 ] || return 4
+    return 1
 }
 
 chmod_managed() {
@@ -710,8 +1082,13 @@ for index in "${!TARGET_DIRS[@]}"; do
             [ "$module_is_current" = false ] || continue
             stale_target="$target_dir/$previous_module_name"
             if [ -f "$stale_target" ] && [ ! -L "$stale_target" ]; then
-                if ! remove_managed_digest "$stale_target" "$previous_digest"; then
+                remove_status=0
+                remove_managed_digest "$stale_target" "$previous_digest" \
+                    || remove_status=$?
+                if [ "$remove_status" -eq 1 ]; then
                     echo "⚠️  Preserving modified stale module: $stale_target" >&2
+                elif [ "$remove_status" -ne 0 ]; then
+                    exit "$remove_status"
                 fi
             elif [ -e "$stale_target" ] || [ -L "$stale_target" ]; then
                 echo "⚠️  Preserving non-regular stale module path: $stale_target" >&2
@@ -761,6 +1138,42 @@ for index in "${!TARGET_DIRS[@]}"; do
         find "$STAGING_DIR/learn-session" -type f -print0 | LC_ALL=C sort -z
     )
 
+    # Migration authority for the retired sibling facade requires one signed
+    # pre-ticket manifest that names both worker modules retired alongside it.
+    # A current receipt alone is deliberately insufficient: historical bytes
+    # placed after a post-ticket install remain user-owned.
+    legacy_council_facade="$council_target_dir/scripts/council_review.py"
+    if [ -f "$legacy_council_facade" ] && [ ! -L "$legacy_council_facade" ]; then
+        legacy_advisory_owned=false
+        legacy_debate_owned=false
+        if [ "$PREVIOUS_MANIFEST_RECEIPT_AUTHENTICATED" -eq 1 ] \
+            && [ -f "$previous_manifest" ]; then
+            while IFS='|' read -r previous_digest previous_module_name; do
+                case "$previous_module_name" in
+                    advisory_consultation.py) legacy_advisory_owned=true ;;
+                    debate_orchestrator.py) legacy_debate_owned=true ;;
+                esac
+            done < "$previous_manifest"
+        fi
+        if [ "$legacy_advisory_owned" != true ] \
+            || [ "$legacy_debate_owned" != true ]; then
+            echo "⚠️  Preserving retired council-review facade without pre-ticket migration authority: $legacy_council_facade" >&2
+        else
+            remove_status=0
+            remove_managed_digest \
+                "$legacy_council_facade" \
+                "${LEGACY_COUNCIL_REVIEW_FACADE_DIGESTS[@]}" \
+                || remove_status=$?
+            if [ "$remove_status" -eq 1 ]; then
+                echo "⚠️  Preserving customized retired council-review facade: $legacy_council_facade" >&2
+            elif [ "$remove_status" -ne 0 ]; then
+                exit "$remove_status"
+            fi
+        fi
+    elif [ -e "$legacy_council_facade" ] || [ -L "$legacy_council_facade" ]; then
+        echo "⚠️  Preserving non-regular retired council-review facade path: $legacy_council_facade" >&2
+    fi
+
     # Remove retired council-review policy artifacts transactionally so
     # upgrades do not strand files that are no longer present in the source
     # skill. A failed install restores each existing artifact exactly as it was.
@@ -768,7 +1181,12 @@ for index in "${!TARGET_DIRS[@]}"; do
         "$council_target_dir/council-policy.json" \
         "$council_target_dir/references/council-policy.json"; do
         if [ -e "$legacy_council_artifact" ]; then
-            quarantine_managed "$legacy_council_artifact"
+            quarantine_status=0
+            quarantine_managed "$legacy_council_artifact" \
+                || quarantine_status=$?
+            if [ "$quarantine_status" -ne 0 ]; then
+                exit "$quarantine_status"
+            fi
         fi
     done
 done

@@ -512,15 +512,28 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
     GoldenRule(
         26,
         "Testing & TDD Seams",
-        "pipx run mypy needs a symlink workaround for skills/worker-routing/",
+        "Type-check the exact CI module set through a temporary package alias outside the repository",
         "A hyphenated directory name is not a valid Python package name, so mypy "
         "refuses outright (... is not a valid Python package name) rather than "
-        "type-checking anything — CI dodges this by sed-rewriting the module list to "
-        "worker_routing/ first; reproduce locally with ln -sfn worker-routing "
-        "skills/worker_routing before invoking pipx run mypy --config-file "
-        "pyproject.toml skills/worker_routing/<file>.py.",
-        ("mypy", "typecheck", "type check", "symlink", "worker-routing", "worker_routing", "pyproject.toml", "pipx"),
-        ("pyproject.toml", "*.py"),
+        "type-checking anything. Reproduce CI with a temporary directory outside "
+        "the repository whose worker_routing symlink targets the absolute "
+        "skills/worker-routing path; map only those package paths through that "
+        "alias and pass mypy the workflow's exact PYTHON_MODULES target list, "
+        "including test_suite.py and the council-review targets. Remove the "
+        "temporary directory afterward and leave the repository's worker_routing "
+        "path absent.",
+        (
+            "mypy",
+            "typecheck",
+            "type check",
+            "symlink",
+            "worker-routing",
+            "worker_routing",
+            "pyproject.toml",
+            "pipx",
+            "PYTHON_MODULES",
+        ),
+        ("pyproject.toml", ".github/workflows/*.yml", "*.py"),
     ),
     GoldenRule(
         27,
@@ -652,9 +665,33 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
         38,
         "Architecture & Deep Modules",
         "Consolidate multi-occasion deliberation into deep CriticalDialogue modules and eliminate shallow facades",
-        "When an orchestrator manages multi-occasion deliberations (ambiguity, plan reviews, diff audits, panel reviews), consolidate them into a single deep CriticalDialogue module rather than scattering shallow wrapper facades (e.g. advisory_consultation.py, council_review.py) with 60+ re-exported alias chains. Maintain locality and high leverage by keeping state machine transitions, contract quote verification, transcripts, and degradation rungs behind private module seams, and delete obsolete pass-through files completely.",
-        ("critical dialogue", "advisory", "council review", "facade", "shallow", "deep module", "seam", "alias", "re-export", "consolidation"),
-        ("critical_dialogue.py", "debate_*.py", "council_*.py", "dialogue_*.py", "*.py"),
+        "When an orchestrator manages multi-occasion deliberations (ambiguity, plan reviews, diff audits, panel reviews), consolidate them into a single deep CriticalDialogue module rather than scattering shallow wrapper facades (e.g. advisory_consultation.py, council_review.py) with 60+ re-exported alias chains. Maintain locality and high leverage by keeping state machine transitions, contract quote verification, transcripts, and degradation rungs behind private module seams. Before deleting an obsolete facade, prove reference closure across executable code, comments, docstrings, type annotations, subprocess strings, tests, manifests, and CI. Historical or domain-event names may remain only when clearly labeled as historical rather than live module seams.",
+        (
+            "critical dialogue",
+            "advisory",
+            "council review",
+            "facade",
+            "shallow",
+            "deep module",
+            "seam",
+            "alias",
+            "re-export",
+            "consolidation",
+            "reference closure",
+            "deletion",
+            "historical name",
+        ),
+        (
+            "critical_dialogue.py",
+            "debate_*.py",
+            "council_*.py",
+            "dialogue_*.py",
+            "*.py",
+            "*.md",
+            "*.yml",
+            "*.yaml",
+            "*.json",
+        ),
     ),
     GoldenRule(
         39,
@@ -739,6 +776,114 @@ GOLDEN_RULES: tuple[GoldenRule, ...] = (
             "restore",
         ),
         ("install.sh", "uninstall.sh", "RESTORE.md", "AGENTS.md", "*.sh", "*.md"),
+    ),
+    GoldenRule(
+        45,
+        "Multi-Harness Sync & Governance",
+        "Require pre-ticket migration authority before deleting retired cross-module artifacts",
+        "Migration cleanup may delete a retired artifact only when its bytes match a "
+        "known audited digest and an independently signed prior ownership record names "
+        "the complete module set retired in the same migration. A digest alone, a "
+        "current post-ticket receipt, or signed ownership of only part of that "
+        "simultaneously retired set is insufficient; preserve the artifact when "
+        "PreTicketMigrationAuthority is incomplete.",
+        (
+            "migration",
+            "cleanup",
+            "retired artifact",
+            "digest",
+            "signed ownership",
+            "pre-ticket",
+            "receipt",
+            "module set",
+        ),
+        ("install.sh", "uninstall.sh", "*.manifest", "*.receipt", "*.py"),
+    ),
+    GoldenRule(
+        46,
+        "State & File Locking Hygiene",
+        "Roll back the exact transaction-written inode without clobbering replacements",
+        "Before atomically publishing a file, durably record the temporary file's "
+        "device and inode as write intent. Rollback must isolate the current pathname, "
+        "verify that it is the exact transaction-written inode, and restore with an "
+        "atomic no-replace operation so a concurrent replacement is never clobbered. "
+        "When identity verification, restore, or cleanup fails, retain and report all "
+        "available original, transaction-written, and replacement bytes for recovery.",
+        (
+            "rollback",
+            "inode",
+            "device",
+            "write intent",
+            "no-replace",
+            "concurrent replacement",
+            "recovery bytes",
+            "atomic copy",
+        ),
+        ("install.sh", "uninstall.sh", "*.sh", "test_*.py"),
+    ),
+    GoldenRule(
+        47,
+        "State & File Locking Hygiene",
+        "Use durable intent and publication journals for process-death recovery",
+        "An anonymous temporary journal cleaned by an EXIT trap covers ordinary "
+        "in-process failures but cannot survive SIGKILL, process death, or power loss. "
+        "The installer still has this contract gap: place durable transaction journals "
+        "in stable installer state, persist intent before publication, persist the "
+        "publication phase afterward, and reconcile incomplete transactions on the next "
+        "run before starting new mutations.",
+        (
+            "journal",
+            "process death",
+            "SIGKILL",
+            "power loss",
+            "intent",
+            "publication",
+            "reconciliation",
+            "durable",
+            "trap",
+        ),
+        ("install.sh", "uninstall.sh", "*.sh", "test_*.py"),
+    ),
+    GoldenRule(
+        48,
+        "Testing & TDD Seams",
+        "Re-run sandbox-blocked localhost socket tests outside the sandbox before classifying failures",
+        "When a localhost socket test fails only because a restricted sandbox denies "
+        "bind, listen, or connect, obtain explicit authorization and re-run the same "
+        "test outside that sandbox. Classify it as a code failure only if the authorized "
+        "run also fails; otherwise record the restricted environment as the cause.",
+        (
+            "localhost",
+            "socket",
+            "sandbox",
+            "permission",
+            "bind",
+            "listen",
+            "connect",
+            "rerun",
+        ),
+        ("test_*.py", "*.py", "*.sh"),
+    ),
+    GoldenRule(
+        49,
+        "Multi-Harness Sync & Governance",
+        "Generate handoffs as final evidence snapshots",
+        "Create a handoff only from the final git status and the latest post-fix "
+        "verification results. Distinguish committed work from uncommitted changes, "
+        "name checks with their actual final outcomes, and preserve user-owned files, "
+        "deletions, and other boundaries so the next session does not mistake them for "
+        "agent-owned cleanup.",
+        (
+            "handoff",
+            "evidence snapshot",
+            "git status",
+            "verification",
+            "committed",
+            "uncommitted",
+            "user-owned",
+            "boundary",
+        ),
+        ("*.md", "*.txt", ".gitignore", "AGENTS.md"),
     ),
 )
 

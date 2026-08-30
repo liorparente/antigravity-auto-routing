@@ -240,3 +240,6 @@ The Apple-silicon inference path used by MLX-backed local models, where transfor
 
 ### CriticalDialogueConsolidation
 The unification of ambiguity deliberation, plan review, code review, post-mortem, and multi-model council review into a single deep module (`CriticalDialogue`), eliminating legacy pass-through facades (`advisory_consultation.py`, `council_review.py`) and duplicate security checks in `agent_council.py` to maximize locality and testability. Spec 0015 / ADR 0015.
+
+### PreTicketMigrationAuthority
+The conjunctive proof required before an installer may delete a retired artifact that spans module boundaries: the artifact's current bytes match a known audited digest, and an independently signed ownership record from before the migration names the complete set of modules retired simultaneously with it. A matching digest, a current post-migration receipt, or signed ownership of only a subset is insufficient; absent the complete proof, cleanup preserves the artifact.

@@ -76,6 +76,7 @@ def tearDownModule() -> None:
 SKILL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SKILL_DIR.parent.parent
 FIXTURES_DIR = SKILL_DIR / "tests" / "fixtures"
+LEGACY_COUNCIL_REVIEW_FACADE = FIXTURES_DIR / "legacy_council_review.py.txt"
 ROUTING_CHECK = SKILL_DIR / "routing_check.py"
 ROUTING_AUDIT = SKILL_DIR / "routing-audit.sh"
 SKILL_MD = SKILL_DIR / "SKILL.md"
@@ -704,9 +705,12 @@ class ProtocolSyncTests(unittest.TestCase):
     Sandboxed under a fake $HOME so the tests never touch the real
     ~/.gemini or ~/.codex."""
 
-    def _run(self, script: Path, *args: str, home: str) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, script: Path, *args: str, home: str, **env_overrides: str
+    ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env["HOME"] = str(home)
+        env.update(env_overrides)
         return subprocess.run(
             ["bash", str(script), *args],
             capture_output=True,
@@ -714,6 +718,40 @@ class ProtocolSyncTests(unittest.TestCase):
             text=True,
             env=env,
         )
+
+    def _pre_ticket_installer_tree(
+        self,
+        legacy_bytes: bytes,
+        *,
+        retired_modules: tuple[str, ...] = (
+            "advisory_consultation.py",
+            "debate_orchestrator.py",
+        ),
+    ) -> tuple[Path, Path, Path]:
+        """Build one signed-install-capable pre-ticket source fixture."""
+        source_root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, source_root, ignore_errors=True)
+        shutil.copy(INSTALL_SH, source_root / "install.sh")
+        for skill_name in ("worker-routing", "council-review", "learn-session"):
+            shutil.copytree(
+                REPO_ROOT / "skills" / skill_name,
+                source_root / "skills" / skill_name,
+                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+            )
+        source_worker = source_root / "skills" / "worker-routing"
+        for retired_module in retired_modules:
+            (source_worker / retired_module).write_text(
+                "# retired pre-ticket worker module\n", encoding="utf-8"
+            )
+        source_facade = (
+            source_root
+            / "skills"
+            / "council-review"
+            / "scripts"
+            / "council_review.py"
+        )
+        source_facade.write_bytes(legacy_bytes)
+        return source_root / "install.sh", source_worker, source_facade
 
     def test_install_sh_injects_exact_protocol_block_into_all_docs(self) -> None:
         with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as target_dir:
@@ -797,7 +835,276 @@ class ProtocolSyncTests(unittest.TestCase):
                 self.assertTrue(installed_init.exists(), str(installed_init))
                 self.assertEqual(installed_init.read_text(), init_text)
 
-    def test_install_sh_synchronizes_council_review_and_removes_legacy_policy(
+    def test_install_sh_removes_an_exact_repository_legacy_council_facade(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        self.assertEqual(
+            hashlib.sha256(legacy_bytes).hexdigest(),
+            "47c761b9dd228580ff9148ca50df32e874719fdcdac3ac6767a00a9378c58618",
+        )
+        source_install, source_worker, source_facade = self._pre_ticket_installer_tree(
+            legacy_bytes
+        )
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+            installed = self._run(source_install, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    source_install,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            source_facade.unlink()
+            for retired_module in (
+                "advisory_consultation.py",
+                "debate_orchestrator.py",
+            ):
+                (source_worker / retired_module).unlink()
+
+            result = self._run(source_install, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertFalse(
+                        (council_target / "scripts" / "council_review.py").exists()
+                    )
+
+    def test_install_sh_preserves_a_later_facade_despite_a_current_receipt(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+            installed = self._run(INSTALL_SH, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    INSTALL_SH,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            for council_target in council_targets:
+                legacy_facade = council_target / "scripts" / "council_review.py"
+                legacy_facade.write_bytes(legacy_bytes)
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "Preserving retired council-review facade without pre-ticket migration authority",
+                result.stderr,
+            )
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_bytes(),
+                        legacy_bytes,
+                    )
+
+    def test_install_sh_requires_both_retired_modules_for_facade_migration(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        source_install, _, source_facade = self._pre_ticket_installer_tree(
+            legacy_bytes, retired_modules=("advisory_consultation.py",)
+        )
+        only_retired_module = (
+            source_install.parent
+            / "skills"
+            / "worker-routing"
+            / "advisory_consultation.py"
+        )
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+
+            installed = self._run(source_install, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    source_install,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            source_facade.unlink()
+            only_retired_module.unlink()
+
+            result = self._run(source_install, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "Preserving retired council-review facade without pre-ticket migration authority",
+                result.stderr,
+            )
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_bytes(),
+                        legacy_bytes,
+                    )
+
+    def test_install_sh_preserves_an_unowned_byte_identical_legacy_facade(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+            council_targets = tuple(
+                target.parent / "council-review"
+                for target in _target_dirs(
+                    INSTALL_SH,
+                    home=fake_home,
+                    target_project_dir=target_dir,
+                )
+            )
+            for council_target in council_targets:
+                legacy_facade = council_target / "scripts" / "council_review.py"
+                legacy_facade.parent.mkdir(parents=True, exist_ok=True)
+                legacy_facade.write_bytes(legacy_bytes)
+
+            result = self._run(INSTALL_SH, target_dir, home=fake_home)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(
+                "Preserving retired council-review facade without pre-ticket migration authority",
+                result.stderr,
+            )
+            for council_target in council_targets:
+                with self.subTest(council_target=council_target):
+                    self.assertEqual(
+                        (
+                            council_target / "scripts" / "council_review.py"
+                        ).read_bytes(),
+                        legacy_bytes,
+                    )
+
+    def test_legacy_council_facade_cleanup_inventory_is_the_full_audited_history(
+        self,
+    ) -> None:
+        self.assertEqual(
+            set(_bash_array(INSTALL_SH, "LEGACY_COUNCIL_REVIEW_FACADE_DIGESTS")),
+            {
+                "027da87617c84de20f7033b6c4e191093db3efda9814063f630c96757cb86630",
+                "2b7780b2a47325194e43c1b1a69adeb99db7df430597c6eacdd05f96806dfb2b",
+                "307c3b1b6747f5977b97041d47c6f2f64d975d17ed0a11f3c22ad50b8b16b7dc",
+                "43d3f97af0122d774f2ed1d2f359cbc5aac7f73e50f50374f6921b8020c8cc3d",
+                "47c761b9dd228580ff9148ca50df32e874719fdcdac3ac6767a00a9378c58618",
+                "5de22e3a7fb1584c7d59db458365ed521e8f9c95b9a094537b9608990daa352a",
+                "9b2ff8bbb3fb14d67bb3551675326def5c6fbb73641e2184ea93a2649bc9c26b",
+                "a69994ee6743285b12e635e474fa7fd9c09dfc4e2dce7e2e27b900487e09bdeb",
+                "a722b850baeb4421b4a982e09bbf3ff5e2d9420fb031cab564b33f4dde2bc380",
+                "a9d8937040dc85a2a2d0fddcf6e77a5aaf6adcf01bfc9e0db217e8398e12136f",
+                "b21d3320d8550e0a5747e998897a6dbe882eb259bf7dc712f483be698e107b8b",
+                "c55f402700a607afc0366de2ce39956fe2aaf04e2fa8a93e8112fe810fc65791",
+                "e698442453ffaaf54dbd90879f7085b500791d9802daf514a2a6c8a206ea583f",
+                "ebdecc52f7624b33928b32536f2fea191a4c1d90e6a3502f2f7e6563433adc8f",
+            },
+        )
+
+    def test_later_install_failure_restores_an_exact_removed_legacy_facade(
+        self,
+    ) -> None:
+        legacy_bytes = LEGACY_COUNCIL_REVIEW_FACADE.read_bytes()
+        retired_modules = (
+            "advisory_consultation.py",
+            "debate_orchestrator.py",
+        )
+        source_install, source_worker, source_facade = self._pre_ticket_installer_tree(
+            legacy_bytes, retired_modules=retired_modules
+        )
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+        ):
+
+            installed = self._run(source_install, target_dir, home=fake_home)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            worker_targets = _target_dirs(
+                source_install,
+                home=fake_home,
+                target_project_dir=target_dir,
+            )
+            council_targets = tuple(
+                target.parent / "council-review" for target in worker_targets
+            )
+            first_council_target = council_targets[0]
+            legacy_facade = first_council_target / "scripts" / "council_review.py"
+            old_manifests = {
+                target: (target / ".auto-routing-python-modules").read_bytes()
+                for target in worker_targets
+            }
+            receipt = _installer_receipt(
+                home=fake_home, target_project_dir=target_dir
+            )
+            old_receipt = receipt.read_bytes()
+
+            source_facade.unlink()
+            for retired_module in retired_modules:
+                (source_worker / retired_module).unlink()
+
+            traced = self._run(
+                source_install,
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_TRACE_MUTATIONS="1",
+            )
+            self.assertEqual(traced.returncode, 0, traced.stdout + traced.stderr)
+            removal = re.search(
+                rf"Mutation (\d+): remove:{re.escape(str(legacy_facade))}",
+                traced.stderr,
+            )
+            self.assertIsNotNone(removal, traced.stderr)
+            assert removal is not None
+            fail_after = int(removal.group(1))
+
+            # Restore the signed pre-ticket installation state so fault
+            # injection exercises the same one-time migration again.
+            for worker_target in worker_targets:
+                for retired_module in retired_modules:
+                    (worker_target / retired_module).write_text(
+                        "# retired pre-ticket worker module\n", encoding="utf-8"
+                    )
+                (worker_target / ".auto-routing-python-modules").write_bytes(
+                    old_manifests[worker_target]
+                )
+            for council_target in council_targets:
+                (council_target / "scripts" / "council_review.py").write_bytes(
+                    legacy_bytes
+                )
+            receipt.write_bytes(old_receipt)
+
+            failed = self._run(
+                source_install,
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES=str(fail_after),
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("original files were restored", failed.stderr)
+            self.assertEqual(legacy_facade.read_bytes(), legacy_bytes)
+
+    def test_install_sh_synchronizes_council_review_preserves_custom_facade_and_removes_legacy_policy(
         self,
     ) -> None:
         with (
@@ -9017,6 +9324,34 @@ class ManagedFileClosureTests(unittest.TestCase):
         return root
 
     @staticmethod
+    def _rollback_race_python_shim(shim_dir: str) -> Path:
+        """Replace one rollback target immediately before identity handling."""
+        shim = Path(shim_dir) / "python3"
+        shim.write_text(
+            "#!/bin/bash\n"
+            "if [ \"${2:-}\" = rollback ] "
+            "&& [ \"${5:-}\" = \"$RACE_TARGET\" ] "
+            "&& [ ! -e \"$RACE_MARKER\" ]; then\n"
+            "  : > \"$RACE_MARKER\"\n"
+            "  replacement=\"${5}.racing.$$\"\n"
+            "  printf 'concurrent replacement\\n' > \"$replacement\"\n"
+            "  mv -f \"$replacement\" \"${5}\"\n"
+            "fi\n"
+            "exec \"$REAL_PYTHON\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        shim.chmod(0o755)
+        return shim
+
+    def _schedule_retained_transaction_cleanup(self, stderr: str) -> Path:
+        match = re.search(r"Retained transaction directory: (.+)", stderr)
+        self.assertIsNotNone(match, stderr)
+        assert match is not None
+        transaction = Path(match.group(1))
+        self.addCleanup(shutil.rmtree, transaction, ignore_errors=True)
+        return transaction
+
+    @staticmethod
     def _run_installer_script(
         script: Path,
         target_dir: str,
@@ -9094,6 +9429,15 @@ class ManagedFileClosureTests(unittest.TestCase):
                     self._shell_function(INSTALL_SH, function),
                     self._shell_function(UNINSTALL_SH, function),
                 )
+
+    def test_atomic_copy_records_write_identity_before_publication(self) -> None:
+        """A crash after publication must leave enough identity to roll back."""
+        atomic_copy = self._shell_function(INSTALL_SH, "atomic_copy")
+
+        ledger_record = atomic_copy.index('>> "$TRANSACTION_DIR/writes"')
+        publication = atomic_copy.index('mv -f "$temporary" "$target"')
+
+        self.assertLess(ledger_record, publication)
 
     def test_python_filename_policy_matches_installer_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -9700,6 +10044,130 @@ class ManagedFileClosureTests(unittest.TestCase):
                 "racing replacement\n",
             )
 
+    def test_install_mismatch_never_overwrites_a_racing_replacement(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "racing_stale_module.py"
+        stale_source.write_text("installer-owned\n", encoding="utf-8")
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            stale_installed = first_target / stale_source.name
+            stale_installed.write_text("quarantined user bytes\n", encoding="utf-8")
+            stale_source.unlink()
+
+            shim = Path(shim_dir) / "python3"
+            shim.write_text(
+                "#!/bin/bash\n"
+                "case \"${2:-}\" in\n"
+                "  *.auto-routing-quarantine.*)\n"
+                "    original=${2%%.auto-routing-quarantine.*}\n"
+                "    printf 'racing replacement\\n' > \"$original\"\n"
+                "    ;;\n"
+                "esac\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+
+            reinstalled = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+            )
+
+            self.assertNotEqual(reinstalled.returncode, 0)
+            self.assertIn("Concurrent replacement detected", reinstalled.stderr)
+            self.assertIn("partial recovery", reinstalled.stderr)
+            self.assertNotIn("original files were restored", reinstalled.stderr)
+            self._schedule_retained_transaction_cleanup(reinstalled.stderr)
+            self.assertEqual(
+                stale_installed.read_text(encoding="utf-8"),
+                "racing replacement\n",
+            )
+            quarantines = list(
+                stale_installed.parent.glob(
+                    f"{stale_installed.name}.auto-routing-quarantine.*"
+                )
+            )
+            self.assertEqual(len(quarantines), 1, quarantines)
+            self.assertEqual(
+                quarantines[0].read_text(encoding="utf-8"),
+                "quarantined user bytes\n",
+            )
+            self.assertIn(str(quarantines[0]), reinstalled.stderr)
+
+    def test_install_hash_failure_restores_bytes_and_is_fatal(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        stale_source = source_skill / "hash_failure_stale_module.py"
+        stale_source.write_text("installer-owned\n", encoding="utf-8")
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            first_target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0]
+            stale_installed = first_target / stale_source.name
+            customized_bytes = b"customized bytes that must survive\n"
+            stale_installed.write_bytes(customized_bytes)
+            stale_source.unlink()
+
+            failure_marker = Path(shim_dir) / "hash-failed"
+            shim = Path(shim_dir) / "python3"
+            shim.write_text(
+                "#!/bin/bash\n"
+                "case \"${2:-}\" in\n"
+                "  *.auto-routing-quarantine.*)\n"
+                "    if [ ! -e \"$HASH_FAILURE_MARKER\" ]; then\n"
+                "      : > \"$HASH_FAILURE_MARKER\"\n"
+                "      exit 73\n"
+                "    fi\n"
+                "    ;;\n"
+                "esac\n"
+                "exec \"$REAL_PYTHON\" \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim.chmod(0o755)
+
+            reinstalled = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+                HASH_FAILURE_MARKER=str(failure_marker),
+            )
+
+            self.assertNotEqual(reinstalled.returncode, 0)
+            self.assertIn("Could not verify quarantined managed file", reinstalled.stderr)
+            self.assertEqual(stale_installed.read_bytes(), customized_bytes)
+            self.assertEqual(
+                list(
+                    stale_installed.parent.glob(
+                        f"{stale_installed.name}.auto-routing-quarantine.*"
+                    )
+                ),
+                [],
+            )
+
     def test_stale_cleanup_rolls_back_with_fault_injection(self) -> None:
         source_root = self._isolated_installer_tree()
         source_skill = source_root / "skills" / "worker-routing"
@@ -9734,6 +10202,141 @@ class ManagedFileClosureTests(unittest.TestCase):
             self.assertEqual(stale_installed.read_text(encoding="utf-8"), "owned = True\n")
             self.assertEqual(manifest.read_bytes(), original_manifest)
             self.assertEqual((first_target / "SKILL.md").read_bytes(), original_skill)
+
+    def test_present_snapshot_rollback_preserves_a_concurrent_replacement(
+        self,
+    ) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0] / "SKILL.md"
+            original = target.read_bytes()
+            (source_skill / "SKILL.md").write_text(
+                "transaction replacement\n", encoding="utf-8"
+            )
+            marker = Path(shim_dir) / "raced"
+            self._rollback_race_python_shim(shim_dir)
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+                RACE_TARGET=str(target),
+                RACE_MARKER=str(marker),
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Concurrent replacement detected", failed.stderr)
+            self.assertIn("partial recovery", failed.stderr)
+            self._schedule_retained_transaction_cleanup(failed.stderr)
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent replacement\n")
+            snapshot_match = re.search(
+                r"Retained original snapshot: (.+)", failed.stderr
+            )
+            self.assertIsNotNone(snapshot_match, failed.stderr)
+            assert snapshot_match is not None
+            snapshot = Path(snapshot_match.group(1))
+            self.assertEqual(snapshot.read_bytes(), original)
+
+    def test_absent_entry_rollback_preserves_a_concurrent_replacement(self) -> None:
+        source_root = self._isolated_installer_tree()
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0] / "SKILL.md"
+            target.unlink()
+            marker = Path(shim_dir) / "raced"
+            self._rollback_race_python_shim(shim_dir)
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+                PATH=f"{shim_dir}:{os.environ['PATH']}",
+                REAL_PYTHON=sys.executable,
+                RACE_TARGET=str(target),
+                RACE_MARKER=str(marker),
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Concurrent replacement detected", failed.stderr)
+            self.assertIn("partial recovery", failed.stderr)
+            self._schedule_retained_transaction_cleanup(failed.stderr)
+            self.assertEqual(target.read_text(encoding="utf-8"), "concurrent replacement\n")
+            self.assertNotIn("Retained original snapshot", failed.stderr)
+
+    def test_failed_snapshot_restore_retains_transaction_backup(self) -> None:
+        source_root = self._isolated_installer_tree()
+        source_skill = source_root / "skills" / "worker-routing"
+        with (
+            tempfile.TemporaryDirectory() as fake_home,
+            tempfile.TemporaryDirectory() as target_dir,
+            tempfile.TemporaryDirectory() as shim_dir,
+        ):
+            installed = self._run_installer_script(
+                source_root / "install.sh", target_dir, home=fake_home
+            )
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            target = _target_dirs(
+                source_root / "install.sh", home=fake_home, target_project_dir=target_dir
+            )[0] / "SKILL.md"
+            original = target.read_bytes()
+            (source_skill / "SKILL.md").write_text(
+                "transaction replacement\n", encoding="utf-8"
+            )
+            (Path(shim_dir) / "sitecustomize.py").write_text(
+                "import shutil\n"
+                "_real_copy2 = shutil.copy2\n"
+                "def _fail_snapshot_copy(src, dst, *args, **kwargs):\n"
+                "    if dst.endswith('/original'):\n"
+                "        raise OSError('deterministic snapshot restore failure')\n"
+                "    return _real_copy2(src, dst, *args, **kwargs)\n"
+                "shutil.copy2 = _fail_snapshot_copy\n",
+                encoding="utf-8",
+            )
+
+            failed = self._run_installer_script(
+                source_root / "install.sh",
+                target_dir,
+                home=fake_home,
+                AUTO_ROUTING_FAIL_AFTER_WRITES="1",
+                PYTHONPATH=shim_dir,
+            )
+
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertIn("Could not restore the original snapshot", failed.stderr)
+            transaction = self._schedule_retained_transaction_cleanup(failed.stderr)
+            snapshot_match = re.search(
+                r"Retained original snapshot: (.+)", failed.stderr
+            )
+            self.assertIsNotNone(snapshot_match, failed.stderr)
+            assert snapshot_match is not None
+            snapshot = Path(snapshot_match.group(1))
+            self.assertTrue(transaction.is_dir(), transaction)
+            self.assertEqual(snapshot.read_bytes(), original)
+            self.assertTrue(snapshot.is_relative_to(transaction))
 
     def test_fault_injection_removes_directories_created_by_first_managed_write(
         self,
