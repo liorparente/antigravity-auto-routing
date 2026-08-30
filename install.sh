@@ -425,7 +425,9 @@ rollback() {
         fi
     done < "$TRANSACTION_DIR/entries"
     while IFS='|' read -r target quarantine; do
-        [ -n "$target" ] && [ -e "$quarantine" ] || continue
+        if [ -z "$target" ] || [ ! -e "$quarantine" ]; then
+            continue
+        fi
         if grep -Fqx -- "$quarantine" "$TRANSACTION_DIR/recoveries"; then
             partial_recovery=true
             continue
